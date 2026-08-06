@@ -70,6 +70,8 @@ pub(crate) async fn run(options: AnswerOptions, format: Format) -> Exit {
     if let Err(message) = transport.configure_listener(&signalling, &mut config) {
         return fail(format, Exit::Usage, &message);
     }
+    let mut progress =
+        crate::progress::Call::new(crate::progress::CallRole::Answer, options.local.to_string());
     let (handle, mut incoming) = match bind(config).await {
         Ok(bound) => bound,
         Err(error) => return fail(format, Exit::Failed, &format!("bind: {error}")),
@@ -102,7 +104,7 @@ pub(crate) async fn run(options: AnswerOptions, format: Format) -> Exit {
     // The call's progress at INFO, which is what `-v` documents and what it produced nothing of
     // before `X-57`: the two INFO records in the workspace are a registration refresh and a
     // transcoding bridge, and a call goes near neither.
-    tracing::info!(address = %listening, within = ?wait, "waiting for a call");
+    progress.waiting(listening, wait);
     let deadline = tokio::time::Instant::now() + wait;
     let process_stop = crate::stop::Stop::new();
     let interrupted = process_stop.wait();
@@ -111,17 +113,25 @@ pub(crate) async fn run(options: AnswerOptions, format: Format) -> Exit {
         let request = tokio::select! {
             biased;
             () = interrupted.as_mut() => {
-                return report_pending_interrupt(format, export, &handle, &process_stop).await;
+                return report_pending_interrupt(
+                    format,
+                    export,
+                    &handle,
+                    &process_stop,
+                    &mut progress,
+                )
+                .await;
             }
-            request = tokio::time::timeout_at(deadline, incoming.recv()) => match request {
-                Ok(Some(request)) => request,
-                Ok(None) | Err(_) => {
-                    return fail(
-                        format,
-                        Exit::Timeout,
-                        "no call arrived on the selected transport",
-                    );
-                }
+            request = tokio::time::timeout_at(deadline, incoming.recv()) => if let Ok(Some(request)) = request {
+                request
+            } else {
+                handle.shutdown().await;
+                progress.finish(crate::progress::CallEnd::Timeout);
+                return fail(
+                    format,
+                    Exit::Timeout,
+                    "no call arrived on the selected transport",
+                );
             },
         };
         if transport.accepts(request.transport) {
@@ -135,16 +145,17 @@ pub(crate) async fn run(options: AnswerOptions, format: Format) -> Exit {
         .value(&HeaderName::From)
         .map(|value| String::from_utf8_lossy(&value).into_owned())
         .unwrap_or_default();
+    progress.caller_observed(&caller);
 
     if options.reject || options.busy {
         return refuse(
             &handle,
             &request,
-            &caller,
             options.busy,
             transport,
             format,
             &headers,
+            &mut progress,
         )
         .await;
     }
@@ -152,7 +163,6 @@ pub(crate) async fn run(options: AnswerOptions, format: Format) -> Exit {
     let media_addresses = crate::advertise::media_addresses(local, request.source.ip(), advertised);
     let media_address = media_addresses.advertised;
 
-    let started = std::time::Instant::now();
     let mut call = match sipx_call::answer_with_policy_and_headers_at(
         &handle,
         &request,
@@ -165,6 +175,7 @@ pub(crate) async fn run(options: AnswerOptions, format: Format) -> Exit {
         Ok(call) => call,
         Err(error) => return fail(format, Exit::Failed, &error.to_string()),
     };
+    progress.answered();
 
     let duration = Duration::from_secs(options.duration);
     let pcm = match clip.as_ref().map(crate::dial::pcm_clip).transpose() {
@@ -211,11 +222,11 @@ pub(crate) async fn run(options: AnswerOptions, format: Format) -> Exit {
             return fail(format, Exit::Failed, &error.to_string());
         }
     };
-    let (exchanged, status, ended_by, bye) = match served {
+    let (exchanged, end, bye) = match served {
         Served::Remote {
             cause: EndCause::RemoteBye,
             output,
-        } => (output, "answered", "remote", None),
+        } => (output, crate::progress::CallEnd::Remote, None),
         Served::Remote { cause, output } => {
             let _ = output;
             drop(call);
@@ -226,8 +237,10 @@ pub(crate) async fn run(options: AnswerOptions, format: Format) -> Exit {
                 &format!("call ended unexpectedly: {cause:?}"),
             );
         }
-        Served::Local { output, bye } => (output, "answered", "duration", Some(bye)),
-        Served::Interrupted { output, bye } => (output, "interrupted", "interrupt", Some(bye)),
+        Served::Local { output, bye } => (output, crate::progress::CallEnd::Duration, Some(bye)),
+        Served::Interrupted { output, bye } => {
+            (output, crate::progress::CallEnd::Interrupted, Some(bye))
+        }
         _ => {
             drop(call);
             handle.shutdown().await;
@@ -259,17 +272,19 @@ pub(crate) async fn run(options: AnswerOptions, format: Format) -> Exit {
     } else {
         recorded.len()
     };
+    let status = end.status();
+    let ended_by = end.ended_by();
 
     let report = media.requested_report(
         Report::new()
             .text("status", status)
             .text("ended_by", ended_by)
-            .text("caller", caller)
+            .text("caller", caller.as_str())
             .text("media_advertised", media_address.to_string())
             .text("media_bound", call.media().local_addr().to_string())
             .number(
                 "duration_ms",
-                i64::try_from(started.elapsed().as_millis()).unwrap_or(0),
+                i64::try_from(progress.elapsed().as_millis()).unwrap_or(0),
             )
             .number(
                 "samples_recorded",
@@ -312,6 +327,7 @@ pub(crate) async fn run(options: AnswerOptions, format: Format) -> Exit {
         Ok(report) => report,
         Err(message) => return fail(format, Exit::Failed, &message),
     };
+    progress.finish(end);
     report.emit(format);
     Exit::Success
 }
@@ -321,6 +337,7 @@ async fn report_pending_interrupt(
     export: crate::counters::Export,
     handle: &sipx_transport::Handle,
     process_stop: &crate::stop::Stop,
+    progress: &mut crate::progress::Call,
 ) -> Exit {
     handle.shutdown().await;
     if let Some(message) = process_stop.failure() {
@@ -334,10 +351,14 @@ async fn report_pending_interrupt(
     }
     match export.into_report(report) {
         Ok(report) => {
+            progress.finish(crate::progress::CallEnd::Interrupted);
             report.emit(format);
             Exit::Success
         }
-        Err(message) => fail(format, Exit::Failed, &message),
+        Err(message) => {
+            progress.finish(crate::progress::CallEnd::Failed);
+            fail(format, Exit::Failed, &message)
+        }
     }
 }
 
@@ -422,11 +443,11 @@ struct Exchange {
 async fn refuse(
     handle: &sipx_transport::Handle,
     request: &sipx_transport::Incoming,
-    caller: &str,
     busy: bool,
     transport: crate::signalling::Selection,
     format: Format,
     headers: &[sipx_sip::Header],
+    progress: &mut crate::progress::Call,
 ) -> Exit {
     let (code, reason) = if busy {
         (486, "Busy Here")
@@ -468,11 +489,13 @@ async fn refuse(
         .report(
             Report::new()
                 .text("status", "refused")
-                .text("caller", caller)
+                .text("caller", progress.peer())
                 .number("code", i64::from(code)),
             request.transport,
         )
         .emit(format);
+    handle.shutdown().await;
+    progress.finish(crate::progress::CallEnd::Refused("refused"));
     Exit::Success
 }
 

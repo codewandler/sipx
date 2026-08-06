@@ -122,6 +122,7 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
     if let Err(message) = transport.configure_client(&options.signalling, &mut config) {
         return fail(format, Exit::Usage, &message);
     }
+    let mut progress = crate::progress::Call::new(crate::progress::CallRole::Dial, uri);
     let (handle, mut incoming) = match bind(config).await {
         Ok(bound) => bound,
         Err(error) => return fail(format, Exit::Failed, &format!("bind: {error}")),
@@ -160,11 +161,10 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
     // help text got silence from the level it documents (`X-57`). These three records are the
     // lifecycle a shell already sees on stdout — placed, answered, ended — on the stream that is
     // allowed to narrate it.
-    tracing::info!(peer = uri, transport = ?target.transport, "calling");
+    progress.placed(target.transport);
 
     let duration = Duration::from_secs(options.duration);
     let early_requested = options.early_media;
-    let started = std::time::Instant::now();
     let (mut call, selected_target, early_recorded, early_media) = if early_requested {
         let (mut dialing, selected) = match dial_early_candidates(
             &handle,
@@ -183,10 +183,13 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
                     &handle,
                     &process_stop,
                     cancellation,
+                    &mut progress,
                 )
                 .await;
             }
-            Err(error) => return report_failure(format, export, &handle, &error).await,
+            Err(error) => {
+                return report_failure(format, export, &handle, &error, &mut progress).await;
+            }
         };
         let early_media = match tokio::select! {
             biased;
@@ -198,13 +201,16 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
                     &handle,
                     &process_stop,
                     cancellation,
+                    &mut progress,
                 )
                 .await;
             }
             available = dialing.wait_for_early_media() => available,
         } {
             Ok(available) => available,
-            Err(error) => return report_failure(format, export, &handle, &error).await,
+            Err(error) => {
+                return report_failure(format, export, &handle, &error, &mut progress).await;
+            }
         };
         let early_recorded = if early_media {
             let Some(session) = dialing.media() else {
@@ -224,6 +230,7 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
                         &handle,
                         &process_stop,
                         cancellation,
+                        &mut progress,
                     )
                     .await;
                 }
@@ -241,10 +248,13 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
                     &handle,
                     &process_stop,
                     cancellation,
+                    &mut progress,
                 )
                 .await;
             }
-            Err(error) => return report_failure(format, export, &handle, &error).await,
+            Err(error) => {
+                return report_failure(format, export, &handle, &error, &mut progress).await;
+            }
         };
         (call, selected, early_recorded, early_media)
     } else {
@@ -265,15 +275,18 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
                     &handle,
                     &process_stop,
                     cancellation,
+                    &mut progress,
                 )
                 .await;
             }
-            Err(error) => return report_failure(format, export, &handle, &error).await,
+            Err(error) => {
+                return report_failure(format, export, &handle, &error, &mut progress).await;
+            }
         };
         (call, selected, Vec::new(), false)
     };
     let negotiated_transport = selected_target.transport;
-    tracing::info!(peer = uri, setup = ?started.elapsed(), "answered");
+    progress.answered();
 
     let served = sipx_call::serve_until(
         &mut call,
@@ -300,11 +313,11 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
             return fail(format, Exit::Failed, &error.to_string());
         }
     };
-    let (exchanged, status, ended_by, bye) = match served {
+    let (exchanged, end, bye) = match served {
         Served::Remote {
             cause: EndCause::RemoteBye,
             output,
-        } => (output, "answered", "remote", None),
+        } => (output, crate::progress::CallEnd::Remote, None),
         Served::Remote { cause, output } => {
             let _ = output;
             drop(call);
@@ -315,8 +328,10 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
                 &format!("call ended unexpectedly: {cause:?}"),
             );
         }
-        Served::Local { output, bye } => (output, "answered", "duration", Some(bye)),
-        Served::Interrupted { output, bye } => (output, "interrupted", "interrupt", Some(bye)),
+        Served::Local { output, bye } => (output, crate::progress::CallEnd::Duration, Some(bye)),
+        Served::Interrupted { output, bye } => {
+            (output, crate::progress::CallEnd::Interrupted, Some(bye))
+        }
         _ => {
             drop(call);
             handle.shutdown().await;
@@ -343,6 +358,8 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
 
     let early_samples = early_recorded.len();
     let total_samples = early_samples.saturating_add(exchanged.samples_received);
+    let status = end.status();
+    let ended_by = end.ended_by();
     let report = media.requested_report(
         Report::new()
             .text("status", status)
@@ -352,7 +369,7 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
             .text("media_bound", call.media().local_addr().to_string())
             .number(
                 "duration_ms",
-                i64::try_from(started.elapsed().as_millis()).unwrap_or(0),
+                i64::try_from(progress.elapsed().as_millis()).unwrap_or(0),
             )
             .number(
                 "samples_recorded",
@@ -394,12 +411,6 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
         }
     }
 
-    tracing::info!(
-        peer = uri,
-        elapsed = ?started.elapsed(),
-        samples_recorded = exchanged.samples_received,
-        "hung up"
-    );
     drop(call);
     handle.shutdown().await;
     if let Some(message) = process_stop.failure() {
@@ -409,6 +420,7 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
         Ok(report) => report,
         Err(message) => return fail(format, Exit::Failed, &message),
     };
+    progress.finish(end);
     report.emit(format);
     Exit::Success
 }
@@ -530,6 +542,7 @@ async fn report_pending_interrupt(
     handle: &sipx_transport::Handle,
     process_stop: &crate::stop::Stop,
     cancellation: sipx_call::InvitationCancellation,
+    progress: &mut crate::progress::Call,
 ) -> Exit {
     handle.shutdown().await;
     if let Some(message) = process_stop.failure() {
@@ -546,10 +559,14 @@ async fn report_pending_interrupt(
     }
     match export.into_report(report) {
         Ok(report) => {
+            progress.finish(crate::progress::CallEnd::Interrupted);
             report.emit(format);
             Exit::Success
         }
-        Err(message) => fail(format, Exit::Failed, &message),
+        Err(message) => {
+            progress.finish(crate::progress::CallEnd::Failed);
+            fail(format, Exit::Failed, &message)
+        }
     }
 }
 
@@ -558,11 +575,17 @@ async fn report_failure(
     export: crate::counters::Export,
     handle: &sipx_transport::Handle,
     error: &sipx_call::Error,
+    progress: &mut crate::progress::Call,
 ) -> Exit {
-    let exit = match error {
-        sipx_call::Error::Rejected { status, .. } => Exit::for_status(*status),
-        sipx_call::Error::NoResponse | sipx_call::Error::Cancelled(_) => Exit::Timeout,
-        _ => Exit::Failed,
+    let (exit, end) = match error {
+        sipx_call::Error::Rejected { status, .. } => {
+            let exit = Exit::for_status(*status);
+            (exit, crate::progress::CallEnd::Refused(exit.as_str()))
+        }
+        sipx_call::Error::NoResponse | sipx_call::Error::Cancelled(_) => {
+            (Exit::Timeout, crate::progress::CallEnd::Timeout)
+        }
+        _ => (Exit::Failed, crate::progress::CallEnd::Failed),
     };
     handle.shutdown().await;
     let report = Report::new()
@@ -574,10 +597,14 @@ async fn report_failure(
     };
     match export.into_report(report) {
         Ok(report) => {
+            progress.finish(end);
             eprintln!("{}", report.render(format));
             exit
         }
-        Err(message) => fail(format, Exit::Failed, &message),
+        Err(message) => {
+            progress.finish(crate::progress::CallEnd::Failed);
+            fail(format, Exit::Failed, &message)
+        }
     }
 }
 

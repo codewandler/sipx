@@ -91,7 +91,7 @@ pub(crate) struct Cli {
     #[arg(long, global = true)]
     pub(crate) json: bool,
 
-    /// Increase logging detail; repeat for protocol detail.
+    /// Show call/load progress; repeat for protocol detail.
     #[arg(short = 'v', action = ArgAction::Count, global = true)]
     pub(crate) verbose: u8,
 

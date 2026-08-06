@@ -515,6 +515,7 @@ async fn dph_2_wss_name_mismatch_fails_without_downgrade() {
                 "--timeout",
                 "5",
                 "--json",
+                "-v",
             ])
             .output(),
     )
@@ -528,6 +529,13 @@ async fn dph_2_wss_name_mismatch_fails_without_downgrade() {
         "name mismatch connected: {stdout} / {stderr}"
     );
     assert!(stderr.contains("\"status\":\"failed\""), "{stderr}");
+    assert_eq!(
+        stderr.matches("event=\"call.ended\"").count(),
+        1,
+        "{stderr}"
+    );
+    assert!(stderr.contains("cause=\"failed\""), "{stderr}");
+    assert!(!stderr.contains("event=\"call.answered\""), "{stderr}");
     assert!(
         stderr.contains("certificate") || stderr.contains("tls handshake"),
         "the typed failure names TLS verification: {stderr}"
@@ -2643,6 +2651,7 @@ async fn a_busy_answer_gives_the_caller_the_busy_exit_code() {
                 "5",
                 "--timeout",
                 "10",
+                "-v",
             ])
             .output(),
     )
@@ -2653,6 +2662,14 @@ async fn a_busy_answer_gives_the_caller_the_busy_exit_code() {
     assert_eq!(caller.status.code(), Some(6), "busy has its own exit code");
     let stderr = String::from_utf8_lossy(&caller.stderr);
     assert!(stderr.contains("\"status\":\"busy\""), "{stderr}");
+    assert_eq!(
+        stderr.matches("event=\"call.ended\"").count(),
+        1,
+        "{stderr}"
+    );
+    assert!(stderr.contains("cause=\"refused\""), "{stderr}");
+    assert!(stderr.contains("status=\"busy\""), "{stderr}");
+    assert!(!stderr.contains("event=\"call.answered\""), "{stderr}");
     assert!(
         String::from_utf8_lossy(&caller.stdout).is_empty(),
         "a failure must not land on stdout"
@@ -2709,6 +2726,7 @@ async fn dial_timeout_reports_and_obeys_its_cancellation_allowance() {
                 "--cancel-timeout",
                 "1",
                 "--json",
+                "-v",
             ])
             .output(),
     )
@@ -2724,8 +2742,21 @@ async fn dial_timeout_reports_and_obeys_its_cancellation_allowance() {
 
     assert_eq!(output.status.code(), Some(5));
     assert!(output.stdout.is_empty(), "failure stays off stdout");
-    let report: serde_json::Value =
-        serde_json::from_slice(&output.stderr).expect("timeout stderr is one JSON result");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr.matches("event=\"call.ended\"").count(),
+        1,
+        "{stderr}"
+    );
+    assert!(stderr.contains("cause=\"timeout\""), "{stderr}");
+    assert!(!stderr.contains("event=\"call.answered\""), "{stderr}");
+    let report: serde_json::Value = serde_json::from_str(
+        stderr
+            .lines()
+            .find(|line| line.starts_with('{'))
+            .expect("timeout stderr contains its JSON result"),
+    )
+    .expect("timeout stderr has one JSON result");
     assert_eq!(report["status"], "timeout");
     assert_eq!(report["invitation_limit_ms"], 1_000);
     assert_eq!(report["cancel_limit_ms"], 1_000);
@@ -2958,6 +2989,7 @@ async fn bounded_load_stops_at_the_call_limit_and_emits_one_stable_summary() {
                 "--timeout",
                 "5",
                 "--json",
+                "-v",
             ])
             .output(),
     )
@@ -2972,6 +3004,21 @@ async fn bounded_load_stops_at_the_call_limit_and_emits_one_stable_summary() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).expect("UTF-8 summary");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let progress = log_records(&stderr);
+    assert_eq!(
+        progress.len(),
+        2,
+        "load INFO is bounded to admission plus summary: {progress:?}; {stderr}"
+    );
+    for event in ["load.admission_started", "load.summary"] {
+        assert!(
+            progress
+                .iter()
+                .any(|record| record.contains(&format!("event=\"{event}\""))),
+            "missing {event}: {progress:?}; {stderr}"
+        );
+    }
     assert_eq!(stdout.lines().count(), 1, "one final record: {stdout}");
     let summary = support::strict_json::versioned("load", stdout.trim());
     assert_eq!(summary["schema"], "sipx.load.v1");
@@ -3379,6 +3426,7 @@ async fn an_internal_load_worker_error_is_failed_not_interrupted() {
             "--timeout",
             "5",
             "--json",
+            "-v",
         ])
         .output()
         .await
@@ -3397,6 +3445,16 @@ async fn an_internal_load_worker_error_is_failed_not_interrupted() {
             .as_str()
             .is_some_and(|reason| reason.contains("sdp:")),
         "{summary}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let progress = log_records(&stderr);
+    assert_eq!(progress.len(), 2, "{progress:?}; {stderr}");
+    assert!(
+        progress
+            .iter()
+            .any(|record| record.contains("event=\"load.summary\"")
+                && record.contains("status=\"failed\"")),
+        "{progress:?}; {stderr}"
     );
 }
 
@@ -5249,6 +5307,58 @@ async fn one_v_reports_the_call_on_both_ends_of_it() {
         );
     }
 
+    let ordered = |who: &str, stream: &str, expected: &[&str]| {
+        let records = log_records(stream);
+        let events: Vec<_> = records
+            .iter()
+            .filter_map(|record| {
+                expected
+                    .iter()
+                    .find(|event| record.contains(&format!("event=\"{event}\"")))
+                    .copied()
+            })
+            .collect();
+        assert_eq!(events, expected, "{who} progress: {records:?}; {stream}");
+    };
+    ordered(
+        "answerer",
+        &placed.answerer_stderr,
+        &[
+            "call.waiting",
+            "call.caller_observed",
+            "call.answered",
+            "call.ended",
+        ],
+    );
+    ordered(
+        "caller",
+        &caller_stderr,
+        &["call.placed", "call.answered", "call.ended"],
+    );
+
+    let answer = placed
+        .answerer_stdout
+        .iter()
+        .find(|line| line.contains("\"status\":\"answered\""))
+        .map(|line| support::strict_json::value(line))
+        .expect("answerer terminal JSON");
+    let caller = answer["caller"].as_str().expect("terminal caller");
+    let ended_by = answer["ended_by"].as_str().expect("terminal cause");
+    assert!(
+        placed
+            .answerer_stderr
+            .contains(&format!("caller=\"{caller}\"")),
+        "answer progress does not name terminal caller {caller}: {}",
+        placed.answerer_stderr
+    );
+    assert!(
+        placed
+            .answerer_stderr
+            .contains(&format!("cause=\"{ended_by}\"")),
+        "answer progress does not share terminal cause {ended_by}: {}",
+        placed.answerer_stderr
+    );
+
     let written = placed.answerer_stdout.join("\n");
     let on_stdout = log_records(&written);
     assert!(
@@ -5258,6 +5368,54 @@ async fn one_v_reports_the_call_on_both_ends_of_it() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn info_progress_stays_on_stderr_with_text_results() {
+    let _scenario = process_scenario().await;
+    let (mut answerer, address, mut lines) = start_answerer(&["--duration", "5"]).await;
+    let output = tokio::time::timeout(
+        Duration::from_secs(10),
+        sipx()
+            .args([
+                "dial",
+                &format!("sip:text-progress@{address}"),
+                "--duration",
+                "1",
+                "--timeout",
+                "5",
+                "-v",
+            ])
+            .output(),
+    )
+    .await
+    .expect("text call is bounded")
+    .expect("text dial runs");
+    assert!(
+        output.status.success(),
+        "{} / {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains("status") && stdout.contains("answered"),
+        "{stdout}"
+    );
+    assert!(log_records(&stdout).is_empty(), "{stdout}");
+    assert_eq!(
+        stderr.matches("event=\"call.ended\"").count(),
+        1,
+        "{stderr}"
+    );
+
+    tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        .await
+        .expect("answer terminal is bounded")
+        .expect("answer terminal can be read")
+        .expect("answer terminal exists");
+    answerer_exits_cleanly(&mut answerer).await;
 }
 
 /// DTMF sent by the caller is reported by the answering side.
@@ -5587,7 +5745,7 @@ async fn terminating_a_confirmed_answerer_hangs_up_and_reports_once() {
 #[tokio::test]
 async fn interrupting_a_waiting_answerer_reports_after_listener_cleanup() {
     let _scenario = process_scenario().await;
-    let (mut answerer, _address, mut lines) = start_answerer(&[]).await;
+    let (mut answerer, _address, mut lines) = start_answerer(&["-v"]).await;
     signal_interrupt(answerer.id().expect("answerer process id")).await;
 
     let terminal = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
@@ -5599,7 +5757,15 @@ async fn interrupting_a_waiting_answerer_reports_after_listener_cleanup() {
     assert_eq!(terminal["status"], "interrupted");
     assert_eq!(terminal["ended_by"], "interrupt");
     assert_eq!(terminal["stop_signal"], "interrupt");
-    answerer_exits_cleanly(&mut answerer).await;
+    let progress = drain_stderr(&mut answerer).await;
+    assert_eq!(
+        progress.matches("event=\"call.ended\"").count(),
+        1,
+        "{progress}"
+    );
+    assert!(progress.contains("cause=\"interrupted\""), "{progress}");
+    assert!(!progress.contains("event=\"call.answered\""), "{progress}");
+    exits_cleanly(&mut answerer, &progress).await;
 }
 
 /// Before confirmation the same interrupt remains INVITE cancellation: CANCEL/487, never a BYE
@@ -5624,6 +5790,7 @@ async fn interrupting_a_pending_dial_cancels_without_manufacturing_a_bye() {
             "--timeout",
             "30",
             "--json",
+            "-v",
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -5678,6 +5845,14 @@ async fn interrupting_a_pending_dial_cancels_without_manufacturing_a_bye() {
     assert_eq!(terminal["status"], "interrupted");
     assert_eq!(terminal["ended_by"], "interrupt");
     assert_eq!(terminal["stop_signal"], "interrupt");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr.matches("event=\"call.ended\"").count(),
+        1,
+        "{stderr}"
+    );
+    assert!(stderr.contains("cause=\"interrupted\""), "{stderr}");
+    assert!(!stderr.contains("event=\"call.answered\""), "{stderr}");
     while let Ok(request) = incoming.try_recv() {
         assert_ne!(
             request.request.method,

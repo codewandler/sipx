@@ -10,6 +10,27 @@ and `scenario`, documented below — alongside `help` and `version`. Global: `--
 object on stdout; `-v`/`-vv` raise log verbosity on stderr (never stdout, so JSON stays
 parseable); `-h`/`--help` on any command.
 
+### INFO progress
+
+One `-v` emits bounded lifecycle progress on stderr in both text and JSON result modes. No `-v`
+keeps these records quiet; `-vv` adds DEBUG detail, and further repetitions remain at DEBUG. The
+stable INFO events are:
+
+| Event | When | Fields |
+|---|---|---|
+| `call.waiting` | answer begins its bounded wait | `role`, `address`, `wait_ms` |
+| `call.placed` | dial is about to invite the selected peer | `role`, `peer`, `transport` |
+| `call.caller_observed` | answer admits the caller | `role`, `caller` |
+| `call.answered` | the confirmed call enters media exchange | `role`, `peer`, `setup_ms` |
+| `call.ended` | call resources and export have joined | `role`, `peer`, `status`, `cause`, `elapsed_ms` |
+| `load.admission_started` | bounded admission begins | `target`, `mode`, `rate`, `concurrency`, `calls`, `duration_ms` |
+| `load.summary` | admission and all owned calls have joined | `status`, `attempted`, `connected`, `rejected`, `timed_out`, `failed`, `peak_concurrency` |
+
+Dial orders placed, answered and ended. Answer orders waiting, caller observed, answered and ended;
+a refusal or failure omits answered. Terminal causes are `remote`, `duration`, `interrupted`,
+`refused`, `timeout` or `failed`, and the first cause produces exactly one end record. Load INFO is
+always two aggregate records regardless of its call/rate bounds—there is no per-attempt INFO stream.
+
 Every flag below whose name is followed by a placeholder — `--timeout <S>`, `--book <FILE>` — needs
 a value, and a flag given none is a usage error (exit 2) naming the flag. It is never read as
 absent: falling back to the default would run the command on something you did not ask for, and

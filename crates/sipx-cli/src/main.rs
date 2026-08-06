@@ -38,6 +38,7 @@ mod media;
 mod output;
 mod peers;
 mod preflight;
+mod progress;
 mod register;
 mod scenario;
 mod signalling;

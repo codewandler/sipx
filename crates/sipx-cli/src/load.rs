@@ -218,6 +218,15 @@ pub(crate) async fn run(command: LoadOptions, format: Format) -> Exit {
     let credentials = Arc::new(credentials);
     let candidates = Arc::new(candidates);
 
+    crate::progress::LoadStart {
+        target: uri_text,
+        mode: limits.mode.as_str(),
+        rate: limits.rate,
+        concurrency: limits.concurrency,
+        calls: limits.calls,
+        duration: limits.duration,
+    }
+    .emit();
     let bounded = run_bounded(
         BoundedPlan {
             calls: limits.calls,
@@ -794,6 +803,10 @@ fn percentile(values: &[Duration], numerator: usize, denominator: usize) -> Opti
     clippy::cast_precision_loss,
     reason = "a process cannot collect enough media snapshots to exceed f64's exact integer range"
 )]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one summary calculation feeds JSON, text and bounded INFO from the same facts"
+)]
 fn emit_summary(
     format: Format,
     target: &str,
@@ -877,6 +890,17 @@ fn emit_summary(
             "mean_mos": mean(|value| value.mos),
         }
     });
+
+    crate::progress::LoadSummary {
+        status,
+        attempted: outcome.attempted,
+        connected,
+        rejected,
+        timed_out,
+        failed,
+        peak_concurrency: bounded.peak_in_flight,
+    }
+    .emit();
 
     match format {
         Format::Json => println!("{summary}"),

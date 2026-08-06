@@ -107,7 +107,6 @@ pub(crate) fn parse(text: &str) -> Result<serde_json::Value, String> {
     Ok(value)
 }
 
-#[cfg(all(feature = "dtls", feature = "opus"))]
 pub(crate) fn value(text: &str) -> serde_json::Value {
     parse(text).unwrap_or_else(|error| panic!("strict JSON result: {error}: {text}"))
 }

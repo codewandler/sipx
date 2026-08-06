@@ -93,6 +93,11 @@ Terminal two calls it and hangs up after two seconds:
 sipx dial sip:you@127.0.0.1:5060 --duration 2 --timeout 5 --json
 ```
 
+Add `-v` to either call role for bounded INFO progress on stderr: dial reports placed, answered and
+ended; answer reports waiting, caller observed, answered and ended. `load -v` emits one aggregate
+admission record and one aggregate summary, never one INFO line per attempted call. Result text or
+JSON remains on stdout, so the same invocation stays safe in a pipeline.
+
 That proves the signalling and media session without needing an account. Add `--play hello.wav` or
 `--record reply.wav` to move audio samples; WAV input is 16-bit mono at the negotiated clock
 (8 kHz for G.711, 44.1 or 8 kHz for L16, or 48 kHz for an Opus-only call), and recordings preserve
