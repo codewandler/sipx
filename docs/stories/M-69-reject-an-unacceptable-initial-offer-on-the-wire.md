@@ -2,8 +2,7 @@
 id: M-69
 title: "Reject an unacceptable initial offer on the wire"
 pillar: "Media"
-status: ready
-priority: 1
+status: in-progress
 epic: media-interoperability
 areas: [sipx-call, sipx-cli]
 design: docs/designs/media-interoperability.md
@@ -41,3 +40,8 @@ reporting the local failure.
 
 Finding 3 observed answer-side `no codec in common`, `messages_in: 1`, `messages_out: 0`, and a
 caller that reached timeout because no final response appeared on the wire.
+
+## Progress
+
+- In progress: `docs/specs/call-initial-offer.md` specifies the malformed, unsupported and internal
+  failure classes, their initial-INVITE wire mapping and byte-level vectors before implementation.
