@@ -224,6 +224,8 @@ the refused name before binding or dialing.
 
 `sipx scenario` reads one JSON object per line and writes the existing versioned JSON event envelope
 one object per line. Every command carries a caller-supplied `id`; completion or refusal echoes it.
+The normative frame grammar, command fields, correlation, recovery and process-exit rules are in
+[`scenario-automation.md`](scenario-automation.md).
 The v1 command set is:
 
 ```text

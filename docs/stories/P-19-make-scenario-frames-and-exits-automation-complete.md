@@ -2,8 +2,7 @@
 id: P-19
 title: "Make scenario frames and exits automation-complete"
 pillar: "Phone"
-status: ready
-priority: 1
+status: in-progress
 epic: diagnostic-automation
 areas: [sipx-cli, sipx-app-protocol]
 design: docs/designs/diagnostic-automation.md
@@ -44,3 +43,9 @@ discover the frame shape or required wait deadline.
 Finding 6 showed help naturally implied `{"id":"1","dial":{...}}` while only a flat string
 `command`/`do` field worked. Invalid JSON, every command refused and failed dial streams all exited
 zero; `wait_for`'s required `timeout_ms` was absent from help.
+
+## Progress
+
+- In progress: the canonical frame, compatibility selector, per-command fields, correlation,
+  recovery, terminal stream result and exit mapping are specified in
+  `docs/specs/scenario-automation.md` before implementation.
