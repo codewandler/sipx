@@ -464,6 +464,30 @@ a documented flag absent from help, a missing JSON field and a newly discovered 
 The checker and its fixture tests are separate gate steps. The executable comparison runs after the
 workspace build in the local gate and CI, so it observes the binary that will ship.
 
+### 6.3 Unique structured fields
+
+Every JSON object emitted by the diagnostic phone MUST contain each member name at most once.
+Parsing into a map is not evidence of this property because an ordinary decoder may retain only
+one value. Repository assertions therefore deserialize with a recursive visitor that records the
+raw member names of every object before accepting its values. The visitor MUST reject a duplicate
+at the root or inside an array or nested object.
+
+The common text/JSON `Report` uses an order-preserving unique field collection. Inserting a name
+already present retains one member at its original position; storage and rendering cannot
+represent two members with the same name. Composition tests still reject repeated insertions so an
+ownership defect cannot hide behind replacement. Requested media owns `media_profile`,
+`requested_codecs`, `requested_media_security` and `requested_ice`. Negotiated media owns only the
+`negotiated_*` fields and browser component observations. Thus a terminal dial or answer report
+contains the requested `media_profile` exactly once while all prior field spelling, values and
+ordering remain unchanged.
+
+The strict recursive visitor is applied to representative output from every versioned CLI JSON
+producer listed by the public contract inventory: devices, bounded load, comparative-load
+readiness, load responder and scenario. The inventory check and strict-output test use the same
+discovered producer names, so adding a versioned producer without a duplicate-member assertion is
+a failure. Text output is rendered from the same ordered unique collection as JSON and therefore
+retains fact parity and deterministic order.
+
 ## 7. Vectors
 
 | ID | Scenario | Required result |
@@ -487,3 +511,6 @@ workspace build in the local gate and CI, so it observes the binary that will sh
 | `DPH-17` | each long-running command receives SIGINT and, on Unix, SIGTERM after readiness; a cleanup case receives the same signal twice | admission closes, owned work joins inside the command-specific bound, and exactly one terminal record names the first signal |
 | `DPH-18` | `version` in text and JSON modes, then each with a stray positional | exact one-line version result in the selected format; both stray forms exit usage without a success result |
 | `DPH-19` | each unavailable optional media/device selection targets a bound local observer; scenario and both call roles are included | exit 2 names the missing feature before local-resource or network I/O; the observer receives zero bytes |
+| `DPH-20` | browser-audio dial and answer terminal results are tokenized before map construction | `media_profile` and every other object member occur exactly once; both roles retain the documented values |
+| `DPH-21` | a duplicate member is placed at the root, in a nested object and in an object inside an array | the strict result decoder rejects all three and names the repeated member |
+| `DPH-22` | representative output from each discovered versioned CLI producer is checked | every object is accepted by the strict recursive decoder; a newly discovered producer without a fixture fails the inventory assertion |

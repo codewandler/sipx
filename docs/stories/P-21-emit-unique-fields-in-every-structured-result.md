@@ -2,8 +2,7 @@
 id: P-21
 title: "Emit unique fields in every structured result"
 pillar: "Phone"
-status: ready
-priority: 3
+status: in-progress
 epic: diagnostic-automation
 areas: [sipx-cli]
 design: docs/designs/diagnostic-automation.md
@@ -36,3 +35,10 @@ the deterministic field order and text/JSON fact parity scripts already rely on.
 
 Finding 14 observed two `media_profile` members in one successful structured browser-audio call;
 ordinary parsers hid the defect by retaining one value.
+
+## Progress
+
+- `docs/specs/diagnostic-phone.md` section 6.3 defines ordered unique common reports, assigns
+  requested and negotiated media fields to one owner, and requires recursive duplicate rejection
+  plus inventory coverage for every versioned CLI producer. DPH-20 through DPH-22 carry the
+  executable vectors. Board regeneration and the complete gate remain deferred to push.
