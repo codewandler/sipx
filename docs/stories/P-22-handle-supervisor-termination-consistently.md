@@ -2,8 +2,7 @@
 id: P-22
 title: "Handle supervisor termination consistently"
 pillar: "Phone"
-status: ready
-priority: 2
+status: in-progress
 epic: phone-lifecycle
 areas: [sipx-cli]
 design: docs/designs/phone-lifecycle.md
@@ -41,3 +40,9 @@ emit the command's terminal record instead of invoking the platform's default im
 The follow-up review observed `load-responder` complete naturally and handle SIGINT with a
 `status=interrupted` summary, but SIGTERM exited `-15` after readiness with no cleanup summary—the
 signal used by common process supervisors.
+
+## Progress
+
+- The diagnostic-phone contract now defines portable SIGINT and Unix SIGTERM support, first- and
+  repeated-signal semantics, per-command cleanup bounds, terminal fields and exit mapping. Board
+  regeneration and the complete gate remain deferred to the requested push boundary.

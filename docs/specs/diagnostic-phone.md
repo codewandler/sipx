@@ -277,6 +277,36 @@ the command MUST stop or finish media operations, join device relays and media w
 call, shut down the endpoint driver, and finalize its counter export. No dialog, transport, media
 or device task owned by the invocation may still be running after terminal output.
 
+### 3.4 Process stop signals
+
+`dial`, `answer`, `load` and `load-responder` share one process-stop abstraction. SIGINT is the
+portable interactive stop supported by the runtime. On Unix, SIGTERM is additionally supported as
+the supervisor stop. A platform without Unix signals MUST still compile and exercise the same
+library cancellation inputs, but the command does not claim a SIGTERM name that its runtime cannot
+install. Failure to install or receive a supported handler is an internal failure, not an
+interruption.
+
+The first supported signal freezes `stop_signal` as `interrupt` or `terminate`, closes admission
+and requests the command's existing graceful cleanup. A second or later supported signal during
+cleanup does not escalate to immediate process death, restart cleanup or emit another result; the
+first signal and existing finite cleanup deadline continue to own the outcome. This makes repeated
+supervisor delivery idempotent while retaining a hard bound:
+
+| Command state | Cleanup bound after first signal |
+|---|---|
+| `dial`, invitation pending | `--cancel-timeout` |
+| `dial` or `answer`, confirmed dialog | two-second BYE-response failure bound, then causal endpoint/media/device joins |
+| `answer`, waiting for an invitation | immediate admission close followed by causal endpoint/device join |
+| `load` | forty seconds |
+| `load-responder` | configured `--cleanup` |
+
+A fully joined signal stop emits exactly one terminal result after any readiness result,
+`status=interrupted`, `stop_signal`, and exit 0. `dial` and `answer` retain
+`ended_by=interrupt` for compatibility. Cleanup exhaustion or handler failure emits
+`status=failed`, an actionable reason and exit 1; a signal MUST NOT turn an internal worker failure
+into `interrupted`. Natural completion reports `stop_signal=null` in the versioned load summaries
+and adds no stop field to ordinary call results.
+
 `--header 'Name: value'` MAY be repeated. Values pass the same injection checks as the message
 builders. These stack-owned fields **MUST** be refused: `Via`, `Route`, `Record-Route`,
 `Max-Forwards`, `Call-ID`, `CSeq`, `From`, `To`, `Contact` and `Content-Length`. The command reports
@@ -422,3 +452,4 @@ workspace build in the local gate and CI, so it observes the binary that will sh
 | `DPH-14` | a reserved destination becomes occupied before finalization | the call outcome remains observable, finalization fails without replacing the competing file, and no reservation temporary remains |
 | `DPH-15` | invitation limits 1, 2, 3, 5 and 8 seconds expire against a ringing peer; cancellation allowance is 2 seconds | paused time reaches each invitation limit and at most its explicit cancellation allowance; one CANCEL is sent and the timeout report separates both measured phases |
 | `DPH-16` | final response is ready immediately before, exactly at or immediately after the invitation deadline | before wins as a final result; exact and after retain timeout while cleanup handles the crossed response at most once |
+| `DPH-17` | each long-running command receives SIGINT and, on Unix, SIGTERM after readiness; a cleanup case receives the same signal twice | admission closes, owned work joins inside the command-specific bound, and exactly one terminal record names the first signal |
