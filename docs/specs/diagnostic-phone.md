@@ -474,10 +474,11 @@ at the root or inside an array or nested object.
 
 The common text/JSON `Report` uses an order-preserving unique field collection. Inserting a name
 already present retains one member at its original position; storage and rendering cannot
-represent two members with the same name. Composition tests still reject repeated insertions so an
-ownership defect cannot hide behind replacement. Requested media owns `media_profile`,
-`requested_codecs`, `requested_media_security` and `requested_ice`. Negotiated media owns only the
-`negotiated_*` fields and browser component observations. Thus a terminal dial or answer report
+represent two members with the same name. The common-field test proves replacement itself remains
+unique, while media composition MUST NOT rely on replacement to resolve ownership. Requested media
+owns `media_profile`, `requested_codecs`, `requested_media_security` and `requested_ice`.
+Negotiated media owns only the `negotiated_*` fields and browser component observations. Thus a
+terminal dial or answer report
 contains the requested `media_profile` exactly once while all prior field spelling, values and
 ordering remain unchanged.
 

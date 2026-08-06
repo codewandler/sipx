@@ -490,7 +490,9 @@ does not change what an exit status means.
 than one thing to report, such as `answer`'s bound address or `peers`' list, emits one such line
 each; failures emit
 `{"status": …, "error": …}` on **stderr**. The text and JSON forms carry the same field set —
-that equality is asserted by a test, so a field you see in one is in the other.
+that equality is asserted by a test, so a field you see in one is in the other. Every object member
+name is unique. The process tests decode raw members recursively before constructing a map, so a
+repeated field at the root or inside a nested result is rejected instead of silently overwritten.
 
 Five outputs have versioned schemas or envelopes. The checked table below is held against the Rust
 producers by `./scripts/check-cli-reference.py --check`; the same checker executes root and

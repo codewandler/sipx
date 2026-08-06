@@ -4,7 +4,7 @@
 The help half executes the binary. Reading Rust constants would compare one copy of the help with
 another while a dispatch or build defect remained invisible. The JSON half discovers versioned
 contracts and their literal structural fields beside the producers; a schema added to the command
-cannot remain absent from the public inventory.
+cannot remain absent from the public inventory or from strict duplicate-member process coverage.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 DOCUMENT = ROOT / "website" / "docs" / "reference" / "cli.md"
 CLI_SOURCE = ROOT / "crates" / "sipx-cli" / "src"
 APP_EVENT = ROOT / "crates" / "sipx-app-protocol" / "src" / "event.rs"
+STRICT_JSON_TEST = ROOT / "crates" / "sipx-cli" / "tests" / "cli.rs"
 
 BEGIN_JSON = "<!-- BEGIN cli-json-contracts -->"
 END_JSON = "<!-- END cli-json-contracts -->"
@@ -188,6 +189,29 @@ def json_drift(document: str, actual: Mapping[str, JsonContract]) -> list[str]:
     return problems
 
 
+def strict_result_producers(source: str) -> frozenset[str]:
+    """Read the versioned producers covered by the strict recursive process assertions."""
+
+    return frozenset(
+        re.findall(
+            r'support::strict_json::versioned(?:_bytes)?\(\s*"([a-z][a-z0-9_]*)"',
+            source,
+        )
+    )
+
+
+def strict_output_drift(
+    actual: Mapping[str, JsonContract], covered: Set[str]
+) -> list[str]:
+    """Require a duplicate-member process assertion for each versioned producer."""
+
+    producers = {contract.producer for contract in actual.values()}
+    return [
+        f"versioned CLI producer `{producer}` has no strict duplicate-member output assertion"
+        for producer in sorted(producers - set(covered))
+    ]
+
+
 def _run(command: Sequence[str], *, timeout: int) -> str:
     completed = subprocess.run(
         command,
@@ -232,7 +256,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         root_help, commands = executable_help(binary)
         problems = help_drift(document, root_help, commands)
-        problems.extend(json_drift(document, discover_json_contracts(ROOT)))
+        contracts = discover_json_contracts(ROOT)
+        problems.extend(json_drift(document, contracts))
+        problems.extend(
+            strict_output_drift(
+                contracts,
+                strict_result_producers(STRICT_JSON_TEST.read_text(encoding="utf-8")),
+            )
+        )
     except (OSError, RuntimeError, subprocess.TimeoutExpired, ValueError) as error:
         print(f"cli reference: {error}", file=sys.stderr)
         return 1
@@ -242,7 +273,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     print(
         f"cli reference: {len(commands)} command helps and "
-        f"{len(discover_json_contracts(ROOT))} versioned JSON contracts agree"
+        f"{len(contracts)} versioned JSON contracts agree"
     )
     return 0
 

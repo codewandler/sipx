@@ -265,7 +265,6 @@ impl Selection {
             NegotiatedKeying::DtlsSrtp => "dtls-srtp",
         };
         let mut report = report
-            .text("media_profile", profile_name(call.media_profile()))
             .text("negotiated_codec", codec_name(call.media().codec()))
             .number(
                 "negotiated_payload_type",

@@ -27,6 +27,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{Semaphore, SemaphorePermit};
 
+mod support;
+
 /// One real command-line scenario at a time in this test binary.
 ///
 /// A scenario may and usually does run several `sipx` processes concurrently. Running every
@@ -1179,7 +1181,7 @@ async fn browser_audio_profile_runs_both_cli_roles_and_reports_nominated_facts()
         (&*offerer, "browser-offerer"),
         (&answerer_report, "browser-answerer"),
     ] {
-        let value: serde_json::Value = serde_json::from_str(report).expect("terminal JSON parses");
+        let value = support::strict_json::value(report);
         assert_eq!(value["status"], "answered", "{report}");
         assert_eq!(value["media_profile"], "browser-audio", "{report}");
         assert_eq!(value["negotiated_codec"], "opus", "{report}");
@@ -1587,8 +1589,7 @@ async fn dph_12_wav_and_virtual_device_carry_the_same_clip() {
         String::from_utf8_lossy(&listing.stdout),
         String::from_utf8_lossy(&listing.stderr)
     );
-    let listing: serde_json::Value =
-        serde_json::from_slice(&listing.stdout).expect("device inventory is JSON");
+    let listing = support::strict_json::versioned_bytes("device", &listing.stdout);
     let listed = listing["devices"]
         .as_array()
         .expect("device inventory contains an array")
@@ -2972,7 +2973,7 @@ async fn bounded_load_stops_at_the_call_limit_and_emits_one_stable_summary() {
     );
     let stdout = String::from_utf8(output.stdout).expect("UTF-8 summary");
     assert_eq!(stdout.lines().count(), 1, "one final record: {stdout}");
-    let summary: serde_json::Value = serde_json::from_str(stdout.trim()).expect("JSON summary");
+    let summary = support::strict_json::versioned("load", stdout.trim());
     assert_eq!(summary["schema"], "sipx.load.v1");
     assert_eq!(summary["seed"], 41);
     assert_eq!(summary["outcomes"]["attempted"], 3);
@@ -3432,7 +3433,7 @@ async fn bounded_load_responder_drives_readiness_through_zero_state() {
         .expect("readiness is bounded")
         .expect("readiness can be read")
         .expect("readiness line exists");
-    let ready: serde_json::Value = serde_json::from_str(&ready_line).expect("readiness JSON");
+    let ready = support::strict_json::versioned("load_responder_readiness", &ready_line);
     assert_eq!(ready["schema"], "sipx.comparative-load.ready.v1");
     assert_eq!(ready["role"], "responder");
     let address: std::net::SocketAddr = ready["address"]
@@ -3621,7 +3622,7 @@ async fn bounded_load_responder_drives_readiness_through_zero_state() {
         .expect("summary follows cleanup")
         .expect("summary can be read")
         .expect("summary line exists");
-    let summary: serde_json::Value = serde_json::from_str(&summary_line).expect("summary JSON");
+    let summary = support::strict_json::versioned("load_responder", &summary_line);
     assert_eq!(summary["schema"], "sipx.load-responder.v1");
     assert_eq!(summary["status"], "completed");
     assert_eq!(summary["counts"]["invitations"], 1);
@@ -4693,7 +4694,7 @@ async fn run_scenario_stream(script: &str) -> std::process::Output {
 fn scenario_lines(output: &std::process::Output) -> Vec<serde_json::Value> {
     String::from_utf8_lossy(&output.stdout)
         .lines()
-        .map(|line| serde_json::from_str(line).expect("one JSON object per scenario line"))
+        .map(|line| support::strict_json::versioned("scenario", line))
         .collect()
 }
 

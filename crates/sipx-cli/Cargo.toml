@@ -46,6 +46,7 @@ cpal = { workspace = true, optional = true }
 sipx-audio.workspace = true
 # Path-only so Cargo omits workspace-only fixture support from the normalized registry manifest.
 sipx-testkit = { path = "../sipx-testkit" }
+serde.workspace = true
 tokio = { workspace = true, features = ["full"] }
 
 [lints]
