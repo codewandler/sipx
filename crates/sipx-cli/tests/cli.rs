@@ -2627,6 +2627,417 @@ async fn bounded_load_stops_at_the_call_limit_and_emits_one_stable_summary() {
     );
 }
 
+/// P-18: the two bounded-load commands are documented as a pair, so their neutral defaults must
+/// drive the same bodyless signalling workload. Both summaries prove the requested admission and
+/// concurrency bounds were exercised, then prove that every owned resource drained.
+#[cfg(unix)]
+#[tokio::test]
+async fn default_load_pair_completes_the_requested_signalling_workload() {
+    let _scenario = process_scenario().await;
+    let mut command = sipx();
+    command
+        .args([
+            "load-responder",
+            "--max-active",
+            "8",
+            "--calls",
+            "20",
+            "--cleanup",
+            "5",
+            "--dialog-duration",
+            "5",
+            "--json",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut responder = command.spawn().expect("responder starts");
+    let stdout = responder.stdout.take().expect("stdout is piped");
+    let mut lines = BufReader::new(stdout).lines();
+    let ready: serde_json::Value = serde_json::from_str(
+        &tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+            .await
+            .expect("readiness is bounded")
+            .expect("readiness can be read")
+            .expect("readiness line exists"),
+    )
+    .expect("readiness JSON");
+    let address = ready["address"].as_str().expect("readiness address");
+
+    let output = tokio::time::timeout(
+        Duration::from_secs(15),
+        sipx()
+            .args([
+                "load",
+                &format!("sip:load@{address}"),
+                "--rate",
+                "100",
+                "--concurrency",
+                "8",
+                "--calls",
+                "20",
+                "--call-duration",
+                "1",
+                "--timeout",
+                "5",
+                "--json",
+            ])
+            .output(),
+    )
+    .await
+    .expect("default load run is bounded")
+    .expect("load runs");
+    let load: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("load summary JSON");
+
+    // The pre-fix run stops after one internal media failure, leaving the responder below its
+    // call bound. Ask it through the ordinary graceful path for the diagnostic summary instead of
+    // letting the failing-first assertion orphan it.
+    if load["outcomes"]["attempted"] != 20 {
+        signal_interrupt(responder.id().expect("responder process id")).await;
+    }
+    let responder_summary: serde_json::Value = serde_json::from_str(
+        &tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+            .await
+            .expect("responder summary is bounded")
+            .expect("responder summary can be read")
+            .expect("responder summary exists"),
+    )
+    .expect("responder summary JSON");
+    let complaint = drain_stderr(&mut responder).await;
+    let responder_status = tokio::time::timeout(Duration::from_secs(5), responder.wait())
+        .await
+        .expect("responder exit is bounded")
+        .expect("responder exits");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(load["mode"], "signalling", "{load}");
+    assert_eq!(load["status"], "completed", "{load}");
+    assert_eq!(load["outcomes"]["attempted"], 20, "{load}");
+    assert_eq!(
+        load["outcomes"]["connected"], 20,
+        "load: {load}; responder: {responder_summary}"
+    );
+    assert_eq!(load["outcomes"]["failed"], 0, "{load}");
+    assert_eq!(load["outcomes"]["peak_concurrency"], 8, "{load}");
+
+    assert_eq!(responder_status.code(), Some(0), "{complaint}");
+    assert_eq!(responder_summary["mode"], "signalling");
+    assert_eq!(responder_summary["status"], "completed");
+    assert_eq!(responder_summary["counts"]["invitations"], 20);
+    assert_eq!(responder_summary["counts"]["established"], 20);
+    assert_eq!(responder_summary["counts"]["completed"], 20);
+    assert_eq!(responder_summary["counts"]["active_high_water"], 8);
+    assert_eq!(responder_summary["post_drain"]["active_dialogs"], 0);
+    assert_eq!(responder_summary["post_drain"]["dispatcher_routes"], 0);
+    assert_eq!(responder_summary["post_drain"]["endpoint_transactions"], 0);
+    assert_eq!(responder_summary["post_drain"]["owned_tasks"], 0);
+}
+
+async fn start_mode_responder(
+    mode: &str,
+    calls: &str,
+    max_active: &str,
+) -> (
+    tokio::process::Child,
+    tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    serde_json::Value,
+) {
+    let mut command = sipx();
+    command
+        .args([
+            "load-responder",
+            "--mode",
+            mode,
+            "--max-active",
+            max_active,
+            "--calls",
+            calls,
+            "--cleanup",
+            "5",
+            "--dialog-duration",
+            "5",
+            "--json",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().expect("responder starts");
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let mut lines = BufReader::new(stdout).lines();
+    let ready = serde_json::from_str(
+        &tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+            .await
+            .expect("readiness is bounded")
+            .expect("readiness can be read")
+            .expect("readiness exists"),
+    )
+    .expect("readiness JSON");
+    (child, lines, ready)
+}
+
+/// Generated media remains an explicit symmetric workload and still supplies real RTP snapshots.
+#[tokio::test]
+async fn generated_media_load_pair_retains_the_rtp_workload() {
+    let _scenario = process_scenario().await;
+    let (mut responder, mut lines, ready) = start_mode_responder("generated-media", "4", "2").await;
+    let address = ready["address"].as_str().expect("readiness address");
+    let output = tokio::time::timeout(
+        Duration::from_secs(15),
+        sipx()
+            .args([
+                "load",
+                &format!("sip:load@{address}"),
+                "--mode",
+                "generated-media",
+                "--rate",
+                "20",
+                "--concurrency",
+                "2",
+                "--calls",
+                "4",
+                "--call-duration",
+                "1",
+                "--timeout",
+                "5",
+                "--json",
+            ])
+            .output(),
+    )
+    .await
+    .expect("generated-media run is bounded")
+    .expect("load runs");
+    let load: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("load summary JSON");
+    let summary: serde_json::Value = serde_json::from_str(
+        &tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+            .await
+            .expect("responder summary is bounded")
+            .expect("responder summary can be read")
+            .expect("responder summary exists"),
+    )
+    .expect("responder summary JSON");
+    let complaint = drain_stderr(&mut responder).await;
+    let responder_status = responder.wait().await.expect("responder exits");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(load["mode"], "generated-media", "{load}");
+    assert_eq!(load["status"], "completed", "{load}");
+    assert_eq!(load["outcomes"]["attempted"], 4, "{load}");
+    assert_eq!(load["outcomes"]["failed"], 0, "{load}");
+    assert_eq!(
+        load["outcomes"]["connected"].as_u64().unwrap_or(0)
+            + load["outcomes"]["timed_out"].as_u64().unwrap_or(0),
+        4,
+        "{load}"
+    );
+    assert_eq!(
+        load["media"]["snapshots"], load["outcomes"]["connected"],
+        "{load}"
+    );
+    assert_ne!(load["media"]["snapshots"], 0, "{load}");
+    assert_eq!(responder_status.code(), Some(0), "{complaint}");
+    assert_eq!(summary["status"], "completed", "{summary}");
+    assert_eq!(summary["counts"]["failed"], 0, "{summary}");
+    assert_eq!(
+        summary["counts"]["completed"].as_u64().unwrap_or(0)
+            + summary["counts"]["cancelled"].as_u64().unwrap_or(0),
+        4,
+        "{summary}"
+    );
+    assert_eq!(summary["post_drain"]["active_dialogs"], 0);
+    assert_eq!(summary["post_drain"]["owned_tasks"], 0);
+}
+
+/// A paired mode marker turns a configuration mismatch into one pre-admission refusal and two
+/// honest nonzero terminal results, rather than a late SDP parse failure inside a measured call.
+#[tokio::test]
+async fn incompatible_explicit_load_modes_fail_before_dialog_admission() {
+    let _scenario = process_scenario().await;
+    let (mut responder, mut lines, ready) = start_mode_responder("signalling", "4", "2").await;
+    let address = ready["address"].as_str().expect("readiness address");
+    let output = sipx()
+        .args([
+            "load",
+            &format!("sip:load@{address}"),
+            "--mode",
+            "generated-media",
+            "--rate",
+            "20",
+            "--concurrency",
+            "2",
+            "--calls",
+            "4",
+            "--timeout",
+            "5",
+            "--json",
+        ])
+        .output()
+        .await
+        .expect("mismatched load runs");
+    let load: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("load summary JSON");
+    let summary: serde_json::Value = serde_json::from_str(
+        &tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+            .await
+            .expect("responder summary is bounded")
+            .expect("responder summary can be read")
+            .expect("responder summary exists"),
+    )
+    .expect("responder summary JSON");
+    let complaint = drain_stderr(&mut responder).await;
+    let responder_status = responder.wait().await.expect("responder exits");
+
+    assert_eq!(output.status.code(), Some(1), "{load}");
+    assert_eq!(load["status"], "failed", "{load}");
+    assert_eq!(load["outcomes"]["attempted"], 1, "{load}");
+    assert_eq!(load["outcomes"]["connected"], 0, "{load}");
+    assert!(
+        load["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("workload mode mismatch")),
+        "{load}"
+    );
+    assert_eq!(responder_status.code(), Some(1), "{complaint}");
+    assert_eq!(summary["status"], "failed", "{summary}");
+    assert_eq!(summary["counts"]["invitations"], 1, "{summary}");
+    assert_eq!(summary["counts"]["admitted"], 0, "{summary}");
+    assert_eq!(summary["counts"]["rejected"], 1, "{summary}");
+    assert_eq!(summary["responses"]["488"], 1, "{summary}");
+    assert_eq!(summary["post_drain"]["active_dialogs"], 0);
+}
+
+/// The shared typed vocabulary rejects an unknown local mode in argument parsing, before any
+/// destination resolution or endpoint bind can occur.
+#[tokio::test]
+async fn an_unknown_load_mode_is_usage_before_io() {
+    let output = sipx()
+        .args([
+            "load",
+            "sip:load@127.0.0.1:9",
+            "--mode",
+            "media",
+            "--rate",
+            "1",
+            "--concurrency",
+            "1",
+            "--calls",
+            "1",
+            "--json",
+        ])
+        .output()
+        .await
+        .expect("parser runs");
+    let complaint = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{complaint}");
+    assert!(complaint.contains("invalid value 'media'"), "{complaint}");
+    assert!(complaint.contains("signalling"), "{complaint}");
+    assert!(complaint.contains("generated-media"), "{complaint}");
+    assert!(output.stdout.is_empty(), "usage emits no result record");
+}
+
+/// Internal call failure is not an operator interrupt merely because it requests the shared stop
+/// token. An unmarked peer can still send a bodyless 2xx to explicit media mode; that is a worker
+/// failure, closes admission after one attempt, drains, and exits nonzero with its actual cause.
+#[tokio::test]
+async fn an_internal_load_worker_error_is_failed_not_interrupted() {
+    let _scenario = process_scenario().await;
+    let (peer, mut incoming) = bind(TransportConfig::new(
+        "127.0.0.1:0".parse().expect("peer bind address"),
+    ))
+    .await
+    .expect("peer binds");
+    let address = peer.local_addr();
+    let serving = tokio::spawn({
+        let peer = peer.clone();
+        async move {
+            let invitation = incoming.recv().await.expect("INVITE arrives");
+            let accepted = sipx_sip::build::ResponseBuilder::to_request(
+                &invitation.request,
+                StatusCode::new(200).expect("success status"),
+                "OK",
+            )
+            .expect("response builds")
+            .set_header(
+                &HeaderName::To,
+                bytes::Bytes::from_static(b"<sip:load@peer.invalid>;tag=bodyless"),
+            )
+            .expect("tagged To")
+            .header(
+                HeaderName::Contact,
+                bytes::Bytes::from(format!("<sip:load@{}>", peer.local_addr())),
+            )
+            .expect("Contact")
+            .build();
+            peer.respond(&invitation.key, accepted)
+                .await
+                .expect("bodyless answer sends");
+            // The call layer ACKs and then attempts BYE after discovering that explicit media has
+            // no SDP answer. Serving that cleanup keeps this independent peer causally bounded.
+            // A bound on failure: each pass completes on the next exact ACK/BYE network event.
+            while let Ok(Some(request)) =
+                tokio::time::timeout(Duration::from_secs(5), incoming.recv()).await
+            {
+                if request.request.method == Method::Bye {
+                    let response = sipx_sip::build::ResponseBuilder::to_request(
+                        &request.request,
+                        StatusCode::new(200).expect("success status"),
+                        "OK",
+                    )
+                    .expect("BYE response builds")
+                    .build();
+                    peer.respond(&request.key, response)
+                        .await
+                        .expect("BYE response sends");
+                    break;
+                }
+            }
+        }
+    });
+    let output = sipx()
+        .args([
+            "load",
+            &format!("sip:load@{address}"),
+            "--mode",
+            "generated-media",
+            "--rate",
+            "20",
+            "--concurrency",
+            "2",
+            "--calls",
+            "4",
+            "--timeout",
+            "5",
+            "--json",
+        ])
+        .output()
+        .await
+        .expect("load runs");
+    let summary: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("load summary JSON");
+    serving.await.expect("peer task joins");
+    peer.shutdown().await;
+
+    assert_eq!(output.status.code(), Some(1), "{summary}");
+    assert_eq!(summary["status"], "failed", "{summary}");
+    assert_eq!(summary["outcomes"]["attempted"], 1, "{summary}");
+    assert_eq!(summary["outcomes"]["failed"], 1, "{summary}");
+    assert!(
+        summary["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("sdp:")),
+        "{summary}"
+    );
+}
+
 /// P-15 through the shipped process: readiness is the start barrier, then the exact SDP-free
 /// INVITE/2xx/ACK/BYE/2xx flow drains every owned route, transaction and task before the terminal
 /// record appears.
@@ -3629,6 +4040,8 @@ async fn interrupted_load_stops_admission_and_summarizes_after_cleanup() {
             "100",
             "--timeout",
             "20",
+            "--mode",
+            "generated-media",
             "--json",
         ])
         .stdout(Stdio::piped())

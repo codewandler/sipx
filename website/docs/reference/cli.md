@@ -174,7 +174,8 @@ sipx load sip:load@192.0.2.1:5060 --rate 10 --concurrency 32 --calls 100 --seed 
 | `--duration <S>` | Stop admission after this many seconds |
 | `--call-duration <S>` | End each answered call after this many seconds (default 0) |
 | `--timeout <S>` | Bound each call setup (default 20) |
-| `--seed <N>` | Reproduce arrival jitter and deterministic media (default 0) |
+| `--mode <M>` | `signalling` (default) or the separately explicit `generated-media` workload |
+| `--seed <N>` | Reproduce arrival jitter and deterministic workload data (default 0) |
 | `--from <URI>` | Address used by the generated callers |
 | `--password <P>` | Digest password; prefer `SIPX_PASSWORD` |
 | `--local <ADDR>` | Local address to bind (default `0.0.0.0:0`) |
@@ -190,11 +191,18 @@ closes admission. Reaching a bound or receiving Ctrl-C signals all owned calls t
 their cleanup before emitting the summary. Cleanup has a 40-second failure bound, longer than the
 SIP transaction ceiling; exhaustion exits 1 and reports `status: "failed"`.
 
-JSON output is exactly one `sipx.load.v1` object. It records the seed and effective limits;
+The default sends bodyless INVITE/2xx/ACK/BYE dialogs and creates no SDP, RTP socket or media task,
+matching `load-responder`'s default. Select `--mode generated-media` on both commands for the
+deterministic PCMU/RTP workload. A paired mode mismatch is refused before dialog admission and both
+commands report failure after cleanup.
+
+JSON output is exactly one `sipx.load.v1` object. It records the effective mode, terminal reason,
+seed and effective limits;
 attempted, connected, rejected, timed-out and failed calls; peak concurrency; response-code counts;
 p50/p95/p99 setup time; and aggregate media loss, jitter and MOS snapshots. Missing measurements
 are `null`, not zero. A run that reaches a configured bound is `completed`; a cleanly drained Ctrl-C
-is `interrupted`.
+is `interrupted`. An internal worker or media error is `failed`/exit 1 and retains its actionable
+reason; it is never relabeled as an operator interruption.
 
 ## `sipx load-responder`
 
@@ -433,7 +441,7 @@ scenario details extend the `event` object and do not define a second envelope.
 | Contract | Producer | Required structural fields |
 |---|---|---|
 | `sipx.devices.v1` | `device` | `schema`, `devices`, `id`, `name`, `input`, `output` |
-| `sipx.load.v1` | `load` | `schema`, `status`, `seed`, `target`, `limits`, `rate`, `concurrency`, `calls`, `duration_ms`, `call_duration_ms`, `setup_timeout_ms`, `cleanup_ms`, `outcomes`, `attempted`, `connected`, `rejected`, `timed_out`, `failed`, `peak_concurrency`, `response_codes`, `setup_ms`, `p50`, `p95`, `p99`, `media`, `snapshots`, `packets_lost`, `mean_loss`, `mean_jitter_ms`, `mean_mos` |
+| `sipx.load.v1` | `load` | `schema`, `status`, `reason`, `mode`, `seed`, `target`, `limits`, `rate`, `concurrency`, `calls`, `duration_ms`, `call_duration_ms`, `setup_timeout_ms`, `cleanup_ms`, `outcomes`, `attempted`, `connected`, `rejected`, `timed_out`, `failed`, `peak_concurrency`, `response_codes`, `setup_ms`, `p50`, `p95`, `p99`, `media`, `snapshots`, `packets_lost`, `mean_loss`, `mean_jitter_ms`, `mean_mos` |
 | `sipx.comparative-load.ready.v1` | `load_responder_readiness` | `active`, `address`, `events`, `limits`, `pid`, `role`, `schema`, `stderr_bytes`, `stdout_bytes`, `transport` |
 | `sipx.load-responder.v1` | `load_responder` | `active_dialogs`, `active_high_water`, `admitted`, `calls`, `cancelled`, `cleanup_ms`, `completed`, `count`, `counts`, `dialog_duration_ms`, `dispatcher_routes`, `duration_ms`, `endpoint_transactions`, `established`, `failed`, `invalid_messages`, `invitations`, `latency_ms`, `limits`, `max_active`, `maximum`, `mode`, `owned_tasks`, `p50`, `p95`, `p99`, `post_drain`, `reason`, `rejected`, `responses`, `schema`, `seed`, `setup`, `status`, `teardown` |
 | `sipx.app.v1` | `scenario` | `contract`, `seq`, `at`, `call`, `event`, `id`, `leg`, `direction`, `state`, `from`, `to`, `headers`, `media`, `encrypted`, `on_hold`, `muted`, `legs`, `bridged`, `tags`, `type`, `command` |

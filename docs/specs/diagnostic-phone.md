@@ -260,13 +260,15 @@ status codes are decimal strings):
 {
   "schema":"sipx.load.v1",
   "status":"completed|interrupted|failed",
+  "reason":null,
+  "mode":"signalling",
   "seed":0,
   "target":"sip:load@192.0.2.1:5060",
   "limits":{"rate":10.0,"concurrency":32,"calls":100,"duration_ms":null,"call_duration_ms":0,"setup_timeout_ms":20000,"cleanup_ms":40000},
   "outcomes":{"attempted":100,"connected":98,"rejected":1,"timed_out":1,"failed":0,"peak_concurrency":12},
   "response_codes":{"200":98,"486":1},
   "setup_ms":{"p50":18,"p95":31,"p99":45},
-  "media":{"snapshots":98,"packets_lost":0,"mean_loss":0.0000,"mean_jitter_ms":1,"mean_mos":4.38}
+  "media":{"snapshots":0,"packets_lost":0,"mean_loss":null,"mean_jitter_ms":null,"mean_mos":null}
 }
 ```
 
@@ -280,8 +282,8 @@ commands. It sends a bodyless INVITE, completes the bodyless 2xx/ACK dialog, hol
 configured call/dialog duration, and completes it with BYE. It creates no SDP, media port, RTP task
 or media snapshot. `generated-media` is selected explicitly on both commands and retains the
 deterministic PCMU offer/answer, one bounded generated frame and RTP quality snapshot used by the
-media workload. The `mode` field appears in responder readiness and in both terminal summaries;
-signalling summaries report zero media snapshots and unavailable media aggregates as `null`.
+media workload. The `mode` field appears in both terminal summaries; signalling summaries report
+zero media snapshots and unavailable media aggregates as `null`.
 
 Every INVITE emitted by `load` carries the private extension field
 `X-Sipx-Workload-Mode: signalling|generated-media`. The paired responder checks a present field

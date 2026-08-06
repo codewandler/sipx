@@ -52,6 +52,31 @@ pub(crate) enum IceChoice {
     Stun,
 }
 
+/// Workload shared by the bounded load caller and responder.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub(crate) enum WorkloadMode {
+    /// Bodyless INVITE/ACK/BYE measurement with no media ownership.
+    #[default]
+    Signalling,
+    /// Deterministic PCMU offer/answer and RTP measurement.
+    GeneratedMedia,
+}
+
+impl WorkloadMode {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Signalling => "signalling",
+            Self::GeneratedMedia => "generated-media",
+        }
+    }
+}
+
+impl std::fmt::Display for WorkloadMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// The complete command line.
 #[derive(Debug, Parser)]
 #[command(
@@ -417,6 +442,9 @@ pub(crate) struct LoadOptions {
     /// Bound each call setup in seconds.
     #[arg(long, default_value_t = 20, value_name = "S", value_parser = parse_seconds)]
     pub(crate) timeout: u64,
+    /// Select bodyless signalling or deterministic generated media.
+    #[arg(long, default_value_t)]
+    pub(crate) mode: WorkloadMode,
     #[arg(long, default_value_t = 0)]
     pub(crate) seed: u64,
     #[arg(long, value_parser = parse_non_empty)]
@@ -455,8 +483,9 @@ pub(crate) struct LoadResponderOptions {
     pub(crate) reject_status: u16,
     #[arg(long, default_value_t = 40, value_name = "S", value_parser = parse_seconds)]
     pub(crate) dialog_duration: u64,
-    #[arg(long, default_value = "signalling", value_parser = ["signalling", "generated-media"])]
-    pub(crate) mode: String,
+    /// Select bodyless signalling or deterministic generated media.
+    #[arg(long, default_value_t)]
+    pub(crate) mode: WorkloadMode,
     #[arg(long, default_value = "127.0.0.1:0")]
     pub(crate) local: SocketAddr,
     #[arg(long, default_value = "udp", value_parser = ["udp"])]

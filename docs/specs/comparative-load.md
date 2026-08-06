@@ -375,7 +375,10 @@ Call-ID and `n`; the command never reflects unbounded or invalid bytes into a he
 `--mode signalling` is the default and creates no SDP, RTP socket or media task. The distinct
 `--mode generated-media` accepts only an INVITE carrying a negotiable SDP offer, uses the ordinary
 call/media stack, and emits a finite deterministic audio fixture. A missing or unusable offer in
-that mode receives a typed final refusal. Media behavior and measurements never enter the v1
+that mode receives a typed final refusal. A present `X-Sipx-Workload-Mode` field is parsed before
+admission; a value different from the responder's effective mode receives 488 `Workload Mode
+Mismatch`, closes the paired run as failed and consumes no dialog slot. An absent field preserves
+the body-based behavior for clients outside this paired command contract. Media behavior and measurements never enter the v1
 signalling-load result. After the initial ACK, its bounded request vocabulary is ACK and BYE: an
 unsupported in-dialog method receives 405, while a malformed, wrong-dialog or stale BYE receives
 400, 481 or 500 respectively. This narrower load profile keeps ordinary call/media ownership while

@@ -14,7 +14,7 @@ use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::cli::LoadResponderOptions;
+use crate::cli::{LoadResponderOptions, WorkloadMode};
 use crate::output::{Exit, Format, fail};
 
 const PER_DIALOG_QUEUE: usize = 8;
@@ -24,31 +24,6 @@ fn endpoint_event_capacity(max_active: usize) -> usize {
     max_active
         .saturating_mul(PER_DIALOG_QUEUE)
         .clamp(1, tokio::sync::Semaphore::MAX_PERMITS)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Mode {
-    Signalling,
-    GeneratedMedia,
-}
-
-impl Mode {
-    fn parse(value: &str) -> Result<Self, String> {
-        match value {
-            "signalling" => Ok(Self::Signalling),
-            "generated-media" => Ok(Self::GeneratedMedia),
-            other => Err(format!(
-                "--mode must be signalling or generated-media, not {other:?}"
-            )),
-        }
-    }
-
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Signalling => "signalling",
-            Self::GeneratedMedia => "generated-media",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -62,7 +37,7 @@ struct Limits {
     provisional_percent: u8,
     answer_percent: u8,
     reject_status: u16,
-    mode: Mode,
+    mode: WorkloadMode,
 }
 
 impl Limits {
@@ -111,7 +86,7 @@ impl Limits {
             provisional_percent,
             answer_percent,
             reject_status,
-            mode: Mode::parse(&options.mode)?,
+            mode: options.mode,
         })
     }
 }
@@ -531,6 +506,65 @@ pub(crate) async fn run(options: LoadResponderOptions, format: Format) -> Exit {
                 let reached_call_bound = limits
                     .calls
                     .is_some_and(|bound| totals.invitations >= bound as u64);
+                let requested_mode = crate::load::requested_mode(&invitation.request().request);
+                if let Err(message) = requested_mode {
+                    totals.invalid = totals.invalid.saturating_add(1);
+                    match invitation.refuse(&endpoint, 400, "Bad Request").await {
+                        Ok(()) => {
+                            totals.rejected = totals.rejected.saturating_add(1);
+                            *totals.responses.entry(400).or_default() += 1;
+                        }
+                        Err(sipx_call::Error::InvitationCancelled) => {
+                            totals.cancelled = totals.cancelled.saturating_add(1);
+                        }
+                        Err(error) => {
+                            totals.failed = totals.failed.saturating_add(1);
+                            completion = Completion::Failed;
+                            reason.get_or_insert_with(|| {
+                                format!("invalid workload-mode refusal failed: {error}")
+                            });
+                        }
+                    }
+                    totals.first_error.get_or_insert(message);
+                    if reached_call_bound {
+                        close_admission(&mut admission_open, &mut cleanup_deadline, limits.cleanup);
+                    }
+                    continue;
+                }
+                if requested_mode
+                    .ok()
+                    .flatten()
+                    .is_some_and(|requested| requested != limits.mode)
+                {
+                    match invitation
+                        .refuse(&endpoint, 488, crate::load::MODE_MISMATCH_REASON)
+                        .await
+                    {
+                        Ok(()) => {
+                            totals.rejected = totals.rejected.saturating_add(1);
+                            *totals.responses.entry(488).or_default() += 1;
+                        }
+                        Err(sipx_call::Error::InvitationCancelled) => {
+                            totals.cancelled = totals.cancelled.saturating_add(1);
+                        }
+                        Err(error) => {
+                            totals.failed = totals.failed.saturating_add(1);
+                            reason.get_or_insert_with(|| {
+                                format!("workload-mode mismatch refusal failed: {error}")
+                            });
+                        }
+                    }
+                    completion = Completion::Failed;
+                    reason.get_or_insert_with(|| {
+                        format!(
+                            "workload mode mismatch: responder requires {}",
+                            limits.mode.as_str()
+                        )
+                    });
+                    stop.cancel();
+                    close_admission(&mut admission_open, &mut cleanup_deadline, limits.cleanup);
+                    continue;
+                }
                 let at_capacity = workers.len() >= limits.max_active;
                 if !admission_open || at_capacity {
                     match invitation
@@ -723,8 +757,10 @@ async fn run_invitation(
     stop: CancellationToken,
 ) -> WorkerResult {
     match limits.mode {
-        Mode::Signalling => run_signalling(invitation, index, endpoint, calls, limits, stop).await,
-        Mode::GeneratedMedia => {
+        WorkloadMode::Signalling => {
+            run_signalling(invitation, index, endpoint, calls, limits, stop).await
+        }
+        WorkloadMode::GeneratedMedia => {
             run_generated_media(invitation, index, endpoint, calls, limits, stop).await
         }
     }
@@ -1536,7 +1572,7 @@ mod tests {
             provisional_percent: 50,
             answer_percent: 50,
             reject_status: 486,
-            mode: Mode::Signalling,
+            mode: WorkloadMode::Signalling,
         };
         assert_eq!(
             decision(limits, 9).provisional,
@@ -1634,7 +1670,7 @@ mod tests {
             provisional_percent: 0,
             answer_percent: 100,
             reject_status: 486,
-            mode: Mode::Signalling,
+            mode: WorkloadMode::Signalling,
         };
         let mut worker = WorkerResult::new(Terminal::Failed);
         worker.cancelled();
