@@ -203,10 +203,11 @@ pub(crate) async fn run(command: LoadOptions, format: Format) -> Exit {
 
     let stop = Stop::new();
     let interrupt = stop.clone();
+    let process_stop = crate::stop::Stop::new();
+    let signal_listener = process_stop.clone();
     let signal_task = tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            interrupt.request();
-        }
+        signal_listener.wait().await;
+        interrupt.request();
     });
     let measurements = Arc::new(Mutex::new(Vec::<Measurement>::new()));
     let observed = Arc::clone(&measurements);
@@ -266,13 +267,25 @@ pub(crate) async fn run(command: LoadOptions, format: Format) -> Exit {
 
     signal_task.abort();
     let _ = signal_task.await;
+    let signal_failure = process_stop.failure();
     let measurements = match measurements.lock() {
         Ok(values) => values.clone(),
         Err(_) => return fail(format, Exit::Failed, "measurement store poisoned"),
     };
-    emit_summary(format, uri_text, limits, &bounded, &measurements);
+    emit_summary(
+        format,
+        uri_text,
+        limits,
+        &bounded,
+        &measurements,
+        process_stop.signal(),
+        signal_failure.as_deref(),
+    );
 
-    if !bounded.cleanup_complete || has_internal_failure(&bounded.outcome.failures) {
+    if signal_failure.is_some()
+        || !bounded.cleanup_complete
+        || has_internal_failure(&bounded.outcome.failures)
+    {
         Exit::Failed
     } else {
         Exit::Success
@@ -787,6 +800,8 @@ fn emit_summary(
     limits: Limits,
     bounded: &sipx_call::load::BoundedOutcome,
     measurements: &[Measurement],
+    stop_signal: Option<&str>,
+    signal_failure: Option<&str>,
 ) {
     let outcome = &bounded.outcome;
     let rejected: usize = outcome
@@ -809,7 +824,9 @@ fn emit_summary(
     let mean = |value: fn(&sipx_rtp::Quality) -> f64| {
         (snapshots > 0).then(|| quality.iter().map(|item| value(item)).sum::<f64>() / divisor)
     };
-    let reason = if bounded.cleanup_complete {
+    let reason = if signal_failure.is_some() {
+        signal_failure
+    } else if bounded.cleanup_complete {
         internal_reason(&outcome.failures)
     } else {
         Some("cleanup budget exhausted")
@@ -824,6 +841,7 @@ fn emit_summary(
     let summary = serde_json::json!({
         "schema": "sipx.load.v1",
         "status": status,
+        "stop_signal": stop_signal,
         "reason": reason,
         "mode": limits.mode.as_str(),
         "seed": limits.seed,
@@ -864,6 +882,9 @@ fn emit_summary(
         Format::Json => println!("{summary}"),
         Format::Text => {
             println!("status             {status}");
+            if let Some(signal) = stop_signal {
+                println!("stop_signal        {signal}");
+            }
             println!("mode               {}", limits.mode.as_str());
             if let Some(reason) = reason {
                 println!("reason             {reason}");

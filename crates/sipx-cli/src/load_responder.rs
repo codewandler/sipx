@@ -373,7 +373,8 @@ pub(crate) async fn run(options: LoadResponderOptions, format: Format) -> Exit {
     let mut reason: Option<String> = None;
     let mut totals = Totals::new(limits);
     let mut deadline_leftovers = None;
-    let mut ctrl_c = std::pin::pin!(tokio::signal::ctrl_c());
+    let process_stop = crate::stop::Stop::new();
+    let mut process_wait = std::pin::pin!(process_stop.wait());
     let mut signal_open = true;
     let mut data_priority = DataPriority::Dispatch;
     loop {
@@ -396,11 +397,11 @@ pub(crate) async fn run(options: LoadResponderOptions, format: Format) -> Exit {
             let control = async {
                 tokio::select! {
                     biased;
-                    signal = &mut ctrl_c, if signal_open => {
+                    () = &mut process_wait, if signal_open => {
                         signal_open = false;
-                        match signal {
-                            Ok(()) => LoopEvent::Interrupt,
-                            Err(error) => LoopEvent::Internal(format!("signal handler failed: {error}")),
+                        match process_stop.failure() {
+                            Some(message) => LoopEvent::Internal(message),
+                            None => LoopEvent::Interrupt,
                         }
                     }
                     () = sleep_until(admission_deadline), if admission_open && admission_deadline.is_some() => {
@@ -431,9 +432,12 @@ pub(crate) async fn run(options: LoadResponderOptions, format: Format) -> Exit {
 
         match selected {
             LoopEvent::Interrupt => {
+                let stopped_admission = admission_open;
                 close_admission(&mut admission_open, &mut cleanup_deadline, limits.cleanup);
-                completion = Completion::Interrupted;
-                reason = Some("interrupt".to_owned());
+                if stopped_admission && completion != Completion::Failed {
+                    completion = Completion::Interrupted;
+                    reason = None;
+                }
                 stop.cancel();
             }
             LoopEvent::Internal(message) => {
@@ -683,6 +687,7 @@ pub(crate) async fn run(options: LoadResponderOptions, format: Format) -> Exit {
         &totals,
         leftovers,
         reason.as_deref(),
+        process_stop.signal(),
     );
     if completion == Completion::Failed {
         Exit::Failed
@@ -1433,6 +1438,7 @@ fn emit_summary(
     totals: &Totals,
     leftovers: Leftovers,
     reason: Option<&str>,
+    stop_signal: Option<&str>,
 ) {
     let responses: BTreeMap<String, u64> = totals
         .responses
@@ -1442,6 +1448,7 @@ fn emit_summary(
     let summary = serde_json::json!({
         "schema": "sipx.load-responder.v1",
         "status": completion.as_str(),
+        "stop_signal": stop_signal,
         "seed": limits.seed,
         "mode": limits.mode.as_str(),
         "limits": {
@@ -1479,6 +1486,9 @@ fn emit_summary(
         Format::Json => println!("{summary}"),
         Format::Text => {
             println!("status             {}", completion.as_str());
+            if let Some(signal) = stop_signal {
+                println!("stop_signal        {signal}");
+            }
             println!("invitations        {}", totals.invitations);
             println!("established        {}", totals.established);
             println!("completed          {}", totals.completed);

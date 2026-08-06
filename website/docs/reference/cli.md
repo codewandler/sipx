@@ -33,6 +33,12 @@ remove the binding. `load-responder` refuses zero for `--cleanup` and
 
 `--help` is answered before any of this, so it still prints when the rest of the line is wrong.
 
+The long-running `dial`, `answer`, `load`, and `load-responder` commands handle Ctrl-C/SIGINT and,
+on Unix, supervisor SIGTERM through the same graceful stop path. The first signal is reported as
+`stop_signal: "interrupt"` or `"terminate"`; repeated supported signals do not shorten the
+command's documented cleanup bound or produce another terminal record. A clean signal stop exits
+0 after owned work joins. Handler or cleanup failure reports `failed` and exits 1.
+
 `dial`, `answer`, and `register` select `udp`, `tcp`, `tls`, `ws`, or `wss` with
 `--transport <T>`. `dial` and `register` default to UDP; `answer` without a transport flag keeps its
 historical UDP and TCP listeners. `--tcp` remains a compatible alias. TLS/WSS verify certificates
@@ -54,7 +60,7 @@ Place a call: `sipx dial sip:bob@192.0.2.1:5060`
 | `--record <FILE>` | Record the far end to WAV with that negotiated clock in its header |
 | `--dtmf <DIGITS>` | Send these digits once the call is up |
 | `--early-media` | Receive a reliable provisional media session before the final answer; incompatible with `--profile browser-audio` |
-| `--duration <S>` | Hang up after this many seconds once connected (default 30); Ctrl-C hangs up early and reports `interrupted` |
+| `--duration <S>` | Hang up after this many seconds once connected (default 30); a supported process stop hangs up early and reports `interrupted` |
 | `--timeout <S>` | Give up if not answered in this many seconds (default 20). `0` waits as long as the transaction layer does — 32 seconds |
 | `--cancel-timeout <S>` | Additional invitation-cancellation allowance after timeout or Ctrl-C (default 2). `0` performs no timed cancellation wait |
 | `--from <URI>` | Our own address (default `sip:sipx@<local>`) |
@@ -86,8 +92,8 @@ Report fields: `status`, `ended_by`, `peer`, `media_advertised`, `media_bound`, 
 `negotiated_transport`; omitting it adds neither transport field, and `--tcp` remains the legacy
 alias rather than an explicit-selection report request.
 `ended_by` is `duration`, `remote`, or `interrupt`; a locally originated BYE adds `bye_status` when
-its final response was observed. Ctrl-C emits one `status: interrupted` terminal result after BYE
-and owned-work cleanup, and exits 0.
+its final response was observed. A supported process stop emits one `status: interrupted` terminal
+result with `stop_signal` after BYE and owned-work cleanup, and exits 0.
 An invitation timeout reports `invitation_limit_ms`, measured `invitation_elapsed_ms`,
 `cancel_limit_ms`, measured `cancel_elapsed_ms`, `cancel_sent`, `cancel_final_observed`,
 `cancel_cleanup_completed`, and `cancel_cleanup_exhausted`. These make the maximum setup time the
@@ -120,7 +126,7 @@ Wait for a call and answer it: `sipx answer --play greeting.wav`
 |---|---|
 | `--play <FILE>` | Play mono 16-bit WAV, linearly resampled from its header rate to the negotiated clock |
 | `--record <FILE>` | Record the caller to WAV with that negotiated clock in its header |
-| `--duration <S>` | Maximum call duration (default 30); remote BYE or Ctrl-C ends it early |
+| `--duration <S>` | Maximum call duration (default 30); remote BYE or a supported process stop ends it early |
 | `--wait <S>` | Give up if no call arrives within this many seconds (default 60) |
 | `--local <ADDR>` | Local address to bind (default `0.0.0.0:5060`) |
 | `--advertise <IP>` | Address written consistently into Via, Contact, and SDP; independent of `--local` |
@@ -148,9 +154,9 @@ Reports twice: `status: "listening"` with the bound `address` first, then
 requested transport to the listening report and both requested and negotiated transport to the
 terminal report.
 Remote BYE reports `ended_by: remote` only after its 200 response and media cleanup. Local duration
-reports `ended_by: duration`; Ctrl-C sends BYE, emits one `status: interrupted`,
-`ended_by: interrupt` result after cleanup, and exits 0. A locally originated BYE adds `bye_status`
-when its final response was observed.
+reports `ended_by: duration`; a supported process stop sends BYE, emits one
+`status: interrupted`, `ended_by: interrupt` result with `stop_signal` after cleanup, and exits 0.
+A locally originated BYE adds `bye_status` when its final response was observed.
 
 `--profile browser-audio` is valid on both `dial` and `answer`. It cannot be combined with
 `--codec` or `--media-security`, because the named profile fixes those choices; `--ice host` and
@@ -194,9 +200,9 @@ sipx load sip:load@192.0.2.1:5060 --rate 10 --concurrency 32 --calls 100 --seed 
 | `--tls-key <FILE>` | Mutual-TLS client private key; requires `--tls-cert` |
 
 At least one of `--calls` and `--duration` is required; when both are present, the first reached
-closes admission. Reaching a bound or receiving Ctrl-C signals all owned calls to end and waits for
-their cleanup before emitting the summary. Cleanup has a 40-second failure bound, longer than the
-SIP transaction ceiling; exhaustion exits 1 and reports `status: "failed"`.
+closes admission. Reaching a bound or receiving a supported process stop signals all owned calls to
+end and waits for their cleanup before emitting the summary. Cleanup has a 40-second failure bound,
+longer than the SIP transaction ceiling; exhaustion exits 1 and reports `status: "failed"`.
 
 The default sends bodyless INVITE/2xx/ACK/BYE dialogs and creates no SDP, RTP socket or media task,
 matching `load-responder`'s default. Select `--mode generated-media` on both commands for the
@@ -207,9 +213,10 @@ JSON output is exactly one `sipx.load.v1` object. It records the effective mode,
 seed and effective limits;
 attempted, connected, rejected, timed-out and failed calls; peak concurrency; response-code counts;
 p50/p95/p99 setup time; and aggregate media loss, jitter and MOS snapshots. Missing measurements
-are `null`, not zero. A run that reaches a configured bound is `completed`; a cleanly drained Ctrl-C
-is `interrupted`. An internal worker or media error is `failed`/exit 1 and retains its actionable
-reason; it is never relabeled as an operator interruption.
+are `null`, not zero. `stop_signal` is `null` after natural completion and names the first supported
+signal otherwise. A run that reaches a configured bound is `completed`; a cleanly drained process
+stop is `interrupted`. An internal worker or media error is `failed`/exit 1 and retains its
+actionable reason; it is never relabeled as an operator interruption.
 
 ## `sipx load-responder`
 
@@ -249,7 +256,8 @@ owned dialog before reporting. A successful summary therefore has zero `active_d
 
 The terminal summary records invitations and response statuses; admitted, established, completed,
 cancelled, rejected and failed outcomes; active high-water; p50/p95/p99 setup and teardown latency;
-invalid messages; and the exact effective bounds. A response status is counted once when the
+invalid messages; the exact effective bounds; and `stop_signal`, which is `null` after natural
+completion and names the first supported signal otherwise. A response status is counted once when the
 responder successfully sends it, or when a valid final response returns for a BYE the responder
 originated. Protocol retransmissions do not inflate the map, and invalid responses are counted as
 invalid messages instead. UDP is the v1 baseline so connection setup and reuse costs cannot
@@ -483,8 +491,8 @@ scenario details extend the `event` object and do not define a second envelope.
 | Contract | Producer | Required structural fields |
 |---|---|---|
 | `sipx.devices.v1` | `device` | `schema`, `devices`, `id`, `name`, `input`, `output` |
-| `sipx.load.v1` | `load` | `schema`, `status`, `reason`, `mode`, `seed`, `target`, `limits`, `rate`, `concurrency`, `calls`, `duration_ms`, `call_duration_ms`, `setup_timeout_ms`, `cleanup_ms`, `outcomes`, `attempted`, `connected`, `rejected`, `timed_out`, `failed`, `peak_concurrency`, `response_codes`, `setup_ms`, `p50`, `p95`, `p99`, `media`, `snapshots`, `packets_lost`, `mean_loss`, `mean_jitter_ms`, `mean_mos` |
+| `sipx.load.v1` | `load` | `schema`, `status`, `stop_signal`, `reason`, `mode`, `seed`, `target`, `limits`, `rate`, `concurrency`, `calls`, `duration_ms`, `call_duration_ms`, `setup_timeout_ms`, `cleanup_ms`, `outcomes`, `attempted`, `connected`, `rejected`, `timed_out`, `failed`, `peak_concurrency`, `response_codes`, `setup_ms`, `p50`, `p95`, `p99`, `media`, `snapshots`, `packets_lost`, `mean_loss`, `mean_jitter_ms`, `mean_mos` |
 | `sipx.comparative-load.ready.v1` | `load_responder_readiness` | `active`, `address`, `events`, `limits`, `pid`, `role`, `schema`, `stderr_bytes`, `stdout_bytes`, `transport` |
-| `sipx.load-responder.v1` | `load_responder` | `active_dialogs`, `active_high_water`, `admitted`, `calls`, `cancelled`, `cleanup_ms`, `completed`, `count`, `counts`, `dialog_duration_ms`, `dispatcher_routes`, `duration_ms`, `endpoint_transactions`, `established`, `failed`, `invalid_messages`, `invitations`, `latency_ms`, `limits`, `max_active`, `maximum`, `mode`, `owned_tasks`, `p50`, `p95`, `p99`, `post_drain`, `reason`, `rejected`, `responses`, `schema`, `seed`, `setup`, `status`, `teardown` |
+| `sipx.load-responder.v1` | `load_responder` | `active_dialogs`, `active_high_water`, `admitted`, `calls`, `cancelled`, `cleanup_ms`, `completed`, `count`, `counts`, `dialog_duration_ms`, `dispatcher_routes`, `duration_ms`, `endpoint_transactions`, `established`, `failed`, `invalid_messages`, `invitations`, `latency_ms`, `limits`, `max_active`, `maximum`, `mode`, `owned_tasks`, `p50`, `p95`, `p99`, `post_drain`, `reason`, `rejected`, `responses`, `schema`, `seed`, `setup`, `status`, `stop_signal`, `teardown` |
 | `sipx.app.v1` | `scenario` | `contract`, `seq`, `at`, `call`, `event`, `id`, `leg`, `direction`, `state`, `from`, `to`, `headers`, `media`, `encrypted`, `on_hold`, `muted`, `legs`, `bridged`, `tags`, `type`, `command`, `message` |
 <!-- END cli-json-contracts -->

@@ -104,15 +104,14 @@ pub(crate) async fn run(options: AnswerOptions, format: Format) -> Exit {
     // transcoding bridge, and a call goes near neither.
     tracing::info!(address = %listening, within = ?wait, "waiting for a call");
     let deadline = tokio::time::Instant::now() + wait;
-    let interrupted = async {
-        let _ = tokio::signal::ctrl_c().await;
-    };
+    let process_stop = crate::stop::Stop::new();
+    let interrupted = process_stop.wait();
     tokio::pin!(interrupted);
     let request = loop {
         let request = tokio::select! {
             biased;
             () = interrupted.as_mut() => {
-                return report_pending_interrupt(format, export, &handle).await;
+                return report_pending_interrupt(format, export, &handle, &process_stop).await;
             }
             request = tokio::time::timeout_at(deadline, incoming.recv()) => match request {
                 Ok(Some(request)) => request,
@@ -280,6 +279,11 @@ pub(crate) async fn run(options: AnswerOptions, format: Format) -> Exit {
     );
     let report = media.negotiated_report(report, &call, "browser-answerer");
     let mut report = devices.report(transport.report(report, request.transport));
+    if status == "interrupted"
+        && let Some(signal) = process_stop.signal()
+    {
+        report = report.text("stop_signal", signal);
+    }
     if let Some(status) = bye_status {
         report = report.number("bye_status", i64::from(status));
     }
@@ -301,6 +305,9 @@ pub(crate) async fn run(options: AnswerOptions, format: Format) -> Exit {
 
     drop(call);
     handle.shutdown().await;
+    if let Some(message) = process_stop.failure() {
+        return fail(format, Exit::Failed, &message);
+    }
     report = match export.into_report(report) {
         Ok(report) => report,
         Err(message) => return fail(format, Exit::Failed, &message),
@@ -313,11 +320,18 @@ async fn report_pending_interrupt(
     format: Format,
     export: crate::counters::Export,
     handle: &sipx_transport::Handle,
+    process_stop: &crate::stop::Stop,
 ) -> Exit {
     handle.shutdown().await;
-    let report = Report::new()
+    if let Some(message) = process_stop.failure() {
+        return fail(format, Exit::Failed, &message);
+    }
+    let mut report = Report::new()
         .text("status", "interrupted")
         .text("ended_by", "interrupt");
+    if let Some(signal) = process_stop.signal() {
+        report = report.text("stop_signal", signal);
+    }
     match export.into_report(report) {
         Ok(report) => {
             report.emit(format);

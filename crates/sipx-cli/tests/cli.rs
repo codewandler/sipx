@@ -2970,6 +2970,7 @@ async fn default_load_pair_completes_the_requested_signalling_workload() {
     );
     assert_eq!(load["mode"], "signalling", "{load}");
     assert_eq!(load["status"], "completed", "{load}");
+    assert_eq!(load["stop_signal"], serde_json::Value::Null, "{load}");
     assert_eq!(load["outcomes"]["attempted"], 20, "{load}");
     assert_eq!(
         load["outcomes"]["connected"], 20,
@@ -2981,6 +2982,7 @@ async fn default_load_pair_completes_the_requested_signalling_workload() {
     assert_eq!(responder_status.code(), Some(0), "{complaint}");
     assert_eq!(responder_summary["mode"], "signalling");
     assert_eq!(responder_summary["status"], "completed");
+    assert_eq!(responder_summary["stop_signal"], serde_json::Value::Null);
     assert_eq!(responder_summary["counts"]["invitations"], 20);
     assert_eq!(responder_summary["counts"]["established"], 20);
     assert_eq!(responder_summary["counts"]["completed"], 20);
@@ -4269,77 +4271,168 @@ async fn load_responder_enforces_the_concurrent_dialog_ceiling() {
     peer.shutdown().await;
 }
 
-/// DPH-11 through the process boundary: signal only after the peer has observed the first INVITE,
-/// then require the one final summary to follow cleanup. Concurrency one is load-bearing: no second
-/// invitation can be admitted while the owned first call is still cleaning up.
+/// DPH-11 and DPH-17 through the process boundary: signal only after the peer has observed the
+/// first INVITE, then require the one final summary to follow cleanup. Concurrency one is
+/// load-bearing: no second invitation can be admitted while the owned first call is cleaning up.
 #[cfg(unix)]
 #[tokio::test]
-async fn interrupted_load_stops_admission_and_summarizes_after_cleanup() {
+async fn supported_process_stops_end_load_admission_and_cleanup() {
     let _scenario = process_scenario().await;
-    let peer = tokio::net::UdpSocket::bind("127.0.0.1:0")
-        .await
-        .expect("peer binds");
-    let address = peer.local_addr().expect("peer address");
-    let mut command = sipx();
-    command
-        .args([
-            "load",
-            &format!("sip:load@{address}"),
-            "--rate",
-            "100",
-            "--concurrency",
-            "1",
-            "--calls",
-            "100",
-            "--timeout",
-            "20",
-            "--mode",
-            "generated-media",
-            "--json",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let child = command.spawn().expect("load starts");
-    let process = child.id().expect("load process id");
+    for (argument, name, expected) in [
+        ("-INT", "SIGINT", "interrupt"),
+        ("-TERM", "SIGTERM", "terminate"),
+    ] {
+        let peer = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("peer binds");
+        let address = peer.local_addr().expect("peer address");
+        let mut command = sipx();
+        command
+            .args([
+                "load",
+                &format!("sip:load@{address}"),
+                "--rate",
+                "100",
+                "--concurrency",
+                "1",
+                "--calls",
+                "100",
+                "--timeout",
+                "20",
+                "--mode",
+                "generated-media",
+                "--json",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = command.spawn().expect("load starts");
+        let process = child.id().expect("load process id");
 
-    let mut packet = [0u8; 4096];
-    let (length, _) = tokio::time::timeout(Duration::from_secs(5), peer.recv_from(&mut packet))
+        let mut packet = [0u8; 4096];
+        let (length, _) = tokio::time::timeout(Duration::from_secs(5), peer.recv_from(&mut packet))
+            .await
+            .expect("the first admission is bounded")
+            .expect("the first INVITE arrives");
+        assert!(
+            packet
+                .get(..length)
+                .is_some_and(|bytes| bytes.starts_with(b"INVITE ")),
+            "the readiness event is an INVITE"
+        );
+
+        signal_process(process, argument, name).await;
+        let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
+            .await
+            .expect("interrupted cleanup is bounded")
+            .expect("load exits");
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).expect("UTF-8 summary");
+        assert_eq!(
+            stdout.lines().count(),
+            1,
+            "one summary after cleanup: {stdout}"
+        );
+        let summary: serde_json::Value = serde_json::from_str(stdout.trim()).expect("JSON summary");
+        assert_eq!(summary["status"], "interrupted");
+        assert_eq!(summary["stop_signal"], expected);
+        assert_eq!(summary["outcomes"]["attempted"], 1);
+        assert_eq!(summary["outcomes"]["timed_out"], 1);
+    }
+}
+
+/// DPH-17's supervisor regression: once readiness has been flushed, SIGTERM owns the same bounded
+/// dialog cleanup as SIGINT. A repeated SIGTERM while BYE is outstanding neither kills the process
+/// nor creates a second terminal record.
+#[cfg(unix)]
+#[tokio::test]
+async fn supervisor_termination_drains_load_responder_and_reports_once() {
+    let _scenario = process_scenario().await;
+    let (mut interactive, mut interactive_lines, _ready) =
+        start_mode_responder("signalling", "100", "2").await;
+    signal_interrupt(interactive.id().expect("responder process id")).await;
+    let interactive_terminal =
+        tokio::time::timeout(Duration::from_secs(5), interactive_lines.next_line())
+            .await
+            .expect("interactive terminal record is bounded")
+            .expect("interactive terminal record can be read")
+            .expect("interactive terminal record exists");
+    let interactive_terminal: serde_json::Value =
+        serde_json::from_str(&interactive_terminal).expect("interactive terminal JSON");
+    assert_eq!(interactive_terminal["status"], "interrupted");
+    assert_eq!(interactive_terminal["stop_signal"], "interrupt");
+    let complaint = drain_stderr(&mut interactive).await;
+    let status = interactive
+        .wait()
         .await
-        .expect("the first admission is bounded")
-        .expect("the first INVITE arrives");
+        .expect("interactive responder exits");
+    assert_eq!(status.code(), Some(0), "{complaint}");
+
+    let (mut responder, mut lines, ready) =
+        start_mode_responder("generated-media", "100", "2").await;
+    let address: std::net::SocketAddr = ready["address"]
+        .as_str()
+        .expect("readiness address")
+        .parse()
+        .expect("socket address");
+    let (peer, mut incoming) = bind(TransportConfig::new(
+        "127.0.0.1:0".parse().expect("peer bind address"),
+    ))
+    .await
+    .expect("peer binds");
+    let uri = sipx_sip::Uri::parse(bytes::Bytes::from(format!("sip:load@{address}")))
+        .expect("request URI");
+    let options = sipx_call::DialOptions::new(
+        "<sip:driver@127.0.0.1>",
+        "127.0.0.1".parse().expect("media address"),
+    );
+    let mut call = sipx_call::dial(&peer, sipx_transport::Target::udp(address), &uri, &options)
+        .await
+        .expect("call confirms");
+    let process = responder.id().expect("responder process id");
+
+    signal_terminate(process).await;
+    let bye = tokio::time::timeout(Duration::from_secs(5), incoming.recv())
+        .await
+        .expect("cleanup BYE is bounded")
+        .expect("cleanup BYE arrives");
+    assert_eq!(bye.request.method, Method::Bye);
+    signal_terminate(process).await;
+    assert!(call.handle(&bye).await.expect("cleanup BYE is handled"));
+
+    let terminal = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        .await
+        .expect("terminal record is bounded")
+        .expect("terminal record can be read")
+        .expect("terminal record exists");
+    let terminal: serde_json::Value = serde_json::from_str(&terminal).expect("terminal JSON");
+    assert_eq!(terminal["schema"], "sipx.load-responder.v1");
+    assert_eq!(terminal["status"], "interrupted");
+    assert_eq!(terminal["stop_signal"], "terminate");
+    assert_eq!(terminal["post_drain"]["active_dialogs"], 0);
+    assert_eq!(terminal["post_drain"]["dispatcher_routes"], 0);
+    assert_eq!(terminal["post_drain"]["endpoint_transactions"], 0);
+    assert_eq!(terminal["post_drain"]["owned_tasks"], 0);
+
+    let complaint = drain_stderr(&mut responder).await;
+    let status = tokio::time::timeout(Duration::from_secs(5), responder.wait())
+        .await
+        .expect("responder exit is bounded")
+        .expect("responder exits");
+    assert_eq!(status.code(), Some(0), "{complaint}");
     assert!(
-        packet
-            .get(..length)
-            .is_some_and(|bytes| bytes.starts_with(b"INVITE ")),
-        "the readiness event is an INVITE"
+        lines
+            .next_line()
+            .await
+            .expect("stdout remains readable")
+            .is_none(),
+        "one readiness record and one terminal record"
     );
-
-    let signal = Command::new("kill")
-        .args(["-INT", &process.to_string()])
-        .status()
-        .await
-        .expect("sends SIGINT");
-    assert!(signal.success(), "SIGINT reaches the load process");
-    let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
-        .await
-        .expect("interrupted cleanup is bounded")
-        .expect("load exits");
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8(output.stdout).expect("UTF-8 summary");
-    assert_eq!(
-        stdout.lines().count(),
-        1,
-        "one summary after cleanup: {stdout}"
-    );
-    let summary: serde_json::Value = serde_json::from_str(stdout.trim()).expect("JSON summary");
-    assert_eq!(summary["status"], "interrupted");
-    assert_eq!(summary["outcomes"]["attempted"], 1);
-    assert_eq!(summary["outcomes"]["timed_out"], 1);
+    peer.shutdown().await;
 }
 
 /// A final response to an INVITE must carry a To tag (RFC 3261 §8.2.6.2): the tag is what
@@ -5257,11 +5350,11 @@ async fn wait_for_transport_messages(peer: &sipx_transport::Handle, above: u64) 
     }
 }
 
-/// A confirmed caller handles Ctrl-C as a local terminal input: one BYE, one observed response and
-/// one machine record after the peer has processed the request.
+/// A confirmed caller handles supervisor termination as a local terminal input: one BYE, one
+/// observed response and one machine record after the peer has processed the request.
 #[cfg(unix)]
 #[tokio::test]
-async fn interrupting_a_confirmed_dialer_hangs_up_and_reports_once() {
+async fn terminating_a_confirmed_dialer_hangs_up_and_reports_once() {
     let _scenario = process_scenario().await;
     let (peer, mut incoming) = bind(TransportConfig::new(
         "127.0.0.1:0".parse().expect("peer bind address"),
@@ -5306,7 +5399,7 @@ async fn interrupting_a_confirmed_dialer_hangs_up_and_reports_once() {
     assert_eq!(ack.request.method, Method::Ack);
     assert!(call.handle(&ack).await.expect("ACK is handled"));
 
-    signal_interrupt(process).await;
+    signal_terminate(process).await;
     let bye = tokio::time::timeout(Duration::from_secs(5), incoming.recv())
         .await
         .expect("interrupt BYE is bounded")
@@ -5329,15 +5422,16 @@ async fn interrupting_a_confirmed_dialer_hangs_up_and_reports_once() {
     let terminal: serde_json::Value = serde_json::from_str(stdout.trim()).expect("terminal JSON");
     assert_eq!(terminal["status"], "interrupted");
     assert_eq!(terminal["ended_by"], "interrupt");
+    assert_eq!(terminal["stop_signal"], "terminate");
     assert_eq!(terminal["bye_status"], 200);
     peer.shutdown().await;
 }
 
 /// The answering role uses the same confirmed-call stop path and does not rely on its local
-/// duration to release the peer after Ctrl-C.
+/// duration to release the peer after supervisor termination.
 #[cfg(unix)]
 #[tokio::test]
-async fn interrupting_a_confirmed_answerer_hangs_up_and_reports_once() {
+async fn terminating_a_confirmed_answerer_hangs_up_and_reports_once() {
     let _scenario = process_scenario().await;
     let (mut answerer, address, mut lines) = start_answerer(&["--duration", "30"]).await;
     let address: std::net::SocketAddr = address.parse().expect("answerer address");
@@ -5356,7 +5450,7 @@ async fn interrupting_a_confirmed_answerer_hangs_up_and_reports_once() {
         .await
         .expect("call confirms");
 
-    signal_interrupt(answerer.id().expect("answerer process id")).await;
+    signal_terminate(answerer.id().expect("answerer process id")).await;
     tokio::time::timeout(
         Duration::from_secs(5),
         sipx_call::serve(&mut call, &mut incoming),
@@ -5374,9 +5468,31 @@ async fn interrupting_a_confirmed_answerer_hangs_up_and_reports_once() {
     let terminal: serde_json::Value = serde_json::from_str(&terminal).expect("terminal JSON");
     assert_eq!(terminal["status"], "interrupted");
     assert_eq!(terminal["ended_by"], "interrupt");
+    assert_eq!(terminal["stop_signal"], "terminate");
     assert_eq!(terminal["bye_status"], 200);
     answerer_exits_cleanly(&mut answerer).await;
     peer.shutdown().await;
+}
+
+/// The portable interactive stop closes answer admission after readiness and still emits the one
+/// terminal record only after the listener has joined.
+#[cfg(unix)]
+#[tokio::test]
+async fn interrupting_a_waiting_answerer_reports_after_listener_cleanup() {
+    let _scenario = process_scenario().await;
+    let (mut answerer, _address, mut lines) = start_answerer(&[]).await;
+    signal_interrupt(answerer.id().expect("answerer process id")).await;
+
+    let terminal = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        .await
+        .expect("answerer terminal record is bounded")
+        .expect("terminal line can be read")
+        .expect("terminal line exists");
+    let terminal: serde_json::Value = serde_json::from_str(&terminal).expect("terminal JSON");
+    assert_eq!(terminal["status"], "interrupted");
+    assert_eq!(terminal["ended_by"], "interrupt");
+    assert_eq!(terminal["stop_signal"], "interrupt");
+    answerer_exits_cleanly(&mut answerer).await;
 }
 
 /// Before confirmation the same interrupt remains INVITE cancellation: CANCEL/487, never a BYE
@@ -5454,6 +5570,7 @@ async fn interrupting_a_pending_dial_cancels_without_manufacturing_a_bye() {
     let terminal: serde_json::Value = serde_json::from_str(stdout.trim()).expect("terminal JSON");
     assert_eq!(terminal["status"], "interrupted");
     assert_eq!(terminal["ended_by"], "interrupt");
+    assert_eq!(terminal["stop_signal"], "interrupt");
     while let Ok(request) = incoming.try_recv() {
         assert_ne!(
             request.request.method,
@@ -5466,12 +5583,22 @@ async fn interrupting_a_pending_dial_cancels_without_manufacturing_a_bye() {
 
 #[cfg(unix)]
 async fn signal_interrupt(process: u32) {
+    signal_process(process, "-INT", "SIGINT").await;
+}
+
+#[cfg(unix)]
+async fn signal_terminate(process: u32) {
+    signal_process(process, "-TERM", "SIGTERM").await;
+}
+
+#[cfg(unix)]
+async fn signal_process(process: u32, argument: &str, name: &str) {
     let status = Command::new("kill")
-        .args(["-INT", &process.to_string()])
+        .args([argument, &process.to_string()])
         .status()
         .await
-        .expect("sends SIGINT");
-    assert!(status.success(), "SIGINT reaches process {process}");
+        .unwrap_or_else(|error| panic!("sends {name}: {error}"));
+    assert!(status.success(), "{name} reaches process {process}");
 }
 
 /// Calling something that never answers gives up on the caller's schedule rather than on the

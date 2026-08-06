@@ -40,6 +40,7 @@ mod peers;
 mod register;
 mod scenario;
 mod signalling;
+mod stop;
 
 use std::process::ExitCode;
 

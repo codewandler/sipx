@@ -130,9 +130,8 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
     // Armed here, not at the end: the run that most needs the numbers is the one that fails, and
     // every `return fail(…)` below now takes the counters file with it.
     let export = crate::counters::Export::arm(&options.capture, &handle);
-    let interrupted = async {
-        let _ = tokio::signal::ctrl_c().await;
-    };
+    let process_stop = crate::stop::Stop::new();
+    let interrupted = process_stop.wait();
     tokio::pin!(interrupted);
 
     // The bound is handed to the library rather than wrapped around it. Dropping the call
@@ -178,7 +177,14 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
         {
             Ok(dialing) => dialing,
             Err(sipx_call::Error::Cancelled(cancellation)) if !cancellation.timed_out => {
-                return report_pending_interrupt(format, export, &handle, cancellation).await;
+                return report_pending_interrupt(
+                    format,
+                    export,
+                    &handle,
+                    &process_stop,
+                    cancellation,
+                )
+                .await;
             }
             Err(error) => return report_failure(format, export, &handle, &error).await,
         };
@@ -186,7 +192,14 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
             biased;
             () = interrupted.as_mut() => {
                 let cancellation = dialing.cancel_observed().await;
-                return report_pending_interrupt(format, export, &handle, cancellation).await;
+                return report_pending_interrupt(
+                    format,
+                    export,
+                    &handle,
+                    &process_stop,
+                    cancellation,
+                )
+                .await;
             }
             available = dialing.wait_for_early_media() => available,
         } {
@@ -205,7 +218,14 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
                 biased;
                 () = interrupted.as_mut() => {
                     let cancellation = dialing.cancel_observed().await;
-                    return report_pending_interrupt(format, export, &handle, cancellation).await;
+                    return report_pending_interrupt(
+                        format,
+                        export,
+                        &handle,
+                        &process_stop,
+                        cancellation,
+                    )
+                    .await;
                 }
                 recorded = crate::record_media(session, duration, crate::RECORD_IDLE) => recorded,
             }
@@ -215,7 +235,14 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
         let call = match dialing.answered_until(interrupted.as_mut()).await {
             Ok(call) => call,
             Err(sipx_call::Error::Cancelled(cancellation)) if !cancellation.timed_out => {
-                return report_pending_interrupt(format, export, &handle, cancellation).await;
+                return report_pending_interrupt(
+                    format,
+                    export,
+                    &handle,
+                    &process_stop,
+                    cancellation,
+                )
+                .await;
             }
             Err(error) => return report_failure(format, export, &handle, &error).await,
         };
@@ -232,7 +259,14 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
         {
             Ok(call) => call,
             Err(sipx_call::Error::Cancelled(cancellation)) if !cancellation.timed_out => {
-                return report_pending_interrupt(format, export, &handle, cancellation).await;
+                return report_pending_interrupt(
+                    format,
+                    export,
+                    &handle,
+                    &process_stop,
+                    cancellation,
+                )
+                .await;
             }
             Err(error) => return report_failure(format, export, &handle, &error).await,
         };
@@ -328,6 +362,11 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
     );
     let report = media.negotiated_report(report, &call, "browser-offerer");
     let mut report = devices.report(transport.report(report, negotiated_transport));
+    if status == "interrupted"
+        && let Some(signal) = process_stop.signal()
+    {
+        report = report.text("stop_signal", signal);
+    }
     if let Some(status) = bye_status {
         report = report.number("bye_status", i64::from(status));
     }
@@ -363,6 +402,9 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
     );
     drop(call);
     handle.shutdown().await;
+    if let Some(message) = process_stop.failure() {
+        return fail(format, Exit::Failed, &message);
+    }
     report = match export.into_report(report) {
         Ok(report) => report,
         Err(message) => return fail(format, Exit::Failed, &message),
@@ -486,15 +528,22 @@ async fn report_pending_interrupt(
     format: Format,
     export: crate::counters::Export,
     handle: &sipx_transport::Handle,
+    process_stop: &crate::stop::Stop,
     cancellation: sipx_call::InvitationCancellation,
 ) -> Exit {
     handle.shutdown().await;
-    let report = with_cancellation(
+    if let Some(message) = process_stop.failure() {
+        return fail(format, Exit::Failed, &message);
+    }
+    let mut report = with_cancellation(
         Report::new()
             .text("status", "interrupted")
             .text("ended_by", "interrupt"),
         &cancellation,
     );
+    if let Some(signal) = process_stop.signal() {
+        report = report.text("stop_signal", signal);
+    }
     match export.into_report(report) {
         Ok(report) => {
             report.emit(format);
