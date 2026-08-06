@@ -121,6 +121,11 @@ pub(crate) enum Command {
     /// List what can be called.
     Peers(PeersOptions),
     /// Drive one call through correlated NDJSON commands.
+    ///
+    /// Each input line is a flat object with a unique string `id` and string `command`.
+    /// `wait_for` also requires a finite `timeout_ms`. For example, against an answering peer:
+    ///
+    /// printf '%s\n' '{"id":"dial-1","command":"dial","uri":"sip:echo@127.0.0.1:5060","timeout_ms":5000}' '{"id":"wait-1","command":"wait_for","event":"call.answered","timeout_ms":5000}' '{"id":"hangup-1","command":"hangup"}' '{"id":"shutdown-1","command":"shutdown"}' | sipx scenario --local 127.0.0.1:0
     Scenario(ScenarioOptions),
     /// Show the binary version.
     Version(VersionOptions),

@@ -4215,6 +4215,234 @@ async fn custom_supported_header_is_sent_and_stack_owned_via_is_refused_before_b
     assert!(complaint.contains("stack-owned field Via"), "{complaint}");
 }
 
+/// Run one finite stdin scenario through the shipped process and collect its complete stream.
+async fn run_scenario_stream(script: &str) -> std::process::Output {
+    use tokio::io::AsyncWriteExt as _;
+
+    let mut child = sipx()
+        .args(["scenario", "--local", "127.0.0.1:0"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("scenario starts");
+    let mut stdin = child.stdin.take().expect("scenario stdin is piped");
+    stdin
+        .write_all(script.as_bytes())
+        .await
+        .expect("scenario script writes");
+    drop(stdin);
+    tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
+        .await
+        .expect("scenario stream is bounded")
+        .expect("scenario exits")
+}
+
+fn scenario_lines(output: &std::process::Output) -> Vec<serde_json::Value> {
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("one JSON object per scenario line"))
+        .collect()
+}
+
+/// P-19 failing-first evidence: before outcome-derived exits, every one of these refusals was
+/// correlated and recoverable but the process still exited 0 after doing no successful work.
+#[tokio::test]
+async fn a_scenario_stream_containing_only_refusals_exits_failed() {
+    let _scenario = process_scenario().await;
+    let output = run_scenario_stream(
+        "{\"id\":\"broken\",\"command\":\n\
+         {\"id\":\"nested\",\"dial\":{\"uri\":\"sip:test@127.0.0.1:9\"}}\n\
+         {\"id\":\"wait\",\"command\":\"wait_for\",\"event\":\"call.answered\"}\n\
+         {\"id\":\"unknown\",\"command\":\"not-a-command\"}\n",
+    )
+    .await;
+    let lines = scenario_lines(&output);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for id in ["broken", "nested", "wait", "unknown"] {
+        assert!(
+            lines.iter().any(|line| {
+                line["event"]["type"] == "scenario.command.refused" && line["event"]["id"] == id
+            }),
+            "missing refusal for {id}: {lines:?}"
+        );
+    }
+    assert_eq!(
+        lines.last().map(|line| &line["event"]["type"]),
+        Some(&serde_json::Value::String(
+            "scenario.stream.failed".to_owned()
+        )),
+        "{lines:?}"
+    );
+}
+
+/// Recovery is line-local: rejected nesting and a duplicate correlation cannot hide the later
+/// canonical shutdown command, while that later success cannot erase the final failed status.
+#[tokio::test]
+async fn a_mixed_scenario_stream_continues_in_order_but_retains_failure() {
+    let _scenario = process_scenario().await;
+    let output = run_scenario_stream(
+        "{\"id\":\"nested\",\"dial\":{\"uri\":\"sip:test@127.0.0.1:9\"}}\n\
+         {\"id\":\"duplicate\",\"command\":\"stop_playback\"}\n\
+         {\"id\":\"duplicate\",\"command\":\"hangup\"}\n\
+         {\"id\":\"shutdown\",\"command\":\"shutdown\"}\n",
+    )
+    .await;
+    let lines = scenario_lines(&output);
+    assert_eq!(output.status.code(), Some(1), "{lines:?}");
+    let outcomes: Vec<_> = lines
+        .iter()
+        .filter(|line| {
+            matches!(
+                line["event"]["type"].as_str(),
+                Some("scenario.command.completed" | "scenario.command.refused")
+            )
+        })
+        .map(|line| {
+            (
+                line["event"]["id"].as_str().unwrap_or_default(),
+                line["event"]["type"].as_str().unwrap_or_default(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            ("nested", "scenario.command.refused"),
+            ("duplicate", "scenario.command.refused"),
+            ("duplicate", "scenario.command.refused"),
+            ("shutdown", "scenario.command.completed"),
+        ]
+    );
+    assert!(lines.iter().any(|line| {
+        line["event"]["id"] == "duplicate" && line["event"]["message"] == "duplicate command id"
+    }));
+    assert_eq!(
+        lines.last().and_then(|line| line["event"]["type"].as_str()),
+        Some("scenario.stream.failed")
+    );
+}
+
+/// Empty input is a clean no-op and `do` remains an explicit compatibility path. Both get a typed
+/// terminal outcome so a supervisor never has to infer completion from a closed pipe alone.
+#[tokio::test]
+async fn empty_and_compatibility_scenario_streams_complete_explicitly() {
+    let _scenario = process_scenario().await;
+    for script in ["", "{\"id\":\"shutdown\",\"do\":\"shutdown\"}\n"] {
+        let output = run_scenario_stream(script).await;
+        let lines = scenario_lines(&output);
+        assert_eq!(output.status.code(), Some(0), "{lines:?}");
+        assert_eq!(
+            lines.last().and_then(|line| line["event"]["type"].as_str()),
+            Some("scenario.stream.completed"),
+            "{lines:?}"
+        );
+    }
+}
+
+/// The parser-owned long help is itself a copyable flat transcript and names the wait deadline.
+#[tokio::test]
+async fn scenario_help_documents_the_executable_flat_frame() {
+    let output = sipx()
+        .args(["scenario", "--help"])
+        .output()
+        .await
+        .expect("scenario help runs");
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "{help}");
+    assert!(help.contains(r#"{"id":"dial-1","command":"dial"#), "{help}");
+    assert!(help.contains(r#""command":"wait_for"#), "{help}");
+    assert!(help.contains(r#""timeout_ms":5000"#), "{help}");
+    assert!(help.contains(r#""command":"hangup"#), "{help}");
+    assert!(!help.contains(r#""dial":{"#), "{help}");
+}
+
+/// A successful `reject` fulfils an explicit operation. The peer receives the requested refusal,
+/// while the command and stream both complete and the process exits 0.
+#[tokio::test]
+async fn a_successful_scenario_reject_operation_is_not_a_failed_stream() {
+    use tokio::io::AsyncWriteExt as _;
+
+    let _scenario = process_scenario().await;
+    let mut child = sipx()
+        .args(["scenario", "--local", "127.0.0.1:0"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("scenario starts");
+    let stdout = child.stdout.take().expect("scenario stdout is piped");
+    let mut lines = BufReader::new(stdout).lines();
+    let ready: serde_json::Value = serde_json::from_str(
+        &tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+            .await
+            .expect("readiness is bounded")
+            .expect("readiness can be read")
+            .expect("readiness exists"),
+    )
+    .expect("readiness JSON");
+    let address: std::net::SocketAddr = ready["event"]["address"]
+        .as_str()
+        .expect("readiness address")
+        .parse()
+        .expect("socket address");
+    let (peer, _incoming) = bind(TransportConfig::new(
+        "127.0.0.1:0".parse().expect("peer bind address"),
+    ))
+    .await
+    .expect("peer binds");
+    let mut refusal = peer
+        .send(
+            load_invite(&peer, address, 99),
+            sipx_transport::Target::udp(address),
+        )
+        .await
+        .expect("INVITE sends");
+    let script = "{\"id\":\"incoming\",\"command\":\"wait_for\",\"event\":\"call.incoming\",\"timeout_ms\":5000}\n\
+                  {\"id\":\"reject\",\"command\":\"reject\",\"status\":603,\"reason\":\"Decline\"}\n\
+                  {\"id\":\"shutdown\",\"command\":\"shutdown\"}\n";
+    let mut stdin = child.stdin.take().expect("scenario stdin is piped");
+    stdin
+        .write_all(script.as_bytes())
+        .await
+        .expect("scenario script writes");
+    drop(stdin);
+    let response = tokio::time::timeout(Duration::from_secs(5), refusal.final_response())
+        .await
+        .expect("refusal is bounded")
+        .expect("final refusal arrives");
+    assert_eq!(response.status.code(), 603);
+
+    let mut output = vec![ready];
+    // A bound on failure: each pass waits for the next exact output or EOF after shutdown.
+    while let Some(line) = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        .await
+        .expect("scenario output is bounded")
+        .expect("scenario output can be read")
+    {
+        output.push(serde_json::from_str(&line).expect("scenario JSON"));
+    }
+    let complaint = drain_stderr(&mut child).await;
+    let status = child.wait().await.expect("scenario exits");
+    assert_eq!(status.code(), Some(0), "{complaint}; {output:?}");
+    assert!(output.iter().any(|line| {
+        line["event"]["type"] == "scenario.command.completed" && line["event"]["id"] == "reject"
+    }));
+    assert_eq!(
+        output
+            .last()
+            .and_then(|line| line["event"]["type"].as_str()),
+        Some("scenario.stream.completed")
+    );
+    peer.shutdown().await;
+}
+
 /// DPH-9: the real process reads a finite shell pipeline, waits for the answer event instead of a
 /// delay, sends DTMF, hangs up, and correlates every completion in causal sequence.
 #[tokio::test]
@@ -4281,6 +4509,10 @@ async fn scenario_waits_for_answer_then_sends_dtmf_and_hangs_up_in_causal_order(
     let ended = position("call.ended", None);
     let hung_up = position("scenario.command.completed", Some("hangup-1"));
     assert!(answered < waited && waited < digit && digit < ended && ended < hung_up);
+    assert_eq!(
+        lines.last().and_then(|line| line["event"]["type"].as_str()),
+        Some("scenario.stream.completed")
+    );
 
     answerer_exits_cleanly(&mut answerer).await;
 }

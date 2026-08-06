@@ -74,6 +74,8 @@ pub(crate) async fn run(options: ScenarioOptions) -> Exit {
         recording: None,
         snapshot: Snapshot::idle(),
         emitted: BTreeSet::new(),
+        correlations: BTreeSet::new(),
+        stream_failed: false,
         output: Output::default(),
         next_call: 1,
     };
@@ -86,8 +88,7 @@ pub(crate) async fn run(options: ScenarioOptions) -> Exit {
             Value::String(actor.handle.local_addr().to_string()),
         )]),
     );
-    actor.drive().await;
-    Exit::Success
+    actor.drive().await
 }
 
 struct Actor {
@@ -105,12 +106,14 @@ struct Actor {
     recording: Option<Recording>,
     snapshot: Snapshot,
     emitted: BTreeSet<String>,
+    correlations: BTreeSet<String>,
+    stream_failed: bool,
     output: Output,
     next_call: u64,
 }
 
 impl Actor {
-    async fn drive(&mut self) {
+    async fn drive(&mut self) -> Exit {
         let stdin = tokio::io::stdin();
         let mut lines = tokio::io::BufReader::new(stdin).lines();
         loop {
@@ -118,25 +121,24 @@ impl Actor {
             let line = match lines.next_line().await {
                 Ok(Some(line)) => line,
                 Ok(None) => {
-                    self.shutdown().await;
-                    return;
+                    return self.finish_stream().await;
                 }
                 Err(error) => {
-                    self.output
-                        .error(&self.snapshot, None, &format!("stdin: {error}"));
-                    self.shutdown().await;
-                    return;
+                    self.refuse(None, &format!("stdin: {error}"));
+                    return self.finish_stream().await;
                 }
             };
             let value: Value = match serde_json::from_str(&line) {
                 Ok(value) => value,
                 Err(error) => {
                     let id = recover_id(&line);
-                    self.output.error(
-                        &self.snapshot,
-                        id.as_deref(),
-                        &format!("invalid JSON: {error}"),
-                    );
+                    if let Some(id) = id.as_ref()
+                        && !self.correlations.insert(id.clone())
+                    {
+                        self.refuse(Some(id), "duplicate command id");
+                        continue;
+                    }
+                    self.refuse(id.as_deref(), &format!("invalid JSON: {error}"));
                     continue;
                 }
             };
@@ -145,22 +147,23 @@ impl Actor {
                 .and_then(Value::as_str)
                 .filter(|id| !id.is_empty() && id.len() <= 128)
             else {
-                self.output.error(
-                    &self.snapshot,
+                self.refuse(
                     None,
                     "every command requires a non-empty string id of at most 128 bytes",
                 );
                 continue;
             };
             let id = id.to_owned();
-            let command = value
-                .get("command")
-                .or_else(|| value.get("do"))
-                .and_then(Value::as_str);
-            let Some(command) = command else {
-                self.output
-                    .error(&self.snapshot, Some(&id), "command must be a string");
+            if !self.correlations.insert(id.clone()) {
+                self.refuse(Some(&id), "duplicate command id");
                 continue;
+            }
+            let command = match command_selector(&value) {
+                Ok(command) => command,
+                Err(message) => {
+                    self.refuse(Some(&id), &message);
+                    continue;
+                }
             };
             let outcome = self.command(command, &value).await;
             match outcome {
@@ -168,12 +171,30 @@ impl Actor {
                     self.drain_events();
                     self.output.completed(&self.snapshot, &id, command);
                     if shutdown {
-                        self.shutdown().await;
-                        return;
+                        return self.finish_stream().await;
                     }
                 }
-                Err(message) => self.output.error(&self.snapshot, Some(&id), &message),
+                Err(message) => self.refuse(Some(&id), &message),
             }
+        }
+    }
+
+    fn refuse(&mut self, id: Option<&str>, message: &str) {
+        self.stream_failed = true;
+        self.output.error(&self.snapshot, id, message);
+    }
+
+    async fn finish_stream(&mut self) -> Exit {
+        let cleanup_error = self.shutdown().await.err();
+        if cleanup_error.is_some() {
+            self.stream_failed = true;
+        }
+        self.output
+            .stream(&self.snapshot, self.stream_failed, cleanup_error.as_deref());
+        if self.stream_failed {
+            Exit::Failed
+        } else {
+            Exit::Success
         }
     }
 
@@ -202,7 +223,16 @@ impl Actor {
         if self.call.is_some() || self.pending.is_some() {
             return Err("a call or invitation is already active".to_owned());
         }
-        let target_text = string(value, "uri").or_else(|_| string(value, "target"))?;
+        let target_text = match (
+            optional_non_empty_string(value, "uri")?,
+            optional_non_empty_string(value, "target")?,
+        ) {
+            (Some(_), Some(_)) => {
+                return Err("dial.uri and dial.target cannot both be present".to_owned());
+            }
+            (Some(uri), None) | (None, Some(uri)) => uri,
+            (None, None) => return Err("uri must be a non-empty string".to_owned()),
+        };
         let to = Uri::parse(Bytes::from(target_text.to_owned()))
             .map_err(|_| format!("not a SIP URI: {target_text}"))?;
         if to.scheme().is_secure() && !self.transport.kind().is_secure() {
@@ -219,13 +249,11 @@ impl Actor {
         let target_addr = target.addr;
         let media_address: IpAddr =
             crate::advertise::reachable_ip(self.handle.local_addr(), target_addr.ip());
-        let from = value
-            .get("from")
-            .and_then(Value::as_str)
+        let from = optional_non_empty_string(value, "from")?
             .map_or_else(|| format!("<sip:sipx@{media_address}>"), str::to_owned);
         let mut options =
             sipx_call::DialOptions::new(from.clone(), media_address).with_media_policy(self.policy);
-        let timeout = value.get("timeout_ms").and_then(Value::as_u64).map_or_else(
+        let timeout = optional_u64(value, "timeout_ms")?.map_or_else(
             || Duration::from_secs(self.options.timeout),
             Duration::from_millis,
         );
@@ -235,7 +263,10 @@ impl Actor {
         for header in self.headers.iter().cloned() {
             options = options.with_header(header);
         }
-        if let Some(items) = value.get("headers").and_then(Value::as_array) {
+        if let Some(items) = value.get("headers") {
+            let items = items
+                .as_array()
+                .ok_or_else(|| "dial.headers must be an array of strings".to_owned())?;
             for item in items {
                 let raw = item
                     .as_str()
@@ -299,16 +330,16 @@ impl Actor {
     }
 
     async fn reject(&mut self, value: &Value) -> Result<(), String> {
+        let code = optional_u64(value, "status")?.unwrap_or(603);
+        if !(300..=699).contains(&code) {
+            return Err("reject.status must be between 300 and 699".to_owned());
+        }
+        let code = u16::try_from(code).map_err(|_| "reject.status is out of range".to_owned())?;
+        let reason = optional_string(value, "reason")?.unwrap_or("Decline");
         let incoming = self
             .pending
             .take()
             .ok_or_else(|| "there is no incoming invitation to reject".to_owned())?;
-        let code = value.get("status").and_then(Value::as_u64).unwrap_or(603);
-        let code = u16::try_from(code).map_err(|_| "reject.status is out of range".to_owned())?;
-        let reason = value
-            .get("reason")
-            .and_then(Value::as_str)
-            .unwrap_or("Decline");
         let status = StatusCode::new(code).ok_or_else(|| "reject.status is invalid".to_owned())?;
         let mut response = ResponseBuilder::to_request(
             &incoming.request,
@@ -453,10 +484,8 @@ impl Actor {
         } else {
             format!("call.{requested}")
         };
-        let timeout_ms = value
-            .get("timeout_ms")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| "wait_for requires a finite timeout_ms".to_owned())?;
+        let timeout_ms = required_u64(value, "timeout_ms")
+            .map_err(|_| "wait_for requires a finite timeout_ms".to_owned())?;
         if self.emitted.contains(&wanted) {
             return Ok(());
         }
@@ -623,19 +652,28 @@ impl Actor {
         Ok(())
     }
 
-    async fn shutdown(&mut self) {
-        let _ = self.finish_recording_if_any().await;
+    async fn shutdown(&mut self) -> Result<(), String> {
+        let mut failure = self.finish_recording_if_any().await.err();
         if let Some(playback) = self.playback.take() {
             playback.stop();
         }
         if let Some(mut call) = self.call.take() {
-            let _ = call.hang_up().await;
+            if let Err(error) = call.hang_up().await
+                && failure.is_none()
+            {
+                failure = Some(format!("call cleanup: {error}"));
+            }
             self.drain_events();
         }
-        if let Some(incoming) = self.pending.take() {
-            let _ = refuse_unattended(&self.handle, &incoming).await;
+        if let Some(incoming) = self.pending.take()
+            && let Err(error) = refuse_unattended(&self.handle, &incoming).await
+            && failure.is_none()
+        {
+            failure = Some(format!("invitation cleanup: {error}"));
         }
         self.events = None;
+        self.handle.shutdown().await;
+        failure.map_or(Ok(()), Err)
     }
 }
 
@@ -770,6 +808,23 @@ impl Output {
         );
     }
 
+    fn stream(&mut self, snapshot: &Snapshot, failed: bool, message: Option<&str>) {
+        let mut details = BTreeMap::new();
+        if let Some(message) = message {
+            details.insert("message", Value::String(message.to_owned()));
+        }
+        self.event(
+            snapshot,
+            if failed {
+                "scenario.stream.failed"
+            } else {
+                "scenario.stream.completed"
+            },
+            None,
+            details,
+        );
+    }
+
     fn event(
         &mut self,
         snapshot: &Snapshot,
@@ -802,6 +857,47 @@ impl Output {
             })
         );
     }
+}
+
+fn command_selector(value: &Value) -> Result<&str, String> {
+    match (value.get("command"), value.get("do")) {
+        (Some(_), Some(_)) => Err("command and do cannot both be present".to_owned()),
+        (Some(command), None) | (None, Some(command)) => command
+            .as_str()
+            .filter(|command| !command.is_empty())
+            .ok_or_else(|| "command must be a non-empty string".to_owned()),
+        (None, None) => Err("command must be a non-empty string".to_owned()),
+    }
+}
+
+fn optional_non_empty_string<'a>(value: &'a Value, name: &str) -> Result<Option<&'a str>, String> {
+    match value.get(name) {
+        None => Ok(None),
+        Some(Value::String(text)) if !text.is_empty() => Ok(Some(text)),
+        Some(_) => Err(format!("{name} must be a non-empty string")),
+    }
+}
+
+fn optional_string<'a>(value: &'a Value, name: &str) -> Result<Option<&'a str>, String> {
+    match value.get(name) {
+        None => Ok(None),
+        Some(Value::String(text)) => Ok(Some(text)),
+        Some(_) => Err(format!("{name} must be a string")),
+    }
+}
+
+fn optional_u64(value: &Value, name: &str) -> Result<Option<u64>, String> {
+    match value.get(name) {
+        None => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| format!("{name} must be an unsigned integer")),
+    }
+}
+
+fn required_u64(value: &Value, name: &str) -> Result<u64, String> {
+    optional_u64(value, name)?.ok_or_else(|| format!("{name} must be an unsigned integer"))
 }
 
 fn string<'a>(value: &'a Value, name: &str) -> Result<&'a str, String> {

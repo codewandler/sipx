@@ -396,8 +396,43 @@ string `id` in its completion or refusal event.
 
 The v1 commands are `dial`, `accept`, `reject`, `play`, `stop_playback`, `start_recording`,
 `stop_recording`, `send_dtmf`, `hold`, `resume`, `transfer`, `hangup`, `wait_for`, and `shutdown`.
-`wait_for` requires a finite timeout; there is no sleep command. EOF requests orderly shutdown.
-Malformed JSON and unknown commands produce a refusal envelope without corrupting later frames.
+The canonical input is a flat frame such as
+`{"id":"dial-1","command":"dial","uri":"sip:echo@127.0.0.1:5060"}`. `do` is accepted as a
+compatibility alias only when `command` is absent. The nested form
+`{"id":"dial-1","dial":{"uri":"…"}}` is not accepted.
+
+| Command | Required fields | Optional fields |
+|---|---|---|
+| `dial` | `uri` | `target` alias, `from`, `timeout_ms`, string-array `headers` |
+| `accept` | — | — |
+| `reject` | — | `status` (300–699, default 603), `reason` |
+| `play` | `path` | — |
+| `stop_playback` | — | — |
+| `start_recording` | `path` | — |
+| `stop_recording` | — | — |
+| `send_dtmf` | `digits` | — |
+| `hold`, `resume` | — | — |
+| `transfer` | `target` | — |
+| `hangup` | — | — |
+| `wait_for` | `event`, unsigned `timeout_ms` | — |
+| `shutdown` | — | — |
+
+This executable stream dials, waits for the actual answer event, hangs up, and shuts down:
+
+```sh
+printf '%s\n' \
+  '{"id":"dial-1","command":"dial","uri":"sip:echo@127.0.0.1:5060","timeout_ms":5000}' \
+  '{"id":"wait-1","command":"wait_for","event":"call.answered","timeout_ms":5000}' \
+  '{"id":"hangup-1","command":"hangup"}' \
+  '{"id":"shutdown-1","command":"shutdown"}' \
+  | sipx scenario --local 127.0.0.1:0
+```
+
+There is no sleep command. EOF requests orderly shutdown. Malformed JSON and refused commands emit
+correlated `scenario.command.refused` events without corrupting later frames. The final event is
+`scenario.stream.completed` or `scenario.stream.failed`; the latter exits 1 after cleanup, even if
+a later command succeeded. A clean empty stream is an explicit completed no-op. Duplicate IDs are
+refused, and each ID is bounded to 128 UTF-8 bytes.
 
 ## Exit codes
 
@@ -444,5 +479,5 @@ scenario details extend the `event` object and do not define a second envelope.
 | `sipx.load.v1` | `load` | `schema`, `status`, `reason`, `mode`, `seed`, `target`, `limits`, `rate`, `concurrency`, `calls`, `duration_ms`, `call_duration_ms`, `setup_timeout_ms`, `cleanup_ms`, `outcomes`, `attempted`, `connected`, `rejected`, `timed_out`, `failed`, `peak_concurrency`, `response_codes`, `setup_ms`, `p50`, `p95`, `p99`, `media`, `snapshots`, `packets_lost`, `mean_loss`, `mean_jitter_ms`, `mean_mos` |
 | `sipx.comparative-load.ready.v1` | `load_responder_readiness` | `active`, `address`, `events`, `limits`, `pid`, `role`, `schema`, `stderr_bytes`, `stdout_bytes`, `transport` |
 | `sipx.load-responder.v1` | `load_responder` | `active_dialogs`, `active_high_water`, `admitted`, `calls`, `cancelled`, `cleanup_ms`, `completed`, `count`, `counts`, `dialog_duration_ms`, `dispatcher_routes`, `duration_ms`, `endpoint_transactions`, `established`, `failed`, `invalid_messages`, `invitations`, `latency_ms`, `limits`, `max_active`, `maximum`, `mode`, `owned_tasks`, `p50`, `p95`, `p99`, `post_drain`, `reason`, `rejected`, `responses`, `schema`, `seed`, `setup`, `status`, `teardown` |
-| `sipx.app.v1` | `scenario` | `contract`, `seq`, `at`, `call`, `event`, `id`, `leg`, `direction`, `state`, `from`, `to`, `headers`, `media`, `encrypted`, `on_hold`, `muted`, `legs`, `bridged`, `tags`, `type`, `command` |
+| `sipx.app.v1` | `scenario` | `contract`, `seq`, `at`, `call`, `event`, `id`, `leg`, `direction`, `state`, `from`, `to`, `headers`, `media`, `encrypted`, `on_hold`, `muted`, `legs`, `bridged`, `tags`, `type`, `command`, `message` |
 <!-- END cli-json-contracts -->

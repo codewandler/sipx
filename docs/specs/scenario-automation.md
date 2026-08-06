@@ -36,9 +36,9 @@ The canonical frame is flat:
 the process. Once an output event has used a recovered or parsed correlation, a later frame cannot
 reuse it. A duplicate is refused and is never executed.
 
-`command` MUST be a string and is the canonical selector. The string field `do` is retained as a
-compatibility alias only when `command` is absent. A frame containing both selectors is refused,
-even when their values agree. A one-key-per-command object such as
+`command` MUST be a non-empty string and is the canonical selector. The non-empty string field `do`
+is retained as a compatibility alias only when `command` is absent. A frame containing both
+selectors is refused, even when their values agree. A one-key-per-command object such as
 `{"id":"dial-1","dial":{"uri":"sip:echo@example.net"}}` is not a command frame and is refused.
 
 Unknown object members are ignored, following the `sipx.app.v1` within-line compatibility rule.
@@ -97,6 +97,7 @@ After orderly cleanup, the process emits exactly one uncorrelated terminal event
 - `scenario.stream.completed` when no frame or operation was refused;
 - `scenario.stream.failed` when input, parsing, validation, execution or cleanup failed.
 
+When cleanup itself fails, the failed terminal event includes its actionable `message`.
 The terminal event is the output join barrier. No call, invitation, playback, recording or endpoint
 work owned by the actor remains after it is printed.
 
