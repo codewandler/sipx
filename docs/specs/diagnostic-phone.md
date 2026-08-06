@@ -412,7 +412,38 @@ the three requested fields because no call exists yet.
 An implemented lower-layer capability receives no product credit unless this result can show that
 a real call selected it.
 
-### 6.1 Public-reference drift contract
+### 6.1 Command capability preflight and version output
+
+After declarative argument parsing and before destination parsing or resolution, every command runs
+one shared capability preflight over its closed command values. The preflight performs no resolver,
+socket, filesystem or device operation. A refusal is command usage: exit 2, `status=usage` in JSON,
+and an error that names both the selected value and missing build feature.
+
+The phase covers every available selector rather than relying on when a command happens to build
+its media policy:
+
+| Selection | Preflight requirement |
+|---|---|
+| explicit `--codec opus` | the `opus` build feature |
+| explicit `--media-security dtls-srtp` | the `dtls` build feature |
+| `--profile browser-audio` | both `opus` and `dtls` build features |
+| `--ice disabled|host|stun` | baseline capability; STUN requires `--stun-server`, which is refused for other ICE modes |
+| `--audio-input device:<id>` or `--audio-output device:<id>` | the `device-audio` build feature |
+| `load`/`load-responder --mode signalling|generated-media` | baseline capability; neither mode silently selects an optional codec |
+
+`dial`, `answer`, `load`, `load-responder` and `scenario` all pass through this phase where their
+command model exposes a selector. Full policy validation still follows: for example, SDES requires
+protected signalling and the browser profile requires WSS. Those checks may inspect the parsed URI
+or selected transport, but an absent compiled capability MUST NOT be deferred behind them or behind
+a peer outcome. Opening a WAV/device or reserving a recording is local-resource preflight after
+capability preflight and still precedes network I/O.
+
+`sipx version` has no positional arguments. In text mode it emits exactly the existing single line
+`sipx <workspace-version>`. With `--json` it uses the common report renderer to emit exactly one
+object, `{"status":"version","version":"<workspace-version>"}`. Both forms exit 0; a stray
+positional is the ordinary parser-owned usage error in the requested output format.
+
+### 6.2 Public-reference drift contract
 
 The public CLI reference MUST be checked against the executable, not against a second copy of its
 Rust help constants. The check builds the default `sipx-cli` package once, executes `sipx --help`
@@ -454,3 +485,5 @@ workspace build in the local gate and CI, so it observes the binary that will sh
 | `DPH-15` | invitation limits 1, 2, 3, 5 and 8 seconds expire against a ringing peer; cancellation allowance is 2 seconds | paused time reaches each invitation limit and at most its explicit cancellation allowance; one CANCEL is sent and the timeout report separates both measured phases |
 | `DPH-16` | final response is ready immediately before, exactly at or immediately after the invitation deadline | before wins as a final result; exact and after retain timeout while cleanup handles the crossed response at most once |
 | `DPH-17` | each long-running command receives SIGINT and, on Unix, SIGTERM after readiness; a cleanup case receives the same signal twice | admission closes, owned work joins inside the command-specific bound, and exactly one terminal record names the first signal |
+| `DPH-18` | `version` in text and JSON modes, then each with a stray positional | exact one-line version result in the selected format; both stray forms exit usage without a success result |
+| `DPH-19` | each unavailable optional media/device selection targets a bound local observer; scenario and both call roles are included | exit 2 names the missing feature before local-resource or network I/O; the observer receives zero bytes |

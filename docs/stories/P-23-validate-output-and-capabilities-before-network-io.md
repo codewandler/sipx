@@ -2,8 +2,7 @@
 id: P-23
 title: "Validate output and capabilities before network I/O"
 pillar: "Phone"
-status: ready
-priority: 2
+status: in-progress
 epic: diagnostic-automation
 areas: [sipx-cli]
 design: docs/designs/diagnostic-automation.md
@@ -20,7 +19,7 @@ honor the requested codec, security mode or profile.
 
 ## Acceptance
 
-- [ ] Parser/output specs define the `version` text and JSON result and one validation phase that
+- [x] Parser/output specs define the `version` text and JSON result and one validation phase that
       completes all build-capability checks before resolver, bind or peer I/O.
 - [ ] Failing-first process tests prove `version --json` currently emits plain text and an
       unavailable codec against an unreachable target currently reports timeout instead of the
@@ -41,3 +40,9 @@ honor the requested codec, security mode or profile.
 The follow-up review piped `version --json` into a JSON consumer and received plain text. On the
 feature-minimal binary, an unavailable codec produced an excellent typed refusal only when a peer
 answered; an unreachable peer hid the local incompatibility behind the invitation timeout.
+
+## Progress
+
+- The diagnostic-phone contract now fixes version's two result forms and defines one I/O-free
+  capability phase shared across command selectors, including its feature matrix, error mapping and
+  DPH-18/19 process vectors. Board regeneration and the complete gate remain deferred to push.
