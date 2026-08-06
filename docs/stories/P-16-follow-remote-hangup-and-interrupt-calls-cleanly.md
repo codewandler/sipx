@@ -7,7 +7,7 @@ priority: 1
 epic: phone-lifecycle
 areas: [sipx-cli, sipx-call]
 design: docs/designs/phone-lifecycle.md
-note: "external review finding 1 · confirmed calls outlive remote BYE and interrupts emit no terminal record"
+note: "external reviews findings 1–2/1,2,4 · confirmed calls do not drain ACK/BYE and interrupts emit no terminal record"
 ---
 
 # Follow remote hangup and interrupt calls cleanly
@@ -26,6 +26,9 @@ required SIP exchange, stop media, join owned work and emit one terminal result.
 - [ ] A failing-first two-process test runs `answer --duration 10` against `dial --duration 2`,
       proves the dialer's BYE receives 200, and proves the answerer emits its terminal result and
       exits from remote hangup rather than waiting for its ten-second local duration.
+- [ ] The same confirmed-call input pump dequeues ACK promptly. An independent-peer proof observes
+      no INVITE 2xx retransmission after the ACK has been received, while retransmission still
+      occurs before ACK as RFC 3261 requires.
 - [ ] A bounded interrupt test delivers the platform interrupt to a confirmed dialer and separately
       to a confirmed answerer. Each sends BYE, waits for or finitely bounds its response, stops media,
       emits exactly one machine record and exits with the spec's deliberate status.

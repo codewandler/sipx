@@ -1,0 +1,42 @@
+---
+id: P-24
+title: "Report call progress consistently"
+pillar: "Phone"
+status: ready
+priority: 3
+epic: diagnostic-automation
+areas: [sipx-cli]
+design: docs/designs/diagnostic-automation.md
+note: "follow-up external review finding 11 · answer and load do not emit the INFO progress promised for -v"
+---
+
+# Report call progress consistently
+
+## Goal
+
+Make one verbosity level narrate the same useful call lifecycle in caller, answerer and bounded-load
+roles without contaminating result stdout or multiplying per-call output beyond configured bounds.
+
+## Acceptance
+
+- [ ] The CLI reference defines the INFO event vocabulary and fields for waiting, placed,
+      answered, caller observed, ended and load-summary progress, including which high-volume load
+      events are sampled or aggregated.
+- [ ] Failing-first two-process tests reproduce the review: `dial -v` emits calling/answered/end,
+      `answer -v` emits only waiting, and `load -v` emits no progress.
+- [ ] `answer -v` names the caller after admission and the terminal cause after joined teardown.
+      `load -v` reports bounded admission and completion progress without one unbounded log per
+      attempted call.
+- [ ] Lifecycle records are emitted from typed state transitions shared with result construction,
+      not inferred from elapsed sleeps or duplicated command-side guesses.
+- [ ] INFO remains on stderr in text and JSON modes. Default verbosity remains quiet, repeated `v`
+      retains its documented saturation, and no result schema changes merely to support logging.
+- [ ] Remote hangup, refusal, timeout, interruption and internal failure each produce a truthful
+      final progress event with no duplicate end when causes race.
+- [ ] Focused logging/process tests, README/help/reference wording and the complete repository gate
+      are green.
+
+## Review evidence
+
+The follow-up review observed the documented three-event lifecycle from `dial -v`, only a waiting
+line from `answer -v`, and no output from `load -v` during a completed run.

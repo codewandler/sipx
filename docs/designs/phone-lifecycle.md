@@ -6,7 +6,8 @@ id: phone-lifecycle
 
 **Status:** proposed · **Pillar:** Phone/Transport · **Epic:** `phone-lifecycle` ·
 **Review:** [external functionality and usability review](../reviews/extern-2026-08-06T01-18-47+02-00-full-sweep.md)
-findings 1, 8 and 11 · **Stories:** `P-16`, `P-17`, `T-37`
+findings 1, 8 and 11; [follow-up review](../reviews/extern-2026-08-06T01-56-26+02-00-full-sweep.md)
+findings 1, 2, 4 and 5 · **Stories:** `P-16`, `P-17`, `P-22`, `T-37`
 
 ## Problem
 

@@ -6,7 +6,8 @@ id: diagnostic-automation
 
 **Status:** proposed · **Pillar:** Phone/Build · **Epic:** `diagnostic-automation` ·
 **Review:** [external functionality and usability review](../reviews/extern-2026-08-06T01-18-47+02-00-full-sweep.md)
-findings 4–7 and 12–14 · **Stories:** `X-110`, `P-18`, `P-19`, `P-20`, `P-21`
+findings 4–7 and 12–14; [follow-up review](../reviews/extern-2026-08-06T01-56-26+02-00-full-sweep.md)
+findings 3 and 8–11 · **Stories:** `X-110`, `P-18`–`P-24`
 
 ## Problem
 
@@ -34,6 +35,8 @@ failed only after the call; and one JSON result emitted a duplicate key.
   later failure without discarding already captured data.
 - Structured results contain unique keys while retaining deterministic field order and the
   stdout/result, stderr/diagnostic separation.
+- Global output promises apply even to `version`, capability refusals happen before network I/O,
+  and each `-v` role emits the call progress the public help promises.
 
 ## Story ownership
 
@@ -41,7 +44,8 @@ failed only after the call; and one JSON result emitted a duplicate key.
 registration option and misspellings, accepts global options consistently, and drives generated
 help. `P-18` owns the default load pairing, `P-19` the scenario protocol and exit, `P-20` recording
 preflight, and `P-21` unique result fields. The review findings are deliberately not duplicated
-into one-story-per-symptom parser defects.
+into one-story-per-symptom parser defects. `P-23` owns early capability and global-output
+consistency; `P-24` owns progress logs. Supervisor termination belongs to lifecycle story `P-22`.
 
 ## Exit
 
