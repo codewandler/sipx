@@ -478,9 +478,8 @@ represent two members with the same name. The common-field test proves replaceme
 unique, while media composition MUST NOT rely on replacement to resolve ownership. Requested media
 owns `media_profile`, `requested_codecs`, `requested_media_security` and `requested_ice`.
 Negotiated media owns only the `negotiated_*` fields and browser component observations. Thus a
-terminal dial or answer report
-contains the requested `media_profile` exactly once while all prior field spelling, values and
-ordering remain unchanged.
+terminal dial or answer report contains the requested `media_profile` exactly once while all prior
+field spelling, values and ordering remain unchanged.
 
 The strict recursive visitor is applied to representative output from every versioned CLI JSON
 producer listed by the public contract inventory: devices, bounded load, comparative-load
@@ -488,6 +487,36 @@ readiness, load responder and scenario. The inventory check and strict-output te
 discovered producer names, so adding a versioned producer without a duplicate-member assertion is
 a failure. Text output is rendered from the same ordered unique collection as JSON and therefore
 retains fact parity and deterministic order.
+
+### 6.4 INFO progress vocabulary
+
+One `-v` selects INFO progress on stderr. Default verbosity emits none of these records; `-vv` and
+any additional `v` retain the existing DEBUG saturation. Result stdout and its schemas do not
+change. Each progress record carries the stable `event` field below in addition to the tracing
+message:
+
+| Event | Transition | Required fields |
+|---|---|---|
+| `call.waiting` | answer listener is bound and begins its bounded wait | `role=answer`, `address`, `wait_ms` |
+| `call.placed` | dial has selected and bound its route immediately before invitation | `role=dial`, `peer`, `transport` |
+| `call.caller_observed` | answer admits a transport-compatible invitation | `role=answer`, `caller` |
+| `call.answered` | a confirmed call is available to the media exchange | `role`, `peer`, `setup_ms` |
+| `call.ended` | signalling, media, device and export cleanup have joined | `role`, `peer`, `status`, `cause`, `elapsed_ms` |
+| `load.admission_started` | the bounded plan is complete immediately before admission | `target`, `mode`, `rate`, `concurrency`, `calls`, `duration_ms` |
+| `load.summary` | admission is closed and every owned attempt has joined | `status`, `attempted`, `connected`, `rejected`, `timed_out`, `failed`, `peak_concurrency` |
+
+For answer, the caller is the parsed `From` value already used by the terminal result; an admitted
+call emits `call.caller_observed` and `call.answered` in that order. The same typed terminal cause
+provides the result's `status`/`ended_by` and `call.ended`'s `status`/`cause`. Supported causes are
+`remote`, `duration`, `interrupted`, `refused`, `timeout` and `failed`. First terminal cause wins,
+and only the owner that emits the terminal result emits `call.ended`, after cleanup. A refusal or
+failure before confirmation still gets one truthful terminal progress event but never an answered
+event.
+
+Load progress is deliberately aggregate. A run emits exactly one `load.admission_started` and one
+`load.summary`; it MUST NOT emit per-attempt INFO. The summary fields are the same calculated facts
+used by `sipx.load.v1`, including internal-failure classification, so logging cannot call a failed
+run completed. This bounds INFO volume independently of `--calls`, `--duration` and rate.
 
 ## 7. Vectors
 
@@ -515,3 +544,6 @@ retains fact parity and deterministic order.
 | `DPH-20` | browser-audio dial and answer terminal results are tokenized before map construction | `media_profile` and every other object member occur exactly once; both roles retain the documented values |
 | `DPH-21` | a duplicate member is placed at the root, in a nested object and in an object inside an array | the strict result decoder rejects all three and names the repeated member |
 | `DPH-22` | representative output from each discovered versioned CLI producer is checked | every object is accepted by the strict recursive decoder; a newly discovered producer without a fixture fails the inventory assertion |
+| `DPH-23` | one completed two-process call with `-v` on dial and answer | dial orders placed/answered/ended; answer orders waiting/caller-observed/answered/ended; caller and terminal cause match each result; stdout remains result-only |
+| `DPH-24` | bounded three-attempt load with `-v`, then the same run without it | verbose stderr has exactly one admission start and one aggregate summary; quiet stderr has neither; stdout objects are unchanged |
+| `DPH-25` | refusal, timeout, supported stop and internal failure race with terminal completion | first truthful cause produces one `call.ended` after cleanup; no duplicate end and no false answered event |

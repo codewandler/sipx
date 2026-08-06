@@ -2,8 +2,7 @@
 id: P-24
 title: "Report call progress consistently"
 pillar: "Phone"
-status: ready
-priority: 3
+status: in-progress
 epic: diagnostic-automation
 areas: [sipx-cli]
 design: docs/designs/diagnostic-automation.md
@@ -40,3 +39,10 @@ roles without contaminating result stdout or multiplying per-call output beyond 
 
 The follow-up review observed the documented three-event lifecycle from `dial -v`, only a waiting
 line from `answer -v`, and no output from `load -v` during a completed run.
+
+## Progress
+
+- `docs/specs/diagnostic-phone.md` section 6.4 defines the stable INFO event vocabulary, typed
+  terminal causes, exact dial/answer ordering and bounded aggregate load policy. DPH-23 through
+  DPH-25 carry the process vectors. Board regeneration and the complete gate remain deferred to
+  push.
