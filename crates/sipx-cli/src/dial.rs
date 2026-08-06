@@ -139,10 +139,12 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
     // future partway through would leave the far end believing it is in a call, and only code
     // inside the exchange can send the CANCEL that stops it ringing.
     let attempt = Duration::from_secs(options.timeout);
+    let cancellation = Duration::from_secs(options.cancel_timeout);
 
     let mut call_options = sipx_call::DialOptions::new(from, media_address)
         .with_media_bind_address(media_addresses.bind)
-        .with_media_policy(media.policy());
+        .with_media_policy(media.policy())
+        .with_cancellation_timeout(cancellation);
     for header in headers {
         call_options = call_options.with_header(header);
     }
@@ -175,21 +177,21 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
         .await
         {
             Ok(dialing) => dialing,
-            Err(sipx_call::Error::Cancelled(waited)) if waited.is_zero() => {
-                return report_pending_interrupt(format, export, &handle).await;
+            Err(sipx_call::Error::Cancelled(cancellation)) if !cancellation.timed_out => {
+                return report_pending_interrupt(format, export, &handle, cancellation).await;
             }
-            Err(error) => return report_failure(format, &error),
+            Err(error) => return report_failure(format, export, &handle, &error).await,
         };
         let early_media = match tokio::select! {
             biased;
             () = interrupted.as_mut() => {
-                dialing.cancel().await;
-                return report_pending_interrupt(format, export, &handle).await;
+                let cancellation = dialing.cancel_observed().await;
+                return report_pending_interrupt(format, export, &handle, cancellation).await;
             }
             available = dialing.wait_for_early_media() => available,
         } {
             Ok(available) => available,
-            Err(error) => return report_failure(format, &error),
+            Err(error) => return report_failure(format, export, &handle, &error).await,
         };
         let early_recorded = if early_media {
             let Some(session) = dialing.media() else {
@@ -202,8 +204,8 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
             tokio::select! {
                 biased;
                 () = interrupted.as_mut() => {
-                    dialing.cancel().await;
-                    return report_pending_interrupt(format, export, &handle).await;
+                    let cancellation = dialing.cancel_observed().await;
+                    return report_pending_interrupt(format, export, &handle, cancellation).await;
                 }
                 recorded = crate::record_media(session, duration, crate::RECORD_IDLE) => recorded,
             }
@@ -212,10 +214,10 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
         };
         let call = match dialing.answered_until(interrupted.as_mut()).await {
             Ok(call) => call,
-            Err(sipx_call::Error::Cancelled(waited)) if waited.is_zero() => {
-                return report_pending_interrupt(format, export, &handle).await;
+            Err(sipx_call::Error::Cancelled(cancellation)) if !cancellation.timed_out => {
+                return report_pending_interrupt(format, export, &handle, cancellation).await;
             }
-            Err(error) => return report_failure(format, &error),
+            Err(error) => return report_failure(format, export, &handle, &error).await,
         };
         (call, selected, early_recorded, early_media)
     } else {
@@ -229,10 +231,10 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
         .await
         {
             Ok(call) => call,
-            Err(sipx_call::Error::Cancelled(waited)) if waited.is_zero() => {
-                return report_pending_interrupt(format, export, &handle).await;
+            Err(sipx_call::Error::Cancelled(cancellation)) if !cancellation.timed_out => {
+                return report_pending_interrupt(format, export, &handle, cancellation).await;
             }
-            Err(error) => return report_failure(format, &error),
+            Err(error) => return report_failure(format, export, &handle, &error).await,
         };
         (call, selected, Vec::new(), false)
     };
@@ -484,11 +486,15 @@ async fn report_pending_interrupt(
     format: Format,
     export: crate::counters::Export,
     handle: &sipx_transport::Handle,
+    cancellation: sipx_call::InvitationCancellation,
 ) -> Exit {
     handle.shutdown().await;
-    let report = Report::new()
-        .text("status", "interrupted")
-        .text("ended_by", "interrupt");
+    let report = with_cancellation(
+        Report::new()
+            .text("status", "interrupted")
+            .text("ended_by", "interrupt"),
+        &cancellation,
+    );
     match export.into_report(report) {
         Ok(report) => {
             report.emit(format);
@@ -498,13 +504,52 @@ async fn report_pending_interrupt(
     }
 }
 
-fn report_failure(format: Format, error: &sipx_call::Error) -> Exit {
+async fn report_failure(
+    format: Format,
+    export: crate::counters::Export,
+    handle: &sipx_transport::Handle,
+    error: &sipx_call::Error,
+) -> Exit {
     let exit = match error {
         sipx_call::Error::Rejected { status, .. } => Exit::for_status(*status),
         sipx_call::Error::NoResponse | sipx_call::Error::Cancelled(_) => Exit::Timeout,
         _ => Exit::Failed,
     };
-    fail(format, exit, &error.to_string())
+    handle.shutdown().await;
+    let report = Report::new()
+        .text("status", exit.as_str())
+        .text("error", error.to_string());
+    let report = match error {
+        sipx_call::Error::Cancelled(cancellation) => with_cancellation(report, cancellation),
+        _ => report,
+    };
+    match export.into_report(report) {
+        Ok(report) => {
+            eprintln!("{}", report.render(format));
+            exit
+        }
+        Err(message) => fail(format, Exit::Failed, &message),
+    }
+}
+
+fn with_cancellation(
+    mut report: Report,
+    cancellation: &sipx_call::InvitationCancellation,
+) -> Report {
+    if let Some(limit) = cancellation.invitation_limit {
+        report = report.millis("invitation_limit_ms", limit);
+    }
+    report
+        .millis("invitation_elapsed_ms", cancellation.invitation_elapsed)
+        .millis("cancel_limit_ms", cancellation.cleanup.limit)
+        .millis("cancel_elapsed_ms", cancellation.cleanup.elapsed)
+        .boolean("cancel_sent", cancellation.cleanup.cancel_sent())
+        .boolean(
+            "cancel_final_observed",
+            cancellation.cleanup.final_response_observed(),
+        )
+        .boolean("cancel_cleanup_completed", cancellation.cleanup.completed())
+        .boolean("cancel_cleanup_exhausted", cancellation.cleanup.exhausted())
 }
 
 /// Read and structurally validate a clip before signalling starts.

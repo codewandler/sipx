@@ -3,6 +3,114 @@
 use sipx_sip::{HeaderName, Method};
 use thiserror::Error;
 
+/// What invitation withdrawal accomplished before its caller-owned allowance ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CancellationCleanup {
+    /// Maximum time the caller allowed for withdrawal.
+    pub limit: std::time::Duration,
+    /// Monotonic time actually spent withdrawing the invitation.
+    pub elapsed: std::time::Duration,
+    /// Transaction disposition when the phase ended.
+    pub disposition: CancellationDisposition,
+}
+
+/// Why the invitation-withdrawal phase ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancellationDisposition {
+    /// The INVITE transaction reached a terminal event.
+    Completed {
+        /// Whether the provisional-response precondition admitted one CANCEL transaction.
+        cancel_sent: bool,
+        /// Whether a final INVITE response was observed during withdrawal.
+        final_response_observed: bool,
+    },
+    /// The caller-owned allowance ended the phase.
+    Exhausted {
+        /// Whether a CANCEL transaction had already been created.
+        cancel_sent: bool,
+        /// Whether a crossed final response was observed before its remaining cleanup exhausted.
+        final_response_observed: bool,
+    },
+    /// A local error prevented the protocol operation from being completed.
+    Failed {
+        /// Whether a CANCEL transaction had already been created.
+        cancel_sent: bool,
+    },
+}
+
+impl CancellationCleanup {
+    /// Whether the provisional-response precondition admitted one CANCEL transaction.
+    #[must_use]
+    pub const fn cancel_sent(self) -> bool {
+        match self.disposition {
+            CancellationDisposition::Completed { cancel_sent, .. }
+            | CancellationDisposition::Exhausted { cancel_sent, .. }
+            | CancellationDisposition::Failed { cancel_sent } => cancel_sent,
+        }
+    }
+
+    /// Whether a final INVITE response was observed during withdrawal.
+    #[must_use]
+    pub const fn final_response_observed(self) -> bool {
+        match self.disposition {
+            CancellationDisposition::Completed {
+                final_response_observed,
+                ..
+            }
+            | CancellationDisposition::Exhausted {
+                final_response_observed,
+                ..
+            } => final_response_observed,
+            CancellationDisposition::Failed { .. } => false,
+        }
+    }
+
+    /// Whether the INVITE transaction reached a terminal event during withdrawal.
+    #[must_use]
+    pub const fn completed(self) -> bool {
+        matches!(self.disposition, CancellationDisposition::Completed { .. })
+    }
+
+    /// Whether the allowance, rather than a transaction event, ended withdrawal.
+    #[must_use]
+    pub const fn exhausted(self) -> bool {
+        matches!(self.disposition, CancellationDisposition::Exhausted { .. })
+    }
+}
+
+/// Measurements from one locally stopped outbound invitation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvitationCancellation {
+    /// `true` when the answer budget expired; `false` for caller cancellation.
+    pub timed_out: bool,
+    /// Configured answer budget, absent when the transaction layer owns expiry.
+    pub invitation_limit: Option<std::time::Duration>,
+    /// Monotonic time from handing the INVITE to the endpoint until local stop won.
+    pub invitation_elapsed: std::time::Duration,
+    /// The distinct withdrawal phase.
+    pub cleanup: CancellationCleanup,
+}
+
+impl std::fmt::Display for InvitationCancellation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.timed_out {
+            write!(
+                formatter,
+                "no answer within {:?}; cancellation cleanup used {:?} of {:?}",
+                self.invitation_limit.unwrap_or_default(),
+                self.cleanup.elapsed,
+                self.cleanup.limit
+            )
+        } else {
+            write!(
+                formatter,
+                "the invitation was cancelled after {:?}; cleanup used {:?} of {:?}",
+                self.invitation_elapsed, self.cleanup.elapsed, self.cleanup.limit
+            )
+        }
+    }
+}
+
 /// What can go wrong establishing or running a call.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -87,8 +195,8 @@ pub enum Error {
     /// The caller gave up before the far end answered, and cancelled the invitation.
     ///
     /// Distinct from a rejection: nobody refused the call, we stopped waiting for it.
-    #[error("no answer within {0:?}; the invitation was cancelled")]
-    Cancelled(std::time::Duration),
+    #[error("{0}")]
+    Cancelled(InvitationCancellation),
     /// An invitation was answered after the caller had already withdrawn it (RFC 3261 §9.2).
     ///
     /// The other side of [`Self::Cancelled`]: there, *this* stack gave up on an INVITE it sent;

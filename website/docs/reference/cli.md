@@ -26,8 +26,9 @@ Every `<S>` value is a whole number of seconds from `0` through `4294967295`. Ne
 fractions, units such as `3s`, and values above that range are usage errors naming the flag. Zero is
 deliberate where the command gives it a meaning: `--duration 0` ends an established call immediately
 (and is refused as an admission bound by `load` and `load-responder`), `--timeout 0` uses the
-transaction layer's expiry, `--wait 0` returns immediately when no call is queued, and `--expires 0`
-asks the registrar to remove the binding. `load-responder` refuses zero for `--cleanup` and
+transaction layer's expiry, `dial --cancel-timeout 0` performs no timed cancellation wait,
+`--wait 0` returns immediately when no call is queued, and `--expires 0` asks the registrar to
+remove the binding. `load-responder` refuses zero for `--cleanup` and
 `--dialog-duration`, because neither a cleanup budget nor an accepted-dialog lifetime can be empty.
 
 `--help` is answered before any of this, so it still prints when the rest of the line is wrong.
@@ -55,6 +56,7 @@ Place a call: `sipx dial sip:bob@192.0.2.1:5060`
 | `--early-media` | Receive a reliable provisional media session before the final answer; incompatible with `--profile browser-audio` |
 | `--duration <S>` | Hang up after this many seconds once connected (default 30); Ctrl-C hangs up early and reports `interrupted` |
 | `--timeout <S>` | Give up if not answered in this many seconds (default 20). `0` waits as long as the transaction layer does — 32 seconds |
+| `--cancel-timeout <S>` | Additional invitation-cancellation allowance after timeout or Ctrl-C (default 2). `0` performs no timed cancellation wait |
 | `--from <URI>` | Our own address (default `sip:sipx@<local>`) |
 | `--password <P>` | Digest password; prefer `SIPX_PASSWORD` because argv is world-readable |
 | `--local <ADDR>` | Local address to bind (default `0.0.0.0:0`) |
@@ -86,6 +88,11 @@ alias rather than an explicit-selection report request.
 `ended_by` is `duration`, `remote`, or `interrupt`; a locally originated BYE adds `bye_status` when
 its final response was observed. Ctrl-C emits one `status: interrupted` terminal result after BYE
 and owned-work cleanup, and exits 0.
+An invitation timeout reports `invitation_limit_ms`, measured `invitation_elapsed_ms`,
+`cancel_limit_ms`, measured `cancel_elapsed_ms`, `cancel_sent`, `cancel_final_observed`,
+`cancel_cleanup_completed`, and `cancel_cleanup_exhausted`. These make the maximum setup time the
+sum of two named phases rather than hiding cancellation behind `--timeout`; Ctrl-C during setup
+reports the same cancellation facts with `status: interrupted`.
 Any explicit media selector adds `media_profile`, `requested_codecs`, `requested_media_security`, `requested_ice`,
 `negotiated_codec`, `negotiated_media_security`, and `negotiated_ice`. Negotiated ICE is read from
 the selected candidate pair and may be `checking`, `host`, `server-reflexive`, `peer-reflexive`, or

@@ -25,7 +25,9 @@ use sipx_transport::{Handle, Incoming, Target, TransportKind};
 pub use sipx_sip::auth::Credentials;
 
 use crate::dialog::{Dialog, strip_header_params};
-use crate::error::{Error, Result};
+use crate::error::{
+    CancellationCleanup, CancellationDisposition, Error, InvitationCancellation, Result,
+};
 use crate::event::{CallEvent, CallEvents, EndCause, EventSink};
 use crate::extension::{self, ApplicationRequest};
 use crate::identity::OutboundIdentityPolicy;
@@ -2997,6 +2999,17 @@ pub struct DialOptions {
     /// correct: dropping the future partway through leaves the far end believing it is in a
     /// call, and only code inside the exchange can send the CANCEL that stops it.
     pub timeout: Option<Duration>,
+    /// How long invitation cancellation may wait for its protocol completion events.
+    ///
+    /// This is distinct from [`Self::timeout`]: the answer deadline freezes the call outcome,
+    /// then this allowance admits CANCEL or handles a final response which crossed that deadline.
+    /// Zero performs no timed wait and never means an unbounded fallback.
+    ///
+    /// # Beta API migration
+    ///
+    /// Adding this public field deliberately breaks external `DialOptions` struct literals. Add
+    /// `cancellation_timeout` or use [`Self::new`] and [`Self::with_cancellation_timeout`].
+    pub cancellation_timeout: Duration,
     /// Ask for an RFC 4028 session timer of this length.
     ///
     /// `None` is the default and means no timer is requested. That is not the same as no timer
@@ -3049,6 +3062,7 @@ impl DialOptions {
             media_bind_address: media_address,
             initial_direction: Direction::SendRecv,
             timeout: None,
+            cancellation_timeout: Duration::from_secs(2),
             session_expires: None,
             service_route: Vec::new(),
             headers: Vec::new(),
@@ -3145,6 +3159,13 @@ impl DialOptions {
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
+        self
+    }
+
+    /// Bound the distinct invitation-withdrawal phase after timeout or caller cancellation.
+    #[must_use]
+    pub const fn with_cancellation_timeout(mut self, timeout: Duration) -> Self {
+        self.cancellation_timeout = timeout;
         self
     }
 }
@@ -3865,7 +3886,8 @@ async fn withdraw(
     target: Target,
     responses: &mut sipx_transport::Responses,
     reason: &ReasonValue,
-) {
+    limit: Duration,
+) -> CancellationCleanup {
     // Giving up is not just ceasing to wait. The far end is ringing and has been told
     // nothing; without a CANCEL it goes on ringing, and someone answering afterwards
     // ends up in a call with a party that has left.
@@ -3873,40 +3895,74 @@ async fn withdraw(
     // The transport operation owns §9.1's race: it waits until the exact INVITE has a provisional,
     // or returns the final/timeout/transport event that won instead. Events it observes remain on
     // `responses`, so the crossing-2xx safeguard below sees the same transaction history.
-    let grace = tokio::time::Instant::now() + Duration::from_secs(2);
-    match tokio::time::timeout_at(
-        grace,
-        Box::pin(endpoint.cancel_invite(responses, Some(Reason::from(reason.clone())))),
-    )
-    .await
-    {
-        Ok(Ok(sipx_transport::CancelInviteOutcome::Sent(_cancellation))) => {}
-        Ok(Ok(sipx_transport::CancelInviteOutcome::FinalResponse { response, .. })) => {
-            if response.status.is_success() {
-                ack_then_bye(endpoint, invite, &response, target).await;
+    let started = Instant::now();
+    let deadline = started + limit;
+    let mut cancel_sent = false;
+    let mut final_response_observed = false;
+    let operation = async {
+        match endpoint
+            .cancel_invite(responses, Some(Reason::from(reason.clone())))
+            .await
+        {
+            Ok(sipx_transport::CancelInviteOutcome::Sent(_cancellation)) => {
+                cancel_sent = true;
             }
-            return;
+            Ok(sipx_transport::CancelInviteOutcome::FinalResponse { response, .. }) => {
+                final_response_observed = true;
+                if response.status.is_success() {
+                    ack_then_bye(endpoint, invite, &response, target).await;
+                }
+                return true;
+            }
+            Ok(_) => return true,
+            // The loss is counted where transport output is attempted. This is already the
+            // giving-up path; endpoint shutdown remains the finite ownership barrier.
+            Err(error) => {
+                tracing::debug!(%error, "could not create CANCEL transaction");
+                return false;
+            }
         }
-        Ok(Ok(_)) | Err(_) => return,
-        // The loss is counted where transport output is attempted. This is already the giving-up
-        // path; its remaining remedy is still to catch a crossing 2xx and ACK-then-BYE it.
-        Ok(Err(error)) => tracing::debug!(%error, "could not create CANCEL transaction"),
-    }
 
-    // CANCEL cannot close the race it exists to manage: a 200 already in flight
-    // arrives anyway, and RFC 3261 §15 says a UAC that will not proceed must
-    // acknowledge it and then hang up rather than leave it unanswered.
-    while let Ok(Some(event)) = tokio::time::timeout_at(grace, responses.next()).await {
-        let sipx_sip::transaction::TuEvent::Response(late) = event else {
-            continue;
-        };
-        if !late.status.is_final() {
-            continue;
+        // CANCEL cannot close the race it exists to manage: a 200 already in flight arrives
+        // anyway, and RFC 3261 §15 says a UAC that will not proceed must acknowledge it and then
+        // hang up rather than leave it unanswered.
+        while let Some(event) = responses.next().await {
+            let sipx_sip::transaction::TuEvent::Response(late) = event else {
+                continue;
+            };
+            if !late.status.is_final() {
+                continue;
+            }
+            final_response_observed = true;
+            if late.status.is_success() {
+                ack_then_bye(endpoint, invite, &late, target.clone()).await;
+            }
+            return true;
         }
-        if late.status.is_success() {
-            ack_then_bye(endpoint, invite, &late, target.clone()).await;
-        }
-        break;
+        true
+    };
+    // Fixed duration bounds failed cancellation; a transaction event is successful completion.
+    let (completed, exhausted) = match tokio::time::timeout_at(deadline, Box::pin(operation)).await
+    {
+        Ok(completed) => (completed, false),
+        Err(_elapsed) => (false, true),
+    };
+    CancellationCleanup {
+        limit,
+        elapsed: started.elapsed(),
+        disposition: if exhausted {
+            CancellationDisposition::Exhausted {
+                cancel_sent,
+                final_response_observed,
+            }
+        } else if completed {
+            CancellationDisposition::Completed {
+                cancel_sent,
+                final_response_observed,
+            }
+        } else {
+            CancellationDisposition::Failed { cancel_sent }
+        },
     }
 }
 
@@ -4003,6 +4059,7 @@ async fn dial_with(
         open_invitation(endpoint, &target, to, options, identity, authorization).await?;
 
     let mut responses = endpoint.send(invite.clone(), target.clone()).await?;
+    let invitation_started = Instant::now();
 
     let mut acknowledging = Acknowledging {
         endpoint,
@@ -4023,26 +4080,40 @@ async fn dial_with(
         Waited::Gone => return Err(Error::NoResponse),
         Waited::Transport(error) => return Err(Error::Transport(error)),
         Waited::GaveUp => {
-            withdraw(
+            let invitation_elapsed = invitation_started.elapsed();
+            let cleanup = withdraw(
                 endpoint,
                 &invite,
                 target.clone(),
                 &mut responses,
                 &request_timeout_reason(),
+                options.cancellation_timeout,
             )
             .await;
-            return Err(Error::Cancelled(options.timeout.unwrap_or(Duration::ZERO)));
+            return Err(Error::Cancelled(InvitationCancellation {
+                timed_out: true,
+                invitation_limit: options.timeout,
+                invitation_elapsed,
+                cleanup,
+            }));
         }
         Waited::Cancelled => {
-            withdraw(
+            let invitation_elapsed = invitation_started.elapsed();
+            let cleanup = withdraw(
                 endpoint,
                 &invite,
                 target.clone(),
                 &mut responses,
                 &normal_clearing_reason(),
+                options.cancellation_timeout,
             )
             .await;
-            return Err(Error::Cancelled(Duration::ZERO));
+            return Err(Error::Cancelled(InvitationCancellation {
+                timed_out: false,
+                invitation_limit: options.timeout,
+                invitation_elapsed,
+                cleanup,
+            }));
         }
     };
 
@@ -4666,6 +4737,8 @@ pub struct Dialing {
     /// to [`Self::answered`] — the far end is ringing against one deadline, not a fresh one per
     /// method call.
     deadline: Option<tokio::time::Instant>,
+    /// Monotonic origin shared by the answer deadline and cancellation report.
+    invitation_started: tokio::time::Instant,
     options: DialOptions,
     /// A final response that arrived before the application was handed anything.
     ///
@@ -4691,6 +4764,27 @@ enum Arrived {
     GaveUp,
     /// The transaction ended without a final response.
     Gone,
+}
+
+enum BeforeDeadline<T> {
+    Event(T),
+    Expired,
+}
+
+/// Observe an event only while the answer budget remains.
+///
+/// Deadline first is the public exact-boundary rule: an event must be observed *before*, not at,
+/// the deadline to change the call outcome.
+async fn before_deadline<T>(
+    deadline: tokio::time::Instant,
+    event: impl Future<Output = T>,
+) -> BeforeDeadline<T> {
+    tokio::pin!(event);
+    tokio::select! {
+        biased;
+        () = tokio::time::sleep_until(deadline) => BeforeDeadline::Expired,
+        event = event.as_mut() => BeforeDeadline::Event(event),
+    }
 }
 
 /// One early-dial event surfaced to the owning two-dialog coupling.
@@ -4778,8 +4872,8 @@ where
     tokio::select! {
         biased;
         () = cancelled.as_mut() => {
-            dialing.give_up().await;
-            Err(Error::Cancelled(Duration::ZERO))
+            let cancellation = dialing.local_cancellation(false).await;
+            Err(Error::Cancelled(cancellation))
         }
         result = dialing.reach_early_dialog() => {
             result?;
@@ -4800,6 +4894,7 @@ async fn begin_dial_early(
     let (port, capabilities, ice, _keying, invite) =
         open_invitation(endpoint, &target, to, options, &Identity::fresh(), None).await?;
     let responses = endpoint.send(invite.clone(), target.clone()).await?;
+    let invitation_started = Instant::now();
 
     let (events, events_rx) = EventSink::new();
     Ok(Dialing {
@@ -4821,9 +4916,8 @@ async fn begin_dial_early(
         peer_allows_update: false,
         hold: Direction::SendRecv,
         ringing: None,
-        deadline: options
-            .timeout
-            .map(|limit| tokio::time::Instant::now() + limit),
+        deadline: options.timeout.map(|limit| invitation_started + limit),
+        invitation_started,
         options: options.clone(),
         answered_already: None,
         events: Some(events),
@@ -4855,6 +4949,7 @@ pub async fn dial_early_without_offer(
     let identity = Identity::fresh();
     let invite = open_offerless_invitation(endpoint, &target, to, options, &identity)?;
     let responses = endpoint.send(invite.clone(), target.clone()).await?;
+    let invitation_started = Instant::now();
     let (events, events_rx) = EventSink::new();
     let mut dialing = Dialing {
         endpoint: endpoint.clone(),
@@ -4873,9 +4968,8 @@ pub async fn dial_early_without_offer(
         peer_allows_update: false,
         hold: Direction::SendRecv,
         ringing: None,
-        deadline: options
-            .timeout
-            .map(|limit| tokio::time::Instant::now() + limit),
+        deadline: options.timeout.map(|limit| invitation_started + limit),
+        invitation_started,
         options: options.clone(),
         answered_already: None,
         events: Some(events),
@@ -4897,6 +4991,7 @@ pub(crate) async fn dial_early_without_offer_for_coupling(
     let identity = Identity::fresh();
     let invite = open_offerless_invitation(endpoint, &target, to, options, &identity)?;
     let responses = endpoint.send(invite.clone(), target.clone()).await?;
+    let invitation_started = Instant::now();
     let (events, events_rx) = EventSink::new();
     let mut dialing = Dialing {
         endpoint: endpoint.clone(),
@@ -4915,9 +5010,8 @@ pub(crate) async fn dial_early_without_offer_for_coupling(
         peer_allows_update: false,
         hold: Direction::SendRecv,
         ringing: None,
-        deadline: options
-            .timeout
-            .map(|limit| tokio::time::Instant::now() + limit),
+        deadline: options.timeout.map(|limit| invitation_started + limit),
+        invitation_started,
         options: options.clone(),
         answered_already: None,
         events: Some(events),
@@ -5012,10 +5106,8 @@ impl Dialing {
                     return Ok(false);
                 }
                 Arrived::GaveUp => {
-                    self.give_up().await;
-                    return Err(Error::Cancelled(
-                        self.options.timeout.unwrap_or(Duration::ZERO),
-                    ));
+                    let cancellation = self.local_cancellation(true).await;
+                    return Err(Error::Cancelled(cancellation));
                 }
                 Arrived::Gone => return Err(Error::NoResponse),
             }
@@ -5119,10 +5211,8 @@ impl Dialing {
                     }
                 },
                 Arrived::GaveUp => {
-                    self.give_up().await;
-                    Err(Error::Cancelled(
-                        self.options.timeout.unwrap_or(Duration::ZERO),
-                    ))
+                    let cancellation = self.local_cancellation(true).await;
+                    Err(Error::Cancelled(cancellation))
                 }
                 Arrived::Gone => Err(Error::NoResponse),
             }
@@ -5190,8 +5280,8 @@ impl Dialing {
                     tokio::select! {
                         biased;
                         () = cancelled.as_mut() => {
-                            self.give_up().await;
-                            return Err(Error::Cancelled(Duration::ZERO));
+                            let cancellation = self.local_cancellation(false).await;
+                            return Err(Error::Cancelled(cancellation));
                         }
                         arrived = self.next_response() => arrived,
                     }
@@ -5205,10 +5295,8 @@ impl Dialing {
                 }
                 Arrived::Final(response) => return self.confirm(*response).await,
                 Arrived::GaveUp => {
-                    self.give_up().await;
-                    return Err(Error::Cancelled(
-                        self.options.timeout.unwrap_or(Duration::ZERO),
-                    ));
+                    let cancellation = self.local_cancellation(true).await;
+                    return Err(Error::Cancelled(cancellation));
                 }
                 Arrived::Gone => return Err(Error::NoResponse),
             }
@@ -5221,7 +5309,15 @@ impl Dialing {
     /// that crosses the CANCEL is acknowledged and then hung up, which §15 requires and a CANCEL
     /// cannot do on its own.
     pub async fn cancel(mut self) {
-        self.give_up().await;
+        let _cleanup = self.give_up().await;
+    }
+
+    /// Cancel this invitation and return the measured ownership handoff.
+    ///
+    /// This is the observable form used by command supervisors. [`Self::cancel`] retains the
+    /// compatibility shape for callers that need only the protocol side effect.
+    pub async fn cancel_observed(mut self) -> InvitationCancellation {
+        self.local_cancellation(false).await
     }
 
     /// Cancel this invitation with an explicit protocol cause.
@@ -5229,7 +5325,7 @@ impl Dialing {
     /// A SIP 200 reason represents the RFC 3326 §3.1 case where another coupled or forked leg
     /// completed the call; other valid SIP and Q.850 causes are retained unchanged.
     pub async fn cancel_with_reason(mut self, reason: ReasonValue) {
-        self.give_up_with_reason(&reason).await;
+        let _cleanup = self.give_up_with_reason(&reason).await;
     }
 
     /// The early dialog's mutable parts, borrowed for one UPDATE.
@@ -5268,10 +5364,8 @@ impl Dialing {
                     return Ok(());
                 }
                 Arrived::GaveUp => {
-                    self.give_up().await;
-                    return Err(Error::Cancelled(
-                        self.options.timeout.unwrap_or(Duration::ZERO),
-                    ));
+                    let cancellation = self.local_cancellation(true).await;
+                    return Err(Error::Cancelled(cancellation));
                 }
                 Arrived::Gone => return Err(Error::NoResponse),
             }
@@ -5301,10 +5395,8 @@ impl Dialing {
                     return Ok(None);
                 }
                 Arrived::GaveUp => {
-                    self.give_up().await;
-                    return Err(Error::Cancelled(
-                        self.options.timeout.unwrap_or(Duration::ZERO),
-                    ));
+                    let cancellation = self.local_cancellation(true).await;
+                    return Err(Error::Cancelled(cancellation));
                 }
                 Arrived::Gone => return Err(Error::NoResponse),
             }
@@ -5320,9 +5412,9 @@ impl Dialing {
         loop {
             let event = match deadline {
                 None => responses.next().await,
-                Some(deadline) => match tokio::time::timeout_at(deadline, responses.next()).await {
-                    Ok(event) => event,
-                    Err(_elapsed) => return Arrived::GaveUp,
+                Some(deadline) => match before_deadline(deadline, responses.next()).await {
+                    BeforeDeadline::Event(event) => event,
+                    BeforeDeadline::Expired => return Arrived::GaveUp,
                 },
             };
             match event {
@@ -5565,7 +5657,7 @@ impl Dialing {
     /// no offer of ours will not send a 2xx to fail on, and the caller's only outcome was
     /// [`Error::Cancelled`] when its own deadline passed.
     async fn abandon(&mut self, error: Error) -> Error {
-        self.give_up().await;
+        let _cleanup = self.give_up().await;
         error
     }
 
@@ -5804,19 +5896,59 @@ impl Dialing {
     }
 
     /// Take back the invitation, whatever state it is in.
-    async fn give_up(&mut self) {
-        self.give_up_with_reason(&normal_clearing_reason()).await;
+    async fn local_cancellation(&mut self, timed_out: bool) -> InvitationCancellation {
+        let invitation_elapsed = self.invitation_started.elapsed();
+        let cleanup = self.give_up().await;
+        InvitationCancellation {
+            timed_out,
+            invitation_limit: self.options.timeout,
+            invitation_elapsed,
+            cleanup,
+        }
     }
 
-    async fn give_up_with_reason(&mut self, reason: &ReasonValue) {
+    async fn give_up(&mut self) -> CancellationCleanup {
+        self.give_up_with_reason(&normal_clearing_reason()).await
+    }
+
+    async fn give_up_with_reason(&mut self, reason: &ReasonValue) -> CancellationCleanup {
+        let limit = self.options.cancellation_timeout;
         if let Some(response) = self.coupled_final.take() {
-            if response.status.is_success() {
-                ack_then_bye(&self.endpoint, &self.invite, &response, self.target.clone()).await;
-            }
-            return;
+            let started = Instant::now();
+            let operation = async {
+                if response.status.is_success() {
+                    ack_then_bye(&self.endpoint, &self.invite, &response, self.target.clone())
+                        .await;
+                }
+            };
+            let exhausted = tokio::time::timeout_at(started + limit, Box::pin(operation))
+                .await
+                .is_err();
+            return CancellationCleanup {
+                limit,
+                elapsed: started.elapsed(),
+                disposition: if exhausted {
+                    CancellationDisposition::Exhausted {
+                        cancel_sent: false,
+                        final_response_observed: true,
+                    }
+                } else {
+                    CancellationDisposition::Completed {
+                        cancel_sent: false,
+                        final_response_observed: true,
+                    }
+                },
+            };
         }
         let Some(responses) = self.responses.as_mut() else {
-            return;
+            return CancellationCleanup {
+                limit,
+                elapsed: Duration::ZERO,
+                disposition: CancellationDisposition::Completed {
+                    cancel_sent: false,
+                    final_response_observed: false,
+                },
+            };
         };
         withdraw(
             &self.endpoint,
@@ -5824,8 +5956,9 @@ impl Dialing {
             self.target.clone(),
             responses,
             reason,
+            limit,
         )
-        .await;
+        .await
     }
 }
 
@@ -6864,12 +6997,10 @@ async fn await_final(
     loop {
         let event = match (deadline, cancelled.as_mut()) {
             (None, None) => responses.next().await,
-            (Some(deadline), None) => {
-                match tokio::time::timeout_at(deadline, responses.next()).await {
-                    Ok(event) => event,
-                    Err(_elapsed) => return Waited::GaveUp,
-                }
-            }
+            (Some(deadline), None) => match before_deadline(deadline, responses.next()).await {
+                BeforeDeadline::Event(event) => event,
+                BeforeDeadline::Expired => return Waited::GaveUp,
+            },
             (None, Some(cancelled)) => {
                 tokio::select! {
                     biased;
@@ -7557,6 +7688,38 @@ mod tests {
     use std::task::Poll;
 
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn answer_events_must_precede_their_deadline() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_secs(1);
+        assert!(matches!(
+            before_deadline(
+                deadline,
+                tokio::time::sleep_until(deadline - Duration::from_millis(1))
+            )
+            .await,
+            BeforeDeadline::Event(())
+        ));
+
+        let now = Instant::now();
+        let deadline = now + Duration::from_secs(1);
+        assert!(matches!(
+            before_deadline(deadline, tokio::time::sleep_until(deadline)).await,
+            BeforeDeadline::Expired
+        ));
+
+        let now = Instant::now();
+        let deadline = now + Duration::from_secs(1);
+        assert!(matches!(
+            before_deadline(
+                deadline,
+                tokio::time::sleep_until(deadline + Duration::from_nanos(1))
+            )
+            .await,
+            BeforeDeadline::Expired
+        ));
+    }
 
     #[tokio::test]
     async fn successful_response_stop_before_first_poll_is_latched() {

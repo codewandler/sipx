@@ -98,7 +98,9 @@ pub use dialog::{Dialog, DialogId, Role};
 pub use dispatch::{
     Calls, DispatchCounts, Dispatched, Dispatcher, DrainProgress, DrainReport, Invitation,
 };
-pub use error::{Error, Result};
+pub use error::{
+    CancellationCleanup, CancellationDisposition, Error, InvitationCancellation, Result,
+};
 pub use event::{CallEvent, CallEvents, EndCause};
 pub use extension::{ApplicationRequest, MAX_APPLICATION_BODY};
 pub use identity::{InboundIdentityPolicy, OutboundIdentityPolicy};

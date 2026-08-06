@@ -231,11 +231,11 @@ shutdown joins every owned task. It does not mean an unbounded fallback.
 
 Timeout text and JSON contain the same fields: `status=timeout`, `invitation_limit_ms`, measured
 `invitation_elapsed_ms`, `cancel_limit_ms`, measured `cancel_elapsed_ms`, `cancel_sent`,
-`cancel_final_observed`, `cancel_cleanup_exhausted` and an actionable `error`. Interrupted setup
-uses the same cleanup facts with `status=interrupted`; a pre-deadline SIP rejection retains its SIP
-status and does not invent cancellation fields. Durations use the monotonic clock. A fixed duration
-may bound failed cleanup, but transaction events and the endpoint join barrier are the successful
-happens-before relations.
+`cancel_final_observed`, `cancel_cleanup_completed`, `cancel_cleanup_exhausted` and an actionable
+`error`. Interrupted setup uses the same cleanup facts with `status=interrupted`; a pre-deadline SIP
+rejection retains its SIP status and does not invent cancellation fields. Durations use the
+monotonic clock. A fixed duration may bound failed cleanup, but transaction events and the endpoint
+join barrier are the successful happens-before relations.
 
 ### 3.3 Confirmed-call lifecycle
 

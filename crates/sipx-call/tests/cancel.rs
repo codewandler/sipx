@@ -715,7 +715,7 @@ async fn cancelling_while_early_dial_waits_withdraws_the_invitation() {
         result
             .expect("the cancellation-safe dial finishes")
             .expect("the dial task finishes"),
-        Err(Error::Cancelled(duration)) if duration == Duration::ZERO
+        Err(Error::Cancelled(cancellation)) if !cancellation.timed_out
     ));
     assert!(matches!(
         ended.expect("the target is told to stop ringing"),
@@ -767,7 +767,7 @@ async fn cancelling_while_an_early_handle_awaits_confirmation_withdraws_it() {
         result
             .expect("confirmation cancellation finishes")
             .expect("the confirmation task finishes"),
-        Err(Error::Cancelled(duration)) if duration == Duration::ZERO
+        Err(Error::Cancelled(cancellation)) if !cancellation.timed_out
     ));
     assert!(matches!(
         ended.expect("the target is told to stop ringing"),

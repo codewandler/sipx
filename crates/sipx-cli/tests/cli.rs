@@ -2554,6 +2554,96 @@ async fn a_busy_answer_gives_the_caller_the_busy_exit_code() {
     answerer_exits_cleanly(&mut answerer).await;
 }
 
+/// P-17: the process names and measures the distinct answer and cancellation phases. The peer
+/// rings but deliberately never completes the CANCEL/INVITE exchange, forcing the explicit
+/// cancellation allowance to be the failure bound.
+#[tokio::test]
+async fn dial_timeout_reports_and_obeys_its_cancellation_allowance() {
+    let _scenario = process_scenario().await;
+    let (peer, mut incoming) = bind(TransportConfig::new(
+        "127.0.0.1:0".parse().expect("a local address"),
+    ))
+    .await
+    .expect("peer binds");
+    let address = peer.local_addr();
+    let peer_driver = peer.clone();
+    let serving = tokio::spawn(async move {
+        while let Some(request) = incoming.recv().await {
+            match request.request.method {
+                Method::Invite => {
+                    let ringing = sipx_sip::build::ResponseBuilder::to_request(
+                        &request.request,
+                        StatusCode::new(180).expect("valid"),
+                        "Ringing",
+                    )
+                    .expect("builds")
+                    .build();
+                    peer_driver
+                        .respond(&request.key, ringing)
+                        .await
+                        .expect("rings");
+                }
+                Method::Cancel => return true,
+                _ => {}
+            }
+        }
+        false
+    });
+
+    let started = std::time::Instant::now();
+    let output = tokio::time::timeout(
+        Duration::from_secs(4),
+        sipx()
+            .args([
+                "dial",
+                &format!("sip:timeout@{address}"),
+                "--timeout",
+                "1",
+                "--cancel-timeout",
+                "1",
+                "--json",
+            ])
+            .output(),
+    )
+    .await
+    .expect("the documented total bound holds")
+    .expect("dial runs");
+    let elapsed = started.elapsed();
+    assert!(
+        serving.await.expect("peer task joins"),
+        "the timeout must send CANCEL after the ringing response"
+    );
+    peer.shutdown().await;
+
+    assert_eq!(output.status.code(), Some(5));
+    assert!(output.stdout.is_empty(), "failure stays off stdout");
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stderr).expect("timeout stderr is one JSON result");
+    assert_eq!(report["status"], "timeout");
+    assert_eq!(report["invitation_limit_ms"], 1_000);
+    assert_eq!(report["cancel_limit_ms"], 1_000);
+    assert_eq!(report["cancel_sent"], true);
+    assert_eq!(report["cancel_final_observed"], false);
+    assert_eq!(report["cancel_cleanup_completed"], false);
+    assert_eq!(report["cancel_cleanup_exhausted"], true);
+    assert!(
+        report["invitation_elapsed_ms"]
+            .as_u64()
+            .is_some_and(|value| value >= 1_000),
+        "measured invitation phase: {report}"
+    );
+    assert!(
+        report["cancel_elapsed_ms"]
+            .as_u64()
+            .is_some_and(|value| value >= 1_000),
+        "measured cancellation phase: {report}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "actual bound: {elapsed:?}"
+    );
+}
+
 /// `S-28`: the shell-facing credential option reaches the call retry, rather than merely parsing.
 #[tokio::test]
 async fn dial_password_answers_a_proxy_challenge_and_connects() {

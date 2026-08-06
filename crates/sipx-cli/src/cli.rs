@@ -362,6 +362,9 @@ pub(crate) struct DialOptions {
     /// Answer timeout in seconds; zero delegates to the transaction layer.
     #[arg(long, default_value_t = 20, value_name = "S", value_parser = parse_seconds)]
     pub(crate) timeout: u64,
+    /// Additional invitation-cancellation allowance in seconds.
+    #[arg(long, default_value_t = 2, value_name = "S", value_parser = parse_seconds)]
+    pub(crate) cancel_timeout: u64,
     #[arg(long, value_parser = parse_non_empty)]
     pub(crate) from: Option<String>,
     #[arg(
