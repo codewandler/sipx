@@ -688,10 +688,12 @@ layer = "media"
 status = "implemented"
 evidence = [
   "crates/sipx-rtp/src/dtmf.rs",
+  "crates/sipx-media/src/session.rs",
   "crates/sipx-call/src/call.rs",
   "crates/sipx-call/tests/call.rs",
+  "crates/sipx-cli/tests/cli.rs",
 ]
-note = "Events 0-15, with the payload type read from the negotiation rather than assumed. End retransmissions share the event's timestamp, which is the part that is usually wrong. Reachable from a call: `Call::send_digit`, `send_digits` and `recv_digit` are public, and `call.rs`'s tests carry `1234#` across a live call and assert the digit leaves on the payload type the answer named rather than on 101."
+note = "Events 0-15, with the payload type read from the negotiation rather than assumed. End retransmissions share the event's timestamp, and receive state absorbs continuation, reordering, duplicates and repeated final reports before producing one duration-bearing event. A bounded media-silence input closes a tone whose final reports were lost; media replacement resets that state. Reachable from both library and automation boundaries: call tests carry `1234#` across a live call and assert a non-101 negotiated payload, while the two-process scenario proof observes ordered typed digits at the remote actor."
 
 [[rfc]]
 number = 6716

@@ -2,8 +2,7 @@
 id: M-71
 title: "Deliver negotiated DTMF receive events through scenario"
 pillar: "Media"
-status: ready
-priority: 2
+status: in-progress
 epic: media-interoperability
 areas: [sipx-rtp, sipx-call, sipx-cli]
 design: docs/designs/media-interoperability.md
@@ -41,3 +40,11 @@ automation boundary.
 
 Finding 10 negotiated `telephone-event/8000`, completed `send_dtmf`, then timed out waiting for the
 remote typed event in the same harness that successfully observed hold and resume.
+
+## Progress
+
+- Receiver state and the process boundary are being specified before the implementation. The
+  failing process proof will retain the sender completion and remote wait-expiry output that
+  distinguishes delivery failure from negotiation or send failure.
+- Board and compliance regeneration, the complete gate and final status are deferred to the
+  requested push boundary.
