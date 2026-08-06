@@ -100,10 +100,10 @@ The description MUST contain:
 | `m=audio <port> UDP/TLS/RTP/SAVPF 111 0 8 13 101` | exact payload set/order for locally generated descriptions; a remote description may add safe non-colliding formats |
 | `c=IN IP4/IP6 <default>` | the default candidate address, never `0.0.0.0` for hold |
 | `a=sendrecv` or a negotiated RFC 3264 direction | direction; hold changes this attribute, not ICE credentials or the connection address |
-| `a=rtcp-mux` | mandatory in offer and answer; no separate component 2 exists; the conventional `a=rtcp:9 IN IP4 0.0.0.0` (or IPv6 unspecified equivalent) is an ignored mux placeholder |
+| `a=rtcp-mux` | mandatory in offer and answer; the accepted answer and runtime have no separate component 2; the conventional `a=rtcp:9 IN IP4 0.0.0.0` (or IPv6 unspecified equivalent) is an ignored mux placeholder |
 | `a=ice-options:ice2` | emitted by sipx; a complete remote description may instead advertise `trickle`, which does not make later trickled candidates part of this profile |
 | `a=ice-ufrag`, `a=ice-pwd` | fresh per ICE generation, within [ice.md](ice.md) §13's bounds |
-| one or more component-1 `a=candidate` lines | host and optionally server-reflexive candidates; component 2 is invalid for this profile |
+| one or more component-1 `a=candidate` lines | host and optionally server-reflexive candidates; an initial remote offer may additionally carry bounded component-2 fallback candidates, which are discarded when this endpoint answers with mux |
 | `a=fingerprint:sha-256 ...` | the certificate the sender will present; media level takes precedence over session level |
 | `a=setup` | `actpass` in an offer; `active` or `passive` in an answer |
 | the five format mappings in §4.4 | Opus, PCMU, PCMA, CN and `telephone-event` |
@@ -140,6 +140,12 @@ or an absent answer role is incompatible. The offerer validates that complete re
 the payload numbers and their offered relative order, before generic codec settlement, accepting
 the peer description into its ICE agent, sending ACK, or starting any media protocol.
 
+Because the answer has now agreed to RFC 5761 multiplexing, a component-2 candidate in that answer
+still contradicts this profile and is refused. The initial offer is different: RFC 5761 §5.1.3
+allows it to describe the separate-port fallback before the answer selects mux. Such a candidate
+does not create a local component, does not enter the retained remote candidate set and does not
+participate in an RFC 8445 §6.1.2.2 checklist when the local description has component 1 only.
+
 ### 4.3 Answerer
 
 The answerer validates the whole remote offer before binding or gathering. It MUST reject the
@@ -148,8 +154,9 @@ profile rather than answer under another media policy when the offer:
 - arrived over anything other than WSS with the `sip` subprotocol;
 - does not have the one-section shape from §4.1;
 - names another protocol token, omits `a=rtcp-mux`, carries a real separate RTCP destination,
-  carries `a=ice-mismatch`, supplies no usable component-1 candidate, or supplies a component-2
-  candidate; the port-9 unspecified RTCP placeholder is not a destination and is ignored;
+  carries `a=ice-mismatch`, or supplies no usable component-1 candidate; the port-9 unspecified
+  RTCP placeholder is not a destination and is ignored, and bounded component-2 candidate lines
+  are fallback metadata discarded before the ICE description is built;
 - has no supported fingerprint or uses MD2/MD5 as already forbidden by [srtp.md](srtp.md) §6.1;
 - gives `a=setup` anything except `actpass`; or
 - lacks an offered Opus format or the mandatory auxiliary formats from §4.4.
@@ -191,8 +198,9 @@ session to G.711 while still claiming this profile.
   `ProfileError::WeakerMedia` rather than ignored input.
 - No `RTP/AVP`, `RTP/SAVP`, `UDP/TLS/RTP/SAVP`, or clear signalling alternative. The feedback
   profile's trailing `F` is part of this profile's identity.
-- No component-2 candidates or usable separate `a=rtcp` destination. The port-9 unspecified mux
-  placeholder is tolerated but grants no authority; RTCP follows the nominated component-1 pair.
+- No retained, checked or locally generated component-2 candidate, and no usable separate `a=rtcp`
+  destination. A bounded component-2 line in an initial remote offer and the port-9 unspecified mux
+  placeholder are tolerated but grant no authority; RTCP follows the nominated component-1 pair.
 - No `a=ice-mismatch` fallback. Generic SIP calls retain [ice.md](ice.md) §13.4's fallback; a named
   browser-audio call required ICE and fails when it cannot use it.
 - No early protected media. RTP, RTCP or DTLS from the provisional SDP address cannot nominate
@@ -357,8 +365,8 @@ one of those payloads into the SRTCP range.
 | Resource | Bound | Full/oversize behavior |
 |---|---:|---|
 | active media sections | 1 audio | refuse profile before binding |
-| ICE components | 1 | component-2 candidate refuses profile |
-| remote candidates | 32 for component 1 | refuse description; no partial candidate set |
+| ICE components | 1 | an offered component-2 fallback is discarded before checklist construction |
+| remote candidates | 32 retained for component 1; 32 ignored component-2 lines in an initial offer | refuse description; no partial candidate set and no component-2 allocation |
 | candidate line | 512 ASCII octets | refuse description before storing it |
 | ICE checklist | 100 pairs | prune lowest priority as [ice.md](ice.md) §6.3 requires |
 | inbound UDP datagram | 2048 octets | read with one extra sentinel octet; oversize is dropped and counted, never truncated into a parser |
@@ -445,7 +453,7 @@ from becoming a second unbounded input path.
 | `InsecureSignalling` | profile selected on something other than authenticated WSS with the `sip` subprotocol |
 | `MediaSectionCount` | not exactly one audio media section |
 | `WrongProtocol` | an initial offer's `m=` token is not exactly `UDP/TLS/RTP/SAVPF` and does not claim a weaker media mode |
-| `RtcpMuxRequired` | `a=rtcp-mux` absent, declined or contradicted by component 2 |
+| `RtcpMuxRequired` | `a=rtcp-mux` absent or declined, or a mux answer still advertises component 2 |
 | `IceRequired` | credentials/candidates absent, malformed, over bound, or `ice-mismatch` selected |
 | `SetupRole` | offer is not `actpass`, answer is not `active`/`passive`, or local side cannot hold the selected role |
 | `FingerprintRequired` | no supported well-formed fingerprint |
@@ -467,7 +475,7 @@ partial keys.
 
 ### 9.1 Encoding convention
 
-`BA-SDP-O1` and `BA-SDP-A1` below are US-ASCII. Each displayed line is followed by the two octets
+`BA-SDP-O1`, `BA-SDP-O2` and `BA-SDP-A1` below are US-ASCII. Each displayed line is followed by the two octets
 `0d 0a`, including the last line. There is no leading byte, indentation, trailing space, UTF-8 BOM,
 or extra empty line. Replacing each displayed newline with CRLF therefore yields the exact vector.
 Tests MUST consume these vectors or derive fixtures byte-for-byte from this section; a visually
@@ -476,6 +484,7 @@ similar SDP with different policy is not the vector.
 | ID | Length | SHA-256 of the encoded bytes |
 |---|---:|---|
 | `BA-SDP-O1` | 555 octets | `44fd3d3cc886a667f3b89d50c5bb7453ce985d24851252660c25c8399ae12c25` |
+| `BA-SDP-O2` | 613 octets | `5957da5732ebe747cffa9cc940381eb63caf7c2bfc0dca4beb7f4609e178e4d0` |
 | `BA-SDP-A1` | 563 octets | `518f6918170dc6bd118b653df7db3d4a4136f94cd38c973c6ee5f49784c0343e` |
 | `BA-SDP-B1` | 1298 octets | `451fd0acdd766200f1f5b711d92cac518f7242558ff722b1cb440d544f47c75f` |
 
@@ -506,6 +515,17 @@ a=fmtp:101 0-16
 
 Required result: the offer parses as one browser-audio section; component 1 is the only ICE
 component; Opus payload 111 is selected; no socket address is yet a DTLS peer.
+
+`BA-SDP-O2` inserts this one line immediately after O1's component-one candidate:
+
+```text
+a=candidate:2 2 UDP 2130706430 192.0.2.10 49171 typ host
+```
+
+The offer remains valid. Its returned `BrowserAudioDescription` contains exactly O1's component-one
+candidate. The extra line creates no checklist pair, socket, route or media worker. Replacing O1's
+component-one line with this component-two line instead produces `IceRequired` because no usable
+media path remains.
 
 ### 9.3 `BA-SDP-A1` — complete answer
 

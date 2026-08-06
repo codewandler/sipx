@@ -2,8 +2,7 @@
 id: M-70
 title: "Accept multiplexed browser offers with unused component candidates"
 pillar: "Media"
-status: ready
-priority: 2
+status: in-progress
 epic: media-interoperability
 areas: [sipx-sdp, sipx-media]
 design: docs/designs/media-interoperability.md
@@ -20,7 +19,7 @@ bound or interpreted as evidence that `a=rtcp-mux` is absent.
 
 ## Acceptance
 
-- [ ] `docs/specs/webrtc-audio.md` and the relevant ICE/multiplexing spec state how RFC 5761
+- [x] `docs/specs/webrtc-audio.md` and the relevant ICE/multiplexing spec state how RFC 5761
       `a=rtcp-mux` composes with RFC 8445/8839 candidates for components one and two.
 - [ ] A byte-exact failing-first SDP vector contains `a=rtcp-mux`, at least one viable component-one
       candidate and an extra component-two candidate, and reproduces the current
@@ -43,3 +42,10 @@ bound or interpreted as evidence that `a=rtcp-mux` is absent.
 Finding 9 reached WSS, SIP/SDP and ICE start with a second independently implemented browser engine,
 then failed `Profile(RtcpMuxRequired)` before nomination. The candidate-level cause is a bounded
 inference until the exact SDP vector is captured by this story.
+
+## Progress
+
+- In progress: the validator confirms the inferred seam—any remote component-two candidate is
+  currently treated as contradicting `a=rtcp-mux`, before ICE can retain the viable component-one
+  path. The spec update distinguishes an initial offer's bounded fallback candidates from the
+  one-component mux answer and runtime.
