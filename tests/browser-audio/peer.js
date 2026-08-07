@@ -205,6 +205,20 @@
 
   function mutateSdp(sdp, mutation) {
     if (!mutation) return sdp;
+    if (mutation === "UnusedRtcpCandidate") {
+      const candidate = sdp.split(/\r?\n/).find((line) => /^a=candidate:\S+ 1 /i.test(line));
+      if (!candidate) fail("browser SDP had no component-one candidate to extend");
+      const fields = candidate.split(/\s+/);
+      const priority = Number.parseInt(fields[3], 10);
+      const port = Number.parseInt(fields[5], 10);
+      if (!Number.isSafeInteger(priority) || priority <= 1 || !Number.isSafeInteger(port)) {
+        fail("browser component-one candidate cannot form a bounded fallback");
+      }
+      fields[1] = "2";
+      fields[3] = String(priority - 1);
+      fields[5] = String(port === 65535 ? port - 1 : port + 1);
+      return sdp.replace(candidate, `${candidate}\r\n${fields.join(" ")}`);
+    }
     if (mutation === "FingerprintMismatch") {
       const mutated = sdp.replace(/^(a=fingerprint:[^\r\n]*:)([0-9A-F]{2})$/mi, (_line, prefix, octet) => {
         return `${prefix}${octet === "00" ? "01" : "00"}`;

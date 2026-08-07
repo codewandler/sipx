@@ -375,7 +375,10 @@ Call-ID and `n`; the command never reflects unbounded or invalid bytes into a he
 `--mode signalling` is the default and creates no SDP, RTP socket or media task. The distinct
 `--mode generated-media` accepts only an INVITE carrying a negotiable SDP offer, uses the ordinary
 call/media stack, and emits a finite deterministic audio fixture. A missing or unusable offer in
-that mode receives a typed final refusal. Media behavior and measurements never enter the v1
+that mode receives a typed final refusal. A present `X-Sipx-Workload-Mode` field is parsed before
+admission; a value different from the responder's effective mode receives 488 `Workload Mode
+Mismatch`, closes the paired run as failed and consumes no dialog slot. An absent field preserves
+the body-based behavior for clients outside this paired command contract. Media behavior and measurements never enter the v1
 signalling-load result. After the initial ACK, its bounded request vocabulary is ACK and BYE: an
 unsupported in-dialog method receives 405, while a malformed, wrong-dialog or stale BYE receives
 400, 481 or 500 respectively. This narrower load profile keeps ordinary call/media ownership while
@@ -421,21 +424,22 @@ transaction-matched by the dispatcher and never becomes an in-dialog BYE substit
 
 ### 9.4 Shutdown and result
 
-Ctrl-C, duration/count completion and the first internal error atomically close admission. Shutdown
-then requests BYE for each established owned dialog, stops pending invitations with a final response,
-joins every worker, drops every dialog inbox, observes the dispatcher route set empty, and waits for
-the endpoint's transaction/timer count to become zero. A monotonic cleanup deadline bounds failure;
-no fixed sleep stands in for any of those barriers. Expiry reports failure and the exact non-zero
-leftovers.
+The supported process stops defined in `diagnostic-phone.md` §3.4, duration/count completion and
+the first internal error atomically close admission. Shutdown then requests BYE for each established
+owned dialog, stops pending invitations with a final response, joins every worker, drops every
+dialog inbox, observes the dispatcher route set empty, and waits for the endpoint's transaction/timer
+count to become zero. A monotonic cleanup deadline bounds failure; no fixed sleep stands in for any
+of those barriers. Expiry reports failure and the exact non-zero leftovers.
 
 After cleanup the command writes exactly one `sipx.load-responder.v1` object. Its closed top-level
 keys are:
 
 ```text
-schema, status, seed, mode, limits, counts, responses, latency_ms, post_drain, reason
+schema, status, stop_signal, seed, mode, limits, counts, responses, latency_ms, post_drain, reason
 ```
 
-`status` is `completed`, `interrupted` or `failed`. `limits` records calls/duration, maximum active,
+`status` is `completed`, `interrupted` or `failed`. `stop_signal` is null for natural completion and
+names the first supported process stop as `interrupt` or `terminate`. `limits` records calls/duration, maximum active,
 dialog duration and cleanup seconds. `counts` records surfaced INVITEs, admitted, established,
 completed, cancelled, rejected, failed, active high-water and invalid messages. `responses` maps
 one semantic observation per SIP transaction: provisional and final responses this command
@@ -447,4 +451,5 @@ no samples. Its capacity is eight observations per active-dialog slot, capped at
 duration-bounded run cannot turn latency evidence into unbounded memory use. `post_drain` records active dialogs,
 dispatcher routes, endpoint transactions and owned tasks. Every terminal INVITE belongs to exactly
 one completed/cancelled/rejected/failed class, and a completed/interrupted result has zero post-drain
-state. `reason` is null except for interruption/failure and never contains packet bodies or secrets.
+state. `reason` is null for completion and a clean interruption, and contains an actionable cause
+for failure; it never contains packet bodies or secrets.

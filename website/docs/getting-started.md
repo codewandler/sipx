@@ -60,8 +60,7 @@ portable executables deliberately contain no optional native features. Use the e
 above when you need `device-audio`, `opus` or `dtls`; the archive's `build-manifest.json` and SPDX
 sidecar record that distinction.
 
-Confirm which version was installed. This documentation build covers
-<!-- BEGIN generated:workspace-version -->1.0.0-rc.2<!-- END generated:workspace-version -->:
+Confirm which version was installed. This documentation build covers <!-- BEGIN generated:workspace-version -->1.0.0-rc.2<!-- END generated:workspace-version -->:
 
 ```console
 $ sipx version

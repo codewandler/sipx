@@ -2,6 +2,10 @@
 **/*.rs.bk
 Cargo.lock.orig
 
+# Local Flux Board mutation journal. Story frontmatter is the repository source of truth; retry
+# records are machine-local state and must not enter release commits.
+/.flux/board/
+
 # Fuzzing artifacts
 /fuzz/target
 /fuzz/artifacts

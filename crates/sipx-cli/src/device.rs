@@ -3,17 +3,13 @@
 //! Device callbacks live here, at the command leaf. They exchange bounded PCM frames with a media
 //! session and use `sipx-audio`'s public converter for their rate boundary.
 
-use crate::Args;
+use std::ffi::OsString;
+use std::fs::{File, OpenOptions};
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
+
+use crate::cli::{AudioOptions, DevicesOptions};
 use crate::output::{Exit, Format, Report, fail};
-
-pub(crate) const HELP: &str = "\
-sipx devices — list stable audio device identifiers
-
-USAGE:
-    sipx devices [--json]
-
-The command opens no stream. Device support requires the `device-audio` build feature.
-";
 
 /// A command's two local audio endpoints.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,16 +27,16 @@ enum Endpoint {
 
 impl Selection {
     /// Resolve the new endpoint spelling and the two existing WAV aliases before any I/O.
-    pub(crate) fn from_args(args: &Args<'_>) -> Result<Self, String> {
+    pub(crate) fn from_options(options: &AudioOptions) -> Result<Self, String> {
         let input = endpoint(
-            args.value("audio-input"),
-            args.value("play"),
+            options.audio_input.as_deref(),
+            options.play.as_deref(),
             "input",
             "play",
         )?;
         let output = endpoint(
-            args.value("audio-output"),
-            args.value("record"),
+            options.audio_output.as_deref(),
+            options.record.as_deref(),
             "output",
             "record",
         )?;
@@ -61,6 +57,11 @@ impl Selection {
         }
     }
 
+    /// Reserve a WAV destination before any resolver, socket or peer I/O.
+    pub(crate) fn reserve_wav_output(&self) -> Result<Option<WavOutput>, String> {
+        self.wav_output().map(WavOutput::reserve).transpose()
+    }
+
     /// Open explicit devices paused. This is called before transport bind.
     pub(crate) fn open(&self) -> Result<Driver, String> {
         let input = match &self.input {
@@ -72,6 +73,111 @@ impl Selection {
             Endpoint::Null | Endpoint::Wav(_) => None,
         };
         Driver::open(input, output)
+    }
+}
+
+/// Validate endpoint syntax and build support without opening a file or device.
+pub(crate) fn preflight(options: &AudioOptions) -> Result<(), String> {
+    Selection::from_options(options).map(|_| ())
+}
+
+/// One preflighted WAV destination.
+///
+/// The temporary is a sibling, held open from preflight through finalization. Drop is the cleanup
+/// path for every early return in `dial` and `answer`.
+#[derive(Debug)]
+pub(crate) struct WavOutput {
+    requested: String,
+    final_path: PathBuf,
+    temporary_path: PathBuf,
+    file: Option<File>,
+}
+
+impl WavOutput {
+    const NAME_ATTEMPTS: usize = 16;
+
+    fn reserve(requested: &str) -> Result<Self, String> {
+        let final_path = PathBuf::from(requested);
+        match std::fs::symlink_metadata(&final_path) {
+            Ok(_) => {
+                return Err(format!("{requested}: recording destination already exists"));
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("{requested}: {error}")),
+        }
+
+        let file_name = final_path
+            .file_name()
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| format!("{requested}: recording destination must name a file"))?;
+        let parent = final_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+
+        for _ in 0..Self::NAME_ATTEMPTS {
+            let mut temporary_name = OsString::from(".");
+            temporary_name.push(file_name);
+            temporary_name.push(format!(
+                ".sipx-recording-{:016x}.tmp",
+                rand::random::<u64>()
+            ));
+            let temporary_path = parent.join(temporary_name);
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary_path)
+            {
+                Ok(file) => {
+                    return Ok(Self {
+                        requested: requested.to_owned(),
+                        final_path,
+                        temporary_path,
+                        file: Some(file),
+                    });
+                }
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(format!("{requested}: {error}")),
+            }
+        }
+        Err(format!(
+            "{requested}: could not reserve a unique recording temporary"
+        ))
+    }
+
+    /// Write, durably flush and atomically install the completed WAV without replacing a race.
+    pub(crate) fn finish(mut self, samples: &[i16], sample_rate: u32) -> Result<String, String> {
+        let mut file = self
+            .file
+            .take()
+            .ok_or_else(|| format!("{}: recording reservation is closed", self.requested))?;
+        sipx_audio::write_wav(
+            &mut file,
+            &sipx_audio::Wav {
+                sample_rate,
+                samples: samples.to_vec(),
+            },
+        )
+        .map_err(|error| format!("{}: {error}", self.requested))?;
+        file.sync_all()
+            .map_err(|error| format!("{}: {error}", self.requested))?;
+        drop(file);
+
+        // Both names are siblings, so the link is same-filesystem and atomic. Unlike `rename`,
+        // `hard_link` refuses an existing destination instead of replacing a file created after
+        // preflight.
+        std::fs::hard_link(&self.temporary_path, &self.final_path)
+            .map_err(|error| format!("{}: {error}", self.requested))?;
+        std::fs::remove_file(&self.temporary_path)
+            .map_err(|error| format!("{}: {error}", self.requested))?;
+        Ok(self.requested.clone())
+    }
+}
+
+impl Drop for WavOutput {
+    fn drop(&mut self) {
+        self.file.take();
+        let _ = std::fs::remove_file(&self.temporary_path);
     }
 }
 
@@ -102,7 +208,14 @@ fn endpoint(
     }
     match kind {
         "wav" => Ok(Endpoint::Wav(value.to_owned())),
-        "device" => Ok(Endpoint::Device(value.to_owned())),
+        "device" => {
+            if !cfg!(feature = "device-audio") {
+                return Err(format!(
+                    "--audio-{direction} device:{value} requires a build with the `device-audio` feature"
+                ));
+            }
+            Ok(Endpoint::Device(value.to_owned()))
+        }
         "generator" => Err(format!(
             "--audio-{direction} generator:{value} is not shipped yet"
         )),
@@ -113,11 +226,7 @@ fn endpoint(
 }
 
 /// List stable identifiers without opening a stream.
-pub(crate) fn list(raw: &[String], format: Format) -> Exit {
-    if crate::wants_help(raw) {
-        print!("{HELP}");
-        return Exit::Success;
-    }
+pub(crate) fn list(_options: DevicesOptions, format: Format) -> Exit {
     #[cfg(feature = "device-audio")]
     {
         match enabled::devices() {
@@ -218,17 +327,26 @@ impl Driver {
         &mut self,
         media: &sipx_media::MediaSession,
         duration: std::time::Duration,
+        cancelled: &tokio_util::sync::CancellationToken,
     ) -> Result<u64, String> {
         #[cfg(feature = "device-audio")]
         {
-            self.0.run(media, duration).await
+            self.0.run(media, duration, cancelled).await
         }
         #[cfg(not(feature = "device-audio"))]
         {
-            let _ = (self, media, duration);
+            let _ = (self, media, duration, cancelled);
             std::future::ready(()).await;
             Ok(0)
         }
+    }
+
+    /// Stop callbacks and release both selected streams. Idempotent after ordinary completion.
+    pub(crate) fn stop(&mut self) {
+        #[cfg(feature = "device-audio")]
+        self.0.shutdown();
+        #[cfg(not(feature = "device-audio"))]
+        let _ = self;
     }
 
     /// Add selected configurations and loss counters to the terminal result.
@@ -363,6 +481,7 @@ mod enabled {
             &mut self,
             media: &sipx_media::MediaSession,
             duration: Duration,
+            cancelled: &tokio_util::sync::CancellationToken,
         ) -> Result<u64, String> {
             let rate = media.clock_rate();
             let packet_samples = u32::try_from(media.samples_per_packet())
@@ -404,6 +523,7 @@ mod enabled {
                 deadline,
                 stop_rx.clone(),
                 stop_tx.clone(),
+                cancelled,
             );
             let output = relay_output(
                 self.output.as_mut(),
@@ -411,6 +531,7 @@ mod enabled {
                 deadline,
                 stop_rx,
                 stop_tx.clone(),
+                cancelled,
             );
             let (input_result, output_result) = tokio::join!(input, output);
             let _ = stop_tx.send(true);
@@ -422,7 +543,7 @@ mod enabled {
 
         /// Pausing stops new callbacks; dropping the stream waits for the backend worker it owns.
         /// Taking each option makes this idempotent on every error path.
-        fn shutdown(&mut self) {
+        pub(super) fn shutdown(&mut self) {
             if let Some(stream) = self.input.as_mut().and_then(|input| input.stream.take()) {
                 let _ = stream.pause();
                 drop(stream);
@@ -497,12 +618,14 @@ mod enabled {
         deadline: tokio::time::Instant,
         mut stop: watch::Receiver<bool>,
         stop_all: watch::Sender<bool>,
+        cancelled: &tokio_util::sync::CancellationToken,
     ) -> Result<(), String> {
         let Some(input) = input else {
             return Ok(());
         };
         loop {
             tokio::select! {
+                () = cancelled.cancelled() => return Ok(()),
                 () = tokio::time::sleep_until(deadline) => return Ok(()),
                 changed = stop.changed() => {
                     if changed.is_err() || *stop.borrow() {
@@ -538,6 +661,7 @@ mod enabled {
         deadline: tokio::time::Instant,
         mut stop: watch::Receiver<bool>,
         stop_all: watch::Sender<bool>,
+        cancelled: &tokio_util::sync::CancellationToken,
     ) -> Result<u64, String> {
         let Some(output) = output else {
             return Ok(0);
@@ -545,6 +669,7 @@ mod enabled {
         let mut received = 0u64;
         loop {
             tokio::select! {
+                () = cancelled.cancelled() => return Ok(received),
                 () = tokio::time::sleep_until(deadline) => return Ok(received),
                 changed = stop.changed() => {
                     if changed.is_err() || *stop.borrow() {
@@ -1035,21 +1160,112 @@ mod enabled {
 
         #[test]
         fn endpoint_aliases_are_exact_and_conflicts_are_refused() {
-            let raw = ["dial", "sip:a@b", "--audio-input", "wav:a.wav"].map(str::to_owned);
-            let selected =
-                super::super::Selection::from_args(&crate::Args::new(&raw).unwrap()).unwrap();
+            let selected = super::super::Selection::from_options(&crate::cli::AudioOptions {
+                audio_input: Some("wav:a.wav".to_owned()),
+                ..crate::cli::AudioOptions::default()
+            })
+            .unwrap();
             assert_eq!(selected.wav_input(), Some("a.wav"));
 
-            let raw = [
-                "dial",
-                "sip:a@b",
-                "--audio-input",
-                "wav:a.wav",
-                "--play",
-                "b.wav",
-            ]
-            .map(str::to_owned);
-            assert!(super::super::Selection::from_args(&crate::Args::new(&raw).unwrap()).is_err());
+            let options = crate::cli::AudioOptions {
+                audio_input: Some("wav:a.wav".to_owned()),
+                play: Some("b.wav".to_owned()),
+                ..crate::cli::AudioOptions::default()
+            };
+            assert!(super::super::Selection::from_options(&options).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod output_tests {
+    use super::*;
+
+    fn scratch(case: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "sipx-recording-output-{}-{case}-{:016x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir(&path).expect("scratch directory creates");
+        path
+    }
+
+    fn temporary_entries(directory: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(directory)
+            .expect("directory reads")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().contains(".sipx-recording-"))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn reservation_does_not_create_or_truncate_the_final_path() {
+        let directory = scratch("reserve");
+        let final_path = directory.join("heard.wav");
+        let requested = final_path.to_string_lossy();
+        let reservation = WavOutput::reserve(&requested).expect("destination reserves");
+        assert!(
+            !final_path.exists(),
+            "preflight must not expose an empty WAV"
+        );
+        assert_eq!(temporary_entries(&directory).len(), 1);
+        drop(reservation);
+        assert!(temporary_entries(&directory).is_empty());
+
+        std::fs::write(&final_path, b"keep me").expect("existing destination writes");
+        let error = WavOutput::reserve(&requested).expect_err("existing destination is refused");
+        assert!(error.contains("already exists"), "{error}");
+        assert_eq!(
+            std::fs::read(&final_path).expect("existing bytes read"),
+            b"keep me"
+        );
+        std::fs::remove_dir_all(directory).expect("scratch removes");
+    }
+
+    #[test]
+    fn finalization_installs_a_complete_wav_and_removes_the_temporary() {
+        let directory = scratch("finish");
+        let final_path = directory.join("heard.wav");
+        let requested = final_path.to_string_lossy().into_owned();
+        let reservation = WavOutput::reserve(&requested).expect("destination reserves");
+        assert_eq!(
+            reservation
+                .finish(&[1, -2, 3, -4], 8_000)
+                .expect("WAV installs"),
+            requested
+        );
+        let wav = sipx_audio::read_wav(File::open(&final_path).expect("installed recording opens"))
+            .expect("installed recording parses");
+        assert_eq!(wav.sample_rate, 8_000);
+        assert_eq!(wav.samples, [1, -2, 3, -4]);
+        assert!(temporary_entries(&directory).is_empty());
+        std::fs::remove_dir_all(directory).expect("scratch removes");
+    }
+
+    #[test]
+    fn a_file_created_after_preflight_is_not_replaced() {
+        let directory = scratch("race");
+        let final_path = directory.join("heard.wav");
+        let requested = final_path.to_string_lossy().into_owned();
+        let reservation = WavOutput::reserve(&requested).expect("destination reserves");
+        std::fs::write(&final_path, b"winner").expect("competing destination writes");
+        let error = reservation
+            .finish(&[1, 2, 3], 8_000)
+            .expect_err("late destination wins without replacement");
+        assert!(error.contains(&requested), "{error}");
+        assert_eq!(std::fs::read(&final_path).expect("winner reads"), b"winner");
+        assert!(temporary_entries(&directory).is_empty());
+        std::fs::remove_dir_all(directory).expect("scratch removes");
     }
 }

@@ -40,6 +40,28 @@ a=rtpmap:13 CN/8000\r\n\
 a=rtpmap:101 telephone-event/8000\r\n\
 a=fmtp:101 0-16\r\n";
 
+const O2: &str = "v=0\r\n\
+o=- 496232 1 IN IP4 192.0.2.10\r\n\
+s=-\r\n\
+t=0 0\r\n\
+a=ice-options:ice2\r\n\
+m=audio 49170 UDP/TLS/RTP/SAVPF 111 0 8 13 101\r\n\
+c=IN IP4 192.0.2.10\r\n\
+a=sendrecv\r\n\
+a=rtcp-mux\r\n\
+a=ice-ufrag:ofr1\r\n\
+a=ice-pwd:offerPassword0123456789AB\r\n\
+a=candidate:1 1 UDP 2130706431 192.0.2.10 49170 typ host\r\n\
+a=candidate:2 2 UDP 2130706430 192.0.2.10 49171 typ host\r\n\
+a=fingerprint:sha-256 00:01:02:03:04:05:06:07:08:09:0A:0B:0C:0D:0E:0F:10:11:12:13:14:15:16:17:18:19:1A:1B:1C:1D:1E:1F\r\n\
+a=setup:actpass\r\n\
+a=rtpmap:111 opus/48000/2\r\n\
+a=rtpmap:0 PCMU/8000\r\n\
+a=rtpmap:8 PCMA/8000\r\n\
+a=rtpmap:13 CN/8000\r\n\
+a=rtpmap:101 telephone-event/8000\r\n\
+a=fmtp:101 0-16\r\n";
+
 const A1: &str = "v=0\r\n\
 o=- 772211 1 IN IP4 198.51.100.20\r\n\
 s=-\r\n\
@@ -173,6 +195,74 @@ fn complete_vectors_have_the_normative_identity_and_validate() {
     assert_eq!(
         answer_profile.local_setup,
         sipx_sdp::fingerprint::Setup::Passive
+    );
+}
+
+/// `BA-SDP-O2`: an initial mux offer may retain a bounded separate-port fallback. The answerer
+/// discards its component-two candidate before it constructs the one-component ICE description.
+#[test]
+fn an_unused_rtcp_candidate_in_a_mux_offer_is_not_a_runtime_component() {
+    assert_eq!(O2.len(), 613);
+    assert_eq!(
+        format!("{:x}", Sha256::digest(O2)),
+        "5957da5732ebe747cffa9cc940381eb63caf7c2bfc0dca4beb7f4609e178e4d0"
+    );
+    let offered = parse(O2).expect("O2 parses");
+    let profile = validate(&offered, BrowserAudioRole::Offerer).expect("O2 profile");
+    assert_eq!(profile.candidates.len(), 1);
+    assert_eq!(
+        profile.candidates[0].component,
+        sipx_sdp::ice::ComponentId::RTP
+    );
+
+    let answered = answer(&offered, &answer_local()).expect("O2 is answerable");
+    assert!(
+        answered.media[0]
+            .ice_candidates()
+            .iter()
+            .all(|candidate| candidate.component == sipx_sdp::ice::ComponentId::RTP)
+    );
+}
+
+/// The ignored fallback cannot substitute for the profile's media component, remove mux, or grow
+/// without a bound. A component-two line in an answer remains a contradiction after mux won.
+#[test]
+fn unused_rtcp_candidates_do_not_weaken_the_profile_boundary() {
+    let no_component_one = parse(&O2.replace(
+        "a=candidate:1 1 UDP 2130706431 192.0.2.10 49170 typ host\r\n",
+        "",
+    ))
+    .expect("component-two-only offer parses");
+    assert_eq!(
+        validate(&no_component_one, BrowserAudioRole::Offerer),
+        Err(ProfileError::IceRequired)
+    );
+
+    let no_mux = parse(&O2.replace("a=rtcp-mux\r\n", "")).expect("non-mux offer parses");
+    assert_eq!(
+        validate(&no_mux, BrowserAudioRole::Offerer),
+        Err(ProfileError::RtcpMuxRequired)
+    );
+
+    let extra = "a=candidate:2 2 UDP 2130706430 192.0.2.10 49171 typ host\r\n";
+    let over_bound = parse(&O1.replace(
+        "a=setup:actpass\r\n",
+        &format!("{}a=setup:actpass\r\n", extra.repeat(33)),
+    ))
+    .expect("bounded fallback offer parses");
+    assert_eq!(
+        validate(&over_bound, BrowserAudioRole::Offerer),
+        Err(ProfileError::IceRequired)
+    );
+
+    let answer_with_component_two = answer_mutation(
+        "a=candidate:1 1 UDP 2130706431 198.51.100.20 53000 typ host\r\n",
+        "a=candidate:1 1 UDP 2130706431 198.51.100.20 53000 typ host\r\n\
+         a=candidate:2 2 UDP 2130706430 198.51.100.20 53001 typ host\r\n",
+    );
+    assert_eq!(
+        validate(&answer_with_component_two, BrowserAudioRole::Answerer),
+        Err(ProfileError::RtcpMuxRequired)
     );
 }
 

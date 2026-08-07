@@ -4,7 +4,7 @@ title: Build the CLI scaffold and machine-readable output
 pillar: Phone
 status: done
 priority: 1
-design: docs/designs/cli.md
+design: docs/designs/phone.md
 epic: cli
 areas: [sipx-cli]
 note:

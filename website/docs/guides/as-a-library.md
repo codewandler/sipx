@@ -18,12 +18,18 @@ support intent, not semantic-version stability.
 
 ## Add a dependency
 
-Pin the exact public prerelease in `Cargo.toml` so every sipx crate resolves to the same release:
+Pin every directly imported sipx crate to the exact public prerelease. This complete minimal block
+compiles the [answer-a-call example](answer-a-call.md):
 
+<!-- BEGIN generated:answer-consumer-dependencies -->
 ```toml
 [dependencies]
 sipx-call = "=1.0.0-rc.2"
+sipx-sip = "=1.0.0-rc.2"
+sipx-transport = "=1.0.0-rc.2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
+<!-- END generated:answer-consumer-dependencies -->
 
 This website documents `main`, which can be tested explicitly with:
 

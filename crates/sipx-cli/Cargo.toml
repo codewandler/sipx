@@ -24,6 +24,7 @@ path = "src/main.rs"
 sipx-sip.workspace = true
 sipx-rtp.workspace = true
 bytes.workspace = true
+clap.workspace = true
 sipx-call.workspace = true
 sipx-app-protocol.workspace = true
 sipx-media.workspace = true
@@ -45,6 +46,7 @@ cpal = { workspace = true, optional = true }
 sipx-audio.workspace = true
 # Path-only so Cargo omits workspace-only fixture support from the normalized registry manifest.
 sipx-testkit = { path = "../sipx-testkit" }
+serde.workspace = true
 tokio = { workspace = true, features = ["full"] }
 
 [lints]

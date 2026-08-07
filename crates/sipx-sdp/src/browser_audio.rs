@@ -253,9 +253,6 @@ pub fn validate(
         || media
             .attribute("rtcp")
             .is_some_and(|attribute| !is_mux_placeholder(attribute.value.as_deref()))
-        || raw_candidates(media)
-            .filter_map(raw_candidate_component)
-            .any(|component| component != ComponentId::RTP)
     {
         return Err(ProfileError::RtcpMuxRequired);
     }
@@ -269,29 +266,7 @@ pub fn validate(
     let ice = description
         .ice_credentials_for(media)
         .ok_or(ProfileError::IceRequired)?;
-    let raw_candidates: Vec<&str> = raw_candidates(media).collect();
-    if raw_candidates.is_empty()
-        || raw_candidates.len() > MAX_CANDIDATES
-        || raw_candidates
-            .iter()
-            .any(|value| value.len() > MAX_CANDIDATE_LINE)
-    {
-        return Err(ProfileError::IceRequired);
-    }
-    let candidates: Vec<Candidate> = raw_candidates
-        .into_iter()
-        .map(Candidate::parse)
-        .collect::<Option<_>>()
-        .ok_or(ProfileError::IceRequired)?;
-    if candidates.iter().any(|candidate| {
-        candidate.component != ComponentId::RTP
-            || !matches!(
-                candidate.kind,
-                CandidateType::Host | CandidateType::ServerReflexive
-            )
-    }) {
-        return Err(ProfileError::IceRequired);
-    }
+    let candidates = profile_candidates(media, role)?;
     let setup = setup_of(description, media).ok_or(ProfileError::SetupRole)?;
     let setup_ok = match role {
         BrowserAudioRole::Offerer => setup == Setup::ActPass,
@@ -659,6 +634,51 @@ fn raw_candidates(media: &MediaDescription) -> impl Iterator<Item = &str> {
 fn raw_candidate_component(value: &str) -> Option<ComponentId> {
     let component = value.split_whitespace().nth(1)?.parse::<u16>().ok()?;
     ComponentId::new(component)
+}
+
+/// Retain the one component this profile can check and bound offered fallback metadata.
+fn profile_candidates(
+    media: &MediaDescription,
+    role: BrowserAudioRole,
+) -> Result<Vec<Candidate>, ProfileError> {
+    let raw: Vec<&str> = raw_candidates(media).collect();
+    if raw.is_empty() || raw.iter().any(|value| value.len() > MAX_CANDIDATE_LINE) {
+        return Err(ProfileError::IceRequired);
+    }
+
+    let mut component_one = Vec::new();
+    let mut unused_component_two = 0_usize;
+    for candidate in raw {
+        match raw_candidate_component(candidate) {
+            Some(ComponentId::RTP) => component_one.push(candidate),
+            Some(ComponentId::RTCP) if role == BrowserAudioRole::Offerer => {
+                unused_component_two += 1;
+            }
+            Some(ComponentId::RTCP) => return Err(ProfileError::RtcpMuxRequired),
+            Some(_) | None => return Err(ProfileError::IceRequired),
+        }
+    }
+    if component_one.is_empty()
+        || component_one.len() > MAX_CANDIDATES
+        || unused_component_two > MAX_CANDIDATES
+    {
+        return Err(ProfileError::IceRequired);
+    }
+
+    let candidates: Vec<Candidate> = component_one
+        .into_iter()
+        .map(Candidate::parse)
+        .collect::<Option<_>>()
+        .ok_or(ProfileError::IceRequired)?;
+    if candidates.iter().any(|candidate| {
+        !matches!(
+            candidate.kind,
+            CandidateType::Host | CandidateType::ServerReflexive
+        )
+    }) {
+        return Err(ProfileError::IceRequired);
+    }
+    Ok(candidates)
 }
 
 fn is_weaker_protocol(protocol: &str) -> bool {

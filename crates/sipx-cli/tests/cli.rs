@@ -27,6 +27,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{Semaphore, SemaphorePermit};
 
+mod support;
+
 /// One real command-line scenario at a time in this test binary.
 ///
 /// A scenario may and usually does run several `sipx` processes concurrently. Running every
@@ -122,7 +124,19 @@ async fn start_answerer_in(
     String,
     tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
 ) {
-    let mut args = vec!["answer", "--local", "127.0.0.1:0", "--json", "--wait", "20"];
+    start_answerer_on(dir, "127.0.0.1:0", extra).await
+}
+
+async fn start_answerer_on(
+    dir: Option<&std::path::Path>,
+    local: &str,
+    extra: &[&str],
+) -> (
+    tokio::process::Child,
+    String,
+    tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+) {
+    let mut args = vec!["answer", "--local", local, "--json", "--wait", "20"];
     args.extend_from_slice(extra);
 
     let mut command = sipx();
@@ -501,6 +515,7 @@ async fn dph_2_wss_name_mismatch_fails_without_downgrade() {
                 "--timeout",
                 "5",
                 "--json",
+                "-v",
             ])
             .output(),
     )
@@ -514,6 +529,13 @@ async fn dph_2_wss_name_mismatch_fails_without_downgrade() {
         "name mismatch connected: {stdout} / {stderr}"
     );
     assert!(stderr.contains("\"status\":\"failed\""), "{stderr}");
+    assert_eq!(
+        stderr.matches("event=\"call.ended\"").count(),
+        1,
+        "{stderr}"
+    );
+    assert!(stderr.contains("cause=\"failed\""), "{stderr}");
+    assert!(!stderr.contains("event=\"call.answered\""), "{stderr}");
     assert!(
         stderr.contains("certificate") || stderr.contains("tls handshake"),
         "the typed failure names TLS verification: {stderr}"
@@ -538,12 +560,17 @@ async fn dph_3_opus_without_the_feature_fails_before_network_io() {
         .await
         .expect("observer binds");
     let address = observer.local_addr().expect("observer address");
+    let recording = scratch("capability-before-resources")
+        .join("missing-parent")
+        .join("out.wav");
     let output = sipx()
         .args([
             "dial",
             &format!("sip:bob@{address}"),
             "--codec",
             "opus",
+            "--record",
+            recording.to_str().expect("recording path"),
             "--json",
         ])
         .output()
@@ -552,10 +579,114 @@ async fn dph_3_opus_without_the_feature_fails_before_network_io() {
     let complaint = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(2), "{complaint}");
     assert!(complaint.contains("`opus` feature"), "{complaint}");
+    assert!(
+        !complaint.contains("missing-parent"),
+        "capability preflight precedes local resources: {complaint}"
+    );
+
+    let text = sipx()
+        .args([
+            "dial",
+            &format!("sip:bob@{address}"),
+            "--codec",
+            "opus",
+            "--record",
+            recording.to_str().expect("recording path"),
+        ])
+        .output()
+        .await
+        .expect("text dial runs");
+    let text_complaint = String::from_utf8_lossy(&text.stderr);
+    assert_eq!(text.status.code(), Some(2), "{text_complaint}");
+    assert!(
+        text_complaint.contains("`opus` feature"),
+        "{text_complaint}"
+    );
     let mut datagram = [0u8; 1];
     assert!(
         observer.try_recv_from(&mut datagram).is_err(),
         "an unsupported codec reached signalling"
+    );
+}
+
+/// M-69 failing-first: a valid offer outside the answerer's selected codec policy used to make
+/// the answerer exit locally with no response, leaving the caller to report a timeout. The capture
+/// and exported counters hold the wire boundary as well as both process outcomes.
+#[tokio::test]
+async fn an_unacceptable_initial_offer_is_refused_488_before_answer_teardown() {
+    let _scenario = process_scenario().await;
+    let dir = scratch("initial-offer-refusal");
+    let capture = dir.join("answer.pcapng");
+    let counters = dir.join("answer-counters.json");
+    let (mut answerer, address, _answer_lines) = start_answerer(&[
+        "--codec",
+        "l16",
+        "--capture",
+        capture.to_str().expect("capture path"),
+        "--counters",
+        counters.to_str().expect("counter path"),
+    ])
+    .await;
+
+    // The clock is the measurement: a final 488 must beat the caller's five-second setup budget.
+    let started = std::time::Instant::now();
+    let caller = tokio::time::timeout(
+        Duration::from_secs(10),
+        sipx()
+            .args([
+                "dial",
+                &format!("sip:answer@{address}"),
+                "--codec",
+                "pcmu",
+                "--timeout",
+                "5",
+                "--json",
+            ])
+            .output(),
+    )
+    .await
+    .expect("caller outcome is bounded")
+    .expect("caller runs");
+    let elapsed = started.elapsed();
+    let caller_error = String::from_utf8_lossy(&caller.stderr);
+
+    let answer_error = drain_stderr(&mut answerer).await;
+    let answer_status = tokio::time::timeout(Duration::from_secs(5), answerer.wait())
+        .await
+        .expect("answer teardown is bounded")
+        .expect("answerer exits");
+    assert_eq!(answer_status.code(), Some(1), "{answer_error}");
+    assert!(
+        answer_error.contains("no codec in common"),
+        "{answer_error}"
+    );
+    assert_eq!(caller.status.code(), Some(3), "{caller_error}");
+    assert!(
+        caller_error.contains(r#""status":"rejected"#),
+        "{caller_error}"
+    );
+    assert!(
+        caller_error.contains("488 Not Acceptable Here"),
+        "{caller_error}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "488 arrived after {elapsed:?}"
+    );
+
+    let wire =
+        String::from_utf8_lossy(&std::fs::read(&capture).expect("capture exists")).into_owned();
+    assert_eq!(wire.matches("INVITE sip:answer@").count(), 1, "{wire}");
+    assert!(wire.contains("SIP/2.0 488 Not Acceptable Here"), "{wire}");
+    assert!(wire.contains("Content-Length: 0"), "{wire}");
+
+    let counts: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&counters).expect("answer counters exist"))
+            .expect("counter JSON");
+    assert!(counts["messages_in"].as_u64().unwrap_or(0) >= 1, "{counts}");
+    assert!(
+        counts["messages_out"].as_u64().unwrap_or(0) >= 1,
+        "{counts}"
     );
 }
 
@@ -1058,7 +1189,7 @@ async fn browser_audio_profile_runs_both_cli_roles_and_reports_nominated_facts()
         (&*offerer, "browser-offerer"),
         (&answerer_report, "browser-answerer"),
     ] {
-        let value: serde_json::Value = serde_json::from_str(report).expect("terminal JSON parses");
+        let value = support::strict_json::value(report);
         assert_eq!(value["status"], "answered", "{report}");
         assert_eq!(value["media_profile"], "browser-audio", "{report}");
         assert_eq!(value["negotiated_codec"], "opus", "{report}");
@@ -1068,7 +1199,7 @@ async fn browser_audio_profile_runs_both_cli_roles_and_reports_nominated_facts()
         assert!(value["nominated_local"].as_str().is_some(), "{report}");
         assert!(value["nominated_remote"].as_str().is_some(), "{report}");
         assert_eq!(value["ice_generation"], 0, "{report}");
-        assert_eq!(value["media_state"], "running", "{report}");
+        assert_eq!(value["media_state"], "closed", "{report}");
         assert!(
             value["negotiated_payload_type"].as_u64().is_some(),
             "{report}"
@@ -1082,6 +1213,7 @@ async fn browser_audio_profile_runs_both_cli_roles_and_reports_nominated_facts()
 }
 
 /// A named profile selected on clear signalling is rejected before any datagram leaves.
+#[cfg(all(feature = "opus", feature = "dtls"))]
 #[tokio::test]
 async fn browser_audio_profile_refuses_non_wss_before_network_io() {
     let observer = tokio::net::UdpSocket::bind("127.0.0.1:0")
@@ -1103,6 +1235,43 @@ async fn browser_audio_profile_refuses_non_wss_before_network_io() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("requires --transport wss"));
     let mut datagram = [0_u8; 1];
     assert!(observer.try_recv_from(&mut datagram).is_err());
+}
+
+/// The named profile's complete build requirement is known before WSS connection setup or any
+/// verdict from the selected peer.
+#[cfg(any(not(feature = "opus"), not(feature = "dtls")))]
+#[tokio::test]
+async fn browser_audio_missing_build_feature_precedes_peer_io() {
+    let observer = std::net::TcpListener::bind("127.0.0.1:0").expect("observer binds");
+    observer
+        .set_nonblocking(true)
+        .expect("observer is nonblocking");
+    let address = observer.local_addr().expect("observer address");
+    let output = sipx()
+        .args([
+            "dial",
+            &format!("sip:bob@{address}"),
+            "--transport",
+            "wss",
+            "--profile",
+            "browser-audio",
+            "--json",
+        ])
+        .output()
+        .await
+        .expect("dial runs");
+    let complaint = String::from_utf8_lossy(&output.stderr);
+    let missing = if cfg!(feature = "opus") {
+        "`dtls` feature"
+    } else {
+        "`opus` feature"
+    };
+    assert_eq!(output.status.code(), Some(2), "{complaint}");
+    assert!(complaint.contains(missing), "{complaint}");
+    assert!(
+        observer.accept().is_err(),
+        "profile preflight precedes WSS I/O"
+    );
 }
 
 /// Browser audio starts media only after a final answer, ICE nomination and verified DTLS. The
@@ -1344,7 +1513,7 @@ async fn a_device_endpoint_without_the_feature_fails_before_network_io() {
         .output()
         .await
         .expect("dial runs");
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(2));
     let complaint = String::from_utf8_lossy(&output.stderr);
     assert!(complaint.contains("device-audio"), "{complaint}");
     let mut datagram = [0u8; 1];
@@ -1428,8 +1597,7 @@ async fn dph_12_wav_and_virtual_device_carry_the_same_clip() {
         String::from_utf8_lossy(&listing.stdout),
         String::from_utf8_lossy(&listing.stderr)
     );
-    let listing: serde_json::Value =
-        serde_json::from_slice(&listing.stdout).expect("device inventory is JSON");
+    let listing = support::strict_json::versioned_bytes("device", &listing.stdout);
     let listed = listing["devices"]
         .as_array()
         .expect("device inventory contains an array")
@@ -1593,6 +1761,88 @@ async fn dph_12_wav_and_virtual_device_carry_the_same_clip() {
     answerer_exits_cleanly(&mut output_answerer).await;
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// P-20: both commands and both WAV-output spellings reject local destination failures before a
+/// socket can emit. A regular file used as the parent is a controlled unwritable destination that
+/// remains reliable even when the test runner has elevated privileges.
+#[tokio::test]
+async fn recording_destinations_are_preflighted_before_network_io() {
+    let _scenario = process_scenario().await;
+    let observer = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("observer binds");
+    let address = observer.local_addr().expect("observer address");
+    let directory = scratch("recording-preflight");
+    let missing = directory.join("missing").join("heard.wav");
+    let blocked_parent = directory.join("not-a-directory");
+    std::fs::write(&blocked_parent, b"ordinary file").expect("blocking parent writes");
+    let blocked = blocked_parent.join("heard.wav");
+
+    let cases = [
+        vec![
+            "dial".to_owned(),
+            format!("sip:preflight@{address}"),
+            "--record".to_owned(),
+            missing.to_string_lossy().into_owned(),
+            "--timeout".to_owned(),
+            "1".to_owned(),
+            "--json".to_owned(),
+        ],
+        vec![
+            "dial".to_owned(),
+            format!("sip:preflight@{address}"),
+            "--audio-output".to_owned(),
+            format!("wav:{}", blocked.display()),
+            "--timeout".to_owned(),
+            "1".to_owned(),
+            "--json".to_owned(),
+        ],
+        vec![
+            "answer".to_owned(),
+            "--local".to_owned(),
+            address.to_string(),
+            "--record".to_owned(),
+            missing.to_string_lossy().into_owned(),
+            "--json".to_owned(),
+        ],
+        vec![
+            "answer".to_owned(),
+            "--local".to_owned(),
+            address.to_string(),
+            "--audio-output".to_owned(),
+            format!("wav:{}", blocked.display()),
+            "--json".to_owned(),
+        ],
+    ];
+
+    for case in cases {
+        let requested = case
+            .iter()
+            .find(|value| value.ends_with("heard.wav"))
+            .expect("case names its requested path");
+        let requested = requested.strip_prefix("wav:").unwrap_or(requested);
+        let output = tokio::time::timeout(Duration::from_secs(5), sipx().args(&case).output())
+            .await
+            .expect("preflight refusal is bounded")
+            .expect("command runs");
+        let complaint = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{case:?}: {complaint}");
+        assert!(complaint.contains(requested), "{case:?}: {complaint}");
+        assert!(output.stdout.is_empty(), "usage emits no result: {case:?}");
+    }
+
+    let mut datagram = [0u8; 2048];
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(300),
+            observer.recv_from(&mut datagram)
+        )
+        .await
+        .is_err(),
+        "a local recording refusal must not emit a datagram"
+    );
+    std::fs::remove_dir_all(directory).expect("scratch removes");
 }
 
 /// Registration uses the same selection and certificate policy as calls. This is deliberately a
@@ -1971,12 +2221,52 @@ async fn register_over_a_flow_keeps_it_and_a_push_wakes_it() {
 }
 
 #[tokio::test]
-async fn version_and_help_succeed() {
+async fn version_obeys_the_selected_output_contract() {
     let _scenario = process_scenario().await;
     let output = sipx().arg("version").output().await.expect("runs");
     assert!(output.status.success());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("sipx"));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("sipx {}\n", env!("CARGO_PKG_VERSION"))
+    );
+    assert!(output.stderr.is_empty());
 
+    let output = sipx()
+        .args(["version", "--json"])
+        .output()
+        .await
+        .expect("JSON version runs");
+    assert!(output.status.success());
+    let version: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("version is one JSON object");
+    assert_eq!(version["status"], "version");
+    assert_eq!(version["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(String::from_utf8_lossy(&output.stdout).lines().count(), 1);
+    assert!(output.stderr.is_empty());
+
+    for arguments in [
+        ["version", "extra"].as_slice(),
+        ["version", "--json", "extra"].as_slice(),
+    ] {
+        let output = sipx()
+            .args(arguments)
+            .output()
+            .await
+            .expect("version refuses");
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        let complaint = String::from_utf8_lossy(&output.stderr);
+        assert!(complaint.contains("extra"), "{complaint}");
+        if arguments.contains(&"--json") {
+            serde_json::from_slice::<serde_json::Value>(&output.stderr)
+                .expect("requested JSON usage report");
+        }
+    }
+}
+
+#[tokio::test]
+async fn help_succeeds() {
+    let _scenario = process_scenario().await;
     let output = sipx().arg("help").output().await.expect("runs");
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("USAGE"));
@@ -2026,19 +2316,92 @@ async fn dial_without_a_uri_is_a_usage_error() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("\"status\":\"usage\""));
 }
 
-/// A name with no resolver behind it says what to do about it, rather than failing later in a
-/// way that looks like a network problem.
+/// Named dial and registration share the system resolver. `localhost` makes the proof independent
+/// of public DNS while still failing if either command takes the old literal-only path.
 #[tokio::test]
-async fn dialling_a_name_explains_what_is_missing() {
+async fn dial_and_register_through_a_loopback_hostname() {
     let _scenario = process_scenario().await;
-    let output = sipx()
-        .args(["dial", "sip:bob@example.com", "--json"])
-        .output()
+    let (mut answerer, address, mut lines) = start_answerer(&["--duration", "0"]).await;
+    let port = address
+        .parse::<std::net::SocketAddr>()
+        .expect("answer address")
+        .port();
+    let output = tokio::time::timeout(
+        Duration::from_secs(15),
+        sipx()
+            .args([
+                "dial",
+                &format!("sip:bob@localhost:{port}"),
+                "--local",
+                "127.0.0.1:0",
+                "--duration",
+                "0",
+                "--timeout",
+                "5",
+                "--json",
+            ])
+            .output(),
+    )
+    .await
+    .expect("named dial is bounded")
+    .expect("dial runs");
+    assert!(
+        output.status.success(),
+        "{} / {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let answered = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
         .await
-        .expect("runs");
-    assert_eq!(output.status.code(), Some(2));
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("address and port"), "{stderr}");
+        .expect("answer report is bounded")
+        .expect("reads answer report")
+        .expect("answer report exists");
+    assert!(answered.contains("\"status\":\"answered\""), "{answered}");
+    answerer_exits_cleanly(&mut answerer).await;
+
+    let registrar = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("registrar binds");
+    let registrar_port = registrar.local_addr().expect("registrar address").port();
+    let child = sipx()
+        .args([
+            "register",
+            "sip:alice@example.test",
+            "--target",
+            &format!("localhost:{registrar_port}"),
+            "--local",
+            "127.0.0.1:0",
+            "--expires",
+            "60",
+            "--json",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("register spawns");
+    let mut bytes = vec![0u8; 65_535];
+    let (length, source) =
+        tokio::time::timeout(Duration::from_secs(10), registrar.recv_from(&mut bytes))
+            .await
+            .expect("named REGISTER is bounded")
+            .expect("REGISTER arrives");
+    let request = String::from_utf8_lossy(&bytes[..length]).into_owned();
+    answer_register(&registrar, &request, source).await;
+    let output = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
+        .await
+        .expect("register exits")
+        .expect("register output");
+    assert!(
+        output.status.success(),
+        "{} / {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("\"status\":\"registered\""),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
 }
 
 /// The acceptance test for P-3 and P-4: two `sipx` processes, a real call, and a recording
@@ -2288,6 +2651,7 @@ async fn a_busy_answer_gives_the_caller_the_busy_exit_code() {
                 "5",
                 "--timeout",
                 "10",
+                "-v",
             ])
             .output(),
     )
@@ -2298,12 +2662,124 @@ async fn a_busy_answer_gives_the_caller_the_busy_exit_code() {
     assert_eq!(caller.status.code(), Some(6), "busy has its own exit code");
     let stderr = String::from_utf8_lossy(&caller.stderr);
     assert!(stderr.contains("\"status\":\"busy\""), "{stderr}");
+    assert_eq!(
+        stderr.matches("event=\"call.ended\"").count(),
+        1,
+        "{stderr}"
+    );
+    assert!(stderr.contains("cause=\"refused\""), "{stderr}");
+    assert!(stderr.contains("status=\"busy\""), "{stderr}");
+    assert!(!stderr.contains("event=\"call.answered\""), "{stderr}");
     assert!(
         String::from_utf8_lossy(&caller.stdout).is_empty(),
         "a failure must not land on stdout"
     );
 
     answerer_exits_cleanly(&mut answerer).await;
+}
+
+/// P-17: the process names and measures the distinct answer and cancellation phases. The peer
+/// rings but deliberately never completes the CANCEL/INVITE exchange, forcing the explicit
+/// cancellation allowance to be the failure bound.
+#[tokio::test]
+async fn dial_timeout_reports_and_obeys_its_cancellation_allowance() {
+    let _scenario = process_scenario().await;
+    let (peer, mut incoming) = bind(TransportConfig::new(
+        "127.0.0.1:0".parse().expect("a local address"),
+    ))
+    .await
+    .expect("peer binds");
+    let address = peer.local_addr();
+    let peer_driver = peer.clone();
+    let serving = tokio::spawn(async move {
+        while let Some(request) = incoming.recv().await {
+            match request.request.method {
+                Method::Invite => {
+                    let ringing = sipx_sip::build::ResponseBuilder::to_request(
+                        &request.request,
+                        StatusCode::new(180).expect("valid"),
+                        "Ringing",
+                    )
+                    .expect("builds")
+                    .build();
+                    peer_driver
+                        .respond(&request.key, ringing)
+                        .await
+                        .expect("rings");
+                }
+                Method::Cancel => return true,
+                _ => {}
+            }
+        }
+        false
+    });
+
+    let started = std::time::Instant::now();
+    let output = tokio::time::timeout(
+        Duration::from_secs(4),
+        sipx()
+            .args([
+                "dial",
+                &format!("sip:timeout@{address}"),
+                "--timeout",
+                "1",
+                "--cancel-timeout",
+                "1",
+                "--json",
+                "-v",
+            ])
+            .output(),
+    )
+    .await
+    .expect("the documented total bound holds")
+    .expect("dial runs");
+    let elapsed = started.elapsed();
+    assert!(
+        serving.await.expect("peer task joins"),
+        "the timeout must send CANCEL after the ringing response"
+    );
+    peer.shutdown().await;
+
+    assert_eq!(output.status.code(), Some(5));
+    assert!(output.stdout.is_empty(), "failure stays off stdout");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr.matches("event=\"call.ended\"").count(),
+        1,
+        "{stderr}"
+    );
+    assert!(stderr.contains("cause=\"timeout\""), "{stderr}");
+    assert!(!stderr.contains("event=\"call.answered\""), "{stderr}");
+    let report: serde_json::Value = serde_json::from_str(
+        stderr
+            .lines()
+            .find(|line| line.starts_with('{'))
+            .expect("timeout stderr contains its JSON result"),
+    )
+    .expect("timeout stderr has one JSON result");
+    assert_eq!(report["status"], "timeout");
+    assert_eq!(report["invitation_limit_ms"], 1_000);
+    assert_eq!(report["cancel_limit_ms"], 1_000);
+    assert_eq!(report["cancel_sent"], true);
+    assert_eq!(report["cancel_final_observed"], false);
+    assert_eq!(report["cancel_cleanup_completed"], false);
+    assert_eq!(report["cancel_cleanup_exhausted"], true);
+    assert!(
+        report["invitation_elapsed_ms"]
+            .as_u64()
+            .is_some_and(|value| value >= 1_000),
+        "measured invitation phase: {report}"
+    );
+    assert!(
+        report["cancel_elapsed_ms"]
+            .as_u64()
+            .is_some_and(|value| value >= 1_000),
+        "measured cancellation phase: {report}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "actual bound: {elapsed:?}"
+    );
 }
 
 /// `S-28`: the shell-facing credential option reaches the call retry, rather than merely parsing.
@@ -2391,6 +2867,7 @@ async fn authenticated_dial(from_environment: bool) {
         .await
         .expect("the authenticated dial is bounded")
         .expect("dial runs");
+    let _callee = serving.await.expect("the challenge server finishes");
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -2398,7 +2875,6 @@ async fn authenticated_dial(from_environment: bool) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let _callee = serving.await.expect("the challenge server finishes");
 }
 
 /// A challenge with no credential is a named authentication outcome, not a transaction timeout.
@@ -2513,6 +2989,7 @@ async fn bounded_load_stops_at_the_call_limit_and_emits_one_stable_summary() {
                 "--timeout",
                 "5",
                 "--json",
+                "-v",
             ])
             .output(),
     )
@@ -2527,8 +3004,23 @@ async fn bounded_load_stops_at_the_call_limit_and_emits_one_stable_summary() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).expect("UTF-8 summary");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let progress = log_records(&stderr);
+    assert_eq!(
+        progress.len(),
+        2,
+        "load INFO is bounded to admission plus summary: {progress:?}; {stderr}"
+    );
+    for event in ["load.admission_started", "load.summary"] {
+        assert!(
+            progress
+                .iter()
+                .any(|record| record.contains(&format!("event=\"{event}\""))),
+            "missing {event}: {progress:?}; {stderr}"
+        );
+    }
     assert_eq!(stdout.lines().count(), 1, "one final record: {stdout}");
-    let summary: serde_json::Value = serde_json::from_str(stdout.trim()).expect("JSON summary");
+    let summary = support::strict_json::versioned("load", stdout.trim());
     assert_eq!(summary["schema"], "sipx.load.v1");
     assert_eq!(summary["seed"], 41);
     assert_eq!(summary["outcomes"]["attempted"], 3);
@@ -2539,6 +3031,430 @@ async fn bounded_load_stops_at_the_call_limit_and_emits_one_stable_summary() {
         summary["response_codes"]["486"].as_u64().unwrap_or(0),
         rejected,
         "only responses that arrived are counted"
+    );
+}
+
+/// P-18: the two bounded-load commands are documented as a pair, so their neutral defaults must
+/// drive the same bodyless signalling workload. Both summaries prove the requested admission and
+/// concurrency bounds were exercised, then prove that every owned resource drained.
+#[cfg(unix)]
+#[tokio::test]
+async fn default_load_pair_completes_the_requested_signalling_workload() {
+    let _scenario = process_scenario().await;
+    let mut command = sipx();
+    command
+        .args([
+            "load-responder",
+            "--max-active",
+            "8",
+            "--calls",
+            "20",
+            "--cleanup",
+            "5",
+            "--dialog-duration",
+            "5",
+            "--json",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut responder = command.spawn().expect("responder starts");
+    let stdout = responder.stdout.take().expect("stdout is piped");
+    let mut lines = BufReader::new(stdout).lines();
+    let ready: serde_json::Value = serde_json::from_str(
+        &tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+            .await
+            .expect("readiness is bounded")
+            .expect("readiness can be read")
+            .expect("readiness line exists"),
+    )
+    .expect("readiness JSON");
+    let address = ready["address"].as_str().expect("readiness address");
+
+    let output = tokio::time::timeout(
+        Duration::from_secs(15),
+        sipx()
+            .args([
+                "load",
+                &format!("sip:load@{address}"),
+                "--rate",
+                "100",
+                "--concurrency",
+                "8",
+                "--calls",
+                "20",
+                "--call-duration",
+                "1",
+                "--timeout",
+                "5",
+                "--json",
+            ])
+            .output(),
+    )
+    .await
+    .expect("default load run is bounded")
+    .expect("load runs");
+    let load: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("load summary JSON");
+
+    // The pre-fix run stops after one internal media failure, leaving the responder below its
+    // call bound. Ask it through the ordinary graceful path for the diagnostic summary instead of
+    // letting the failing-first assertion orphan it.
+    if load["outcomes"]["attempted"] != 20 {
+        signal_interrupt(responder.id().expect("responder process id")).await;
+    }
+    let responder_summary: serde_json::Value = serde_json::from_str(
+        &tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+            .await
+            .expect("responder summary is bounded")
+            .expect("responder summary can be read")
+            .expect("responder summary exists"),
+    )
+    .expect("responder summary JSON");
+    let complaint = drain_stderr(&mut responder).await;
+    let responder_status = tokio::time::timeout(Duration::from_secs(5), responder.wait())
+        .await
+        .expect("responder exit is bounded")
+        .expect("responder exits");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(load["mode"], "signalling", "{load}");
+    assert_eq!(load["status"], "completed", "{load}");
+    assert_eq!(load["stop_signal"], serde_json::Value::Null, "{load}");
+    assert_eq!(load["outcomes"]["attempted"], 20, "{load}");
+    assert_eq!(
+        load["outcomes"]["connected"], 20,
+        "load: {load}; responder: {responder_summary}"
+    );
+    assert_eq!(load["outcomes"]["failed"], 0, "{load}");
+    assert_eq!(load["outcomes"]["peak_concurrency"], 8, "{load}");
+
+    assert_eq!(responder_status.code(), Some(0), "{complaint}");
+    assert_eq!(responder_summary["mode"], "signalling");
+    assert_eq!(responder_summary["status"], "completed");
+    assert_eq!(responder_summary["stop_signal"], serde_json::Value::Null);
+    assert_eq!(responder_summary["counts"]["invitations"], 20);
+    assert_eq!(responder_summary["counts"]["established"], 20);
+    assert_eq!(responder_summary["counts"]["completed"], 20);
+    assert_eq!(responder_summary["counts"]["active_high_water"], 8);
+    assert_eq!(responder_summary["post_drain"]["active_dialogs"], 0);
+    assert_eq!(responder_summary["post_drain"]["dispatcher_routes"], 0);
+    assert_eq!(responder_summary["post_drain"]["endpoint_transactions"], 0);
+    assert_eq!(responder_summary["post_drain"]["owned_tasks"], 0);
+}
+
+async fn start_mode_responder(
+    mode: &str,
+    calls: &str,
+    max_active: &str,
+) -> (
+    tokio::process::Child,
+    tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    serde_json::Value,
+) {
+    let mut command = sipx();
+    command
+        .args([
+            "load-responder",
+            "--mode",
+            mode,
+            "--max-active",
+            max_active,
+            "--calls",
+            calls,
+            "--cleanup",
+            "5",
+            "--dialog-duration",
+            "5",
+            "--json",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().expect("responder starts");
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let mut lines = BufReader::new(stdout).lines();
+    let ready = serde_json::from_str(
+        &tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+            .await
+            .expect("readiness is bounded")
+            .expect("readiness can be read")
+            .expect("readiness exists"),
+    )
+    .expect("readiness JSON");
+    (child, lines, ready)
+}
+
+/// Generated media remains an explicit symmetric workload and still supplies real RTP snapshots.
+#[tokio::test]
+async fn generated_media_load_pair_retains_the_rtp_workload() {
+    let _scenario = process_scenario().await;
+    let (mut responder, mut lines, ready) = start_mode_responder("generated-media", "4", "2").await;
+    let address = ready["address"].as_str().expect("readiness address");
+    let output = tokio::time::timeout(
+        Duration::from_secs(15),
+        sipx()
+            .args([
+                "load",
+                &format!("sip:load@{address}"),
+                "--mode",
+                "generated-media",
+                "--rate",
+                "20",
+                "--concurrency",
+                "2",
+                "--calls",
+                "4",
+                "--call-duration",
+                "1",
+                "--timeout",
+                "5",
+                "--json",
+            ])
+            .output(),
+    )
+    .await
+    .expect("generated-media run is bounded")
+    .expect("load runs");
+    let load: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("load summary JSON");
+    let summary: serde_json::Value = serde_json::from_str(
+        &tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+            .await
+            .expect("responder summary is bounded")
+            .expect("responder summary can be read")
+            .expect("responder summary exists"),
+    )
+    .expect("responder summary JSON");
+    let complaint = drain_stderr(&mut responder).await;
+    let responder_status = responder.wait().await.expect("responder exits");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(load["mode"], "generated-media", "{load}");
+    assert_eq!(load["status"], "completed", "{load}");
+    assert_eq!(load["outcomes"]["attempted"], 4, "{load}");
+    assert_eq!(load["outcomes"]["failed"], 0, "{load}");
+    assert_eq!(
+        load["outcomes"]["connected"].as_u64().unwrap_or(0)
+            + load["outcomes"]["timed_out"].as_u64().unwrap_or(0),
+        4,
+        "{load}"
+    );
+    assert_eq!(
+        load["media"]["snapshots"], load["outcomes"]["connected"],
+        "{load}"
+    );
+    assert_ne!(load["media"]["snapshots"], 0, "{load}");
+    assert_eq!(responder_status.code(), Some(0), "{complaint}");
+    assert_eq!(summary["status"], "completed", "{summary}");
+    assert_eq!(summary["counts"]["failed"], 0, "{summary}");
+    assert_eq!(
+        summary["counts"]["completed"].as_u64().unwrap_or(0)
+            + summary["counts"]["cancelled"].as_u64().unwrap_or(0),
+        4,
+        "{summary}"
+    );
+    assert_eq!(summary["post_drain"]["active_dialogs"], 0);
+    assert_eq!(summary["post_drain"]["owned_tasks"], 0);
+}
+
+/// A paired mode marker turns a configuration mismatch into one pre-admission refusal and two
+/// honest nonzero terminal results, rather than a late SDP parse failure inside a measured call.
+#[tokio::test]
+async fn incompatible_explicit_load_modes_fail_before_dialog_admission() {
+    let _scenario = process_scenario().await;
+    let (mut responder, mut lines, ready) = start_mode_responder("signalling", "4", "2").await;
+    let address = ready["address"].as_str().expect("readiness address");
+    let output = sipx()
+        .args([
+            "load",
+            &format!("sip:load@{address}"),
+            "--mode",
+            "generated-media",
+            "--rate",
+            "20",
+            "--concurrency",
+            "2",
+            "--calls",
+            "4",
+            "--timeout",
+            "5",
+            "--json",
+        ])
+        .output()
+        .await
+        .expect("mismatched load runs");
+    let load: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("load summary JSON");
+    let summary: serde_json::Value = serde_json::from_str(
+        &tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+            .await
+            .expect("responder summary is bounded")
+            .expect("responder summary can be read")
+            .expect("responder summary exists"),
+    )
+    .expect("responder summary JSON");
+    let complaint = drain_stderr(&mut responder).await;
+    let responder_status = responder.wait().await.expect("responder exits");
+
+    assert_eq!(output.status.code(), Some(1), "{load}");
+    assert_eq!(load["status"], "failed", "{load}");
+    assert_eq!(load["outcomes"]["attempted"], 1, "{load}");
+    assert_eq!(load["outcomes"]["connected"], 0, "{load}");
+    assert!(
+        load["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("workload mode mismatch")),
+        "{load}"
+    );
+    assert_eq!(responder_status.code(), Some(1), "{complaint}");
+    assert_eq!(summary["status"], "failed", "{summary}");
+    assert_eq!(summary["counts"]["invitations"], 1, "{summary}");
+    assert_eq!(summary["counts"]["admitted"], 0, "{summary}");
+    assert_eq!(summary["counts"]["rejected"], 1, "{summary}");
+    assert_eq!(summary["responses"]["488"], 1, "{summary}");
+    assert_eq!(summary["post_drain"]["active_dialogs"], 0);
+}
+
+/// The shared typed vocabulary rejects an unknown local mode in argument parsing, before any
+/// destination resolution or endpoint bind can occur.
+#[tokio::test]
+async fn an_unknown_load_mode_is_usage_before_io() {
+    let output = sipx()
+        .args([
+            "load",
+            "sip:load@127.0.0.1:9",
+            "--mode",
+            "media",
+            "--rate",
+            "1",
+            "--concurrency",
+            "1",
+            "--calls",
+            "1",
+            "--json",
+        ])
+        .output()
+        .await
+        .expect("parser runs");
+    let complaint = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{complaint}");
+    assert!(complaint.contains("invalid value 'media'"), "{complaint}");
+    assert!(complaint.contains("signalling"), "{complaint}");
+    assert!(complaint.contains("generated-media"), "{complaint}");
+    assert!(output.stdout.is_empty(), "usage emits no result record");
+}
+
+/// Internal call failure is not an operator interrupt merely because it requests the shared stop
+/// token. An unmarked peer can still send a bodyless 2xx to explicit media mode; that is a worker
+/// failure, closes admission after one attempt, drains, and exits nonzero with its actual cause.
+#[tokio::test]
+async fn an_internal_load_worker_error_is_failed_not_interrupted() {
+    let _scenario = process_scenario().await;
+    let (peer, mut incoming) = bind(TransportConfig::new(
+        "127.0.0.1:0".parse().expect("peer bind address"),
+    ))
+    .await
+    .expect("peer binds");
+    let address = peer.local_addr();
+    let serving = tokio::spawn({
+        let peer = peer.clone();
+        async move {
+            let invitation = incoming.recv().await.expect("INVITE arrives");
+            let accepted = sipx_sip::build::ResponseBuilder::to_request(
+                &invitation.request,
+                StatusCode::new(200).expect("success status"),
+                "OK",
+            )
+            .expect("response builds")
+            .set_header(
+                &HeaderName::To,
+                bytes::Bytes::from_static(b"<sip:load@peer.invalid>;tag=bodyless"),
+            )
+            .expect("tagged To")
+            .header(
+                HeaderName::Contact,
+                bytes::Bytes::from(format!("<sip:load@{}>", peer.local_addr())),
+            )
+            .expect("Contact")
+            .build();
+            peer.respond(&invitation.key, accepted)
+                .await
+                .expect("bodyless answer sends");
+            // The call layer ACKs and then attempts BYE after discovering that explicit media has
+            // no SDP answer. Serving that cleanup keeps this independent peer causally bounded.
+            // A bound on failure: each pass completes on the next exact ACK/BYE network event.
+            while let Ok(Some(request)) =
+                tokio::time::timeout(Duration::from_secs(5), incoming.recv()).await
+            {
+                if request.request.method == Method::Bye {
+                    let response = sipx_sip::build::ResponseBuilder::to_request(
+                        &request.request,
+                        StatusCode::new(200).expect("success status"),
+                        "OK",
+                    )
+                    .expect("BYE response builds")
+                    .build();
+                    peer.respond(&request.key, response)
+                        .await
+                        .expect("BYE response sends");
+                    break;
+                }
+            }
+        }
+    });
+    let output = sipx()
+        .args([
+            "load",
+            &format!("sip:load@{address}"),
+            "--mode",
+            "generated-media",
+            "--rate",
+            "20",
+            "--concurrency",
+            "2",
+            "--calls",
+            "4",
+            "--timeout",
+            "5",
+            "--json",
+            "-v",
+        ])
+        .output()
+        .await
+        .expect("load runs");
+    let summary: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("load summary JSON");
+    serving.await.expect("peer task joins");
+    peer.shutdown().await;
+
+    assert_eq!(output.status.code(), Some(1), "{summary}");
+    assert_eq!(summary["status"], "failed", "{summary}");
+    assert_eq!(summary["outcomes"]["attempted"], 1, "{summary}");
+    assert_eq!(summary["outcomes"]["failed"], 1, "{summary}");
+    assert!(
+        summary["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("sdp:")),
+        "{summary}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let progress = log_records(&stderr);
+    assert_eq!(progress.len(), 2, "{progress:?}; {stderr}");
+    assert!(
+        progress
+            .iter()
+            .any(|record| record.contains("event=\"load.summary\"")
+                && record.contains("status=\"failed\"")),
+        "{progress:?}; {stderr}"
     );
 }
 
@@ -2575,7 +3491,7 @@ async fn bounded_load_responder_drives_readiness_through_zero_state() {
         .expect("readiness is bounded")
         .expect("readiness can be read")
         .expect("readiness line exists");
-    let ready: serde_json::Value = serde_json::from_str(&ready_line).expect("readiness JSON");
+    let ready = support::strict_json::versioned("load_responder_readiness", &ready_line);
     assert_eq!(ready["schema"], "sipx.comparative-load.ready.v1");
     assert_eq!(ready["role"], "responder");
     let address: std::net::SocketAddr = ready["address"]
@@ -2764,7 +3680,7 @@ async fn bounded_load_responder_drives_readiness_through_zero_state() {
         .expect("summary follows cleanup")
         .expect("summary can be read")
         .expect("summary line exists");
-    let summary: serde_json::Value = serde_json::from_str(&summary_line).expect("summary JSON");
+    let summary = support::strict_json::versioned("load_responder", &summary_line);
     assert_eq!(summary["schema"], "sipx.load-responder.v1");
     assert_eq!(summary["status"], "completed");
     assert_eq!(summary["counts"]["invitations"], 1);
@@ -3520,75 +4436,168 @@ async fn load_responder_enforces_the_concurrent_dialog_ceiling() {
     peer.shutdown().await;
 }
 
-/// DPH-11 through the process boundary: signal only after the peer has observed the first INVITE,
-/// then require the one final summary to follow cleanup. Concurrency one is load-bearing: no second
-/// invitation can be admitted while the owned first call is still cleaning up.
+/// DPH-11 and DPH-17 through the process boundary: signal only after the peer has observed the
+/// first INVITE, then require the one final summary to follow cleanup. Concurrency one is
+/// load-bearing: no second invitation can be admitted while the owned first call is cleaning up.
 #[cfg(unix)]
 #[tokio::test]
-async fn interrupted_load_stops_admission_and_summarizes_after_cleanup() {
+async fn supported_process_stops_end_load_admission_and_cleanup() {
     let _scenario = process_scenario().await;
-    let peer = tokio::net::UdpSocket::bind("127.0.0.1:0")
-        .await
-        .expect("peer binds");
-    let address = peer.local_addr().expect("peer address");
-    let mut command = sipx();
-    command
-        .args([
-            "load",
-            &format!("sip:load@{address}"),
-            "--rate",
-            "100",
-            "--concurrency",
-            "1",
-            "--calls",
-            "100",
-            "--timeout",
-            "20",
-            "--json",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let child = command.spawn().expect("load starts");
-    let process = child.id().expect("load process id");
+    for (argument, name, expected) in [
+        ("-INT", "SIGINT", "interrupt"),
+        ("-TERM", "SIGTERM", "terminate"),
+    ] {
+        let peer = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("peer binds");
+        let address = peer.local_addr().expect("peer address");
+        let mut command = sipx();
+        command
+            .args([
+                "load",
+                &format!("sip:load@{address}"),
+                "--rate",
+                "100",
+                "--concurrency",
+                "1",
+                "--calls",
+                "100",
+                "--timeout",
+                "20",
+                "--mode",
+                "generated-media",
+                "--json",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = command.spawn().expect("load starts");
+        let process = child.id().expect("load process id");
 
-    let mut packet = [0u8; 4096];
-    let (length, _) = tokio::time::timeout(Duration::from_secs(5), peer.recv_from(&mut packet))
+        let mut packet = [0u8; 4096];
+        let (length, _) = tokio::time::timeout(Duration::from_secs(5), peer.recv_from(&mut packet))
+            .await
+            .expect("the first admission is bounded")
+            .expect("the first INVITE arrives");
+        assert!(
+            packet
+                .get(..length)
+                .is_some_and(|bytes| bytes.starts_with(b"INVITE ")),
+            "the readiness event is an INVITE"
+        );
+
+        signal_process(process, argument, name).await;
+        let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
+            .await
+            .expect("interrupted cleanup is bounded")
+            .expect("load exits");
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).expect("UTF-8 summary");
+        assert_eq!(
+            stdout.lines().count(),
+            1,
+            "one summary after cleanup: {stdout}"
+        );
+        let summary: serde_json::Value = serde_json::from_str(stdout.trim()).expect("JSON summary");
+        assert_eq!(summary["status"], "interrupted");
+        assert_eq!(summary["stop_signal"], expected);
+        assert_eq!(summary["outcomes"]["attempted"], 1);
+        assert_eq!(summary["outcomes"]["timed_out"], 1);
+    }
+}
+
+/// DPH-17's supervisor regression: once readiness has been flushed, SIGTERM owns the same bounded
+/// dialog cleanup as SIGINT. A repeated SIGTERM while BYE is outstanding neither kills the process
+/// nor creates a second terminal record.
+#[cfg(unix)]
+#[tokio::test]
+async fn supervisor_termination_drains_load_responder_and_reports_once() {
+    let _scenario = process_scenario().await;
+    let (mut interactive, mut interactive_lines, _ready) =
+        start_mode_responder("signalling", "100", "2").await;
+    signal_interrupt(interactive.id().expect("responder process id")).await;
+    let interactive_terminal =
+        tokio::time::timeout(Duration::from_secs(5), interactive_lines.next_line())
+            .await
+            .expect("interactive terminal record is bounded")
+            .expect("interactive terminal record can be read")
+            .expect("interactive terminal record exists");
+    let interactive_terminal: serde_json::Value =
+        serde_json::from_str(&interactive_terminal).expect("interactive terminal JSON");
+    assert_eq!(interactive_terminal["status"], "interrupted");
+    assert_eq!(interactive_terminal["stop_signal"], "interrupt");
+    let complaint = drain_stderr(&mut interactive).await;
+    let status = interactive
+        .wait()
         .await
-        .expect("the first admission is bounded")
-        .expect("the first INVITE arrives");
+        .expect("interactive responder exits");
+    assert_eq!(status.code(), Some(0), "{complaint}");
+
+    let (mut responder, mut lines, ready) =
+        start_mode_responder("generated-media", "100", "2").await;
+    let address: std::net::SocketAddr = ready["address"]
+        .as_str()
+        .expect("readiness address")
+        .parse()
+        .expect("socket address");
+    let (peer, mut incoming) = bind(TransportConfig::new(
+        "127.0.0.1:0".parse().expect("peer bind address"),
+    ))
+    .await
+    .expect("peer binds");
+    let uri = sipx_sip::Uri::parse(bytes::Bytes::from(format!("sip:load@{address}")))
+        .expect("request URI");
+    let options = sipx_call::DialOptions::new(
+        "<sip:driver@127.0.0.1>",
+        "127.0.0.1".parse().expect("media address"),
+    );
+    let mut call = sipx_call::dial(&peer, sipx_transport::Target::udp(address), &uri, &options)
+        .await
+        .expect("call confirms");
+    let process = responder.id().expect("responder process id");
+
+    signal_terminate(process).await;
+    let bye = tokio::time::timeout(Duration::from_secs(5), incoming.recv())
+        .await
+        .expect("cleanup BYE is bounded")
+        .expect("cleanup BYE arrives");
+    assert_eq!(bye.request.method, Method::Bye);
+    signal_terminate(process).await;
+    assert!(call.handle(&bye).await.expect("cleanup BYE is handled"));
+
+    let terminal = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        .await
+        .expect("terminal record is bounded")
+        .expect("terminal record can be read")
+        .expect("terminal record exists");
+    let terminal: serde_json::Value = serde_json::from_str(&terminal).expect("terminal JSON");
+    assert_eq!(terminal["schema"], "sipx.load-responder.v1");
+    assert_eq!(terminal["status"], "interrupted");
+    assert_eq!(terminal["stop_signal"], "terminate");
+    assert_eq!(terminal["post_drain"]["active_dialogs"], 0);
+    assert_eq!(terminal["post_drain"]["dispatcher_routes"], 0);
+    assert_eq!(terminal["post_drain"]["endpoint_transactions"], 0);
+    assert_eq!(terminal["post_drain"]["owned_tasks"], 0);
+
+    let complaint = drain_stderr(&mut responder).await;
+    let status = tokio::time::timeout(Duration::from_secs(5), responder.wait())
+        .await
+        .expect("responder exit is bounded")
+        .expect("responder exits");
+    assert_eq!(status.code(), Some(0), "{complaint}");
     assert!(
-        packet
-            .get(..length)
-            .is_some_and(|bytes| bytes.starts_with(b"INVITE ")),
-        "the readiness event is an INVITE"
+        lines
+            .next_line()
+            .await
+            .expect("stdout remains readable")
+            .is_none(),
+        "one readiness record and one terminal record"
     );
-
-    let signal = Command::new("kill")
-        .args(["-INT", &process.to_string()])
-        .status()
-        .await
-        .expect("sends SIGINT");
-    assert!(signal.success(), "SIGINT reaches the load process");
-    let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
-        .await
-        .expect("interrupted cleanup is bounded")
-        .expect("load exits");
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8(output.stdout).expect("UTF-8 summary");
-    assert_eq!(
-        stdout.lines().count(),
-        1,
-        "one summary after cleanup: {stdout}"
-    );
-    let summary: serde_json::Value = serde_json::from_str(stdout.trim()).expect("JSON summary");
-    assert_eq!(summary["status"], "interrupted");
-    assert_eq!(summary["outcomes"]["attempted"], 1);
-    assert_eq!(summary["outcomes"]["timed_out"], 1);
+    peer.shutdown().await;
 }
 
 /// A final response to an INVITE must carry a To tag (RFC 3261 §8.2.6.2): the tag is what
@@ -3695,6 +4704,10 @@ async fn custom_supported_header_is_sent_and_stack_owned_via_is_refused_before_b
     peer.await.expect("peer finishes");
     assert_eq!(sent.status.code(), Some(6));
 
+    let occupied = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("occupied address binds");
+    let occupied_address = occupied.local_addr().expect("occupied address is named");
     let refused = sipx()
         .args([
             "dial",
@@ -3702,7 +4715,7 @@ async fn custom_supported_header_is_sent_and_stack_owned_via_is_refused_before_b
             "--header",
             "Via: SIP/2.0/UDP injected.invalid",
             "--local",
-            "this-is-not-an-address",
+            &occupied_address.to_string(),
             "--json",
         ])
         .output()
@@ -3711,10 +4724,234 @@ async fn custom_supported_header_is_sent_and_stack_owned_via_is_refused_before_b
     assert_eq!(refused.status.code(), Some(2));
     let complaint = String::from_utf8_lossy(&refused.stderr);
     assert!(complaint.contains("stack-owned field Via"), "{complaint}");
-    assert!(
-        !complaint.contains("--local must"),
-        "header validation must win: {complaint}"
+}
+
+/// Run one finite stdin scenario through the shipped process and collect its complete stream.
+async fn run_scenario_stream(script: &str) -> std::process::Output {
+    use tokio::io::AsyncWriteExt as _;
+
+    let mut child = sipx()
+        .args(["scenario", "--local", "127.0.0.1:0"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("scenario starts");
+    let mut stdin = child.stdin.take().expect("scenario stdin is piped");
+    stdin
+        .write_all(script.as_bytes())
+        .await
+        .expect("scenario script writes");
+    drop(stdin);
+    tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
+        .await
+        .expect("scenario stream is bounded")
+        .expect("scenario exits")
+}
+
+fn scenario_lines(output: &std::process::Output) -> Vec<serde_json::Value> {
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| support::strict_json::versioned("scenario", line))
+        .collect()
+}
+
+/// P-19 failing-first evidence: before outcome-derived exits, every one of these refusals was
+/// correlated and recoverable but the process still exited 0 after doing no successful work.
+#[tokio::test]
+async fn a_scenario_stream_containing_only_refusals_exits_failed() {
+    let _scenario = process_scenario().await;
+    let output = run_scenario_stream(
+        "{\"id\":\"broken\",\"command\":\n\
+         {\"id\":\"nested\",\"dial\":{\"uri\":\"sip:test@127.0.0.1:9\"}}\n\
+         {\"id\":\"wait\",\"command\":\"wait_for\",\"event\":\"call.answered\"}\n\
+         {\"id\":\"unknown\",\"command\":\"not-a-command\"}\n",
+    )
+    .await;
+    let lines = scenario_lines(&output);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
+    for id in ["broken", "nested", "wait", "unknown"] {
+        assert!(
+            lines.iter().any(|line| {
+                line["event"]["type"] == "scenario.command.refused" && line["event"]["id"] == id
+            }),
+            "missing refusal for {id}: {lines:?}"
+        );
+    }
+    assert_eq!(
+        lines.last().map(|line| &line["event"]["type"]),
+        Some(&serde_json::Value::String(
+            "scenario.stream.failed".to_owned()
+        )),
+        "{lines:?}"
+    );
+}
+
+/// Recovery is line-local: rejected nesting and a duplicate correlation cannot hide the later
+/// canonical shutdown command, while that later success cannot erase the final failed status.
+#[tokio::test]
+async fn a_mixed_scenario_stream_continues_in_order_but_retains_failure() {
+    let _scenario = process_scenario().await;
+    let output = run_scenario_stream(
+        "{\"id\":\"nested\",\"dial\":{\"uri\":\"sip:test@127.0.0.1:9\"}}\n\
+         {\"id\":\"duplicate\",\"command\":\"stop_playback\"}\n\
+         {\"id\":\"duplicate\",\"command\":\"hangup\"}\n\
+         {\"id\":\"shutdown\",\"command\":\"shutdown\"}\n",
+    )
+    .await;
+    let lines = scenario_lines(&output);
+    assert_eq!(output.status.code(), Some(1), "{lines:?}");
+    let outcomes: Vec<_> = lines
+        .iter()
+        .filter(|line| {
+            matches!(
+                line["event"]["type"].as_str(),
+                Some("scenario.command.completed" | "scenario.command.refused")
+            )
+        })
+        .map(|line| {
+            (
+                line["event"]["id"].as_str().unwrap_or_default(),
+                line["event"]["type"].as_str().unwrap_or_default(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            ("nested", "scenario.command.refused"),
+            ("duplicate", "scenario.command.refused"),
+            ("duplicate", "scenario.command.refused"),
+            ("shutdown", "scenario.command.completed"),
+        ]
+    );
+    assert!(lines.iter().any(|line| {
+        line["event"]["id"] == "duplicate" && line["event"]["message"] == "duplicate command id"
+    }));
+    assert_eq!(
+        lines.last().and_then(|line| line["event"]["type"].as_str()),
+        Some("scenario.stream.failed")
+    );
+}
+
+/// Empty input is a clean no-op and `do` remains an explicit compatibility path. Both get a typed
+/// terminal outcome so a supervisor never has to infer completion from a closed pipe alone.
+#[tokio::test]
+async fn empty_and_compatibility_scenario_streams_complete_explicitly() {
+    let _scenario = process_scenario().await;
+    for script in ["", "{\"id\":\"shutdown\",\"do\":\"shutdown\"}\n"] {
+        let output = run_scenario_stream(script).await;
+        let lines = scenario_lines(&output);
+        assert_eq!(output.status.code(), Some(0), "{lines:?}");
+        assert_eq!(
+            lines.last().and_then(|line| line["event"]["type"].as_str()),
+            Some("scenario.stream.completed"),
+            "{lines:?}"
+        );
+    }
+}
+
+/// The parser-owned long help is itself a copyable flat transcript and names the wait deadline.
+#[tokio::test]
+async fn scenario_help_documents_the_executable_flat_frame() {
+    let output = sipx()
+        .args(["scenario", "--help"])
+        .output()
+        .await
+        .expect("scenario help runs");
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "{help}");
+    assert!(help.contains(r#"{"id":"dial-1","command":"dial"#), "{help}");
+    assert!(help.contains(r#""command":"wait_for"#), "{help}");
+    assert!(help.contains(r#""timeout_ms":5000"#), "{help}");
+    assert!(help.contains(r#""command":"hangup"#), "{help}");
+    assert!(!help.contains(r#""dial":{"#), "{help}");
+}
+
+/// A successful `reject` fulfils an explicit operation. The peer receives the requested refusal,
+/// while the command and stream both complete and the process exits 0.
+#[tokio::test]
+async fn a_successful_scenario_reject_operation_is_not_a_failed_stream() {
+    use tokio::io::AsyncWriteExt as _;
+
+    let _scenario = process_scenario().await;
+    let mut child = sipx()
+        .args(["scenario", "--local", "127.0.0.1:0"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("scenario starts");
+    let stdout = child.stdout.take().expect("scenario stdout is piped");
+    let mut lines = BufReader::new(stdout).lines();
+    let ready: serde_json::Value = serde_json::from_str(
+        &tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+            .await
+            .expect("readiness is bounded")
+            .expect("readiness can be read")
+            .expect("readiness exists"),
+    )
+    .expect("readiness JSON");
+    let address: std::net::SocketAddr = ready["event"]["address"]
+        .as_str()
+        .expect("readiness address")
+        .parse()
+        .expect("socket address");
+    let (peer, _incoming) = bind(TransportConfig::new(
+        "127.0.0.1:0".parse().expect("peer bind address"),
+    ))
+    .await
+    .expect("peer binds");
+    let mut refusal = peer
+        .send(
+            load_invite(&peer, address, 99),
+            sipx_transport::Target::udp(address),
+        )
+        .await
+        .expect("INVITE sends");
+    let script = "{\"id\":\"incoming\",\"command\":\"wait_for\",\"event\":\"call.incoming\",\"timeout_ms\":5000}\n\
+                  {\"id\":\"reject\",\"command\":\"reject\",\"status\":603,\"reason\":\"Decline\"}\n\
+                  {\"id\":\"shutdown\",\"command\":\"shutdown\"}\n";
+    let mut stdin = child.stdin.take().expect("scenario stdin is piped");
+    stdin
+        .write_all(script.as_bytes())
+        .await
+        .expect("scenario script writes");
+    drop(stdin);
+    let response = tokio::time::timeout(Duration::from_secs(5), refusal.final_response())
+        .await
+        .expect("refusal is bounded")
+        .expect("final refusal arrives");
+    assert_eq!(response.status.code(), 603);
+
+    let mut output = vec![ready];
+    // A bound on failure: each pass waits for the next exact output or EOF after shutdown.
+    while let Some(line) = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        .await
+        .expect("scenario output is bounded")
+        .expect("scenario output can be read")
+    {
+        output.push(serde_json::from_str(&line).expect("scenario JSON"));
+    }
+    let complaint = drain_stderr(&mut child).await;
+    let status = child.wait().await.expect("scenario exits");
+    assert_eq!(status.code(), Some(0), "{complaint}; {output:?}");
+    assert!(output.iter().any(|line| {
+        line["event"]["type"] == "scenario.command.completed" && line["event"]["id"] == "reject"
+    }));
+    assert_eq!(
+        output
+            .last()
+            .and_then(|line| line["event"]["type"].as_str()),
+        Some("scenario.stream.completed")
+    );
+    peer.shutdown().await;
 }
 
 /// DPH-9: the real process reads a finite shell pipeline, waits for the answer event instead of a
@@ -3783,8 +5020,151 @@ async fn scenario_waits_for_answer_then_sends_dtmf_and_hangs_up_in_causal_order(
     let ended = position("call.ended", None);
     let hung_up = position("scenario.command.completed", Some("hangup-1"));
     assert!(answered < waited && waited < digit && digit < ended && ended < hung_up);
+    assert_eq!(
+        lines.last().and_then(|line| line["event"]["type"].as_str()),
+        Some("scenario.stream.completed")
+    );
 
     answerer_exits_cleanly(&mut answerer).await;
+}
+
+/// M-71 failing-first process boundary: both peers are the shipped scenario actor. The sender
+/// completing only proves that its bounded media queue accepted all four digits; the remote typed
+/// events prove that negotiated RTP crossed the media and call-event queues too.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn two_scenarios_deliver_each_negotiated_digit_once_and_in_order() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let _scenario = process_scenario().await;
+    let mut answerer = sipx()
+        .args(["scenario", "--local", "127.0.0.1:0"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("answering scenario starts");
+    let stdout = answerer.stdout.take().expect("answerer stdout is piped");
+    let mut lines = BufReader::new(stdout).lines();
+    let ready: serde_json::Value = serde_json::from_str(
+        &tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+            .await
+            .expect("answerer readiness is bounded")
+            .expect("answerer readiness can be read")
+            .expect("answerer readiness exists"),
+    )
+    .expect("answerer readiness JSON");
+    let address = ready["event"]["address"]
+        .as_str()
+        .expect("answerer readiness names its address")
+        .to_owned();
+    let answer_output = tokio::spawn(async move {
+        let mut output = vec![ready];
+        while let Some(line) = lines
+            .next_line()
+            .await
+            .expect("answerer output can be read")
+        {
+            output.push(serde_json::from_str(&line).expect("answerer emits JSON"));
+        }
+        output
+    });
+    let mut answer_stderr = answerer.stderr.take().expect("answerer stderr is piped");
+    let answer_complaint = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        answer_stderr
+            .read_to_end(&mut bytes)
+            .await
+            .expect("answerer stderr can be read");
+        String::from_utf8_lossy(&bytes).into_owned()
+    });
+
+    let answer_script = "{\"id\":\"incoming\",\"command\":\"wait_for\",\"event\":\"call.incoming\",\"timeout_ms\":5000}\n\
+                         {\"id\":\"accept\",\"command\":\"accept\"}\n\
+                         {\"id\":\"digit-1\",\"command\":\"wait_for\",\"event\":\"call.dtmf\",\"timeout_ms\":1500}\n\
+                         {\"id\":\"digit-2\",\"command\":\"wait_for\",\"event\":\"call.dtmf\",\"timeout_ms\":1500}\n\
+                         {\"id\":\"digit-3\",\"command\":\"wait_for\",\"event\":\"call.dtmf\",\"timeout_ms\":1500}\n\
+                         {\"id\":\"digit-4\",\"command\":\"wait_for\",\"event\":\"call.dtmf\",\"timeout_ms\":1500}\n\
+                         {\"id\":\"hangup\",\"command\":\"hangup\"}\n\
+                         {\"id\":\"shutdown\",\"command\":\"shutdown\"}\n";
+    answerer
+        .stdin
+        .take()
+        .expect("answerer stdin is piped")
+        .write_all(answer_script.as_bytes())
+        .await
+        .expect("answerer script writes");
+
+    let mut caller = sipx()
+        .args(["scenario", "--local", "127.0.0.1:0"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("calling scenario starts");
+    let call_script = format!(
+        "{{\"id\":\"dial\",\"command\":\"dial\",\"uri\":\"sip:dtmf@{address}\",\"timeout_ms\":5000}}\n\
+         {{\"id\":\"answered\",\"command\":\"wait_for\",\"event\":\"call.answered\",\"timeout_ms\":5000}}\n\
+         {{\"id\":\"send\",\"command\":\"send_dtmf\",\"digits\":\"1234\"}}\n\
+         {{\"id\":\"ended\",\"command\":\"wait_for\",\"event\":\"call.ended\",\"timeout_ms\":10000}}\n\
+         {{\"id\":\"shutdown\",\"command\":\"shutdown\"}}\n"
+    );
+    caller
+        .stdin
+        .take()
+        .expect("caller stdin is piped")
+        .write_all(call_script.as_bytes())
+        .await
+        .expect("caller script writes");
+
+    let caller_output = tokio::time::timeout(Duration::from_secs(20), caller.wait_with_output())
+        .await
+        .expect("calling scenario is bounded")
+        .expect("calling scenario exits");
+    let answer_status = tokio::time::timeout(Duration::from_secs(20), answerer.wait())
+        .await
+        .expect("answering scenario is bounded")
+        .expect("answering scenario exits");
+    let answer_lines = answer_output.await.expect("answer output collector joins");
+    let answer_complaint = answer_complaint
+        .await
+        .expect("answer stderr collector joins");
+    let caller_lines = scenario_lines(&caller_output);
+
+    assert_eq!(
+        caller_output.status.code(),
+        Some(0),
+        "{}; {caller_lines:?}",
+        String::from_utf8_lossy(&caller_output.stderr)
+    );
+    assert!(
+        answer_status.success(),
+        "{answer_complaint}; {answer_lines:?}"
+    );
+    assert!(caller_lines.iter().any(|line| {
+        line["event"]["type"] == "scenario.command.completed" && line["event"]["id"] == "send"
+    }));
+    let received: Vec<_> = answer_lines
+        .iter()
+        .filter(|line| line["event"]["type"] == "call.dtmf")
+        .map(|line| {
+            (
+                line["event"]["digit"].as_str().unwrap_or_default(),
+                line["event"]["duration_ms"].as_u64().unwrap_or_default(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        received.iter().map(|(digit, _)| *digit).collect::<String>(),
+        "1234",
+        "sender completed but remote typed events were {received:?}"
+    );
+    assert!(
+        received
+            .iter()
+            .all(|(_, duration)| (80..=140).contains(duration)),
+        "durations came from the event clock: {received:?}"
+    );
 }
 
 /// Logging must never reach stdout, or one verbosity flag turns every JSON result into a parse
@@ -3927,6 +5307,58 @@ async fn one_v_reports_the_call_on_both_ends_of_it() {
         );
     }
 
+    let ordered = |who: &str, stream: &str, expected: &[&str]| {
+        let records = log_records(stream);
+        let events: Vec<_> = records
+            .iter()
+            .filter_map(|record| {
+                expected
+                    .iter()
+                    .find(|event| record.contains(&format!("event=\"{event}\"")))
+                    .copied()
+            })
+            .collect();
+        assert_eq!(events, expected, "{who} progress: {records:?}; {stream}");
+    };
+    ordered(
+        "answerer",
+        &placed.answerer_stderr,
+        &[
+            "call.waiting",
+            "call.caller_observed",
+            "call.answered",
+            "call.ended",
+        ],
+    );
+    ordered(
+        "caller",
+        &caller_stderr,
+        &["call.placed", "call.answered", "call.ended"],
+    );
+
+    let answer = placed
+        .answerer_stdout
+        .iter()
+        .find(|line| line.contains("\"status\":\"answered\""))
+        .map(|line| support::strict_json::value(line))
+        .expect("answerer terminal JSON");
+    let caller = answer["caller"].as_str().expect("terminal caller");
+    let ended_by = answer["ended_by"].as_str().expect("terminal cause");
+    assert!(
+        placed
+            .answerer_stderr
+            .contains(&format!("caller=\"{caller}\"")),
+        "answer progress does not name terminal caller {caller}: {}",
+        placed.answerer_stderr
+    );
+    assert!(
+        placed
+            .answerer_stderr
+            .contains(&format!("cause=\"{ended_by}\"")),
+        "answer progress does not share terminal cause {ended_by}: {}",
+        placed.answerer_stderr
+    );
+
     let written = placed.answerer_stdout.join("\n");
     let on_stdout = log_records(&written);
     assert!(
@@ -3936,6 +5368,54 @@ async fn one_v_reports_the_call_on_both_ends_of_it() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn info_progress_stays_on_stderr_with_text_results() {
+    let _scenario = process_scenario().await;
+    let (mut answerer, address, mut lines) = start_answerer(&["--duration", "5"]).await;
+    let output = tokio::time::timeout(
+        Duration::from_secs(10),
+        sipx()
+            .args([
+                "dial",
+                &format!("sip:text-progress@{address}"),
+                "--duration",
+                "1",
+                "--timeout",
+                "5",
+                "-v",
+            ])
+            .output(),
+    )
+    .await
+    .expect("text call is bounded")
+    .expect("text dial runs");
+    assert!(
+        output.status.success(),
+        "{} / {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains("status") && stdout.contains("answered"),
+        "{stdout}"
+    );
+    assert!(log_records(&stdout).is_empty(), "{stdout}");
+    assert_eq!(
+        stderr.matches("event=\"call.ended\"").count(),
+        1,
+        "{stderr}"
+    );
+
+    tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        .await
+        .expect("answer terminal is bounded")
+        .expect("answer terminal can be read")
+        .expect("answer terminal exists");
+    answerer_exits_cleanly(&mut answerer).await;
 }
 
 /// DTMF sent by the caller is reported by the answering side.
@@ -3981,6 +5461,426 @@ async fn digits_sent_by_the_caller_are_reported_by_the_answerer() {
         "the keypresses must be reported: {answered}"
     );
     answerer_exits_cleanly(&mut answerer).await;
+}
+
+/// P-16: the confirmed dialog, not each process's independent duration, owns completion. The
+/// caller's terminal evidence also proves that the answerer responded to its BYE before reporting
+/// the remote end.
+#[tokio::test]
+async fn a_shorter_dialer_ends_the_answerer_and_observes_its_bye_response() {
+    let _scenario = process_scenario().await;
+    let (mut answerer, address, mut lines) = start_answerer(&["--duration", "10"]).await;
+
+    let caller = tokio::time::timeout(
+        Duration::from_secs(8),
+        sipx()
+            .args([
+                "dial",
+                &format!("sip:lifecycle@{address}"),
+                "--local",
+                "127.0.0.1:0",
+                "--json",
+                "--duration",
+                "2",
+                "--timeout",
+                "5",
+            ])
+            .output(),
+    )
+    .await
+    .expect("the shorter caller completes")
+    .expect("dial runs");
+    assert!(
+        caller.status.success(),
+        "{}",
+        String::from_utf8_lossy(&caller.stderr)
+    );
+
+    let answer = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        .await
+        .expect("remote BYE ends the answerer before its local duration")
+        .expect("answer result can be read")
+        .expect("answer result exists");
+    let caller: serde_json::Value =
+        serde_json::from_slice(&caller.stdout).expect("caller terminal JSON");
+    let answer: serde_json::Value = serde_json::from_str(&answer).expect("answer terminal JSON");
+    assert_eq!(caller["status"], "answered");
+    assert_eq!(caller["ended_by"], "duration");
+    assert_eq!(caller["bye_status"], 200);
+    assert_eq!(answer["status"], "answered");
+    assert_eq!(answer["ended_by"], "remote");
+    assert!(
+        answer["duration_ms"]
+            .as_u64()
+            .is_some_and(|value| value < 7_000),
+        "the answerer reported its ten-second local duration instead of remote hangup: {answer}"
+    );
+    answerer_exits_cleanly(&mut answerer).await;
+}
+
+/// The answer command must keep feeding the confirmed dialog after sending its 2xx. Withholding
+/// ACK first proves the retransmitter is live; delivering ACK then defines a silence window in
+/// which another 2xx would prove that the command failed to dequeue it.
+#[tokio::test]
+async fn answer_stops_successful_invite_retransmission_after_ack() {
+    let _scenario = process_scenario().await;
+    let (mut answerer, address, mut lines) = start_answerer(&["--duration", "10"]).await;
+    let address: std::net::SocketAddr = address.parse().expect("answerer socket address");
+    let (peer, _incoming) = bind(TransportConfig::new(
+        "127.0.0.1:0".parse().expect("peer bind address"),
+    ))
+    .await
+    .expect("peer binds");
+
+    let mut invite = peer
+        .send(
+            load_media_invite(&peer, address),
+            sipx_transport::Target::udp(address),
+        )
+        .await
+        .expect("INVITE sends");
+    let accepted = invite
+        .final_response()
+        .await
+        .expect("answerer sends a final response");
+    assert_eq!(accepted.status.code(), 200);
+    let tagged_to = bytes::Bytes::copy_from_slice(
+        &accepted
+            .headers
+            .value(&HeaderName::To)
+            .expect("accepted To tag"),
+    );
+
+    let first_response_count = peer.counters().messages_in();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        // A bound on failure: the loop completes on the retransmitted response counter itself.
+        wait_for_transport_messages(&peer, first_response_count),
+    )
+    .await
+    .expect("a 2xx retransmits before ACK");
+
+    peer.send_directly(
+        load_dialog_request(&peer, address, tagged_to.clone(), &Method::Ack, 1),
+        sipx_transport::Target::udp(address),
+    )
+    .await
+    .expect("ACK sends");
+    let after_ack = peer.counters().messages_in();
+    let silence = tokio::time::timeout(
+        Duration::from_millis(1_200),
+        // A definition of silence: any response in this interval makes the negative claim fail.
+        wait_for_transport_messages(&peer, after_ack),
+    )
+    .await;
+    assert!(
+        silence.is_err(),
+        "the answerer retransmitted its successful INVITE response after receiving ACK"
+    );
+
+    let mut bye = peer
+        .send(
+            load_dialog_request(&peer, address, tagged_to, &Method::Bye, 2),
+            sipx_transport::Target::udp(address),
+        )
+        .await
+        .expect("BYE sends");
+    assert_eq!(
+        bye.final_response()
+            .await
+            .expect("BYE receives a response")
+            .status
+            .code(),
+        200
+    );
+    let terminal = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        .await
+        .expect("remote hangup is bounded")
+        .expect("terminal line can be read")
+        .expect("terminal line exists");
+    let terminal: serde_json::Value = serde_json::from_str(&terminal).expect("terminal JSON");
+    assert_eq!(terminal["ended_by"], "remote");
+
+    answerer_exits_cleanly(&mut answerer).await;
+    peer.shutdown().await;
+}
+
+async fn wait_for_transport_messages(peer: &sipx_transport::Handle, above: u64) {
+    let mut poll = tokio::time::interval(Duration::from_millis(10));
+    loop {
+        poll.tick().await;
+        if peer.counters().messages_in() > above {
+            return;
+        }
+    }
+}
+
+/// A confirmed caller handles supervisor termination as a local terminal input: one BYE, one
+/// observed response and one machine record after the peer has processed the request.
+#[cfg(unix)]
+#[tokio::test]
+async fn terminating_a_confirmed_dialer_hangs_up_and_reports_once() {
+    let _scenario = process_scenario().await;
+    let (peer, mut incoming) = bind(TransportConfig::new(
+        "127.0.0.1:0".parse().expect("peer bind address"),
+    ))
+    .await
+    .expect("peer binds");
+    let address = peer.local_addr();
+    let mut command = sipx();
+    command
+        .args([
+            "dial",
+            &format!("sip:interrupt@{address}"),
+            "--local",
+            "127.0.0.1:0",
+            "--duration",
+            "30",
+            "--timeout",
+            "5",
+            "--json",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = command.spawn().expect("dialer starts");
+    let process = child.id().expect("dialer process id");
+
+    let invitation = tokio::time::timeout(Duration::from_secs(5), incoming.recv())
+        .await
+        .expect("INVITE is bounded")
+        .expect("INVITE arrives");
+    assert_eq!(invitation.request.method, Method::Invite);
+    let mut call = sipx_call::answer(
+        &peer,
+        &invitation,
+        "127.0.0.1".parse().expect("media address"),
+    )
+    .await
+    .expect("peer answers");
+    let ack = tokio::time::timeout(Duration::from_secs(5), incoming.recv())
+        .await
+        .expect("ACK is bounded")
+        .expect("ACK arrives");
+    assert_eq!(ack.request.method, Method::Ack);
+    assert!(call.handle(&ack).await.expect("ACK is handled"));
+
+    signal_terminate(process).await;
+    let bye = tokio::time::timeout(Duration::from_secs(5), incoming.recv())
+        .await
+        .expect("interrupt BYE is bounded")
+        .expect("interrupt BYE arrives");
+    assert_eq!(bye.request.method, Method::Bye);
+    assert!(call.handle(&bye).await.expect("BYE is handled"));
+
+    let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
+        .await
+        .expect("dialer cleanup is bounded")
+        .expect("dialer exits");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("terminal UTF-8");
+    assert_eq!(stdout.lines().count(), 1, "one terminal record: {stdout}");
+    let terminal: serde_json::Value = serde_json::from_str(stdout.trim()).expect("terminal JSON");
+    assert_eq!(terminal["status"], "interrupted");
+    assert_eq!(terminal["ended_by"], "interrupt");
+    assert_eq!(terminal["stop_signal"], "terminate");
+    assert_eq!(terminal["bye_status"], 200);
+    peer.shutdown().await;
+}
+
+/// The answering role uses the same confirmed-call stop path and does not rely on its local
+/// duration to release the peer after supervisor termination.
+#[cfg(unix)]
+#[tokio::test]
+async fn terminating_a_confirmed_answerer_hangs_up_and_reports_once() {
+    let _scenario = process_scenario().await;
+    let (mut answerer, address, mut lines) = start_answerer(&["--duration", "30"]).await;
+    let address: std::net::SocketAddr = address.parse().expect("answerer address");
+    let (peer, mut incoming) = bind(TransportConfig::new(
+        "127.0.0.1:0".parse().expect("peer bind address"),
+    ))
+    .await
+    .expect("peer binds");
+    let uri = sipx_sip::Uri::parse(bytes::Bytes::from(format!("sip:interrupt@{address}")))
+        .expect("request URI");
+    let options = sipx_call::DialOptions::new(
+        "<sip:driver@127.0.0.1>",
+        "127.0.0.1".parse().expect("media address"),
+    );
+    let mut call = sipx_call::dial(&peer, sipx_transport::Target::udp(address), &uri, &options)
+        .await
+        .expect("call confirms");
+
+    signal_terminate(answerer.id().expect("answerer process id")).await;
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        sipx_call::serve(&mut call, &mut incoming),
+    )
+    .await
+    .expect("answerer BYE is bounded")
+    .expect("peer serves the BYE");
+    assert!(call.is_ended());
+
+    let terminal = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        .await
+        .expect("answerer terminal record is bounded")
+        .expect("terminal line can be read")
+        .expect("terminal line exists");
+    let terminal: serde_json::Value = serde_json::from_str(&terminal).expect("terminal JSON");
+    assert_eq!(terminal["status"], "interrupted");
+    assert_eq!(terminal["ended_by"], "interrupt");
+    assert_eq!(terminal["stop_signal"], "terminate");
+    assert_eq!(terminal["bye_status"], 200);
+    answerer_exits_cleanly(&mut answerer).await;
+    peer.shutdown().await;
+}
+
+/// The portable interactive stop closes answer admission after readiness and still emits the one
+/// terminal record only after the listener has joined.
+#[cfg(unix)]
+#[tokio::test]
+async fn interrupting_a_waiting_answerer_reports_after_listener_cleanup() {
+    let _scenario = process_scenario().await;
+    let (mut answerer, _address, mut lines) = start_answerer(&["-v"]).await;
+    signal_interrupt(answerer.id().expect("answerer process id")).await;
+
+    let terminal = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        .await
+        .expect("answerer terminal record is bounded")
+        .expect("terminal line can be read")
+        .expect("terminal line exists");
+    let terminal: serde_json::Value = serde_json::from_str(&terminal).expect("terminal JSON");
+    assert_eq!(terminal["status"], "interrupted");
+    assert_eq!(terminal["ended_by"], "interrupt");
+    assert_eq!(terminal["stop_signal"], "interrupt");
+    let progress = drain_stderr(&mut answerer).await;
+    assert_eq!(
+        progress.matches("event=\"call.ended\"").count(),
+        1,
+        "{progress}"
+    );
+    assert!(progress.contains("cause=\"interrupted\""), "{progress}");
+    assert!(!progress.contains("event=\"call.answered\""), "{progress}");
+    exits_cleanly(&mut answerer, &progress).await;
+}
+
+/// Before confirmation the same interrupt remains INVITE cancellation: CANCEL/487, never a BYE
+/// manufactured for a dialog which does not exist yet.
+#[cfg(unix)]
+#[tokio::test]
+async fn interrupting_a_pending_dial_cancels_without_manufacturing_a_bye() {
+    let _scenario = process_scenario().await;
+    let (peer, mut incoming) = bind(TransportConfig::new(
+        "127.0.0.1:0".parse().expect("peer bind address"),
+    ))
+    .await
+    .expect("peer binds");
+    let address = peer.local_addr();
+    let mut command = sipx();
+    command
+        .args([
+            "dial",
+            &format!("sip:pending@{address}"),
+            "--local",
+            "127.0.0.1:0",
+            "--timeout",
+            "30",
+            "--json",
+            "-v",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = command.spawn().expect("dialer starts");
+    let process = child.id().expect("dialer process id");
+    let invitation = tokio::time::timeout(Duration::from_secs(5), incoming.recv())
+        .await
+        .expect("INVITE is bounded")
+        .expect("INVITE arrives");
+    assert_eq!(invitation.request.method, Method::Invite);
+
+    signal_interrupt(process).await;
+    let cancel = tokio::time::timeout(Duration::from_secs(5), incoming.recv())
+        .await
+        .expect("CANCEL is bounded")
+        .expect("CANCEL arrives");
+    assert_eq!(cancel.request.method, Method::Cancel);
+    let cancelled = sipx_sip::build::ResponseBuilder::to_request(
+        &cancel.request,
+        StatusCode::new(200).expect("valid status"),
+        "OK",
+    )
+    .expect("CANCEL response builds")
+    .build();
+    peer.respond(&cancel.key, cancelled)
+        .await
+        .expect("CANCEL response sends");
+    let terminated = sipx_sip::build::ResponseBuilder::to_request(
+        &invitation.request,
+        StatusCode::new(487).expect("valid status"),
+        "Request Terminated",
+    )
+    .expect("INVITE response builds")
+    .build();
+    peer.respond(&invitation.key, terminated)
+        .await
+        .expect("INVITE response sends");
+
+    let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
+        .await
+        .expect("pending cleanup is bounded")
+        .expect("dialer exits");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("terminal UTF-8");
+    assert_eq!(stdout.lines().count(), 1, "one terminal record: {stdout}");
+    let terminal: serde_json::Value = serde_json::from_str(stdout.trim()).expect("terminal JSON");
+    assert_eq!(terminal["status"], "interrupted");
+    assert_eq!(terminal["ended_by"], "interrupt");
+    assert_eq!(terminal["stop_signal"], "interrupt");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr.matches("event=\"call.ended\"").count(),
+        1,
+        "{stderr}"
+    );
+    assert!(stderr.contains("cause=\"interrupted\""), "{stderr}");
+    assert!(!stderr.contains("event=\"call.answered\""), "{stderr}");
+    while let Ok(request) = incoming.try_recv() {
+        assert_ne!(
+            request.request.method,
+            Method::Bye,
+            "a pending INVITE has no confirmed dialog to end with BYE"
+        );
+    }
+    peer.shutdown().await;
+}
+
+#[cfg(unix)]
+async fn signal_interrupt(process: u32) {
+    signal_process(process, "-INT", "SIGINT").await;
+}
+
+#[cfg(unix)]
+async fn signal_terminate(process: u32) {
+    signal_process(process, "-TERM", "SIGTERM").await;
+}
+
+#[cfg(unix)]
+async fn signal_process(process: u32, argument: &str, name: &str) {
+    let status = Command::new("kill")
+        .args([argument, &process.to_string()])
+        .status()
+        .await
+        .unwrap_or_else(|error| panic!("sends {name}: {error}"));
+    assert!(status.success(), "{name} reaches process {process}");
 }
 
 /// Calling something that never answers gives up on the caller's schedule rather than on the
@@ -4038,6 +5938,49 @@ async fn a_call_that_is_never_answered_times_out_on_schedule() {
     assert!(stderr.contains("\"status\":\"timeout\""), "{stderr}");
 }
 
+/// A refused stream connection is a definitive local transport failure, not SIP silence. UDP's
+/// no-answer control remains covered by `a_call_that_is_never_answered_times_out_on_schedule`.
+#[tokio::test]
+async fn a_refused_stream_connection_exits_failed_without_waiting_for_sip_timeout() {
+    let _scenario = process_scenario().await;
+    for json in [false, true] {
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").expect("reserves a loopback port");
+        let peer = closed.local_addr().expect("reserved address");
+        drop(closed);
+
+        let mut command = sipx();
+        command.args([
+            "dial",
+            &format!("sip:absent@{peer}"),
+            "--transport",
+            "tcp",
+            "--timeout",
+            "30",
+        ]);
+        if json {
+            command.arg("--json");
+        }
+        let output = tokio::time::timeout(Duration::from_secs(5), command.output())
+            .await
+            .expect("connection refusal is prompt")
+            .expect("dial runs");
+
+        assert_eq!(output.status.code(), Some(1));
+        assert!(
+            output.stdout.is_empty(),
+            "results stay off stdout on failure"
+        );
+        let failure = String::from_utf8_lossy(&output.stderr);
+        let status = if json {
+            "\"status\":\"failed\""
+        } else {
+            "status  failed"
+        };
+        assert!(failure.contains(status), "{failure}");
+        assert!(failure.contains("transport:"), "{failure}");
+    }
+}
+
 /// A flag's value must never be read as the URI. `sipx dial --timeout 30 sip:bob@host` tried
 /// to call "30" until `--timeout` was registered as taking a value.
 #[tokio::test]
@@ -4062,8 +6005,12 @@ async fn a_valued_flag_before_the_uri_is_not_mistaken_for_it() {
         !stderr.contains("must name an address"),
         "the timeout value was read as the URI: {stderr}"
     );
-    // 192.0.2.1 is TEST-NET-1 and answers nothing, so this is a timeout rather than usage.
-    assert_eq!(output.status.code(), Some(5), "{stderr}");
+    // The destination reached transport handling. Depending on the host route, it may fail
+    // immediately or time out, but it must not be classified as command-line usage.
+    assert!(
+        matches!(output.status.code(), Some(1 | 5)),
+        "the parsed destination should reach transport handling: {stderr}"
+    );
 }
 
 /// The acceptance test for P-5: a name written into the peer book comes back out of

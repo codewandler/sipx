@@ -20,13 +20,31 @@ pub(crate) enum Format {
     Json,
 }
 
-/// A result worth reporting: an ordered list of fields.
+/// A result worth reporting: an ordered unique collection of fields.
 ///
-/// Ordered rather than a map, because the text form reads in the order the fields were added
-/// and a map would reorder them arbitrarily between runs.
+/// A field added again replaces its value without changing its position. Keeping the collection
+/// private makes duplicate JSON members unrepresentable while preserving the text order scripts
+/// and people already rely on.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct Report {
-    fields: Vec<(String, Value)>,
+    fields: Fields,
+}
+
+#[derive(Debug, Default, Clone)]
+struct Fields(Vec<(String, Value)>);
+
+impl Fields {
+    fn insert(&mut self, name: &str, value: Value) {
+        if let Some((_, existing)) = self.0.iter_mut().find(|(existing, _)| existing == name) {
+            *existing = value;
+        } else {
+            self.0.push((name.to_owned(), value));
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&str, &Value)> {
+        self.0.iter().map(|(name, value)| (name.as_str(), value))
+    }
 }
 
 /// A reported value.
@@ -103,30 +121,28 @@ impl Report {
     /// Add a string field.
     #[must_use]
     pub(crate) fn text(mut self, name: &str, value: impl Into<String>) -> Self {
-        self.fields
-            .push((name.to_owned(), Value::Text(value.into())));
+        self.fields.insert(name, Value::Text(value.into()));
         self
     }
 
     /// Add a numeric field.
     #[must_use]
     pub(crate) fn number(mut self, name: &str, value: i64) -> Self {
-        self.fields.push((name.to_owned(), Value::Number(value)));
+        self.fields.insert(name, Value::Number(value));
         self
     }
 
     /// Add a boolean field.
     #[must_use]
     pub(crate) fn boolean(mut self, name: &str, value: bool) -> Self {
-        self.fields.push((name.to_owned(), Value::Bool(value)));
+        self.fields.insert(name, Value::Bool(value));
         self
     }
 
     /// Add a duration, reported in whole seconds.
     #[must_use]
     pub(crate) fn seconds(mut self, name: &str, value: std::time::Duration) -> Self {
-        self.fields
-            .push((name.to_owned(), Value::Seconds(value.as_secs())));
+        self.fields.insert(name, Value::Seconds(value.as_secs()));
         self
     }
 
@@ -136,8 +152,7 @@ impl Report {
         // A NaN would render as `NaN`, which is not JSON and would break a script parsing the
         // output. Reporting zero is no better; the field is simply omitted upstream.
         let value = if value.is_finite() { value } else { 0.0 };
-        self.fields
-            .push((name.to_owned(), Value::Decimal(value, places)));
+        self.fields.insert(name, Value::Decimal(value, places));
         self
     }
 
@@ -153,7 +168,7 @@ impl Report {
     /// facts — so it is not part of what the binary compiles.
     #[cfg(test)]
     pub(crate) fn names(&self) -> Vec<&str> {
-        self.fields.iter().map(|(name, _)| name.as_str()).collect()
+        self.fields.iter().map(|(name, _)| name).collect()
     }
 
     /// Render in the requested format.
@@ -351,6 +366,19 @@ mod tests {
         assert_eq!(
             sample().names(),
             vec!["status", "peer", "duration_ms", "recorded", "expires"]
+        );
+    }
+
+    #[test]
+    fn adding_a_field_again_cannot_create_a_duplicate_member() {
+        let report = Report::new()
+            .text("status", "first")
+            .text("peer", "sip:bob@example.com")
+            .text("status", "second");
+        assert_eq!(report.names(), ["status", "peer"]);
+        assert_eq!(
+            report.render(Format::Json),
+            r#"{"status":"second","peer":"sip:bob@example.com"}"#
         );
     }
 

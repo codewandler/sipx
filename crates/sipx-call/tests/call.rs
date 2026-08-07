@@ -21,9 +21,9 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use sipx_audio::{Wav, g711, read_wav, write_wav};
-use sipx_call::{Call, Credentials, answer, dial};
+use sipx_call::{Call, Codecs, Credentials, answer, answer_with, dial};
 use sipx_media::RtcpQualityHook;
-use sipx_sip::{CSeq, HeaderName, Host, HostName, Method, Uri};
+use sipx_sip::{CSeq, HeaderName, Host, HostName, Limits, Message, Method, Response, Uri};
 use sipx_transport::{Config, Handle, Incoming, Target, bind};
 use sipx_ua::{Authenticator, Presented, Verdict};
 use tokio::sync::mpsc::Receiver;
@@ -69,6 +69,107 @@ async fn endpoint() -> (Handle, Receiver<Incoming>) {
     bind(Config::new("127.0.0.1:0".parse().expect("valid")))
         .await
         .expect("binds")
+}
+
+fn initial_offer(
+    source: std::net::SocketAddr,
+    destination: std::net::SocketAddr,
+    branch: &'static str,
+    call_id: &'static str,
+    body: &'static str,
+) -> sipx_sip::Request {
+    let uri = Uri::parse(Bytes::from(format!("sip:answer@{destination}"))).expect("request URI");
+    sipx_sip::build::RequestBuilder::new(Method::Invite, uri)
+        .header(
+            HeaderName::Via,
+            Bytes::from(format!("SIP/2.0/UDP {source};branch={branch};rport")),
+        )
+        .expect("Via")
+        .header(
+            HeaderName::From,
+            Bytes::from_static(b"<sip:caller@example.test>;tag=from-iof"),
+        )
+        .expect("From")
+        .header(
+            HeaderName::To,
+            Bytes::from_static(b"<sip:answer@example.test>"),
+        )
+        .expect("To")
+        .header(HeaderName::CallId, Bytes::from_static(call_id.as_bytes()))
+        .expect("Call-ID")
+        .cseq(1, &Method::Invite)
+        .expect("CSeq")
+        .header(
+            HeaderName::Contact,
+            Bytes::from(format!("<sip:caller@{source}>")),
+        )
+        .expect("Contact")
+        .header(
+            HeaderName::ContentType,
+            Bytes::from_static(b"application/sdp"),
+        )
+        .expect("Content-Type")
+        .max_forwards(70)
+        .body(Bytes::from_static(body.as_bytes()))
+        .build()
+}
+
+async fn raw_response(socket: &tokio::net::UdpSocket) -> (Vec<u8>, Response) {
+    let mut bytes = vec![0; 65_535];
+    let (length, _) = tokio::time::timeout(SIGNALLING_BOUND, socket.recv_from(&mut bytes))
+        .await
+        .expect("response is bounded")
+        .expect("response arrives");
+    bytes.truncate(length);
+    let parsed = sipx_sip::parse_datagram(Bytes::copy_from_slice(&bytes), &Limits::default())
+        .expect("response parses");
+    let Message::Response(response) = parsed else {
+        panic!("expected response");
+    };
+    (bytes, response)
+}
+
+fn assert_initial_offer_refusal(
+    response: &Response,
+    request: &sipx_sip::Request,
+    source: std::net::SocketAddr,
+    code: u16,
+    reason: &[u8],
+) -> Bytes {
+    assert_eq!(response.status.code(), code);
+    assert_eq!(response.reason.as_ref(), reason);
+    let via = response
+        .headers
+        .value(&HeaderName::Via)
+        .expect("refusal carries Via");
+    let via = String::from_utf8_lossy(&via);
+    assert!(via.starts_with(&format!("SIP/2.0/UDP {source}")), "{via}");
+    assert!(via.contains("branch=z9hG4bKiof1"), "{via}");
+    for name in [HeaderName::From, HeaderName::CallId, HeaderName::CSeq] {
+        assert_eq!(
+            response.headers.value(&name),
+            request.headers.value(&name),
+            "{name:?} identifies the original transaction"
+        );
+    }
+    let to = response
+        .headers
+        .value(&HeaderName::To)
+        .expect("refusal carries To");
+    assert!(
+        String::from_utf8_lossy(&to).starts_with("<sip:answer@example.test>;tag="),
+        "normal tagged To: {}",
+        String::from_utf8_lossy(&to)
+    );
+    assert_eq!(
+        response
+            .headers
+            .value(&HeaderName::ContentLength)
+            .as_deref(),
+        Some(&b"0"[..])
+    );
+    assert!(response.body().is_empty());
+    Bytes::copy_from_slice(&to)
 }
 
 /// A recognisable clip: a 440 Hz tone with an envelope, so a test that silently recorded
@@ -587,6 +688,199 @@ async fn a_2xx_the_caller_cannot_use_is_still_acknowledged() {
     assert!(
         methods.contains(&sipx_sip::Method::Bye),
         "and then torn down, per RFC 3261 section 15: {methods:?}"
+    );
+}
+
+/// IOF-1/IOF-3: an unsupported but well-formed initial offer ends on its original server
+/// transaction. Its identifiers and empty body are exact, retransmission is transaction-owned,
+/// and the non-2xx ACK never escapes to the application.
+#[tokio::test]
+async fn an_unacceptable_initial_offer_uses_one_tagged_488_transaction() {
+    const PCMU_ONLY: &str = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\n\
+                              c=IN IP4 127.0.0.1\r\nt=0 0\r\n\
+                              m=audio 40000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
+    let (callee, mut incoming) = endpoint().await;
+    let destination = callee.local_addr();
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("raw caller binds");
+    let source = socket.local_addr().expect("raw caller address");
+    let request = initial_offer(
+        source,
+        destination,
+        "z9hG4bKiof1",
+        "iof1@example.test",
+        PCMU_ONLY,
+    );
+    let request_bytes = Message::Request(request.clone()).to_bytes();
+    socket
+        .send_to(&request_bytes, destination)
+        .await
+        .expect("INVITE sends");
+    let offered = tokio::time::timeout(SIGNALLING_BOUND, incoming.recv())
+        .await
+        .expect("INVITE is bounded")
+        .expect("INVITE arrives");
+    let error = answer_with(&callee, &offered, loopback(), Codecs::L16)
+        .await
+        .expect_err("L16 cannot answer PCMU-only SDP");
+    assert!(matches!(error, sipx_call::Error::NoCommonCodec));
+
+    let (first_bytes, first) = raw_response(&socket).await;
+    let to = assert_initial_offer_refusal(&first, &request, source, 488, b"Not Acceptable Here");
+
+    socket
+        .send_to(&request_bytes, destination)
+        .await
+        .expect("retransmitted INVITE sends");
+    let (second_bytes, second) = raw_response(&socket).await;
+    assert_eq!(second.status.code(), 488);
+    assert_eq!(second_bytes, first_bytes, "the transaction repeats its 488");
+
+    let copied = |name: &HeaderName| {
+        Bytes::copy_from_slice(&request.headers.value(name).expect("request header"))
+    };
+    let ack = sipx_sip::build::RequestBuilder::new(Method::Ack, request.uri.clone())
+        .header(HeaderName::Via, copied(&HeaderName::Via))
+        .expect("Via")
+        .header(HeaderName::From, copied(&HeaderName::From))
+        .expect("From")
+        .header(HeaderName::To, to)
+        .expect("To")
+        .header(HeaderName::CallId, copied(&HeaderName::CallId))
+        .expect("Call-ID")
+        .cseq(1, &Method::Ack)
+        .expect("CSeq")
+        .max_forwards(70)
+        .build();
+    socket
+        .send_to(&Message::Request(ack).to_bytes(), destination)
+        .await
+        .expect("ACK sends");
+
+    let barrier = sipx_sip::build::RequestBuilder::new(Method::Options, request.uri)
+        .header(
+            HeaderName::Via,
+            Bytes::from(format!(
+                "SIP/2.0/UDP {source};branch=z9hG4bKiof-barrier;rport"
+            )),
+        )
+        .expect("Via")
+        .header(
+            HeaderName::From,
+            Bytes::from_static(b"<sip:caller@example.test>;tag=barrier"),
+        )
+        .expect("From")
+        .header(
+            HeaderName::To,
+            Bytes::from_static(b"<sip:answer@example.test>"),
+        )
+        .expect("To")
+        .header(
+            HeaderName::CallId,
+            Bytes::from_static(b"iof-barrier@example.test"),
+        )
+        .expect("Call-ID")
+        .cseq(1, &Method::Options)
+        .expect("CSeq")
+        .max_forwards(70)
+        .build();
+    socket
+        .send_to(&Message::Request(barrier).to_bytes(), destination)
+        .await
+        .expect("barrier sends");
+    let surfaced = tokio::time::timeout(SIGNALLING_BOUND, incoming.recv())
+        .await
+        .expect("barrier is bounded")
+        .expect("barrier arrives");
+    assert_eq!(
+        surfaced.request.method,
+        Method::Options,
+        "retransmitted INVITE and its ACK stay in the transaction layer"
+    );
+    assert!(callee.counters().messages_out() >= 2);
+    callee.shutdown().await;
+}
+
+/// IOF-2: malformed SDP is a malformed request, not an unsupported session, and therefore gets a
+/// tagged 400 while preserving the typed local parse reason.
+#[tokio::test]
+async fn a_malformed_initial_offer_is_refused_400_not_488() {
+    let (callee, mut incoming) = endpoint().await;
+    let destination = callee.local_addr();
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("raw caller binds");
+    let source = socket.local_addr().expect("raw caller address");
+    let request = initial_offer(
+        source,
+        destination,
+        "z9hG4bKiof2",
+        "iof2@example.test",
+        "v=not-a-valid-session\r\n",
+    );
+    socket
+        .send_to(&Message::Request(request).to_bytes(), destination)
+        .await
+        .expect("INVITE sends");
+    let offered = incoming.recv().await.expect("INVITE arrives");
+    let error = answer(&callee, &offered, loopback())
+        .await
+        .expect_err("malformed SDP cannot be answered");
+    assert!(matches!(error, sipx_call::Error::Sdp(_)), "{error:?}");
+    let (_, response) = raw_response(&socket).await;
+    assert_eq!(response.status.code(), 400);
+    assert_eq!(response.reason.as_ref(), b"Bad Request");
+    assert!(
+        response
+            .headers
+            .value(&HeaderName::To)
+            .is_some_and(|to| String::from_utf8_lossy(&to).contains(";tag="))
+    );
+    assert_eq!(
+        response
+            .headers
+            .value(&HeaderName::ContentLength)
+            .as_deref(),
+        Some(&b"0"[..])
+    );
+    callee.shutdown().await;
+}
+
+/// A response that cannot be handed to its server transaction is a transport failure, not a
+/// successful local 488. The causal endpoint shutdown makes the negative socket assertion exact.
+#[tokio::test]
+async fn an_unsent_initial_offer_refusal_stays_observable_and_uncounted() {
+    const PCMU_ONLY: &str = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\n\
+                              c=IN IP4 127.0.0.1\r\nt=0 0\r\n\
+                              m=audio 40000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
+    let (callee, mut incoming) = endpoint().await;
+    let destination = callee.local_addr();
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("raw caller binds");
+    let request = initial_offer(
+        socket.local_addr().expect("raw caller address"),
+        destination,
+        "z9hG4bKiof-send-failure",
+        "iof-send-failure@example.test",
+        PCMU_ONLY,
+    );
+    socket
+        .send_to(&Message::Request(request).to_bytes(), destination)
+        .await
+        .expect("INVITE sends");
+    let offered = incoming.recv().await.expect("INVITE arrives");
+    callee.shutdown().await;
+    let error = answer_with(&callee, &offered, loopback(), Codecs::L16)
+        .await
+        .expect_err("closed endpoint cannot send the 488");
+    assert!(matches!(error, sipx_call::Error::Transport(_)), "{error:?}");
+    assert_eq!(callee.counters().messages_out(), 0);
+    let mut byte = [0u8; 1];
+    assert!(
+        socket.try_recv_from(&mut byte).is_err(),
+        "a failed response handoff emitted bytes"
     );
 }
 

@@ -13,8 +13,11 @@
 //! DNS itself is behind a trait: tests use a fixture and never touch a resolver.
 
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use sipx_sip::{Host, Uri, UriTransport};
+use sipx_sip::{Host, Param, Uri, UriTransport};
+use thiserror::Error;
 
 use crate::target::{Target, TransportKind};
 
@@ -44,6 +47,148 @@ pub struct Srv {
     pub target: String,
 }
 
+/// Finite resource policy for one pure resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolutionLimits {
+    /// Maximum resolver questions issued by selection.
+    pub max_lookups: usize,
+    /// Maximum NAPTR rows in one answer.
+    pub max_naptr_records: usize,
+    /// Maximum SRV rows in one answer.
+    pub max_srv_records: usize,
+    /// Maximum addresses returned for one name.
+    pub max_addresses: usize,
+    /// Maximum final connection candidates.
+    pub max_candidates: usize,
+}
+
+impl Default for ResolutionLimits {
+    fn default() -> Self {
+        Self {
+            max_lookups: 32,
+            max_naptr_records: 16,
+            max_srv_records: 32,
+            max_addresses: 16,
+            max_candidates: 64,
+        }
+    }
+}
+
+/// Why pure target selection could not produce a finite candidate list.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum ResolutionError {
+    /// A configured count cannot bound work.
+    #[error("resolution limit {limit} must be greater than zero")]
+    InvalidLimit {
+        /// Public limit field.
+        limit: &'static str,
+    },
+    /// The URI transport parameter cannot be used.
+    #[error("the URI transport is invalid or unsupported")]
+    InvalidTransport,
+    /// Two explicit transport selectors disagree.
+    #[error("URI transport {uri:?} conflicts with requested transport {requested:?}")]
+    ConflictingTransport {
+        /// Effective URI transport.
+        uri: TransportKind,
+        /// Explicit command transport.
+        requested: TransportKind,
+    },
+    /// A clear transport was selected for SIPS.
+    #[error("a SIPS URI requires a secure transport, not {requested:?}")]
+    SecureTransportRequired {
+        /// Refused clear transport.
+        requested: TransportKind,
+    },
+    /// One resolver answer or the resulting list exceeded a finite bound.
+    #[error("resolution {limit} limit is {maximum}, observed {observed}")]
+    LimitExceeded {
+        /// Stable limit name.
+        limit: &'static str,
+        /// Configured maximum.
+        maximum: usize,
+        /// Count that was refused.
+        observed: usize,
+    },
+    /// The injected resolver returned no usable route.
+    #[error("no usable candidate for {authority}")]
+    NoUsableCandidate {
+        /// URI authority being resolved.
+        authority: String,
+    },
+    /// The internal budget lock was poisoned by a panicking resolver implementation.
+    #[error("the resolution budget became unavailable")]
+    BudgetUnavailable,
+}
+
+#[derive(Debug, Default)]
+struct BudgetState {
+    lookups: usize,
+    error: Option<ResolutionError>,
+}
+
+/// Applies count bounds to any injected resolver without putting policy in the DNS adapter.
+#[derive(Debug)]
+struct BoundedResolver<'a, R: ?Sized> {
+    inner: &'a R,
+    limits: ResolutionLimits,
+    state: Mutex<BudgetState>,
+    poisoned: AtomicBool,
+}
+
+impl<'a, R: ?Sized> BoundedResolver<'a, R> {
+    fn new(inner: &'a R, limits: ResolutionLimits) -> Self {
+        Self {
+            inner,
+            limits,
+            state: Mutex::new(BudgetState::default()),
+            poisoned: AtomicBool::new(false),
+        }
+    }
+
+    fn begin_lookup(&self) -> bool {
+        let Ok(mut state) = self.state.lock() else {
+            self.poisoned.store(true, Ordering::Relaxed);
+            return false;
+        };
+        let observed = state.lookups.saturating_add(1);
+        if observed > self.limits.max_lookups {
+            state.error.get_or_insert(ResolutionError::LimitExceeded {
+                limit: "lookups",
+                maximum: self.limits.max_lookups,
+                observed,
+            });
+            return false;
+        }
+        state.lookups = observed;
+        true
+    }
+
+    fn accept_records<T>(&self, records: Vec<T>, limit: &'static str, maximum: usize) -> Vec<T> {
+        if records.len() <= maximum {
+            return records;
+        }
+        if let Ok(mut state) = self.state.lock() {
+            state.error.get_or_insert(ResolutionError::LimitExceeded {
+                limit,
+                maximum,
+                observed: records.len(),
+            });
+        } else {
+            self.poisoned.store(true, Ordering::Relaxed);
+        }
+        Vec::new()
+    }
+
+    fn error(self) -> Option<ResolutionError> {
+        if self.poisoned.load(Ordering::Relaxed) {
+            return Some(ResolutionError::BudgetUnavailable);
+        }
+        self.state.into_inner().ok().and_then(|state| state.error)
+    }
+}
+
 /// What a resolver must be able to answer.
 ///
 /// A trait rather than a concrete DNS client so that the selection logic — which is where the
@@ -55,6 +200,41 @@ pub trait Resolver: Send + Sync {
     fn srv(&self, name: &str) -> Vec<Srv>;
     /// Addresses for a host.
     fn addresses(&self, host: &str) -> Vec<IpAddr>;
+}
+
+impl<R: Resolver + ?Sized> Resolver for BoundedResolver<'_, R> {
+    fn naptr(&self, domain: &str) -> Vec<Naptr> {
+        if !self.begin_lookup() {
+            return Vec::new();
+        }
+        self.accept_records(
+            self.inner.naptr(domain),
+            "NAPTR records",
+            self.limits.max_naptr_records,
+        )
+    }
+
+    fn srv(&self, name: &str) -> Vec<Srv> {
+        if !self.begin_lookup() {
+            return Vec::new();
+        }
+        self.accept_records(
+            self.inner.srv(name),
+            "SRV records",
+            self.limits.max_srv_records,
+        )
+    }
+
+    fn addresses(&self, host: &str) -> Vec<IpAddr> {
+        if !self.begin_lookup() {
+            return Vec::new();
+        }
+        self.accept_records(
+            self.inner.addresses(host),
+            "addresses",
+            self.limits.max_addresses,
+        )
+    }
 }
 
 /// A source of randomness for RFC 2782 weighted selection.
@@ -165,7 +345,7 @@ fn service_transport(service: &str) -> Option<TransportKind> {
 }
 
 /// The conventional SRV prefix for a transport.
-fn srv_prefix(transport: TransportKind) -> &'static str {
+pub(crate) fn srv_prefix(transport: TransportKind) -> &'static str {
     match transport {
         TransportKind::Udp => "_sip._udp.",
         TransportKind::Tcp => "_sip._tcp.",
@@ -185,6 +365,24 @@ pub fn resolve<R: Resolver + ?Sized, G: Rng + ?Sized>(
     resolver: &R,
     rng: &mut G,
 ) -> Vec<Target> {
+    resolve_bounded(uri, resolver, rng, None, ResolutionLimits::default()).unwrap_or_default()
+}
+
+/// Resolve with an optional application-selected transport and finite resource policy.
+///
+/// A URI transport parameter and `requested_transport` are two explicit selectors. They must
+/// agree. Supplying a transport does not replace the URI authority used for TLS or WSS identity.
+pub fn resolve_bounded<R: Resolver + ?Sized, G: Rng + ?Sized>(
+    uri: &Uri,
+    resolver: &R,
+    rng: &mut G,
+    requested_transport: Option<TransportKind>,
+    limits: ResolutionLimits,
+) -> Result<Vec<Target>, ResolutionError> {
+    validate_limits(limits)?;
+    let effective_uri = effective_uri(uri, requested_transport)?;
+    let bounded = BoundedResolver::new(resolver, limits);
+
     // Every secure or WebSocket candidate carries the name from the URI, and resolution is
     // exactly why. Clear WS needs it for HTTP authority even though it verifies no certificate.
     //
@@ -199,7 +397,7 @@ pub fn resolve<R: Resolver + ?Sized, G: Rng + ?Sized>(
         None => String::new(),
     };
     let named_authority = matches!(uri.host(), Some(Host::Name(_)));
-    candidates(uri, resolver, rng)
+    let mut selected: Vec<Target> = candidates(&effective_uri, &bounded, rng)
         .into_iter()
         .map(|target| match target.transport {
             TransportKind::Tls | TransportKind::Wss | TransportKind::Quic => {
@@ -208,7 +406,79 @@ pub fn resolve<R: Resolver + ?Sized, G: Rng + ?Sized>(
             TransportKind::Ws if named_authority => target.verifying(&identity),
             _ => target,
         })
-        .collect()
+        .collect();
+    if let Some(error) = bounded.error() {
+        return Err(error);
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    selected.retain(|target| seen.insert(target.clone()));
+    let observed = selected.len();
+    if observed > limits.max_candidates {
+        return Err(ResolutionError::LimitExceeded {
+            limit: "candidates",
+            maximum: limits.max_candidates,
+            observed,
+        });
+    }
+    if selected.is_empty() {
+        return Err(ResolutionError::NoUsableCandidate {
+            authority: identity,
+        });
+    }
+    Ok(selected)
+}
+
+fn validate_limits(limits: ResolutionLimits) -> Result<(), ResolutionError> {
+    for (name, value) in [
+        ("max_lookups", limits.max_lookups),
+        ("max_naptr_records", limits.max_naptr_records),
+        ("max_srv_records", limits.max_srv_records),
+        ("max_addresses", limits.max_addresses),
+        ("max_candidates", limits.max_candidates),
+    ] {
+        if value == 0 {
+            return Err(ResolutionError::InvalidLimit { limit: name });
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn effective_uri(
+    uri: &Uri,
+    requested_transport: Option<TransportKind>,
+) -> Result<Uri, ResolutionError> {
+    let uri_transport = default_transport(uri).ok_or(ResolutionError::InvalidTransport)?;
+    let Some(requested) = requested_transport else {
+        return Ok(uri.clone());
+    };
+    if uri.scheme().is_secure() && !requested.is_secure() {
+        return Err(ResolutionError::SecureTransportRequired { requested });
+    }
+    if uri.transport().is_some() && uri_transport != requested {
+        return Err(ResolutionError::ConflictingTransport {
+            uri: uri_transport,
+            requested,
+        });
+    }
+
+    let mut effective = uri.clone();
+    effective.remove_param("transport");
+    effective.push_param(Param::new("transport", transport_parameter(uri, requested)));
+    Ok(effective)
+}
+
+fn transport_parameter(uri: &Uri, transport: TransportKind) -> &'static str {
+    match transport {
+        TransportKind::Udp => "udp",
+        TransportKind::Tcp => "tcp",
+        TransportKind::Tls if uri.scheme().is_secure() => "tcp",
+        TransportKind::Tls => "tls",
+        TransportKind::Ws => "ws",
+        TransportKind::Wss if uri.scheme().is_secure() => "ws",
+        TransportKind::Wss => "wss",
+        TransportKind::Quic => "quic",
+    }
 }
 
 /// Where a URI's addresses come from, before the verification name is attached.
@@ -959,5 +1229,90 @@ mod tests {
             .with_address("multi.example.com", "192.0.2.81");
         let targets = resolve(&uri("sip:example.com"), &fixture, &mut SeededRng::new(1));
         assert_eq!(targets.len(), 2);
+    }
+
+    #[test]
+    fn an_explicit_command_transport_must_agree_with_the_uri() {
+        let error = resolve_bounded(
+            &uri("sip:example.com;transport=tcp"),
+            &Fixture::default(),
+            &mut SeededRng::new(1),
+            Some(TransportKind::Udp),
+            ResolutionLimits::default(),
+        )
+        .expect_err("two explicit transports disagree");
+        assert_eq!(
+            error,
+            ResolutionError::ConflictingTransport {
+                uri: TransportKind::Tcp,
+                requested: TransportKind::Udp,
+            }
+        );
+    }
+
+    #[test]
+    fn a_command_transport_can_select_one_named_service() {
+        let fixture = Fixture::default()
+            .with_srv(
+                "_sip._tcp.example.com",
+                vec![srv(1, 0, 5070, "tcp.example.com")],
+            )
+            .with_address("tcp.example.com", "192.0.2.90");
+        let targets = resolve_bounded(
+            &uri("sip:example.com"),
+            &fixture,
+            &mut SeededRng::new(1),
+            Some(TransportKind::Tcp),
+            ResolutionLimits::default(),
+        )
+        .expect("TCP service resolves");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].transport, TransportKind::Tcp);
+        assert_eq!(targets[0].addr.to_string(), "192.0.2.90:5070");
+    }
+
+    #[test]
+    fn a_sips_command_transport_cannot_downgrade() {
+        let error = resolve_bounded(
+            &uri("sips:secure.example"),
+            &Fixture::default(),
+            &mut SeededRng::new(1),
+            Some(TransportKind::Tcp),
+            ResolutionLimits::default(),
+        )
+        .expect_err("clear transport refused");
+        assert_eq!(
+            error,
+            ResolutionError::SecureTransportRequired {
+                requested: TransportKind::Tcp,
+            }
+        );
+    }
+
+    #[test]
+    fn an_oversized_answer_is_a_typed_limit_failure() {
+        let fixture = Fixture::default()
+            .with_address("example.com", "192.0.2.1")
+            .with_address("example.com", "192.0.2.2");
+        let limits = ResolutionLimits {
+            max_addresses: 1,
+            ..ResolutionLimits::default()
+        };
+        let error = resolve_bounded(
+            &uri("sip:example.com:5080"),
+            &fixture,
+            &mut SeededRng::new(1),
+            None,
+            limits,
+        )
+        .expect_err("oversized address answer refused");
+        assert_eq!(
+            error,
+            ResolutionError::LimitExceeded {
+                limit: "addresses",
+                maximum: 1,
+                observed: 2,
+            }
+        );
     }
 }

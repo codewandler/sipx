@@ -25,7 +25,9 @@ use sipx_transport::{Handle, Incoming, Target, TransportKind};
 pub use sipx_sip::auth::Credentials;
 
 use crate::dialog::{Dialog, strip_header_params};
-use crate::error::{Error, Result};
+use crate::error::{
+    CancellationCleanup, CancellationDisposition, Error, InvitationCancellation, Result,
+};
 use crate::event::{CallEvent, CallEvents, EndCause, EventSink};
 use crate::extension::{self, ApplicationRequest};
 use crate::identity::OutboundIdentityPolicy;
@@ -583,6 +585,24 @@ impl Call {
             .recv_digit()
             .await
             .map(|(digit, _duration)| digit)
+    }
+
+    /// Move one completed telephone event from media into this call's event stream.
+    ///
+    /// Call owners that use [`serve`] or [`serve_until`] get this automatically. An owner with
+    /// its own signalling `select!` loop can await this branch beside incoming SIP and
+    /// [`CallEvents::recv`](crate::CallEvents::recv). The handoff uses only the media session's
+    /// bounded digit queue and the call's bounded event queue; it does not spawn a task or create
+    /// another buffer.
+    ///
+    /// A stopped media channel waits forever rather than returning immediately. That makes this a
+    /// safe `select!` arm after teardown instead of a closed-channel busy loop; dropping the
+    /// future remains cancellation-safe.
+    pub async fn drive_media_event(&self) {
+        match self.media.recv_digit().await {
+            Some((digit, duration)) => self.events.emit(CallEvent::Dtmf { digit, duration }),
+            None => std::future::pending().await,
+        }
     }
 
     /// Play a clip and wait for it, reporting on the event stream when it stops.
@@ -2586,6 +2606,65 @@ impl Call {
         observed
     }
 
+    /// End locally while continuing to answer requests which crossed the originated BYE.
+    ///
+    /// The ordinary observed hangup is sufficient when a dispatcher keeps driving the dialog.
+    /// A one-call command owns the receiver itself, though, and must not stop reading it while it
+    /// awaits the BYE response: the peer may have selected a BYE at the same time. That crossed
+    /// request is still answered, while [`Self::begin_end`] ensures this side originates only one.
+    async fn hang_up_observed_while_serving(
+        &mut self,
+        incoming: &mut tokio::sync::mpsc::Receiver<Incoming>,
+        within: Duration,
+    ) -> Result<u16> {
+        let reason = normal_clearing_reason();
+        let Some((bye, cseq)) = self.begin_end(EndCause::LocalHangup, &reason).await? else {
+            return Err(Error::InvalidDialogResponse);
+        };
+        let endpoint = self.endpoint.clone();
+        let target = self.target.clone();
+        let dialog = self.dialog.clone();
+        let observed = async move {
+            let mut responses = endpoint.send(bye, target).await?;
+            let response = responses
+                .final_response()
+                .await
+                .ok_or(Error::SignallingTeardownTimeout(within))?;
+            if !crate::signalling::response_matches_dialog(&response, &dialog, cseq) {
+                return Err(Error::InvalidDialogResponse);
+            }
+            // The dialog is already ended locally. Any valid final response completes this
+            // teardown exchange and is evidence worth reporting; a non-success status cannot
+            // resurrect the call or turn successful media work into a command failure.
+            Ok(response.status.code())
+        };
+        tokio::pin!(observed);
+        let deadline = Instant::now() + within;
+        let mut incoming_open = true;
+        let result = loop {
+            tokio::select! {
+                biased;
+                message = incoming.recv(), if incoming_open => match message {
+                    Some(message)
+                        if matches!(message.request.method, Method::Ack | Method::Bye) =>
+                    {
+                        if !self.handle(&message).await? {
+                            self.refuse_unclaimed(&message).await;
+                        }
+                    }
+                    Some(message) => self.refuse_unclaimed(&message).await,
+                    None => incoming_open = false,
+                },
+                response = &mut observed => break response,
+                () = tokio::time::sleep_until(deadline) => {
+                    break Err(Error::SignallingTeardownTimeout(within));
+                }
+            }
+        };
+        self.finish_media_ownership().await;
+        result
+    }
+
     /// End the call with an explicit protocol cause.
     ///
     /// This is the coupled-leg shape from RFC 3326 §3.1: a controller which knows the winning
@@ -2643,19 +2722,132 @@ pub async fn serve(
                 None => return Ok(()),
             },
             () = sleep_until(deadline) => call.on_session_deadline().await?,
-            // DTMF arrives over RTP, not signalling, so nothing above ever sees it — this is
-            // the one place a digit becomes a `CallEvent`. Read fresh from `call.media()` on
-            // every pass rather than once outside the loop, so a re-INVITE that moves the
-            // media session (`move_media_if_changed`) is followed automatically: the next
-            // iteration's future is built against whichever session is current.
-            digit = call.media().recv_digit() => {
-                if let Some((digit, duration)) = digit {
-                    call.events.emit(CallEvent::Dtmf { digit, duration });
-                }
-            }
+            // Built fresh on each pass so a re-INVITE follows the current media generation.
+            () = call.drive_media_event() => {}
         }
     }
     Ok(())
+}
+
+/// Why [`serve_until`] returned.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum Served<T> {
+    /// The far end ended the confirmed dialog. Media work was cancelled and joined.
+    Remote {
+        /// The protocol cause selected by the call.
+        cause: EndCause,
+        /// The media work's partial or complete result after the call stopped it.
+        output: T,
+    },
+    /// The supplied media work completed, after which one observed BYE ended the dialog.
+    Local {
+        /// The media work's result.
+        output: T,
+        /// The valid final status observed for the originated BYE, or its bounded failure.
+        bye: Result<u16>,
+    },
+    /// The supplied stop input won, after which one observed BYE ended the dialog.
+    Interrupted {
+        /// The media work's partial result after cancellation.
+        output: T,
+        /// The valid final status observed for the originated BYE, or its bounded failure.
+        bye: Result<u16>,
+    },
+}
+
+/// Drive one confirmed call, its media work and a local stop input as one owned lifecycle.
+///
+/// Inbound dialog traffic has priority over `interrupted`, which has priority over local work
+/// completion. ACK therefore stops successful-response retransmission while media runs, and a BYE
+/// already queued when a local terminal input is polled wins without this side originating one.
+/// A BYE which crosses local teardown is answered by the same loop while the originated BYE's
+/// response remains bounded.
+///
+/// `work` receives the current media session and a cancellation token. The token fires before a
+/// remote or interrupted end is joined. The future MUST be cancellation-safe and MUST resolve once
+/// that token and the media session have stopped; this function does not return until it has.
+pub async fn serve_until<F, W, S, T>(
+    call: &mut Call,
+    incoming: &mut tokio::sync::mpsc::Receiver<Incoming>,
+    work: F,
+    interrupted: S,
+) -> Result<Served<T>>
+where
+    F: FnOnce(Arc<MediaSession>, CancellationToken) -> W,
+    W: Future<Output = T>,
+    S: Future<Output = ()>,
+{
+    let stop_work = CancellationToken::new();
+    let work = work(Arc::clone(&call.media), stop_work.clone());
+    tokio::pin!(work);
+    tokio::pin!(interrupted);
+
+    loop {
+        let deadline = call.session_deadline();
+        tokio::select! {
+            biased;
+            message = incoming.recv() => {
+                if let Some(message) = message {
+                    let handled = match call.handle(&message).await {
+                        Ok(handled) => handled,
+                        Err(error) => {
+                            stop_work.cancel();
+                            let _ = call.hang_up().await;
+                            let _ = work.as_mut().await;
+                            return Err(error);
+                        }
+                    };
+                    if call.is_ended() {
+                        stop_work.cancel();
+                        let output = work.as_mut().await;
+                        return Ok(Served::Remote {
+                            cause: EndCause::RemoteBye,
+                            output,
+                        });
+                    }
+                    if !handled {
+                        call.refuse_unclaimed(&message).await;
+                    }
+                } else {
+                    stop_work.cancel();
+                    let _ = call.hang_up().await;
+                    let _ = work.as_mut().await;
+                    return Err(Error::Transport(sipx_transport::Error::EndpointClosed));
+                }
+            },
+            () = interrupted.as_mut() => {
+                stop_work.cancel();
+                let bye = call
+                    .hang_up_observed_while_serving(incoming, Duration::from_secs(2))
+                    .await;
+                let output = work.as_mut().await;
+                return Ok(Served::Interrupted { output, bye });
+            }
+            output = work.as_mut() => {
+                let bye = call
+                    .hang_up_observed_while_serving(incoming, Duration::from_secs(2))
+                    .await;
+                return Ok(Served::Local { output, bye });
+            }
+            () = sleep_until(deadline) => {
+                if let Err(error) = call.on_session_deadline().await {
+                    stop_work.cancel();
+                    let _ = work.as_mut().await;
+                    return Err(error);
+                }
+                if call.is_ended() {
+                    stop_work.cancel();
+                    let output = work.as_mut().await;
+                    return Ok(Served::Remote {
+                        cause: EndCause::Timeout,
+                        output,
+                    });
+                }
+            }
+            () = call.drive_media_event() => {}
+        }
+    }
 }
 
 /// Wait for a deadline, or forever if there is none.
@@ -2807,6 +2999,17 @@ pub struct DialOptions {
     /// correct: dropping the future partway through leaves the far end believing it is in a
     /// call, and only code inside the exchange can send the CANCEL that stops it.
     pub timeout: Option<Duration>,
+    /// How long invitation cancellation may wait for its protocol completion events.
+    ///
+    /// This is distinct from [`Self::timeout`]: the answer deadline freezes the call outcome,
+    /// then this allowance admits CANCEL or handles a final response which crossed that deadline.
+    /// Zero performs no timed wait and never means an unbounded fallback.
+    ///
+    /// # Beta API migration
+    ///
+    /// Adding this public field deliberately breaks external `DialOptions` struct literals. Add
+    /// `cancellation_timeout` or use [`Self::new`] and [`Self::with_cancellation_timeout`].
+    pub cancellation_timeout: Duration,
     /// Ask for an RFC 4028 session timer of this length.
     ///
     /// `None` is the default and means no timer is requested. That is not the same as no timer
@@ -2859,6 +3062,7 @@ impl DialOptions {
             media_bind_address: media_address,
             initial_direction: Direction::SendRecv,
             timeout: None,
+            cancellation_timeout: Duration::from_secs(2),
             session_expires: None,
             service_route: Vec::new(),
             headers: Vec::new(),
@@ -2955,6 +3159,13 @@ impl DialOptions {
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
+        self
+    }
+
+    /// Bound the distinct invitation-withdrawal phase after timeout or caller cancellation.
+    #[must_use]
+    pub const fn with_cancellation_timeout(mut self, timeout: Duration) -> Self {
+        self.cancellation_timeout = timeout;
         self
     }
 }
@@ -3675,7 +3886,8 @@ async fn withdraw(
     target: Target,
     responses: &mut sipx_transport::Responses,
     reason: &ReasonValue,
-) {
+    limit: Duration,
+) -> CancellationCleanup {
     // Giving up is not just ceasing to wait. The far end is ringing and has been told
     // nothing; without a CANCEL it goes on ringing, and someone answering afterwards
     // ends up in a call with a party that has left.
@@ -3683,40 +3895,74 @@ async fn withdraw(
     // The transport operation owns §9.1's race: it waits until the exact INVITE has a provisional,
     // or returns the final/timeout/transport event that won instead. Events it observes remain on
     // `responses`, so the crossing-2xx safeguard below sees the same transaction history.
-    let grace = tokio::time::Instant::now() + Duration::from_secs(2);
-    match tokio::time::timeout_at(
-        grace,
-        Box::pin(endpoint.cancel_invite(responses, Some(Reason::from(reason.clone())))),
-    )
-    .await
-    {
-        Ok(Ok(sipx_transport::CancelInviteOutcome::Sent(_cancellation))) => {}
-        Ok(Ok(sipx_transport::CancelInviteOutcome::FinalResponse { response, .. })) => {
-            if response.status.is_success() {
-                ack_then_bye(endpoint, invite, &response, target).await;
+    let started = Instant::now();
+    let deadline = started + limit;
+    let mut cancel_sent = false;
+    let mut final_response_observed = false;
+    let operation = async {
+        match endpoint
+            .cancel_invite(responses, Some(Reason::from(reason.clone())))
+            .await
+        {
+            Ok(sipx_transport::CancelInviteOutcome::Sent(_cancellation)) => {
+                cancel_sent = true;
             }
-            return;
+            Ok(sipx_transport::CancelInviteOutcome::FinalResponse { response, .. }) => {
+                final_response_observed = true;
+                if response.status.is_success() {
+                    ack_then_bye(endpoint, invite, &response, target).await;
+                }
+                return true;
+            }
+            Ok(_) => return true,
+            // The loss is counted where transport output is attempted. This is already the
+            // giving-up path; endpoint shutdown remains the finite ownership barrier.
+            Err(error) => {
+                tracing::debug!(%error, "could not create CANCEL transaction");
+                return false;
+            }
         }
-        Ok(Ok(_)) | Err(_) => return,
-        // The loss is counted where transport output is attempted. This is already the giving-up
-        // path; its remaining remedy is still to catch a crossing 2xx and ACK-then-BYE it.
-        Ok(Err(error)) => tracing::debug!(%error, "could not create CANCEL transaction"),
-    }
 
-    // CANCEL cannot close the race it exists to manage: a 200 already in flight
-    // arrives anyway, and RFC 3261 §15 says a UAC that will not proceed must
-    // acknowledge it and then hang up rather than leave it unanswered.
-    while let Ok(Some(event)) = tokio::time::timeout_at(grace, responses.next()).await {
-        let sipx_sip::transaction::TuEvent::Response(late) = event else {
-            continue;
-        };
-        if !late.status.is_final() {
-            continue;
+        // CANCEL cannot close the race it exists to manage: a 200 already in flight arrives
+        // anyway, and RFC 3261 §15 says a UAC that will not proceed must acknowledge it and then
+        // hang up rather than leave it unanswered.
+        while let Some(event) = responses.next().await {
+            let sipx_sip::transaction::TuEvent::Response(late) = event else {
+                continue;
+            };
+            if !late.status.is_final() {
+                continue;
+            }
+            final_response_observed = true;
+            if late.status.is_success() {
+                ack_then_bye(endpoint, invite, &late, target.clone()).await;
+            }
+            return true;
         }
-        if late.status.is_success() {
-            ack_then_bye(endpoint, invite, &late, target.clone()).await;
-        }
-        break;
+        true
+    };
+    // Fixed duration bounds failed cancellation; a transaction event is successful completion.
+    let (completed, exhausted) = match tokio::time::timeout_at(deadline, Box::pin(operation)).await
+    {
+        Ok(completed) => (completed, false),
+        Err(_elapsed) => (false, true),
+    };
+    CancellationCleanup {
+        limit,
+        elapsed: started.elapsed(),
+        disposition: if exhausted {
+            CancellationDisposition::Exhausted {
+                cancel_sent,
+                final_response_observed,
+            }
+        } else if completed {
+            CancellationDisposition::Completed {
+                cancel_sent,
+                final_response_observed,
+            }
+        } else {
+            CancellationDisposition::Failed { cancel_sent }
+        },
     }
 }
 
@@ -3813,6 +4059,7 @@ async fn dial_with(
         open_invitation(endpoint, &target, to, options, identity, authorization).await?;
 
     let mut responses = endpoint.send(invite.clone(), target.clone()).await?;
+    let invitation_started = Instant::now();
 
     let mut acknowledging = Acknowledging {
         endpoint,
@@ -3833,26 +4080,40 @@ async fn dial_with(
         Waited::Gone => return Err(Error::NoResponse),
         Waited::Transport(error) => return Err(Error::Transport(error)),
         Waited::GaveUp => {
-            withdraw(
+            let invitation_elapsed = invitation_started.elapsed();
+            let cleanup = withdraw(
                 endpoint,
                 &invite,
                 target.clone(),
                 &mut responses,
                 &request_timeout_reason(),
+                options.cancellation_timeout,
             )
             .await;
-            return Err(Error::Cancelled(options.timeout.unwrap_or(Duration::ZERO)));
+            return Err(Error::Cancelled(InvitationCancellation {
+                timed_out: true,
+                invitation_limit: options.timeout,
+                invitation_elapsed,
+                cleanup,
+            }));
         }
         Waited::Cancelled => {
-            withdraw(
+            let invitation_elapsed = invitation_started.elapsed();
+            let cleanup = withdraw(
                 endpoint,
                 &invite,
                 target.clone(),
                 &mut responses,
                 &normal_clearing_reason(),
+                options.cancellation_timeout,
             )
             .await;
-            return Err(Error::Cancelled(Duration::ZERO));
+            return Err(Error::Cancelled(InvitationCancellation {
+                timed_out: false,
+                invitation_limit: options.timeout,
+                invitation_elapsed,
+                cleanup,
+            }));
         }
     };
 
@@ -4377,10 +4638,14 @@ pub(crate) async fn answer_tagged(
     policy: MediaPolicy,
     headers: &[sipx_sip::Header],
 ) -> Result<Call> {
-    // Ahead of the claim, deliberately: an offer that cannot be read fails here with nothing
-    // sent, and an invitation that was never taken is one a CANCEL can still end.
-    let offer = sipx_sdp::parse(&String::from_utf8_lossy(incoming.request.body()))
-        .map_err(|error| Error::Sdp(error.to_string()))?;
+    let offer = match sipx_sdp::parse(&String::from_utf8_lossy(incoming.request.body())) {
+        Ok(offer) => offer,
+        Err(error) => {
+            let error = Error::Sdp(error.to_string());
+            refuse_initial_offer(endpoint, incoming, tag, claim, 400, "Bad Request").await?;
+            return Err(error);
+        }
+    };
     // No provisional was sent on this path, so there is nothing to report as `Ringing`.
     answer_negotiated(
         endpoint,
@@ -4472,6 +4737,8 @@ pub struct Dialing {
     /// to [`Self::answered`] — the far end is ringing against one deadline, not a fresh one per
     /// method call.
     deadline: Option<tokio::time::Instant>,
+    /// Monotonic origin shared by the answer deadline and cancellation report.
+    invitation_started: tokio::time::Instant,
     options: DialOptions,
     /// A final response that arrived before the application was handed anything.
     ///
@@ -4497,6 +4764,27 @@ enum Arrived {
     GaveUp,
     /// The transaction ended without a final response.
     Gone,
+}
+
+enum BeforeDeadline<T> {
+    Event(T),
+    Expired,
+}
+
+/// Observe an event only while the answer budget remains.
+///
+/// Deadline first is the public exact-boundary rule: an event must be observed *before*, not at,
+/// the deadline to change the call outcome.
+async fn before_deadline<T>(
+    deadline: tokio::time::Instant,
+    event: impl Future<Output = T>,
+) -> BeforeDeadline<T> {
+    tokio::pin!(event);
+    tokio::select! {
+        biased;
+        () = tokio::time::sleep_until(deadline) => BeforeDeadline::Expired,
+        event = event.as_mut() => BeforeDeadline::Event(event),
+    }
 }
 
 /// One early-dial event surfaced to the owning two-dialog coupling.
@@ -4584,8 +4872,8 @@ where
     tokio::select! {
         biased;
         () = cancelled.as_mut() => {
-            dialing.give_up().await;
-            Err(Error::Cancelled(Duration::ZERO))
+            let cancellation = dialing.local_cancellation(false).await;
+            Err(Error::Cancelled(cancellation))
         }
         result = dialing.reach_early_dialog() => {
             result?;
@@ -4606,6 +4894,7 @@ async fn begin_dial_early(
     let (port, capabilities, ice, _keying, invite) =
         open_invitation(endpoint, &target, to, options, &Identity::fresh(), None).await?;
     let responses = endpoint.send(invite.clone(), target.clone()).await?;
+    let invitation_started = Instant::now();
 
     let (events, events_rx) = EventSink::new();
     Ok(Dialing {
@@ -4627,9 +4916,8 @@ async fn begin_dial_early(
         peer_allows_update: false,
         hold: Direction::SendRecv,
         ringing: None,
-        deadline: options
-            .timeout
-            .map(|limit| tokio::time::Instant::now() + limit),
+        deadline: options.timeout.map(|limit| invitation_started + limit),
+        invitation_started,
         options: options.clone(),
         answered_already: None,
         events: Some(events),
@@ -4661,6 +4949,7 @@ pub async fn dial_early_without_offer(
     let identity = Identity::fresh();
     let invite = open_offerless_invitation(endpoint, &target, to, options, &identity)?;
     let responses = endpoint.send(invite.clone(), target.clone()).await?;
+    let invitation_started = Instant::now();
     let (events, events_rx) = EventSink::new();
     let mut dialing = Dialing {
         endpoint: endpoint.clone(),
@@ -4679,9 +4968,8 @@ pub async fn dial_early_without_offer(
         peer_allows_update: false,
         hold: Direction::SendRecv,
         ringing: None,
-        deadline: options
-            .timeout
-            .map(|limit| tokio::time::Instant::now() + limit),
+        deadline: options.timeout.map(|limit| invitation_started + limit),
+        invitation_started,
         options: options.clone(),
         answered_already: None,
         events: Some(events),
@@ -4703,6 +4991,7 @@ pub(crate) async fn dial_early_without_offer_for_coupling(
     let identity = Identity::fresh();
     let invite = open_offerless_invitation(endpoint, &target, to, options, &identity)?;
     let responses = endpoint.send(invite.clone(), target.clone()).await?;
+    let invitation_started = Instant::now();
     let (events, events_rx) = EventSink::new();
     let mut dialing = Dialing {
         endpoint: endpoint.clone(),
@@ -4721,9 +5010,8 @@ pub(crate) async fn dial_early_without_offer_for_coupling(
         peer_allows_update: false,
         hold: Direction::SendRecv,
         ringing: None,
-        deadline: options
-            .timeout
-            .map(|limit| tokio::time::Instant::now() + limit),
+        deadline: options.timeout.map(|limit| invitation_started + limit),
+        invitation_started,
         options: options.clone(),
         answered_already: None,
         events: Some(events),
@@ -4818,10 +5106,8 @@ impl Dialing {
                     return Ok(false);
                 }
                 Arrived::GaveUp => {
-                    self.give_up().await;
-                    return Err(Error::Cancelled(
-                        self.options.timeout.unwrap_or(Duration::ZERO),
-                    ));
+                    let cancellation = self.local_cancellation(true).await;
+                    return Err(Error::Cancelled(cancellation));
                 }
                 Arrived::Gone => return Err(Error::NoResponse),
             }
@@ -4925,10 +5211,8 @@ impl Dialing {
                     }
                 },
                 Arrived::GaveUp => {
-                    self.give_up().await;
-                    Err(Error::Cancelled(
-                        self.options.timeout.unwrap_or(Duration::ZERO),
-                    ))
+                    let cancellation = self.local_cancellation(true).await;
+                    Err(Error::Cancelled(cancellation))
                 }
                 Arrived::Gone => Err(Error::NoResponse),
             }
@@ -4996,8 +5280,8 @@ impl Dialing {
                     tokio::select! {
                         biased;
                         () = cancelled.as_mut() => {
-                            self.give_up().await;
-                            return Err(Error::Cancelled(Duration::ZERO));
+                            let cancellation = self.local_cancellation(false).await;
+                            return Err(Error::Cancelled(cancellation));
                         }
                         arrived = self.next_response() => arrived,
                     }
@@ -5011,10 +5295,8 @@ impl Dialing {
                 }
                 Arrived::Final(response) => return self.confirm(*response).await,
                 Arrived::GaveUp => {
-                    self.give_up().await;
-                    return Err(Error::Cancelled(
-                        self.options.timeout.unwrap_or(Duration::ZERO),
-                    ));
+                    let cancellation = self.local_cancellation(true).await;
+                    return Err(Error::Cancelled(cancellation));
                 }
                 Arrived::Gone => return Err(Error::NoResponse),
             }
@@ -5027,7 +5309,15 @@ impl Dialing {
     /// that crosses the CANCEL is acknowledged and then hung up, which §15 requires and a CANCEL
     /// cannot do on its own.
     pub async fn cancel(mut self) {
-        self.give_up().await;
+        let _cleanup = self.give_up().await;
+    }
+
+    /// Cancel this invitation and return the measured ownership handoff.
+    ///
+    /// This is the observable form used by command supervisors. [`Self::cancel`] retains the
+    /// compatibility shape for callers that need only the protocol side effect.
+    pub async fn cancel_observed(mut self) -> InvitationCancellation {
+        self.local_cancellation(false).await
     }
 
     /// Cancel this invitation with an explicit protocol cause.
@@ -5035,7 +5325,7 @@ impl Dialing {
     /// A SIP 200 reason represents the RFC 3326 §3.1 case where another coupled or forked leg
     /// completed the call; other valid SIP and Q.850 causes are retained unchanged.
     pub async fn cancel_with_reason(mut self, reason: ReasonValue) {
-        self.give_up_with_reason(&reason).await;
+        let _cleanup = self.give_up_with_reason(&reason).await;
     }
 
     /// The early dialog's mutable parts, borrowed for one UPDATE.
@@ -5074,10 +5364,8 @@ impl Dialing {
                     return Ok(());
                 }
                 Arrived::GaveUp => {
-                    self.give_up().await;
-                    return Err(Error::Cancelled(
-                        self.options.timeout.unwrap_or(Duration::ZERO),
-                    ));
+                    let cancellation = self.local_cancellation(true).await;
+                    return Err(Error::Cancelled(cancellation));
                 }
                 Arrived::Gone => return Err(Error::NoResponse),
             }
@@ -5107,10 +5395,8 @@ impl Dialing {
                     return Ok(None);
                 }
                 Arrived::GaveUp => {
-                    self.give_up().await;
-                    return Err(Error::Cancelled(
-                        self.options.timeout.unwrap_or(Duration::ZERO),
-                    ));
+                    let cancellation = self.local_cancellation(true).await;
+                    return Err(Error::Cancelled(cancellation));
                 }
                 Arrived::Gone => return Err(Error::NoResponse),
             }
@@ -5126,9 +5412,9 @@ impl Dialing {
         loop {
             let event = match deadline {
                 None => responses.next().await,
-                Some(deadline) => match tokio::time::timeout_at(deadline, responses.next()).await {
-                    Ok(event) => event,
-                    Err(_elapsed) => return Arrived::GaveUp,
+                Some(deadline) => match before_deadline(deadline, responses.next()).await {
+                    BeforeDeadline::Event(event) => event,
+                    BeforeDeadline::Expired => return Arrived::GaveUp,
                 },
             };
             match event {
@@ -5371,7 +5657,7 @@ impl Dialing {
     /// no offer of ours will not send a 2xx to fail on, and the caller's only outcome was
     /// [`Error::Cancelled`] when its own deadline passed.
     async fn abandon(&mut self, error: Error) -> Error {
-        self.give_up().await;
+        let _cleanup = self.give_up().await;
         error
     }
 
@@ -5610,19 +5896,59 @@ impl Dialing {
     }
 
     /// Take back the invitation, whatever state it is in.
-    async fn give_up(&mut self) {
-        self.give_up_with_reason(&normal_clearing_reason()).await;
+    async fn local_cancellation(&mut self, timed_out: bool) -> InvitationCancellation {
+        let invitation_elapsed = self.invitation_started.elapsed();
+        let cleanup = self.give_up().await;
+        InvitationCancellation {
+            timed_out,
+            invitation_limit: self.options.timeout,
+            invitation_elapsed,
+            cleanup,
+        }
     }
 
-    async fn give_up_with_reason(&mut self, reason: &ReasonValue) {
+    async fn give_up(&mut self) -> CancellationCleanup {
+        self.give_up_with_reason(&normal_clearing_reason()).await
+    }
+
+    async fn give_up_with_reason(&mut self, reason: &ReasonValue) -> CancellationCleanup {
+        let limit = self.options.cancellation_timeout;
         if let Some(response) = self.coupled_final.take() {
-            if response.status.is_success() {
-                ack_then_bye(&self.endpoint, &self.invite, &response, self.target.clone()).await;
-            }
-            return;
+            let started = Instant::now();
+            let operation = async {
+                if response.status.is_success() {
+                    ack_then_bye(&self.endpoint, &self.invite, &response, self.target.clone())
+                        .await;
+                }
+            };
+            let exhausted = tokio::time::timeout_at(started + limit, Box::pin(operation))
+                .await
+                .is_err();
+            return CancellationCleanup {
+                limit,
+                elapsed: started.elapsed(),
+                disposition: if exhausted {
+                    CancellationDisposition::Exhausted {
+                        cancel_sent: false,
+                        final_response_observed: true,
+                    }
+                } else {
+                    CancellationDisposition::Completed {
+                        cancel_sent: false,
+                        final_response_observed: true,
+                    }
+                },
+            };
         }
         let Some(responses) = self.responses.as_mut() else {
-            return;
+            return CancellationCleanup {
+                limit,
+                elapsed: Duration::ZERO,
+                disposition: CancellationDisposition::Completed {
+                    cancel_sent: false,
+                    final_response_observed: false,
+                },
+            };
         };
         withdraw(
             &self.endpoint,
@@ -5630,8 +5956,9 @@ impl Dialing {
             self.target.clone(),
             responses,
             reason,
+            limit,
         )
-        .await;
+        .await
     }
 }
 
@@ -5720,9 +6047,7 @@ async fn answer_gathering(
     offer: &SessionDescription,
     policy: MediaPolicy,
 ) -> Result<(IceNegotiation, Option<LocalDescription>)> {
-    let remote = offer.media.first().map_or(IceNegotiation::Absent, |audio| {
-        sipx_media::ice::negotiate(offer, audio)
-    });
+    let remote = answer_ice_negotiation(offer, policy)?;
     if !remote.runs_ice() {
         return Ok((remote, None));
     }
@@ -5734,6 +6059,31 @@ async fn answer_gathering(
         None => None,
     };
     Ok((remote, local))
+}
+
+/// Read the peer ICE half that an answering call is allowed to retain.
+///
+/// Generic calls preserve every usable component for the ordinary mux fallback. The named
+/// browser profile has already required mux, so its pure validator removes an offered RTCP
+/// fallback before the media ICE agent can store or pair it.
+fn answer_ice_negotiation(
+    offer: &SessionDescription,
+    policy: MediaPolicy,
+) -> Result<IceNegotiation> {
+    if policy.profile == MediaProfile::BrowserAudio {
+        let remote = sipx_sdp::browser_audio::validate(
+            offer,
+            sipx_sdp::browser_audio::BrowserAudioRole::Offerer,
+        )?;
+        return Ok(IceNegotiation::Ice {
+            credentials: remote.ice,
+            candidates: remote.candidates,
+            lite: offer.is_ice_lite(),
+        });
+    }
+    Ok(offer.media.first().map_or(IceNegotiation::Absent, |audio| {
+        sipx_media::ice::negotiate(offer, audio)
+    }))
 }
 
 /// A session that has been described and answered, but not yet accepted.
@@ -6077,8 +6427,15 @@ pub async fn answer_ringing_with_policy_at(
     if !ringing.is_acknowledged() {
         tracing::debug!("answering before the reliable provisional was acknowledged");
     }
-    let offer = sipx_sdp::parse(&String::from_utf8_lossy(incoming.request.body()))
-        .map_err(|error| Error::Sdp(error.to_string()))?;
+    let offer = match sipx_sdp::parse(&String::from_utf8_lossy(incoming.request.body())) {
+        Ok(offer) => offer,
+        Err(error) => {
+            let error = Error::Sdp(error.to_string());
+            refuse_initial_offer(endpoint, incoming, ringing.tag(), None, 400, "Bad Request")
+                .await?;
+            return Err(error);
+        }
+    };
     answer_negotiated(
         endpoint,
         incoming,
@@ -6284,6 +6641,39 @@ async fn negotiate_session(
 /// `an_answer_future_is_spawnable` holds to.
 pub(crate) type Claim<'a> = &'a (dyn Fn() -> Result<()> + Send + Sync);
 
+/// End an initial offer that cannot become a call, through the INVITE's server transaction.
+///
+/// Everything that can fail while shaping the response happens before the optional dispatcher
+/// claim. Once claimed, a crossing CANCEL must not replace this final response with 487. A send
+/// failure is returned instead of the local negotiation error so it stays observable and the
+/// transport cannot count a response it did not hand to the socket.
+async fn refuse_initial_offer(
+    endpoint: &Handle,
+    incoming: &Incoming,
+    tag: &str,
+    claim: Option<Claim<'_>>,
+    code: u16,
+    reason: &'static str,
+) -> Result<()> {
+    let status = StatusCode::new(code)
+        .ok_or_else(|| Error::Sdp(format!("invalid initial-offer response status {code}")))?;
+    let existing = incoming
+        .request
+        .headers
+        .value(&HeaderName::To)
+        .map(|value| String::from_utf8_lossy(&value).into_owned())
+        .unwrap_or_default();
+    let to_with_tag = format!("{};tag={tag}", strip_header_params(&existing));
+    let response = ResponseBuilder::to_request(&incoming.request, status, reason)?
+        .set_header(&HeaderName::To, Bytes::from(to_with_tag))?
+        .build();
+    if let Some(claim) = claim {
+        claim()?;
+    }
+    endpoint.respond(&incoming.key, response).await?;
+    Ok(())
+}
+
 /// Answer an INVITE whose offer has already been parsed.
 ///
 /// `reliable_ringing` is `Some` exactly when this side rang first (via [`crate::rel::ring`]):
@@ -6323,7 +6713,15 @@ async fn answer_negotiated(
         )?;
     }
     validate_dtls_offer_setup(&offer, policy)?;
-    let negotiated = negotiated(&offer, policy.codecs)?;
+    let negotiated = match negotiated(&offer, policy.codecs) {
+        Ok(negotiated) => negotiated,
+        Err(Error::NoCommonCodec) => {
+            refuse_initial_offer(endpoint, incoming, tag, claim, 488, "Not Acceptable Here")
+                .await?;
+            return Err(Error::NoCommonCodec);
+        }
+        Err(error) => return Err(error),
+    };
 
     // The port is bound before the session starts, because the answer has to name it *and* the
     // session has to be created with the keys that answer settles on. Starting the session first
@@ -6383,6 +6781,7 @@ async fn answer_negotiated(
         .iter()
         .all(sipx_sdp::MediaDescription::is_rejected)
     {
+        refuse_initial_offer(endpoint, incoming, tag, claim, 488, "Not Acceptable Here").await?;
         return Err(Error::NoCommonCodec);
     }
 
@@ -6598,12 +6997,10 @@ async fn await_final(
     loop {
         let event = match (deadline, cancelled.as_mut()) {
             (None, None) => responses.next().await,
-            (Some(deadline), None) => {
-                match tokio::time::timeout_at(deadline, responses.next()).await {
-                    Ok(event) => event,
-                    Err(_elapsed) => return Waited::GaveUp,
-                }
-            }
+            (Some(deadline), None) => match before_deadline(deadline, responses.next()).await {
+                BeforeDeadline::Event(event) => event,
+                BeforeDeadline::Expired => return Waited::GaveUp,
+            },
             (None, Some(cancelled)) => {
                 tokio::select! {
                     biased;
@@ -6642,13 +7039,11 @@ async fn await_final(
                 }
             }
             Some(sipx_sip::transaction::TuEvent::TransportError) => {
-                // Preserve TLS verification failures because treating a rejected certificate as
-                // "no response" hides the security decision the caller must act on. Other send
-                // failures retain the call API's established NoResponse behavior; changing those
-                // exit semantics is outside this transport-selection story.
-                if let Some(error @ sipx_transport::Error::Tls(_)) =
-                    responses.take_transport_error()
-                {
+                // The endpoint queues the concrete driver cause before this event. Preserve every
+                // cause: connection refusal, TLS verification failure and a closed established
+                // stream are definitive transport outcomes, not evidence that a reachable SIP
+                // peer stayed silent.
+                if let Some(error) = responses.take_transport_error() {
                     return Waited::Transport(error);
                 }
                 return Waited::Gone;
@@ -7294,6 +7689,38 @@ mod tests {
 
     use super::*;
 
+    #[tokio::test(start_paused = true)]
+    async fn answer_events_must_precede_their_deadline() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_secs(1);
+        assert!(matches!(
+            before_deadline(
+                deadline,
+                tokio::time::sleep_until(deadline - Duration::from_millis(1))
+            )
+            .await,
+            BeforeDeadline::Event(())
+        ));
+
+        let now = Instant::now();
+        let deadline = now + Duration::from_secs(1);
+        assert!(matches!(
+            before_deadline(deadline, tokio::time::sleep_until(deadline)).await,
+            BeforeDeadline::Expired
+        ));
+
+        let now = Instant::now();
+        let deadline = now + Duration::from_secs(1);
+        assert!(matches!(
+            before_deadline(
+                deadline,
+                tokio::time::sleep_until(deadline + Duration::from_nanos(1))
+            )
+            .await,
+            BeforeDeadline::Expired
+        ));
+    }
+
     #[tokio::test]
     async fn successful_response_stop_before_first_poll_is_latched() {
         let stop = CancellationToken::new();
@@ -7479,6 +7906,36 @@ mod tests {
         )
         .expect("complete browser answer");
         (offer, answer, local, port)
+    }
+
+    /// M-70: the answering call constructs the media agent's remote description from the named
+    /// profile result, not by reparsing fallback candidates the profile deliberately discarded.
+    #[cfg(all(feature = "opus", feature = "dtls"))]
+    #[tokio::test]
+    async fn browser_answer_ice_retains_only_the_mux_component() {
+        let (mut offer, _answer, _local, _port) = browser_answer_fixture().await;
+        let mut fallback = offer.media[0]
+            .ice_candidates()
+            .into_iter()
+            .next()
+            .expect("generated offer has a component-one candidate");
+        fallback.component = ComponentId::RTCP;
+        fallback.port = offer.media[0]
+            .port
+            .checked_add(1)
+            .expect("ephemeral media port has a fallback port");
+        offer.media[0].attributes.push(sipx_sdp::Attribute::valued(
+            "candidate",
+            fallback.to_value(),
+        ));
+
+        let negotiation = answer_ice_negotiation(&offer, MediaPolicy::browser_audio())
+            .expect("mux offer is accepted");
+        let IceNegotiation::Ice { candidates, .. } = negotiation else {
+            panic!("browser profile must retain an ICE generation");
+        };
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].component, ComponentId::RTP);
     }
 
     /// `M-49`: an incomplete final answer is refused at the call boundary before the retained ICE

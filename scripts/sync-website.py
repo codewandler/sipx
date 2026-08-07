@@ -35,6 +35,8 @@ REGISTRY = ROOT / "docs" / "rfc" / "registry.toml"
 COMPLIANCE = ROOT / "docs" / "compliance.md"
 COMPARISON = ROOT / "docs" / "comparison.md"
 COMPARISON_REPORT = ROOT / "scripts" / "comparison-report.py"
+ANSWER_CONSUMER = ROOT / "tests" / "published-answer-consumer"
+ANSWER_EXAMPLE = ROOT / "crates" / "sipx-call" / "examples" / "answer_a_call.rs"
 
 REGION = re.compile(
     r"<!-- BEGIN generated:(?P<kind>[a-z-]+)(?: (?P<arg>\S+))? -->"
@@ -77,6 +79,15 @@ PUBLIC_RELEASE_HEADING = re.compile(
 )
 DOC_COMMENT = re.compile(r"^\s*(?://!|///)\s?(?P<body>.*)$")
 RUST_DOC_LANGUAGES = {"", "rust", "no_run", "ignore", "should_panic"}
+BLOCK_REGION_KINDS = {
+    "answer-consumer-dependencies",
+    "badges",
+    "comparison",
+    "compliance",
+    "crate-map",
+    "example",
+    "release-heading",
+}
 
 # These entry points jointly define whether somebody can adopt the current public prerelease
 # without first reading the repository's internal roadmap. Unlike a copied capability table, the
@@ -269,6 +280,17 @@ def render_example(source_path: str) -> str:
     return f"\n```rust\n{code}\n```\n"
 
 
+def render_answer_consumer_dependencies() -> str:
+    """Render the exact dependency table compiled by the public answer consumer."""
+
+    manifest = (ANSWER_CONSUMER / "Cargo.toml").read_text(encoding="utf-8")
+    match = re.search(r"^\[dependencies\]\n(?P<body>.*?)(?=^\[|\Z)", manifest, re.M | re.S)
+    if match is None:
+        raise ValueError("published answer consumer has no [dependencies] table")
+    body = match.group("body").rstrip("\n")
+    return f"\n```toml\n[dependencies]\n{body}\n```\n"
+
+
 def public_compliance() -> str:
     """Render the canonical report for the site without internal tracking history."""
     text = COMPLIANCE.read_text(encoding="utf-8")
@@ -374,6 +396,10 @@ def render_generated(kind: str, arg: str | None) -> str:
         if arg is None:
             raise ValueError("generated:example requires a source path")
         return render_example(arg)
+    if kind == "answer-consumer-dependencies":
+        if arg is not None:
+            raise ValueError("generated:answer-consumer-dependencies does not accept an argument")
+        return render_answer_consumer_dependencies()
     if arg is not None:
         raise ValueError(f"generated:{kind} does not accept an argument")
 
@@ -449,6 +475,41 @@ def render_region(match: re.Match[str]) -> str:
         f"{render_generated(kind, arg)}"
         f"<!-- END generated:{kind} -->"
     )
+
+
+def generated_region_placement_problems(text: str, source: str) -> list[str]:
+    """Reject line-initial inline regions and inline placement of complete Markdown blocks."""
+
+    problems = []
+    for match in REGION.finditer(text):
+        line_start = text.rfind("\n", 0, match.start()) + 1
+        line_end = text.find("\n", match.end())
+        if line_end < 0:
+            line_end = len(text)
+        prefix = text[line_start : match.start()]
+        suffix = text[match.end() : line_end]
+        line_number = text.count("\n", 0, match.start()) + 1
+        kind = match.group("kind")
+        if not prefix.strip() and suffix.strip():
+            problems.append(
+                f"{source}:{line_number}: line-initial generated:{kind} region has inline suffix"
+            )
+        if kind in BLOCK_REGION_KINDS and prefix.strip():
+            problems.append(
+                f"{source}:{line_number}: generated:{kind} Markdown block must start its own line"
+            )
+    return problems
+
+
+def answer_consumer_source_problems(archived: str, example: str) -> list[str]:
+    """Keep the archived clean consumer and the workspace example byte-identical."""
+
+    if archived == example:
+        return []
+    return [
+        "tests/published-answer-consumer/src/main.rs differs from "
+        "crates/sipx-call/examples/answer_a_call.rs"
+    ]
 
 
 def public_content_problems(text: str, source: str) -> list[str]:
@@ -643,6 +704,16 @@ def process(update: bool) -> int:
     if regions == 0:
         failures.append("no generated regions found in public docs — the guard is not guarding")
 
+    try:
+        failures.extend(
+            answer_consumer_source_problems(
+                (ANSWER_CONSUMER / "src" / "main.rs").read_text(encoding="utf-8"),
+                ANSWER_EXAMPLE.read_text(encoding="utf-8"),
+            )
+        )
+    except FileNotFoundError as error:
+        failures.append(f"published answer consumer source is missing: {error.filename}")
+
     public_contents = {}
     for page in public_files():
         text = page.read_text(encoding="utf-8")
@@ -650,6 +721,7 @@ def process(update: bool) -> int:
         public_contents[source] = text
         failures.extend(public_content_problems(text, source))
         if page.suffix == ".md":
+            failures.extend(generated_region_placement_problems(text, source))
             failures.extend(public_fact_problems(text, source))
     failures.extend(public_adoption_problems(public_contents))
     for source in sorted((ROOT / "crates").rglob("*.rs")):

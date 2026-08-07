@@ -88,6 +88,18 @@ class GeneratedFactsTests(unittest.TestCase):
         self.assertIn("| `sipx-cli` | sipx — a command line SIP softphone |", rendered)
         self.assertIn("| `sipx-testkit` | Deterministic SIP and RTP tests", rendered)
 
+    def test_answer_dependencies_come_from_the_compiled_consumer(self) -> None:
+        rendered = SYNC.render_generated("answer-consumer-dependencies", None)
+        version = SYNC.canonical_facts().workspace_version
+        self.assertIn(f'sipx-call = "={version}"', rendered)
+        self.assertIn(f'sipx-sip = "={version}"', rendered)
+        self.assertIn(f'sipx-transport = "={version}"', rendered)
+        self.assertIn('features = ["macros", "rt-multi-thread"]', rendered)
+
+    def test_answer_consumer_source_must_match_the_workspace_example(self) -> None:
+        self.assertEqual([], SYNC.answer_consumer_source_problems("same\n", "same\n"))
+        self.assertNotEqual([], SYNC.answer_consumer_source_problems("old\n", "new\n"))
+
     def test_public_compliance_contains_every_rfc_without_internal_tracking(self) -> None:
         rendered = SYNC.render_generated("compliance", None)
         self.assertEqual(
@@ -170,6 +182,29 @@ class GeneratedFactsTests(unittest.TestCase):
 
 
 class PublicGuardTests(unittest.TestCase):
+    def test_generated_region_placement_rejects_the_broken_inline_shape(self) -> None:
+        broken = (
+            "<!-- BEGIN generated:workspace-version -->1.2.3"
+            "<!-- END generated:workspace-version -->: suffix\n"
+        )
+        self.assertNotEqual(
+            [], SYNC.generated_region_placement_problems(broken, "getting-started.md")
+        )
+        supported = (
+            "Version <!-- BEGIN generated:workspace-version -->1.2.3"
+            "<!-- END generated:workspace-version --> is current.\n"
+        )
+        self.assertEqual(
+            [], SYNC.generated_region_placement_problems(supported, "getting-started.md")
+        )
+
+    def test_generated_markdown_blocks_must_be_standalone(self) -> None:
+        inline = (
+            "Prefix <!-- BEGIN generated:example sample.rs -->\n"
+            "```rust\nfn main() {}\n```\n<!-- END generated:example -->\n"
+        )
+        self.assertNotEqual([], SYNC.generated_region_placement_problems(inline, "sample.md"))
+
     def test_guard_rejects_story_ids_and_internal_design_links(self) -> None:
         problems = SYNC.public_content_problems(
             "A-12 is internal. [design](../../docs/designs/example.md)", "sample.md"

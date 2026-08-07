@@ -29,6 +29,57 @@ use tokio::sync::Mutex;
 
 use crate::resolve::{Naptr, Resolver, Srv};
 
+/// DNS waiting policy paired with the pure selection limits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolutionPolicy {
+    /// Pure lookup, record and candidate limits.
+    pub limits: crate::ResolutionLimits,
+    /// Maximum wait for one DNS question.
+    pub lookup_timeout: Duration,
+    /// Maximum wait for every DNS question and pure selection together.
+    pub resolution_timeout: Duration,
+}
+
+impl Default for ResolutionPolicy {
+    fn default() -> Self {
+        Self {
+            limits: crate::ResolutionLimits::default(),
+            lookup_timeout: Duration::from_secs(2),
+            resolution_timeout: Duration::from_secs(8),
+        }
+    }
+}
+
+/// Why the DNS-backed resolution adapter did not produce candidates.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum ResolutionError {
+    /// Pure selection refused the values or a finite count.
+    #[error(transparent)]
+    Selection(#[from] crate::ResolutionError),
+    /// A deadline cannot bound work.
+    #[error("resolution timeout {field} must be greater than zero")]
+    InvalidTimeout {
+        /// Public timeout field.
+        field: &'static str,
+    },
+    /// A question produced no trustworthy positive or negative answer.
+    #[error("DNS lookup unavailable for {query}")]
+    LookupUnavailable {
+        /// Exact question name.
+        query: String,
+    },
+    /// One question exceeded its deadline.
+    #[error("DNS lookup timed out for {query}")]
+    LookupTimeout {
+        /// Exact question name.
+        query: String,
+    },
+    /// The complete resolution exceeded its deadline.
+    #[error("SIP target resolution timed out")]
+    ResolutionTimeout,
+}
+
 /// What a lookup produced.
 ///
 /// The distinction between "no records" and "could not ask" is the whole reason this is not
@@ -55,19 +106,91 @@ impl<T> Answer<T> {
 }
 
 #[derive(Debug, Clone)]
-struct Cached<T> {
-    records: Vec<T>,
+enum CachedRecords {
+    Naptr(Vec<Naptr>),
+    Srv(Vec<Srv>),
+    Addresses(Vec<IpAddr>),
+}
+
+trait CacheRecord: Clone {
+    fn read(records: &CachedRecords) -> Option<Vec<Self>>;
+    fn store(records: &[Self]) -> CachedRecords;
+}
+
+impl CacheRecord for Naptr {
+    fn read(records: &CachedRecords) -> Option<Vec<Self>> {
+        match records {
+            CachedRecords::Naptr(records) => Some(records.clone()),
+            CachedRecords::Srv(_) | CachedRecords::Addresses(_) => None,
+        }
+    }
+
+    fn store(records: &[Self]) -> CachedRecords {
+        CachedRecords::Naptr(records.to_vec())
+    }
+}
+
+impl CacheRecord for Srv {
+    fn read(records: &CachedRecords) -> Option<Vec<Self>> {
+        match records {
+            CachedRecords::Srv(records) => Some(records.clone()),
+            CachedRecords::Naptr(_) | CachedRecords::Addresses(_) => None,
+        }
+    }
+
+    fn store(records: &[Self]) -> CachedRecords {
+        CachedRecords::Srv(records.to_vec())
+    }
+}
+
+impl CacheRecord for IpAddr {
+    fn read(records: &CachedRecords) -> Option<Vec<Self>> {
+        match records {
+            CachedRecords::Addresses(records) => Some(records.clone()),
+            CachedRecords::Naptr(_) | CachedRecords::Srv(_) => None,
+        }
+    }
+
+    fn store(records: &[Self]) -> CachedRecords {
+        CachedRecords::Addresses(records.to_vec())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CacheKey {
+    name: String,
+    record_type: RecordType,
+}
+
+#[derive(Debug, Clone)]
+struct Cached {
+    records: CachedRecords,
     expires: Instant,
+    last_used: u64,
+}
+
+#[derive(Debug)]
+struct Cache {
+    entries: std::collections::HashMap<CacheKey, Cached>,
+    capacity: usize,
+    clock: u64,
+}
+
+impl Default for Cache {
+    fn default() -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+            capacity: 1_024,
+            clock: 0,
+        }
+    }
 }
 
 /// A DNS-backed resolver with a TTL-respecting cache.
 #[derive(Debug)]
 pub struct DnsResolver {
     inner: TokioResolver,
-    naptr: Mutex<std::collections::HashMap<String, Cached<Naptr>>>,
-    srv: Mutex<std::collections::HashMap<String, Cached<Srv>>>,
-    addresses: Mutex<std::collections::HashMap<String, Cached<IpAddr>>>,
-    addresses_v6: Mutex<std::collections::HashMap<String, Cached<IpAddr>>>,
+    cache: Mutex<Cache>,
     /// Never cache for longer than this, however generous the TTL.
     max_ttl: Duration,
 }
@@ -100,10 +223,7 @@ impl DnsResolver {
     fn with(inner: TokioResolver) -> Self {
         Self {
             inner,
-            naptr: Mutex::new(std::collections::HashMap::new()),
-            srv: Mutex::new(std::collections::HashMap::new()),
-            addresses: Mutex::new(std::collections::HashMap::new()),
-            addresses_v6: Mutex::new(std::collections::HashMap::new()),
+            cache: Mutex::new(Cache::default()),
             max_ttl: Duration::from_secs(3600),
         }
     }
@@ -141,27 +261,29 @@ impl DnsResolver {
         self
     }
 
+    /// Bound the total number of positive and negative entries across every record type.
+    ///
+    /// Zero disables sipx's cache, which is useful for deterministic adapter tests.
+    #[must_use]
+    pub fn with_cache_capacity(mut self, capacity: usize) -> Self {
+        self.cache.get_mut().capacity = capacity;
+        self
+    }
+
     /// NAPTR records for a domain.
     pub async fn naptr(&self, domain: &str) -> Answer<Naptr> {
-        self.lookup(
-            &self.naptr,
-            domain,
-            RecordType::NAPTR,
-            |record| match &record.data {
-                RData::NAPTR(naptr) => Some(convert_naptr(naptr)),
-                _ => None,
-            },
-        )
+        self.lookup(domain, RecordType::NAPTR, |record| match &record.data {
+            RData::NAPTR(naptr) => Some(convert_naptr(naptr)),
+            _ => None,
+        })
         .await
     }
 
     /// SRV records for a name.
     pub async fn srv(&self, name: &str) -> Answer<Srv> {
-        self.lookup(&self.srv, name, RecordType::SRV, |record| {
-            match &record.data {
-                RData::SRV(srv) => Some(convert_srv(srv)),
-                _ => None,
-            }
+        self.lookup(name, RecordType::SRV, |record| match &record.data {
+            RData::SRV(srv) => Some(convert_srv(srv)),
+            _ => None,
         })
         .await
     }
@@ -171,43 +293,33 @@ impl DnsResolver {
     /// Both families, because RFC 3263 does not distinguish them and a host with only an AAAA
     /// record is reachable.
     pub async fn addresses(&self, host: &str) -> Answer<IpAddr> {
-        let v4 = self
-            .lookup(
-                &self.addresses,
-                host,
-                RecordType::A,
-                |record| match &record.data {
-                    RData::A(a) => Some(IpAddr::V4(a.0)),
-                    _ => None,
-                },
-            )
-            .await;
+        // RFC 7984 §3.1: a dual-stack client asks for every supported family. These are sibling
+        // child futures, not tasks; cancelling `addresses` cancels both and leaves nothing detached.
+        let (v6, v4) = tokio::join!(
+            self.lookup(host, RecordType::AAAA, |record| match &record.data {
+                RData::AAAA(aaaa) => Some(IpAddr::V6(aaaa.0)),
+                _ => None,
+            },),
+            self.lookup(host, RecordType::A, |record| match &record.data {
+                RData::A(a) => Some(IpAddr::V4(a.0)),
+                _ => None,
+            },),
+        );
 
-        // A host with no A record may still have AAAA; asking only for A would make it
-        // unreachable for a reason nothing reports.
-        match v4 {
-            Answer::Records(records) if !records.is_empty() => Answer::Records(records),
-            other => {
-                let v6 = self
-                    .lookup(
-                        &self.addresses_v6,
-                        host,
-                        RecordType::AAAA,
-                        |record| match &record.data {
-                            RData::AAAA(aaaa) => Some(IpAddr::V6(aaaa.0)),
-                            _ => None,
-                        },
-                    )
-                    .await;
-                match (other, v6) {
-                    // Only report "the server answered, with nothing" if both did.
-                    (Answer::Records(_), Answer::Records(records)) => Answer::Records(records),
-                    (_, Answer::Records(records)) if !records.is_empty() => {
-                        Answer::Records(records)
-                    }
-                    _ => Answer::Unavailable,
-                }
+        match (v6, v4) {
+            (Answer::Records(v6), Answer::Records(mut v4)) => {
+                // Preserve the adapter's established IPv4-first order until address selection is
+                // supplied by the caller. Every address remains adjacent within its host.
+                v4.extend(v6);
+                Answer::Records(v4)
             }
+            (Answer::Records(records), Answer::Unavailable)
+            | (Answer::Unavailable, Answer::Records(records))
+                if !records.is_empty() =>
+            {
+                Answer::Records(records)
+            }
+            _ => Answer::Unavailable,
         }
     }
 
@@ -222,16 +334,19 @@ impl DnsResolver {
     /// single-flight layer written on top of it was measured to change nothing: eight concurrent
     /// lookups reach the fixture nameserver exactly once with or without it, so the layer was
     /// removed rather than kept as decoration. The property is load-bearing all the same, so
-    /// `two_concurrent_resolutions_of_one_name_make_one_query` pins it — if the client is ever
+    /// `concurrent_resolutions_make_one_query_per_address_family` pins it — if the client is ever
     /// swapped or configured differently, that test is what notices.
-    async fn lookup<T: Clone>(
+    async fn lookup<T: CacheRecord>(
         &self,
-        cache: &Mutex<std::collections::HashMap<String, Cached<T>>>,
         name: &str,
         record_type: RecordType,
         extract: impl Fn(&hickory_resolver::proto::rr::Record) -> Option<T>,
     ) -> Answer<T> {
-        if let Some(records) = cached(cache, name).await {
+        let key = CacheKey {
+            name: name.to_owned(),
+            record_type,
+        };
+        if let Some(records) = cached(&self.cache, &key).await {
             return Answer::Records(records);
         }
 
@@ -249,7 +364,7 @@ impl DnsResolver {
                 // remembering a network blip as a routing decision would keep a domain
                 // unreachable long after it came back.
                 if matches!(answer, Answer::Records(_)) {
-                    store(cache, name, &[], negative_ttl(&error, self.max_ttl)).await;
+                    store::<T>(&self.cache, key, &[], negative_ttl(&error, self.max_ttl)).await;
                 }
                 return answer;
             }
@@ -258,7 +373,7 @@ impl DnsResolver {
         let answers = lookup.answers();
         let ttl = shortest_ttl(answers.iter().map(|record| record.ttl), self.max_ttl);
         let records: Vec<T> = answers.iter().filter_map(&extract).collect();
-        store(cache, name, &records, ttl).await;
+        store(&self.cache, key, &records, ttl).await;
         Answer::Records(records)
     }
 }
@@ -318,29 +433,73 @@ fn shortest_ttl(ttls: impl Iterator<Item = u32>, max: Duration) -> Duration {
         .map_or(max, |ttl| Duration::from_secs(u64::from(ttl)).min(max))
 }
 
-async fn cached<T: Clone>(
-    map: &Mutex<std::collections::HashMap<String, Cached<T>>>,
-    key: &str,
-) -> Option<Vec<T>> {
-    let guard = map.lock().await;
-    let entry = guard.get(key)?;
-    // An expired entry is not returned, and is not preferred over asking again.
-    (entry.expires > Instant::now()).then(|| entry.records.clone())
+async fn cached<T: CacheRecord>(cache: &Mutex<Cache>, key: &CacheKey) -> Option<Vec<T>> {
+    let mut guard = cache.lock().await;
+    let now = Instant::now();
+    if guard
+        .entries
+        .get(key)
+        .is_some_and(|entry| entry.expires <= now)
+    {
+        guard.entries.remove(key);
+        return None;
+    }
+    let records = guard
+        .entries
+        .get(key)
+        .and_then(|entry| T::read(&entry.records))?;
+    guard.clock = guard.clock.saturating_add(1);
+    let last_used = guard.clock;
+    if let Some(entry) = guard.entries.get_mut(key) {
+        entry.last_used = last_used;
+    }
+    Some(records)
 }
 
-async fn store<T: Clone>(
-    map: &Mutex<std::collections::HashMap<String, Cached<T>>>,
-    key: &str,
-    records: &[T],
-    ttl: Duration,
-) {
-    map.lock().await.insert(
-        key.to_owned(),
+async fn store<T: CacheRecord>(cache: &Mutex<Cache>, key: CacheKey, records: &[T], ttl: Duration) {
+    let mut guard = cache.lock().await;
+    if guard.capacity == 0 {
+        return;
+    }
+
+    let now = Instant::now();
+    guard.entries.retain(|_, entry| entry.expires > now);
+    if !guard.entries.contains_key(&key) && guard.entries.len() >= guard.capacity {
+        let evicted = guard
+            .entries
+            .iter()
+            .min_by_key(|(key, entry)| {
+                (
+                    entry.last_used,
+                    key.name.as_str(),
+                    record_type_order(key.record_type),
+                )
+            })
+            .map(|(key, _)| key.clone());
+        if let Some(evicted) = evicted {
+            guard.entries.remove(&evicted);
+        }
+    }
+    guard.clock = guard.clock.saturating_add(1);
+    let last_used = guard.clock;
+    guard.entries.insert(
+        key,
         Cached {
-            records: records.to_vec(),
-            expires: Instant::now() + ttl,
+            records: T::store(records),
+            expires: now + ttl,
+            last_used,
         },
     );
+}
+
+fn record_type_order(record_type: RecordType) -> u16 {
+    match record_type {
+        RecordType::A => 1,
+        RecordType::AAAA => 2,
+        RecordType::NAPTR => 3,
+        RecordType::SRV => 4,
+        _ => u16::MAX,
+    }
 }
 
 fn convert_naptr(naptr: &NAPTR) -> Naptr {
@@ -372,7 +531,7 @@ fn strip_root(name: &str) -> String {
 /// The trait is synchronous because RFC 3263 selection is pure computation over records. Doing
 /// the lookups up front and handing over the results keeps it that way — and keeps every
 /// await off the endpoint loop, where a slow resolver would stop the transaction timers.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Prefetched {
     naptr: Vec<Naptr>,
     srv: std::collections::HashMap<String, Vec<Srv>>,
@@ -426,6 +585,183 @@ impl Prefetched {
             addresses,
         }
     }
+
+    async fn for_uri(
+        resolver: &Arc<DnsResolver>,
+        uri: &sipx_sip::Uri,
+        requested_transport: Option<crate::TransportKind>,
+        policy: ResolutionPolicy,
+    ) -> Result<(sipx_sip::Uri, Self), ResolutionError> {
+        if policy.lookup_timeout.is_zero() {
+            return Err(ResolutionError::InvalidTimeout {
+                field: "lookup_timeout",
+            });
+        }
+        if policy.resolution_timeout.is_zero() {
+            return Err(ResolutionError::InvalidTimeout {
+                field: "resolution_timeout",
+            });
+        }
+
+        let effective = crate::resolve::effective_uri(uri, requested_transport)?;
+        let Some(sipx_sip::Host::Name(name)) = effective.host() else {
+            return Ok((effective, Self::default()));
+        };
+        let domain = String::from_utf8_lossy(name.as_bytes()).into_owned();
+        let mut lookups = 0usize;
+
+        if effective.port().is_some() {
+            claim_lookups(&mut lookups, 2, policy.limits)?;
+            let records = address_records(resolver, &domain, policy.lookup_timeout).await?;
+            check_record_count("addresses", records.len(), policy.limits.max_addresses)?;
+            return Ok((
+                effective,
+                Self {
+                    naptr: Vec::new(),
+                    srv: std::collections::HashMap::new(),
+                    addresses: std::collections::HashMap::from([(domain, records)]),
+                },
+            ));
+        }
+
+        let explicit_transport = effective.transport().is_some();
+        let naptr = if explicit_transport {
+            Vec::new()
+        } else {
+            claim_lookups(&mut lookups, 1, policy.limits)?;
+            let records =
+                answer_records(resolver.naptr(&domain), &domain, policy.lookup_timeout).await?;
+            check_record_count(
+                "NAPTR records",
+                records.len(),
+                policy.limits.max_naptr_records,
+            )?;
+            records
+        };
+
+        let mut srv_names: Vec<String> = if explicit_transport {
+            let transport = uri_transport(&effective)?;
+            vec![format!("{}{domain}", crate::resolve::srv_prefix(transport))]
+        } else {
+            let mut names: Vec<String> = naptr
+                .iter()
+                .map(|record| record.replacement.clone())
+                .collect();
+            if effective.scheme().is_secure() {
+                names.push(format!("_sips._tcp.{domain}"));
+            } else {
+                names.extend([
+                    format!("_sip._udp.{domain}"),
+                    format!("_sip._tcp.{domain}"),
+                    format!("_sips._tcp.{domain}"),
+                ]);
+            }
+            names
+        };
+        srv_names.sort_unstable();
+        srv_names.dedup();
+
+        let mut srv = std::collections::HashMap::new();
+        let mut hosts = vec![domain.clone()];
+        for query in srv_names {
+            claim_lookups(&mut lookups, 1, policy.limits)?;
+            let records =
+                answer_records(resolver.srv(&query), &query, policy.lookup_timeout).await?;
+            check_record_count("SRV records", records.len(), policy.limits.max_srv_records)?;
+            hosts.extend(records.iter().map(|record| record.target.clone()));
+            srv.insert(query, records);
+        }
+
+        hosts.sort_unstable();
+        hosts.dedup();
+        let mut addresses = std::collections::HashMap::new();
+        for host in hosts {
+            claim_lookups(&mut lookups, 2, policy.limits)?;
+            let records = address_records(resolver, &host, policy.lookup_timeout).await?;
+            check_record_count("addresses", records.len(), policy.limits.max_addresses)?;
+            addresses.insert(host, records);
+        }
+
+        Ok((
+            effective,
+            Self {
+                naptr,
+                srv,
+                addresses,
+            },
+        ))
+    }
+}
+
+fn claim_lookups(
+    observed: &mut usize,
+    amount: usize,
+    limits: crate::ResolutionLimits,
+) -> Result<(), ResolutionError> {
+    *observed = observed.saturating_add(amount);
+    if *observed > limits.max_lookups {
+        return Err(crate::ResolutionError::LimitExceeded {
+            limit: "lookups",
+            maximum: limits.max_lookups,
+            observed: *observed,
+        }
+        .into());
+    }
+    Ok(())
+}
+
+fn check_record_count(
+    limit: &'static str,
+    observed: usize,
+    maximum: usize,
+) -> Result<(), ResolutionError> {
+    if observed > maximum {
+        return Err(crate::ResolutionError::LimitExceeded {
+            limit,
+            maximum,
+            observed,
+        }
+        .into());
+    }
+    Ok(())
+}
+
+async fn answer_records<T>(
+    answer: impl std::future::Future<Output = Answer<T>>,
+    query: &str,
+    within: Duration,
+) -> Result<Vec<T>, ResolutionError> {
+    match tokio::time::timeout(within, answer).await {
+        Ok(Answer::Records(records)) => Ok(records),
+        Ok(Answer::Unavailable) => Err(ResolutionError::LookupUnavailable {
+            query: query.to_owned(),
+        }),
+        Err(_) => Err(ResolutionError::LookupTimeout {
+            query: query.to_owned(),
+        }),
+    }
+}
+
+async fn address_records(
+    resolver: &Arc<DnsResolver>,
+    host: &str,
+    within: Duration,
+) -> Result<Vec<IpAddr>, ResolutionError> {
+    answer_records(resolver.addresses(host), &format!("A/AAAA {host}"), within).await
+}
+
+fn uri_transport(uri: &sipx_sip::Uri) -> Result<crate::TransportKind, ResolutionError> {
+    let transport = uri
+        .selected_transport()
+        .map_err(|_| crate::ResolutionError::InvalidTransport)?;
+    Ok(match transport {
+        sipx_sip::UriTransport::Udp => crate::TransportKind::Udp,
+        sipx_sip::UriTransport::Tcp => crate::TransportKind::Tcp,
+        sipx_sip::UriTransport::Tls => crate::TransportKind::Tls,
+        sipx_sip::UriTransport::Ws => crate::TransportKind::Ws,
+        sipx_sip::UriTransport::Wss => crate::TransportKind::Wss,
+        sipx_sip::UriTransport::Quic => crate::TransportKind::Quic,
+    })
 }
 
 /// Resolve a URI to an ordered candidate list, in one await (RFC 3263).
@@ -446,6 +782,28 @@ pub async fn resolve_uri<G: crate::resolve::Rng + ?Sized>(
     };
     let prefetched = Prefetched::for_domain(resolver, &domain).await;
     crate::resolve::resolve(uri, &prefetched, rng)
+}
+
+/// Resolve through the DNS adapter with finite question, record, candidate and wall-clock bounds.
+///
+/// No task is detached: the complete operation and every lookup are child futures of this await,
+/// so cancelling the caller drops all active resolver work.
+pub async fn resolve_uri_bounded<G: crate::resolve::Rng + ?Sized>(
+    uri: &sipx_sip::Uri,
+    resolver: &Arc<DnsResolver>,
+    rng: &mut G,
+    requested_transport: Option<crate::TransportKind>,
+    policy: ResolutionPolicy,
+) -> Result<Vec<crate::Target>, ResolutionError> {
+    let operation = async {
+        let (effective, prefetched) =
+            Prefetched::for_uri(resolver, uri, requested_transport, policy).await?;
+        crate::resolve::resolve_bounded(&effective, &prefetched, rng, None, policy.limits)
+            .map_err(ResolutionError::from)
+    };
+    tokio::time::timeout(policy.resolution_timeout, operation)
+        .await
+        .map_err(|_| ResolutionError::ResolutionTimeout)?
 }
 
 impl Resolver for Prefetched {
@@ -534,8 +892,11 @@ mod tests {
     /// A cached entry that has expired is not preferred over asking again.
     #[tokio::test]
     async fn an_expired_entry_is_not_returned() {
-        let map: Mutex<std::collections::HashMap<String, Cached<Srv>>> =
-            Mutex::new(std::collections::HashMap::new());
+        let cache = Mutex::new(Cache::default());
+        let key = CacheKey {
+            name: "name".to_owned(),
+            record_type: RecordType::SRV,
+        };
         let record = Srv {
             priority: 1,
             weight: 0,
@@ -550,27 +911,27 @@ mod tests {
         // expired before this immediate read, and a gate for a diff that had never opened this
         // crate came back red. A minute is a bound on failure, not a window to measure in.
         store(
-            &map,
-            "name",
+            &cache,
+            key.clone(),
             std::slice::from_ref(&record),
             Duration::from_secs(60),
         )
         .await;
-        assert_eq!(cached(&map, "name").await, Some(vec![record.clone()]));
+        assert_eq!(cached(&cache, &key).await, Some(vec![record.clone()]));
 
         // The expiry is then a real one — the same `Instant` comparison against a TTL that
         // genuinely elapses — but it is waited *for* rather than slept past. Load can only
         // lengthen the wait, and the deadline turns "never expires" into a failure that says so
         // rather than into a flake.
         store(
-            &map,
-            "name",
+            &cache,
+            key.clone(),
             std::slice::from_ref(&record),
             Duration::from_millis(50),
         )
         .await;
         let deadline = Instant::now() + Duration::from_secs(10);
-        while cached(&map, "name").await.is_some() {
+        while cached::<Srv>(&cache, &key).await.is_some() {
             assert!(
                 Instant::now() < deadline,
                 "an entry with a 50 ms TTL never expired"
@@ -579,7 +940,7 @@ mod tests {
         }
 
         assert_eq!(
-            cached(&map, "name").await,
+            cached::<Srv>(&cache, &key).await,
             None,
             "an expired entry must be re-asked, not served"
         );
@@ -587,10 +948,13 @@ mod tests {
 
     #[tokio::test]
     async fn a_fresh_entry_is_served_from_cache() {
-        let map: Mutex<std::collections::HashMap<String, Cached<IpAddr>>> =
-            Mutex::new(std::collections::HashMap::new());
+        let cache = Mutex::new(Cache::default());
+        let key = CacheKey {
+            name: "host".to_owned(),
+            record_type: RecordType::A,
+        };
         let address: IpAddr = "192.0.2.1".parse().expect("valid");
-        store(&map, "host", &[address], Duration::from_secs(60)).await;
-        assert_eq!(cached(&map, "host").await, Some(vec![address]));
+        store(&cache, key.clone(), &[address], Duration::from_secs(60)).await;
+        assert_eq!(cached(&cache, &key).await, Some(vec![address]));
     }
 }

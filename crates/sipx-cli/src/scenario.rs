@@ -16,65 +16,33 @@ use sipx_transport::{Config as TransportConfig, Incoming, bind};
 use tokio::io::AsyncBufReadExt as _;
 use tokio::sync::oneshot;
 
+use crate::cli::ScenarioOptions;
 use crate::output::{Exit, Format, fail};
 
-pub(crate) const HELP: &str = "\
-sipx scenario — drive one call through correlated NDJSON commands
-
-USAGE:
-    sipx scenario [OPTIONS]
-
-OPTIONS:
-    --local <ADDR>    Local signalling address (default 0.0.0.0:0)
-    --transport <T>   Signalling: udp, tcp, tls, ws or wss (default udp)
-    --tcp             Legacy alias for --transport tcp
-    --tls-server-name <N>  Certificate identity to verify (default URI host)
-    --tls-ca <FILE>   Add PEM trust roots to the platform store
-    --tls-cert <FILE> Certificate chain for TLS/WSS
-    --tls-key <FILE>  Private key paired with --tls-cert
-    --codec <C>       Ordered codec preference; repeat pcmu, pcma, l16 or opus
-    --media-security <M>  auto, plain, sdes or dtls-srtp
-    --ice <P>         disabled, host or stun
-    --stun-server <ADDR>  STUN server for --ice stun
-    --header <H>      Add an application-owned field to originated INVITEs; repeat
-    --timeout <S>     Default outbound answer timeout (default 20)
-    -h, --help        Show this help
-
-STDIN:
-    One JSON object per line. Every object has a string `id` and one of:
-    dial, accept, reject, play, stop_playback, start_recording, stop_recording,
-    send_dtmf, hold, resume, transfer, hangup, wait_for, shutdown.
-";
-
-const DEFAULT_TIMEOUT: u64 = 20;
 /// One minute of 48 kHz mono PCM. Reaching it finishes the recording rather than growing forever.
 const MAX_RECORDING_SAMPLES: usize = 48_000 * 60;
 
-pub(crate) async fn run(raw: &[String]) -> Exit {
-    let args = match crate::arguments(raw, HELP, Format::Json) {
-        Ok(args) => args,
-        Err(exit) => return exit,
-    };
-    let headers = match crate::header::from_args(&args) {
+pub(crate) async fn run(options: ScenarioOptions) -> Exit {
+    let headers = match crate::header::from_options(&options.headers) {
         Ok(headers) => headers,
         Err(message) => return fail(Format::Json, Exit::Usage, &message),
     };
-    let transport = match crate::signalling::Selection::from_args(&args, false) {
+    let transport = match crate::signalling::Selection::from_options(&options.signalling, false) {
         Ok(transport) => transport,
         Err(message) => return fail(Format::Json, Exit::Usage, &message),
     };
-    let media = match crate::media::Selection::from_args(&args, transport.kind()) {
+    let media_options = options.media.complete();
+    let media = match crate::media::Selection::from_options(&media_options, transport.kind(), false)
+    {
         Ok(media) => media,
         Err(message) => return fail(Format::Json, Exit::Usage, &message),
     };
-    let Ok(local) = args.value("local").unwrap_or("0.0.0.0:0").parse() else {
-        return fail(Format::Json, Exit::Usage, "--local must be host:port");
-    };
+    let local = options.local;
     let mut config = TransportConfig::new(local);
     if local.ip().is_unspecified() {
         "127.0.0.1".clone_into(&mut config.sent_by);
     }
-    if let Err(message) = transport.configure_client(&args, &mut config) {
+    if let Err(message) = transport.configure_client(&options.signalling, &mut config) {
         return fail(Format::Json, Exit::Usage, &message);
     }
     // The default endpoint already owns UDP and TCP listeners. Explicit WebSocket listeners need
@@ -82,7 +50,7 @@ pub(crate) async fn run(raw: &[String]) -> Exit {
     if matches!(
         transport.kind(),
         sipx_transport::TransportKind::Ws | sipx_transport::TransportKind::Wss
-    ) && let Err(message) = transport.configure_listener(&args, &mut config)
+    ) && let Err(message) = transport.configure_listener(&options.signalling, &mut config)
     {
         return fail(Format::Json, Exit::Usage, &message);
     }
@@ -92,10 +60,11 @@ pub(crate) async fn run(raw: &[String]) -> Exit {
     };
 
     let mut actor = Actor {
-        args: &args,
+        options,
         handle,
         incoming,
         transport,
+        resolver: crate::destination::Resolver::system(),
         policy: media.policy(),
         headers,
         call: None,
@@ -104,7 +73,10 @@ pub(crate) async fn run(raw: &[String]) -> Exit {
         playback: None,
         recording: None,
         snapshot: Snapshot::idle(),
-        emitted: BTreeSet::new(),
+        emitted: BTreeMap::new(),
+        consumed: BTreeMap::new(),
+        correlations: BTreeSet::new(),
+        stream_failed: false,
         output: Output::default(),
         next_call: 1,
     };
@@ -117,15 +89,15 @@ pub(crate) async fn run(raw: &[String]) -> Exit {
             Value::String(actor.handle.local_addr().to_string()),
         )]),
     );
-    actor.drive().await;
-    Exit::Success
+    actor.drive().await
 }
 
-struct Actor<'a> {
-    args: &'a crate::Args<'a>,
+struct Actor {
+    options: ScenarioOptions,
     handle: sipx_transport::Handle,
     incoming: tokio::sync::mpsc::Receiver<Incoming>,
     transport: crate::signalling::Selection,
+    resolver: crate::destination::Resolver,
     policy: sipx_call::MediaPolicy,
     headers: Vec<sipx_sip::Header>,
     call: Option<Call>,
@@ -134,13 +106,18 @@ struct Actor<'a> {
     playback: Option<sipx_media::Playback>,
     recording: Option<Recording>,
     snapshot: Snapshot,
-    emitted: BTreeSet<String>,
+    /// Event occurrences in the current correlation scope. Counts, rather than membership, let
+    /// repeated `wait_for call.dtmf` commands consume distinct keypresses.
+    emitted: BTreeMap<String, u64>,
+    consumed: BTreeMap<String, u64>,
+    correlations: BTreeSet<String>,
+    stream_failed: bool,
     output: Output,
     next_call: u64,
 }
 
-impl Actor<'_> {
-    async fn drive(&mut self) {
+impl Actor {
+    async fn drive(&mut self) -> Exit {
         let stdin = tokio::io::stdin();
         let mut lines = tokio::io::BufReader::new(stdin).lines();
         loop {
@@ -148,25 +125,24 @@ impl Actor<'_> {
             let line = match lines.next_line().await {
                 Ok(Some(line)) => line,
                 Ok(None) => {
-                    self.shutdown().await;
-                    return;
+                    return self.finish_stream().await;
                 }
                 Err(error) => {
-                    self.output
-                        .error(&self.snapshot, None, &format!("stdin: {error}"));
-                    self.shutdown().await;
-                    return;
+                    self.refuse(None, &format!("stdin: {error}"));
+                    return self.finish_stream().await;
                 }
             };
             let value: Value = match serde_json::from_str(&line) {
                 Ok(value) => value,
                 Err(error) => {
                     let id = recover_id(&line);
-                    self.output.error(
-                        &self.snapshot,
-                        id.as_deref(),
-                        &format!("invalid JSON: {error}"),
-                    );
+                    if let Some(id) = id.as_ref()
+                        && !self.correlations.insert(id.clone())
+                    {
+                        self.refuse(Some(id), "duplicate command id");
+                        continue;
+                    }
+                    self.refuse(id.as_deref(), &format!("invalid JSON: {error}"));
                     continue;
                 }
             };
@@ -175,22 +151,23 @@ impl Actor<'_> {
                 .and_then(Value::as_str)
                 .filter(|id| !id.is_empty() && id.len() <= 128)
             else {
-                self.output.error(
-                    &self.snapshot,
+                self.refuse(
                     None,
                     "every command requires a non-empty string id of at most 128 bytes",
                 );
                 continue;
             };
             let id = id.to_owned();
-            let command = value
-                .get("command")
-                .or_else(|| value.get("do"))
-                .and_then(Value::as_str);
-            let Some(command) = command else {
-                self.output
-                    .error(&self.snapshot, Some(&id), "command must be a string");
+            if !self.correlations.insert(id.clone()) {
+                self.refuse(Some(&id), "duplicate command id");
                 continue;
+            }
+            let command = match command_selector(&value) {
+                Ok(command) => command,
+                Err(message) => {
+                    self.refuse(Some(&id), &message);
+                    continue;
+                }
             };
             let outcome = self.command(command, &value).await;
             match outcome {
@@ -198,12 +175,30 @@ impl Actor<'_> {
                     self.drain_events();
                     self.output.completed(&self.snapshot, &id, command);
                     if shutdown {
-                        self.shutdown().await;
-                        return;
+                        return self.finish_stream().await;
                     }
                 }
-                Err(message) => self.output.error(&self.snapshot, Some(&id), &message),
+                Err(message) => self.refuse(Some(&id), &message),
             }
+        }
+    }
+
+    fn refuse(&mut self, id: Option<&str>, message: &str) {
+        self.stream_failed = true;
+        self.output.error(&self.snapshot, id, message);
+    }
+
+    async fn finish_stream(&mut self) -> Exit {
+        let cleanup_error = self.shutdown().await.err();
+        if cleanup_error.is_some() {
+            self.stream_failed = true;
+        }
+        self.output
+            .stream(&self.snapshot, self.stream_failed, cleanup_error.as_deref());
+        if self.stream_failed {
+            Exit::Failed
+        } else {
+            Exit::Success
         }
     }
 
@@ -232,27 +227,38 @@ impl Actor<'_> {
         if self.call.is_some() || self.pending.is_some() {
             return Err("a call or invitation is already active".to_owned());
         }
-        let target_text = string(value, "uri").or_else(|_| string(value, "target"))?;
+        let target_text = match (
+            optional_non_empty_string(value, "uri")?,
+            optional_non_empty_string(value, "target")?,
+        ) {
+            (Some(_), Some(_)) => {
+                return Err("dial.uri and dial.target cannot both be present".to_owned());
+            }
+            (Some(uri), None) | (None, Some(uri)) => uri,
+            (None, None) => return Err("uri must be a non-empty string".to_owned()),
+        };
         let to = Uri::parse(Bytes::from(target_text.to_owned()))
             .map_err(|_| format!("not a SIP URI: {target_text}"))?;
         if to.scheme().is_secure() && !self.transport.kind().is_secure() {
             return Err("a sips: target requires tls or wss; no downgrade is permitted".to_owned());
         }
-        let (target_addr, server_name) = crate::dial::target_of(&to, self.transport.kind())
-            .ok_or_else(|| format!("{target_text} must name an IP address and port"))?;
-        let target = self
-            .transport
-            .target(self.args, target_addr, &server_name)?;
+        let candidates = self
+            .resolver
+            .resolve(&to, None, self.transport, &self.options.signalling)
+            .await
+            .map_err(|error| error.to_string())?;
+        let target = crate::destination::first(&candidates)
+            .map_err(|error| error.to_string())?
+            .clone();
+        let target_addr = target.addr;
         let media_address: IpAddr =
             crate::advertise::reachable_ip(self.handle.local_addr(), target_addr.ip());
-        let from = value
-            .get("from")
-            .and_then(Value::as_str)
+        let from = optional_non_empty_string(value, "from")?
             .map_or_else(|| format!("<sip:sipx@{media_address}>"), str::to_owned);
         let mut options =
             sipx_call::DialOptions::new(from.clone(), media_address).with_media_policy(self.policy);
-        let timeout = value.get("timeout_ms").and_then(Value::as_u64).map_or_else(
-            || Duration::from_secs(self.args.number("timeout").unwrap_or(DEFAULT_TIMEOUT)),
+        let timeout = optional_u64(value, "timeout_ms")?.map_or_else(
+            || Duration::from_secs(self.options.timeout),
             Duration::from_millis,
         );
         if !timeout.is_zero() {
@@ -261,7 +267,10 @@ impl Actor<'_> {
         for header in self.headers.iter().cloned() {
             options = options.with_header(header);
         }
-        if let Some(items) = value.get("headers").and_then(Value::as_array) {
+        if let Some(items) = value.get("headers") {
+            let items = items
+                .as_array()
+                .ok_or_else(|| "dial.headers must be an array of strings".to_owned())?;
             for item in items {
                 let raw = item
                     .as_str()
@@ -269,9 +278,24 @@ impl Actor<'_> {
                 options = options.with_header(crate::header::parse(raw)?);
             }
         }
-        let mut call = sipx_call::dial(&self.handle, target, &to, &options)
-            .await
-            .map_err(|error| error.to_string())?;
+        let mut last_transport = None;
+        let mut connected = None;
+        for candidate in candidates.iter().take(crate::destination::MAX_ATTEMPTS) {
+            match sipx_call::dial(&self.handle, candidate.clone(), &to, &options).await {
+                Ok(call) => {
+                    connected = Some(call);
+                    break;
+                }
+                Err(error @ sipx_call::Error::Transport(_)) => last_transport = Some(error),
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        let mut call = connected.ok_or_else(|| {
+            last_transport.map_or_else(
+                || "no target candidate was attempted".to_owned(),
+                |error| error.to_string(),
+            )
+        })?;
         self.events = call.events();
         self.snapshot = Snapshot::outbound(
             format!("scenario-{}", self.next_call),
@@ -280,6 +304,7 @@ impl Actor<'_> {
         );
         self.next_call = self.next_call.saturating_add(1);
         self.emitted.clear();
+        self.consumed.clear();
         self.call = Some(call);
         self.drain_events();
         Ok(())
@@ -310,16 +335,16 @@ impl Actor<'_> {
     }
 
     async fn reject(&mut self, value: &Value) -> Result<(), String> {
+        let code = optional_u64(value, "status")?.unwrap_or(603);
+        if !(300..=699).contains(&code) {
+            return Err("reject.status must be between 300 and 699".to_owned());
+        }
+        let code = u16::try_from(code).map_err(|_| "reject.status is out of range".to_owned())?;
+        let reason = optional_string(value, "reason")?.unwrap_or("Decline");
         let incoming = self
             .pending
             .take()
             .ok_or_else(|| "there is no incoming invitation to reject".to_owned())?;
-        let code = value.get("status").and_then(Value::as_u64).unwrap_or(603);
-        let code = u16::try_from(code).map_err(|_| "reject.status is out of range".to_owned())?;
-        let reason = value
-            .get("reason")
-            .and_then(Value::as_str)
-            .unwrap_or("Decline");
         let status = StatusCode::new(code).ok_or_else(|| "reject.status is invalid".to_owned())?;
         let mut response = ResponseBuilder::to_request(
             &incoming.request,
@@ -350,7 +375,7 @@ impl Actor<'_> {
             None,
             BTreeMap::from([("status", Value::from(code))]),
         );
-        self.emitted.insert("call.ended".to_owned());
+        self.note_event("call.ended");
         Ok(())
     }
 
@@ -464,29 +489,33 @@ impl Actor<'_> {
         } else {
             format!("call.{requested}")
         };
-        let timeout_ms = value
-            .get("timeout_ms")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| "wait_for requires a finite timeout_ms".to_owned())?;
-        if self.emitted.contains(&wanted) {
-            return Ok(());
-        }
+        let timeout_ms = required_u64(value, "timeout_ms")
+            .map_err(|_| "wait_for requires a finite timeout_ms".to_owned())?;
         let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
         loop {
-            let arrived = self.next_runtime(deadline).await?;
-            if arrived == wanted {
+            if self.consume_event(&wanted) {
                 return Ok(());
             }
+            let _ = self.next_runtime(deadline).await?;
         }
     }
 
     async fn next_runtime(&mut self, deadline: tokio::time::Instant) -> Result<String, String> {
         enum Arrived {
             Event(Option<CallEvent>),
+            Media,
             Incoming(Box<Option<Incoming>>),
             Timeout,
         }
-        let arrived = if let Some(events) = self.events.as_mut() {
+        let arrived = if let (Some(events), Some(call)) = (self.events.as_mut(), self.call.as_ref())
+        {
+            tokio::select! {
+                event = events.recv() => Arrived::Event(event),
+                () = call.drive_media_event() => Arrived::Media,
+                incoming = self.incoming.recv() => Arrived::Incoming(Box::new(incoming)),
+                () = tokio::time::sleep_until(deadline) => Arrived::Timeout,
+            }
+        } else if let Some(events) = self.events.as_mut() {
             tokio::select! {
                 event = events.recv() => Arrived::Event(event),
                 incoming = self.incoming.recv() => Arrived::Incoming(Box::new(incoming)),
@@ -501,6 +530,10 @@ impl Actor<'_> {
         match arrived {
             Arrived::Event(Some(event)) => Ok(self.emit_call_event(event)),
             Arrived::Event(None) => Err("the call event stream ended".to_owned()),
+            // `drive_media_event` has offered exactly one item to the bounded call-event queue.
+            // Reading it on the next loop preserves that queue as the public handoff; if a slow
+            // consumer filled it, its existing drop counter and recovery policy remain decisive.
+            Arrived::Media => Ok("call.media".to_owned()),
             Arrived::Incoming(incoming) => match *incoming {
                 Some(incoming) => self.on_incoming(incoming).await,
                 None => Err("the signalling endpoint stopped".to_owned()),
@@ -536,10 +569,11 @@ impl Actor<'_> {
         );
         self.next_call = self.next_call.saturating_add(1);
         self.emitted.clear();
+        self.consumed.clear();
         self.pending = Some(incoming);
         self.output
             .event(&self.snapshot, "call.incoming", None, BTreeMap::new());
-        self.emitted.insert("call.incoming".to_owned());
+        self.note_event("call.incoming");
         Ok("call.incoming".to_owned())
     }
 
@@ -623,8 +657,23 @@ impl Actor<'_> {
             _ => ("call.event", BTreeMap::new()),
         };
         self.output.event(&self.snapshot, name, None, details);
-        self.emitted.insert(name.to_owned());
+        self.note_event(name);
         name.to_owned()
+    }
+
+    fn note_event(&mut self, name: &str) {
+        let count = self.emitted.entry(name.to_owned()).or_default();
+        *count = count.saturating_add(1);
+    }
+
+    fn consume_event(&mut self, name: &str) -> bool {
+        let emitted = self.emitted.get(name).copied().unwrap_or(0);
+        let consumed = self.consumed.entry(name.to_owned()).or_default();
+        if *consumed >= emitted {
+            return false;
+        }
+        *consumed = consumed.saturating_add(1);
+        true
     }
 
     async fn finish_recording_if_any(&mut self) -> Result<(), String> {
@@ -634,19 +683,28 @@ impl Actor<'_> {
         Ok(())
     }
 
-    async fn shutdown(&mut self) {
-        let _ = self.finish_recording_if_any().await;
+    async fn shutdown(&mut self) -> Result<(), String> {
+        let mut failure = self.finish_recording_if_any().await.err();
         if let Some(playback) = self.playback.take() {
             playback.stop();
         }
         if let Some(mut call) = self.call.take() {
-            let _ = call.hang_up().await;
+            if let Err(error) = call.hang_up().await
+                && failure.is_none()
+            {
+                failure = Some(format!("call cleanup: {error}"));
+            }
             self.drain_events();
         }
-        if let Some(incoming) = self.pending.take() {
-            let _ = refuse_unattended(&self.handle, &incoming).await;
+        if let Some(incoming) = self.pending.take()
+            && let Err(error) = refuse_unattended(&self.handle, &incoming).await
+            && failure.is_none()
+        {
+            failure = Some(format!("invitation cleanup: {error}"));
         }
         self.events = None;
+        self.handle.shutdown().await;
+        failure.map_or(Ok(()), Err)
     }
 }
 
@@ -781,6 +839,23 @@ impl Output {
         );
     }
 
+    fn stream(&mut self, snapshot: &Snapshot, failed: bool, message: Option<&str>) {
+        let mut details = BTreeMap::new();
+        if let Some(message) = message {
+            details.insert("message", Value::String(message.to_owned()));
+        }
+        self.event(
+            snapshot,
+            if failed {
+                "scenario.stream.failed"
+            } else {
+                "scenario.stream.completed"
+            },
+            None,
+            details,
+        );
+    }
+
     fn event(
         &mut self,
         snapshot: &Snapshot,
@@ -813,6 +888,47 @@ impl Output {
             })
         );
     }
+}
+
+fn command_selector(value: &Value) -> Result<&str, String> {
+    match (value.get("command"), value.get("do")) {
+        (Some(_), Some(_)) => Err("command and do cannot both be present".to_owned()),
+        (Some(command), None) | (None, Some(command)) => command
+            .as_str()
+            .filter(|command| !command.is_empty())
+            .ok_or_else(|| "command must be a non-empty string".to_owned()),
+        (None, None) => Err("command must be a non-empty string".to_owned()),
+    }
+}
+
+fn optional_non_empty_string<'a>(value: &'a Value, name: &str) -> Result<Option<&'a str>, String> {
+    match value.get(name) {
+        None => Ok(None),
+        Some(Value::String(text)) if !text.is_empty() => Ok(Some(text)),
+        Some(_) => Err(format!("{name} must be a non-empty string")),
+    }
+}
+
+fn optional_string<'a>(value: &'a Value, name: &str) -> Result<Option<&'a str>, String> {
+    match value.get(name) {
+        None => Ok(None),
+        Some(Value::String(text)) => Ok(Some(text)),
+        Some(_) => Err(format!("{name} must be a string")),
+    }
+}
+
+fn optional_u64(value: &Value, name: &str) -> Result<Option<u64>, String> {
+    match value.get(name) {
+        None => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| format!("{name} must be an unsigned integer")),
+    }
+}
+
+fn required_u64(value: &Value, name: &str) -> Result<u64, String> {
+    optional_u64(value, name)?.ok_or_else(|| format!("{name} must be an unsigned integer"))
 }
 
 fn string<'a>(value: &'a Value, name: &str) -> Result<&'a str, String> {

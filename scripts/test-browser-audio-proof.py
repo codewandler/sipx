@@ -89,6 +89,22 @@ def sipx(role: str) -> dict:
     }
 
 
+def unused_rtcp_candidate_browser() -> dict:
+    result = browser("browser-offerer")
+    result["sdp"] = {
+        "local": {
+            "candidate_components": ["1", "2"],
+            "raw": "a=candidate:left 1 UDP 100 192.0.2.10 40000 typ host\r\n"
+            "a=candidate:left 2 UDP 99 192.0.2.10 40001 typ host\r\n",
+        },
+        "remote": {
+            "candidate_components": ["1"],
+            "raw": "a=candidate:right 1 UDP 100 198.51.100.20 41000 typ host\r\n",
+        },
+    }
+    return result
+
+
 def negative(name: str, role: str, digest: str) -> dict:
     facts = {"rtp_packets": 0, "fallback_attempted": False}
     if name == "FingerprintMismatch":
@@ -123,6 +139,14 @@ class BrowserAudioProofTest(unittest.TestCase):
             b, s = browser(role), sipx(role)
             (role_dir / "browser.json").write_text(json.dumps(b), encoding="utf-8")
             (role_dir / "sipx.json").write_text(json.dumps(s), encoding="utf-8")
+        compatibility = self.directory / "unused-rtcp-candidate"
+        compatibility.mkdir()
+        (compatibility / "browser.json").write_text(
+            json.dumps(unused_rtcp_candidate_browser()), encoding="utf-8"
+        )
+        (compatibility / "sipx.json").write_text(
+            json.dumps(sipx("browser-offerer")), encoding="utf-8"
+        )
         negative_dir = self.directory / "negatives"
         negative_dir.mkdir()
         for name in ("FingerprintMismatch", "NoNominatedPair", "WeakerMedia"):
@@ -142,6 +166,19 @@ class BrowserAudioProofTest(unittest.TestCase):
     def test_complete_two_role_proof_is_accepted(self) -> None:
         result = DRIVER.validate_proof(self.directory, PIN)
         self.assertEqual(set(DRIVER.ROLES), set(result["roles"]))
+        self.assertIn("unused_rtcp_candidate", result)
+
+    def test_unused_candidate_compatibility_evidence_is_mandatory_and_exact(self) -> None:
+        target = self.directory / "unused-rtcp-candidate/browser.json"
+        original = unused_rtcp_candidate_browser()
+        for components in (["1"], ["1", "2", "3"], ["2", "1"]):
+            changed = copy.deepcopy(original)
+            changed["sdp"]["local"]["candidate_components"] = components
+            target.write_text(json.dumps(changed), encoding="utf-8")
+            self.assert_refused()
+        target.unlink()
+        with self.assertRaises(OSError):
+            DRIVER.validate_proof(self.directory, PIN)
 
     def test_one_role_cannot_be_called_complete(self) -> None:
         (self.directory / "browser-answerer/browser.json").unlink()

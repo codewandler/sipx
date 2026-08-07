@@ -213,6 +213,7 @@ WEBDRIVER_URL=${SIPX_BROWSER_AUDIO_WEBDRIVER_URL:-http://127.0.0.1:9515}
 
 run_case() {
     local role=$1 case_name=$2 config_template=$3 directory=$4 driver_command=$5
+    local browser_mutation=${6:-}
     local product_case=${case_name:-positive}
     mkdir -p "$directory"
     start_group \
@@ -241,12 +242,17 @@ run_case() {
         --pin "$SIPX_BROWSER_AUDIO_WSS_SPKI_SHA256" \
         --timeout 10
     if [[ $driver_command == run-role ]]; then
+        local -a mutation_args=()
+        if [[ -n $browser_mutation ]]; then
+            mutation_args=(--mutation "$browser_mutation")
+        fi
         "$DRIVER" run-role \
             --url "$WEBDRIVER_URL" \
             --page "$ROOT/tests/browser-audio/peer.html" \
             --config "$config" \
             --capabilities "$CAPABILITIES" \
             --role "$role" \
+            "${mutation_args[@]}" \
             --pin "$SIPX_BROWSER_AUDIO_WSS_SPKI_SHA256" \
             --output "$directory/browser.json" \
             --timeout "$ROLE_TIMEOUT"
@@ -273,6 +279,13 @@ run_positive() {
 
 run_positive browser-offerer "$SIPX_BROWSER_AUDIO_OFFERER_CONFIG"
 run_positive browser-answerer "$SIPX_BROWSER_AUDIO_ANSWERER_CONFIG"
+run_case \
+    browser-offerer \
+    "" \
+    "$SIPX_BROWSER_AUDIO_OFFERER_CONFIG" \
+    "$SIPX_BROWSER_AUDIO_EVIDENCE_DIR/unused-rtcp-candidate" \
+    run-role \
+    UnusedRtcpCandidate
 
 mkdir -p "$SIPX_BROWSER_AUDIO_EVIDENCE_DIR/negatives"
 for negative in FingerprintMismatch NoNominatedPair WeakerMedia; do

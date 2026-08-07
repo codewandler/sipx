@@ -3084,9 +3084,8 @@ impl Driver {
                     self.meters.unsent(&request.method);
                 }
             }
-            if let Some(fallback) = self.tcp_fallbacks.get(&key).copied()
-                && let Some(client) = self.clients.get(&key)
-            {
+            let fallback = self.tcp_fallbacks.get(&key).copied();
+            let failure = if let Some(fallback) = fallback {
                 // Connection establishment is asynchronous: the pool accepts the generation,
                 // then `Closed` reports that the selected TCP path could not become usable.
                 // Preserve that this connection existed only because the UDP request was too
@@ -3096,34 +3095,46 @@ impl Driver {
                     .map_or(Error::ConnectionClosed, |failure| {
                         Error::Io(std::io::Error::new(failure.0, failure.1.clone()))
                     });
-                let failure = fallback.unavailable(source);
-                let _ = client.failures.try_send(failure);
-            }
-            #[cfg(feature = "tls")]
-            if let Some(detail) = &tls_detail
-                && let Some(client) = self.clients.get(&key)
-            {
-                #[cfg(feature = "quic")]
-                let failure = if closed.key.transport == TransportKind::Quic {
-                    Error::Quic(crate::quic::QuicError::handshake(
-                        closed.key.peer.to_string(),
-                        detail.clone(),
-                    ))
-                } else {
-                    Error::Tls(crate::tls::TlsError::Handshake {
+                fallback.unavailable(source)
+            } else if let Some(detail) = &tls_detail {
+                #[cfg(feature = "tls")]
+                {
+                    #[cfg(feature = "quic")]
+                    let failure = if closed.key.transport == TransportKind::Quic {
+                        Error::Quic(crate::quic::QuicError::handshake(
+                            closed.key.peer.to_string(),
+                            detail.clone(),
+                        ))
+                    } else {
+                        Error::Tls(crate::tls::TlsError::Handshake {
+                            peer: closed.key.peer.to_string(),
+                            detail: detail.clone(),
+                        })
+                    };
+                    #[cfg(not(feature = "quic"))]
+                    let failure = Error::Tls(crate::tls::TlsError::Handshake {
                         peer: closed.key.peer.to_string(),
                         detail: detail.clone(),
+                    });
+                    failure
+                }
+                #[cfg(not(feature = "tls"))]
+                {
+                    let _ = detail;
+                    Error::ConnectionClosed
+                }
+            } else {
+                connect_failure
+                    .as_ref()
+                    .map_or(Error::ConnectionClosed, |failure| {
+                        Error::Io(std::io::Error::new(failure.0, failure.1.clone()))
                     })
-                };
-                #[cfg(not(feature = "quic"))]
-                let failure = Error::Tls(crate::tls::TlsError::Handshake {
-                    peer: closed.key.peer.to_string(),
-                    detail: detail.clone(),
-                });
+            };
+            if let Some(client) = self.clients.get(&key) {
+                // Queue the concrete I/O cause before the sans-I/O transport-error event so the
+                // application can distinguish a failed connection from SIP silence.
                 let _ = client.failures.try_send(failure);
             }
-            #[cfg(not(feature = "tls"))]
-            let _ = &tls_detail;
             let outputs = self.layer.on_transport_error(&key);
             self.perform(&key, outputs, None).await;
         }

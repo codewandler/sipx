@@ -224,17 +224,48 @@ pub fn tone(digit: Digit, packets: usize, samples_per_packet: u16) -> Vec<TonePa
     events
 }
 
+/// One telephone event completed by the receive state machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Completed {
+    /// Which key was pressed.
+    pub digit: Digit,
+    /// How long it was held, in the negotiated RTP clock's timestamp units.
+    ///
+    /// This is wider than the wire's 16-bit duration because a long event can span several
+    /// timestamp segments (RFC 4733 §2.5.2.3).
+    pub duration: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Current {
+    digit: Digit,
+    started_at: u32,
+    segment_at: u32,
+    duration: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Reported {
+    digit: Digit,
+    segment_at: u32,
+}
+
 /// Reassembles received events into digits.
 ///
 /// The whole job is reporting each keypress exactly once. A tone arrives as many packets and
 /// its end arrives three times, so a receiver that reports what it receives reports every
 /// digit four or more times — which, for a caller entering a PIN, is a wrong PIN.
+///
+/// This type reads no clock. [`Self::timeout`] is the explicit fired-timer input supplied by the
+/// media worker after RFC 4733 §2.5.2.2's bounded silence interval.
 #[derive(Debug, Default)]
 pub struct Receiver {
-    /// The tone currently sounding, identified by its RTP timestamp.
-    current: Option<(u32, Digit)>,
-    /// Timestamps already reported, so the end retransmissions are absorbed.
-    reported: Option<u32>,
+    current: Option<Current>,
+    /// The most recently completed identity, so final-report retransmissions cannot emit twice.
+    reported: Option<Reported>,
+    /// RTP ordering includes ordinary audio packets too; [`Self::observe_non_event`] advances it
+    /// while no event payload is being decoded.
+    last_sequence: Option<u16>,
 }
 
 impl Receiver {
@@ -246,32 +277,131 @@ impl Receiver {
 
     /// Feed one telephone-event packet.
     ///
-    /// Returns the digit when the tone ends, and `None` while it is still sounding or if this
-    /// packet is a repeat of an end already reported.
-    pub fn push(&mut self, timestamp: u32, event: &Event) -> Option<Digit> {
-        // The timestamp identifies the tone. A new one is a new keypress even if the digit is
-        // the same, which is how "44" is told apart from a single long "4".
-        if self.reported == Some(timestamp) {
+    /// The two slots are allocation-free and preserve order in the one case that can complete two
+    /// events at once: a new marked event replaces a tone whose end reports were all lost, and the
+    /// first received report for the new event already has its E bit set. Empty slots mean no
+    /// application event.
+    pub fn push(
+        &mut self,
+        sequence: u16,
+        timestamp: u32,
+        marker: bool,
+        event: &Event,
+    ) -> [Option<Completed>; 2] {
+        if !self.advance(sequence) {
+            return [None, None];
+        }
+
+        // A report for the same event code and segment timestamp after completion is an update or
+        // final-report retransmission, never a reason to restart the key. A different timestamp
+        // is independent even if its first marked packet was lost, which is how "44" remains two
+        // digits on a lossy path.
+        if self.current.is_none()
+            && self.reported.is_some_and(|reported| {
+                reported.digit == event.digit && reported.segment_at == timestamp
+            })
+        {
+            return [None, None];
+        }
+
+        let mut prior = None;
+        match self.current {
+            None => self.start(timestamp, *event),
+            Some(current) if marker || current.digit != event.digit => {
+                prior = self.complete();
+                self.start(timestamp, *event);
+            }
+            Some(current) => {
+                let duration = if current.segment_at == timestamp {
+                    current.duration.max(u32::from(event.duration))
+                } else {
+                    // Only the first segment carries M (RFC 4733 §2.2.2). Timestamp distance
+                    // therefore turns the final segment's 16-bit field into the full event
+                    // duration without reading a wall clock.
+                    timestamp
+                        .wrapping_sub(current.started_at)
+                        .saturating_add(u32::from(event.duration))
+                        .max(current.duration)
+                };
+                self.current = Some(Current {
+                    segment_at: timestamp,
+                    duration,
+                    ..current
+                });
+            }
+        }
+
+        if !event.end {
+            return [prior, None];
+        }
+        match prior {
+            Some(prior) => [Some(prior), self.complete()],
+            None => [self.complete(), None],
+        }
+    }
+
+    /// Advance RTP ordering for an accepted packet that is not a telephone event.
+    ///
+    /// Audio shares the RTP sequence space. Observing it prevents a long pause between keypresses
+    /// from exceeding half the serial-number range and making the next digit look older.
+    pub fn observe_non_event(&mut self, sequence: u16) {
+        let _ = self.advance(sequence);
+    }
+
+    /// Finish a current event when ordinary media resumes after all of its end reports were lost.
+    pub fn finish_on_media(&mut self, sequence: u16) -> Option<Completed> {
+        if !self.advance(sequence) {
             return None;
         }
+        self.complete()
+    }
 
-        match self.current {
-            Some((ts, _)) if ts == timestamp => {}
-            _ => self.current = Some((timestamp, event.digit)),
-        }
+    /// Finish a current event when the media worker fires its bounded silence expiration.
+    pub fn timeout(&mut self) -> Option<Completed> {
+        self.complete()
+    }
 
-        if event.end {
-            let digit = self.current.take().map(|(_, digit)| digit)?;
-            self.reported = Some(timestamp);
-            return Some(digit);
-        }
-        None
+    /// Discard all receive history at a media-generation boundary.
+    pub fn reset(&mut self) {
+        *self = Self::default();
     }
 
     /// The digit currently sounding, if any.
     #[must_use]
     pub fn in_progress(&self) -> Option<Digit> {
-        self.current.map(|(_, digit)| digit)
+        self.current.map(|current| current.digit)
+    }
+
+    fn advance(&mut self, sequence: u16) -> bool {
+        if self
+            .last_sequence
+            .is_some_and(|last| !crate::packet::sequence_is_newer(sequence, last))
+        {
+            return false;
+        }
+        self.last_sequence = Some(sequence);
+        true
+    }
+
+    fn start(&mut self, timestamp: u32, event: Event) {
+        self.current = Some(Current {
+            digit: event.digit,
+            started_at: timestamp,
+            segment_at: timestamp,
+            duration: u32::from(event.duration),
+        });
+    }
+
+    fn complete(&mut self) -> Option<Completed> {
+        let current = self.current.take()?;
+        self.reported = Some(Reported {
+            digit: current.digit,
+            segment_at: current.segment_at,
+        });
+        Some(Completed {
+            digit: current.digit,
+            duration: current.duration,
+        })
     }
 }
 
@@ -444,13 +574,15 @@ mod tests {
     #[test]
     fn a_tone_is_reported_exactly_once() {
         let mut receiver = Receiver::new();
-        let mut digits = Vec::new();
-        for packet in tone(Digit::Number(3), 5, 160) {
-            if let Some(digit) = receiver.push(1000, &packet.event) {
-                digits.push(digit);
-            }
-        }
-        assert_eq!(digits, vec![Digit::Number(3)], "one keypress, one digit");
+        let completed = receive_tone(&mut receiver, 10, 1000, Digit::Number(3), 5);
+        assert_eq!(
+            completed,
+            vec![Completed {
+                digit: Digit::Number(3),
+                duration: 800,
+            }],
+            "one keypress, one digit"
+        );
     }
 
     /// Two presses of the same key are two digits, told apart by their timestamps. Without
@@ -459,12 +591,12 @@ mod tests {
     fn the_same_digit_pressed_twice_is_two_digits() {
         let mut receiver = Receiver::new();
         let mut digits = Vec::new();
-        for timestamp in [1000u32, 5000] {
-            for packet in tone(Digit::Number(4), 3, 160) {
-                if let Some(digit) = receiver.push(timestamp, &packet.event) {
-                    digits.push(digit);
-                }
-            }
+        for (sequence, timestamp) in [(10, 1000u32), (20, 5000)] {
+            digits.extend(
+                receive_tone(&mut receiver, sequence, timestamp, Digit::Number(4), 3)
+                    .into_iter()
+                    .map(|completed| completed.digit),
+            );
         }
         assert_eq!(digits, vec![Digit::Number(4), Digit::Number(4)]);
     }
@@ -477,10 +609,9 @@ mod tests {
         for (index, c) in "1234*#".chars().enumerate() {
             let digit = Digit::from_char(c).expect("a digit");
             let timestamp = 1000 + u32::try_from(index).unwrap_or(0) * 2000;
-            for packet in tone(digit, 3, 160) {
-                if let Some(reported) = receiver.push(timestamp, &packet.event) {
-                    collected.push(reported.as_char());
-                }
+            let sequence = u16::try_from(index * 10).unwrap_or(0);
+            for completed in receive_tone(&mut receiver, sequence, timestamp, digit, 3) {
+                collected.push(completed.digit.as_char());
             }
         }
         assert_eq!(collected, "1234*#");
@@ -494,7 +625,16 @@ mod tests {
         let events = tone(Digit::Star, 5, 160);
         // Only the last packet arrives.
         let last = events.last().expect("an end packet");
-        assert_eq!(receiver.push(2000, &last.event), Some(Digit::Star));
+        assert_eq!(
+            receiver.push(10, 2000, false, &last.event),
+            [
+                Some(Completed {
+                    digit: Digit::Star,
+                    duration: 800,
+                }),
+                None,
+            ]
+        );
     }
 
     #[test]
@@ -502,11 +642,238 @@ mod tests {
         let mut receiver = Receiver::new();
         let events = tone(Digit::Hash, 3, 160);
         assert!(receiver.in_progress().is_none());
-        receiver.push(1000, &events[0].event);
+        receiver.push(10, 1000, true, &events[0].event);
         assert_eq!(receiver.in_progress(), Some(Digit::Hash));
-        for packet in &events[1..] {
-            receiver.push(1000, &packet.event);
+        for (index, packet) in events[1..].iter().enumerate() {
+            receiver.push(
+                11 + u16::try_from(index).unwrap_or(0),
+                1000,
+                false,
+                &packet.event,
+            );
         }
         assert!(receiver.in_progress().is_none(), "the tone is over");
+    }
+
+    fn receive_tone(
+        receiver: &mut Receiver,
+        first_sequence: u16,
+        timestamp: u32,
+        digit: Digit,
+        packets: usize,
+    ) -> Vec<Completed> {
+        tone(digit, packets, 160)
+            .into_iter()
+            .enumerate()
+            .flat_map(|(index, packet)| {
+                receiver
+                    .push(
+                        first_sequence.wrapping_add(u16::try_from(index).unwrap_or(0)),
+                        timestamp.wrapping_add(packet.segment_offset),
+                        index == 0,
+                        &packet.event,
+                    )
+                    .into_iter()
+                    .flatten()
+            })
+            .collect()
+    }
+
+    fn event(digit: char, end: bool, duration: u16) -> Event {
+        Event {
+            digit: Digit::from_char(digit).expect("a digit"),
+            end,
+            volume: 10,
+            duration,
+        }
+    }
+
+    fn push_wire(receiver: &mut Receiver, bytes: &'static [u8]) -> [Option<Completed>; 2] {
+        let packet = crate::packet::Packet::decode(&Bytes::from_static(bytes)).expect("valid RTP");
+        let event = Event::decode(&packet.payload).expect("valid telephone event");
+        receiver.push(packet.sequence, packet.timestamp, packet.marker, &event)
+    }
+
+    /// D5 is byte-pinned so the state proof cannot accidentally test a convenient struct that the
+    /// RTP decoder would never produce.
+    #[test]
+    fn negotiated_payload_96_wire_vector_completes_with_its_duration() {
+        let mut receiver = Receiver::new();
+        assert_eq!(
+            push_wire(
+                &mut receiver,
+                &[
+                    0x80, 0xe0, 0x03, 0xe8, 0x00, 0x00, 0x03, 0xe8, 0xde, 0xca, 0xfb, 0xad, 0x01,
+                    0x0a, 0x00, 0xa0,
+                ],
+            ),
+            [None, None]
+        );
+        assert_eq!(
+            push_wire(
+                &mut receiver,
+                &[
+                    0x80, 0x60, 0x03, 0xe9, 0x00, 0x00, 0x03, 0xe8, 0xde, 0xca, 0xfb, 0xad, 0x01,
+                    0x0a, 0x01, 0x40,
+                ],
+            ),
+            [None, None]
+        );
+        assert_eq!(
+            push_wire(
+                &mut receiver,
+                &[
+                    0x80, 0x60, 0x03, 0xea, 0x00, 0x00, 0x03, 0xe8, 0xde, 0xca, 0xfb, 0xad, 0x01,
+                    0x8a, 0x01, 0xe0,
+                ],
+            ),
+            [
+                Some(Completed {
+                    digit: Digit::Number(1),
+                    duration: 480,
+                }),
+                None,
+            ]
+        );
+    }
+
+    /// D5/D6: duration grows, the E-bit report completes once, and both its recommended
+    /// retransmissions and packets delivered out of sequence are absorbed.
+    #[test]
+    fn receive_vectors_absorb_reordering_duplicates_and_end_retransmissions() {
+        let mut receiver = Receiver::new();
+        assert_eq!(
+            receiver.push(1000, 1000, true, &event('1', false, 160)),
+            [None, None]
+        );
+        assert_eq!(
+            receiver.push(1002, 1000, false, &event('1', false, 480)),
+            [None, None]
+        );
+        assert_eq!(
+            receiver.push(1001, 1000, false, &event('1', false, 320)),
+            [None, None],
+            "the late continuation cannot reduce duration"
+        );
+        assert_eq!(
+            receiver.push(1003, 1000, false, &event('1', true, 480)),
+            [
+                Some(Completed {
+                    digit: Digit::Number(1),
+                    duration: 480,
+                }),
+                None,
+            ]
+        );
+        assert_eq!(
+            receiver.push(1004, 1000, false, &event('1', true, 480)),
+            [None, None]
+        );
+        assert_eq!(
+            receiver.push(1005, 1000, false, &event('1', true, 480)),
+            [None, None]
+        );
+        assert_eq!(
+            receiver.push(1005, 1000, false, &event('1', true, 480)),
+            [None, None]
+        );
+    }
+
+    /// D7: time is an input. The RTP core neither reads a clock nor invents extra duration.
+    #[test]
+    fn fired_silence_reports_the_greatest_wire_duration_once() {
+        let mut receiver = Receiver::new();
+        assert_eq!(
+            push_wire(
+                &mut receiver,
+                &[
+                    0x80, 0xe0, 0x07, 0xd0, 0x00, 0x00, 0x0b, 0xb8, 0xde, 0xca, 0xfb, 0xad, 0x03,
+                    0x0a, 0x00, 0xa0,
+                ],
+            ),
+            [None, None]
+        );
+        assert_eq!(
+            push_wire(
+                &mut receiver,
+                &[
+                    0x80, 0x60, 0x07, 0xd1, 0x00, 0x00, 0x0b, 0xb8, 0xde, 0xca, 0xfb, 0xad, 0x03,
+                    0x0a, 0x01, 0x40,
+                ],
+            ),
+            [None, None]
+        );
+        assert_eq!(
+            receiver.timeout(),
+            Some(Completed {
+                digit: Digit::Number(3),
+                duration: 320,
+            })
+        );
+        assert_eq!(receiver.timeout(), None);
+        assert_eq!(
+            receiver.push(2002, 3000, false, &event('3', true, 320)),
+            [None, None]
+        );
+    }
+
+    /// A new M-bit event closes a prior event whose final reports were all lost, without making
+    /// the new event wait behind it or changing their order.
+    #[test]
+    fn a_marked_event_closes_an_unfinished_predecessor_in_order() {
+        let mut receiver = Receiver::new();
+        receiver.push(10, 1000, true, &event('1', false, 320));
+        assert_eq!(
+            receiver.push(11, 1320, true, &event('2', true, 160)),
+            [
+                Some(Completed {
+                    digit: Digit::Number(1),
+                    duration: 320,
+                }),
+                Some(Completed {
+                    digit: Digit::Number(2),
+                    duration: 160,
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn ordinary_media_closes_a_tone_but_an_unknown_payload_only_advances_ordering() {
+        let mut receiver = Receiver::new();
+        receiver.push(65_534, 1000, true, &event('8', false, 240));
+        receiver.observe_non_event(65_535);
+        assert_eq!(receiver.in_progress(), Some(Digit::Number(8)));
+        assert_eq!(
+            receiver.finish_on_media(0),
+            Some(Completed {
+                digit: Digit::Number(8),
+                duration: 240,
+            }),
+            "sequence wrap is forward progress"
+        );
+    }
+
+    /// D8: replacement owns a fresh receiver. Incomplete state and duplicate history from the
+    /// retired worker are not inherited by the new media generation.
+    #[test]
+    fn reset_discards_incomplete_and_reported_state() {
+        let mut receiver = Receiver::new();
+        receiver.push(10, 1000, true, &event('4', false, 160));
+        receiver.reset();
+        assert!(receiver.in_progress().is_none());
+        assert_eq!(receiver.timeout(), None);
+
+        assert_eq!(
+            receiver.push(1, 5000, true, &event('4', true, 320)),
+            [
+                Some(Completed {
+                    digit: Digit::Number(4),
+                    duration: 320,
+                }),
+                None,
+            ],
+            "the replacement generation has independent ordering and identity"
+        );
     }
 }

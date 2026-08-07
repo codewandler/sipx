@@ -48,6 +48,7 @@ The runner executes these cases serially:
 |---|---|---|
 | `browser-offerer` | create and send the INVITE offer; apply the answer; ACK; exchange media; BYE | listen on WSS, answer, report its selected path |
 | `browser-answerer` | accept INVITE; apply offer; create/send answer; exchange media; accept or send BYE | place the WSS call, report its selected path |
+| `unused-rtcp-candidate` | create the offer, append exactly one bounded component-2 host fallback derived from its first component-1 host candidate, then complete the ordinary offerer lifecycle | answer with mux, discard the fallback before ICE, and report its selected path |
 
 The driver supplies one bounded JSON configuration and receives one terminal object with
 `contract: "sipx.browser-audio.v1"`, a `role`, and a stable `type`. The terminal browser result has:
@@ -60,6 +61,13 @@ The driver supplies one bounded JSON configuration and receives one terminal obj
 - `media`: inbound/outbound packet and byte counts, received audio energy and sent oscillator
   frames; and
 - `sip`: INVITE, final response, ACK, BYE and the BYE final response for the selected role.
+
+The compatibility case additionally retains both candidate component identifiers from the exact
+local SDP sent over SIP. Its browser terminal object MUST show components 1 and 2 in that offer,
+component 1 in the received mux answer, and component 1 as the only selected pair. The sipx object
+independently retains its normal one-component snapshot. Synthesising the fallback is a single SDP
+fixture mutation; ICE, DTLS, SRTP, codec and media evidence still come from the independent native
+runtime and the public sipx endpoint.
 
 The sipx command emits its own terminal JSON. The harness preserves both objects and validates them
 independently before emitting a combined result. It never substitutes a browser inference for a
@@ -82,8 +90,9 @@ A role succeeds only when all of these are observed in that same run:
 8. the sipx terminal object independently reports browser-audio, Opus, keyed media, the same role
    and a nominated component-1 pair.
 
-The overall proof succeeds only after both roles satisfy the list. Process exit without all facts is
-failure. A terminal result from only one role is failure.
+The overall proof succeeds only after both ordinary roles and the unused-candidate compatibility
+case satisfy the list. Process exit without all facts is failure. A terminal result from only one
+role, or compatibility evidence not containing both offered components, is failure.
 
 ## 5. Negative non-vacuity
 
@@ -144,7 +153,8 @@ The self-test reverses the harness's own trust boundaries with fixture processes
 - an interrupted helper that has reported its leader and grandchild proves process-group cleanup
   and reaping, while a separate outer-timeout case proves the complete bound;
 - malformed, partial and oversized JSON prove structured-fact assertions fail closed;
-- a one-role result proves both-role completeness is required;
+- a one-role result proves both-role completeness is required, and missing or malformed
+  unused-candidate evidence proves the compatibility case cannot be inferred from an ordinary run;
 - each negative without its paired positive proves non-vacuity is enforced; and
 - a pin mismatch proves no page or sipx role starts after identity preflight fails.
 

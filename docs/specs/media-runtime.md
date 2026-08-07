@@ -1,6 +1,6 @@
 # Media runtime construction and ownership
 
-**Status:** normative · **Stories:** M-32, M-35, M-36, M-37, P-15
+**Status:** normative · **Stories:** M-32, M-35, M-36, M-37, P-15, M-71
 
 ## 1. Scope
 
@@ -65,6 +65,49 @@ Replacing a media session during renegotiation performs the same explicit shutdo
 session. The confirmed `Call` retains the old `Arc`, and in-place `MediaSession::reconfigure`
 retains the old generation, before either begins an await. Merely swapping and relying on a local
 destructor would let cancellation abort the shutdown future and lose the only retry handle.
+
+### 2.2 Named telephone-event reception
+
+RFC 4733 events enter the receiver only when their RTP payload type equals the `telephone-event`
+format selected by SDP. The value is dynamic: no default number, including 101, is accepted as a
+substitute for negotiation. A packet on any other payload follows the negotiated audio/unknown
+payload path and cannot create a digit.
+
+The receiver is pure state. It reads no clock and performs no I/O. Its inputs are an accepted RTP
+packet or an explicit silence expiration fired by the media worker. One receive-loop generation
+owns one receiver and the existing 32-place media digit queue. A completed event is offered to that
+queue with `try_send`; it never waits for an application consumer. The call driver then offers the
+typed `CallEvent::Dtmf` to the existing bounded call-event queue. No third digit buffer or per-digit
+task exists.
+
+An event identity is its synchronisation source, event code and initial RTP timestamp. Source is
+pinned before this state machine; the receiver therefore stores only event code and timestamp.
+RFC 4733 §§2.2.1, 2.2.2 and 2.3.5 give the state transitions:
+
+| Input | State transition | Output |
+|---|---|---|
+| M-bit start for an unreported identity | create current event; retain the greatest observed duration | none |
+| same timestamp and event code, increasing duration | update current duration | none |
+| duplicate or older RTP sequence | do not move state | none |
+| E-bit report for current identity | close current and retain its identity as reported | one digit and the greatest duration |
+| further E-bit reports for the reported identity | absorb them, including the recommended final-report retransmissions of §2.5.1.4 | none |
+| newer M-bit start while an event lacks its E bit | close the prior event at its greatest duration, then start the new event | prior event once |
+| fired silence expiration while an event is current | close it at its greatest duration; this is §2.5.2.2's bounded stuck-tone recovery | current event once |
+| accepted ordinary audio after an event whose E bit was lost | close the event before delivering the audio | current event once |
+| media generation, source or negotiated payload replacement | discard current and reported receive state before packets from the replacement are admitted | none |
+
+The receive loop arms the silence boundary for three negotiated packet intervals whenever an event
+is current, as bounded by RFC 4733 §2.5.2.2. It is a definition of media silence and shares the
+loop's cancellation-safe socket wait; it is not a new worker. The fired expiration is an input to
+the RTP state, not a core clock read. A timeout reports the last duration carried on the wire rather
+than adding local elapsed time. With no event current, the existing jitter-buffer flush boundary
+remains four packet intervals with a 60 ms floor.
+
+Long events keep one application identity across unmarked, contiguous timestamp segments. The
+reported duration is the segment timestamp's forward distance from the initial timestamp plus the
+greatest duration in that segment. A marker starts a new application event. Sequence comparison is
+serial-number arithmetic, so wrap is forward progress; accepted non-event RTP packets advance the
+ordering reference too, preventing a long pause between digits from looking like reordering.
 
 ## 3. Conference construction and shutdown
 
@@ -175,3 +218,8 @@ is honest under load.
 | D2 | one RTP packet using neither the negotiated nor a known static payload type | no audio is delivered and `unknown_payload_type = 1` |
 | D3 | one packet after a different SSRC has established the stream | no stream state moves and `foreign_ssrc = 1` |
 | D4 | a source discard is added without a nearby counter increment or `// discard:` reason | the media discard enumeration test fails with its file and line |
+| D5 | negotiated PT 96, `80e003e8000003e8decafbad010a00a0`, then PT 96 packets `806003e9000003e8decafbad010a0140` and `806003ea000003e8decafbad018a01e0` | one digit `1`, duration 480 timestamp units |
+| D6 | D5 followed by two newer copies of the final `018a01e0` payload, a duplicate sequence, and a late continuation | still one digit `1`; state does not move backwards |
+| D7 | PT 96 start `80e007d000000bb8decafbad030a00a0`, continuation `806007d100000bb8decafbad030a0140`, then the explicit silence expiration | one digit `3`, duration 320 timestamp units; a later end report cannot emit it again |
+| D8 | D7's start followed by receiver reset; the old worker is stopped before a replacement is admitted | no digit; a fresh marked event in the replacement generation is independent and old-worker packets cannot cross the boundary |
+| D9 | D5 bytes carried on PT 101 when SDP selected PT 96 | no receiver input and no digit |
