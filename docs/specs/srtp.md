@@ -849,7 +849,8 @@ most of them — work. Two MUSTs, one interop bug, one missing check.
 tag 2 and was answered tag 1 was failing the call at its end.
 
 **§5.1.3 is closed too.** `Crypto::verify_answer` (§5.4) and `SrtpKeys::from_answer` implement the
-check; `M-29` moved `sipx-call`'s `srtp_keys` ([`call.rs`](../../crates/sipx-call/src/call.rs)) onto
+check; `M-29` moved `sipx-call`'s `srtp_keys`
+([`offer_answer.rs`](../../crates/sipx-call/src/call/offer_answer.rs)) onto
 it. It now takes the offered attributes as a **slice** and the answered one as an `Option`, and
 returns `Result` — the shape the check has, rather than a pair of `Option`s that unwrapped both and
 compared nothing. `Ok(None)` survives for exactly one case, a call that offered no key at all; an
