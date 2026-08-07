@@ -273,8 +273,9 @@ impl Call {
     ///
     /// # Errors
     ///
-    /// Returns [`Error`] when the re-INVITE cannot be built or sent, or when the far end refuses
-    /// it — the same failures as any other renegotiation, and like them it leaves the call running.
+    /// Returns [`Error`](crate::Error) when the re-INVITE cannot be built or sent, or when the far
+    /// end refuses it — the same failures as any other renegotiation, and like them it leaves the
+    /// call running.
     pub async fn restart_ice(&mut self) -> Result<()> {
         if !self.media.runs_ice() {
             return Ok(());
