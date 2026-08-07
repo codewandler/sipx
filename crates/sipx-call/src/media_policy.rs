@@ -26,6 +26,8 @@ pub enum CodecPreference {
     Pcmu,
     /// G.711 A-law (RFC 3551 §4.5.14).
     Pcma,
+    /// G.722 wideband, static payload type 9 (RFC 3551 §4.5.2).
+    G722,
     /// Opus (RFC 6716, carried per RFC 7587).
     Opus,
     /// Mono signed linear PCM (RFC 3551 §4.5.11).
@@ -39,6 +41,7 @@ impl CodecPreference {
         match self {
             Self::Pcmu => "pcmu",
             Self::Pcma => "pcma",
+            Self::G722 => "g722",
             Self::Opus => "opus",
             Self::L16 => "l16",
         }
@@ -65,9 +68,18 @@ pub enum CodecSelectionError {
 /// The default is PCMU then PCMA. An explicit selection is exactly the ordered set supplied by
 /// the application; negotiation may choose no codec outside it. RFC 4733 telephone events remain
 /// alongside every non-empty audio set and are not themselves an audio codec.
+///
+/// # Where G.722 sits, and why (`M-44`)
+///
+/// In every named selection that includes it, G.722 is placed **below Opus and above G.711**,
+/// and the rule is stated here rather than implied by list order: Opus is the better wideband
+/// codec wherever both ends have it — lower bitrate for the same band, loss concealment, and a
+/// negotiation that cannot be half-taken — and wideband G.722 beats narrowband G.711 wherever
+/// they do not. An explicit [`Codecs::ordered`] list is the application's own and is used
+/// exactly as given; nothing reorders it toward this rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Codecs {
-    ordered: [Option<CodecPreference>; 4],
+    ordered: [Option<CodecPreference>; 5],
 }
 
 impl Default for Codecs {
@@ -82,6 +94,7 @@ impl Codecs {
         ordered: [
             Some(CodecPreference::Pcmu),
             Some(CodecPreference::Pcma),
+            None,
             None,
             None,
         ],
@@ -99,12 +112,28 @@ impl Codecs {
             Some(CodecPreference::Pcmu),
             Some(CodecPreference::Pcma),
             None,
+            None,
+        ],
+    };
+
+    /// G.722 first, followed by the compatibility G.711 pair.
+    ///
+    /// The type documentation states the placement rule: below Opus, above G.711. This named
+    /// set has no Opus entry only because it is constructible in every build; a wideband-first
+    /// application with the `opus` feature wants `Codecs::ordered(&[Opus, G722, Pcmu, Pcma])`.
+    pub const G722: Self = Self {
+        ordered: [
+            Some(CodecPreference::G722),
+            Some(CodecPreference::Pcmu),
+            Some(CodecPreference::Pcma),
+            None,
+            None,
         ],
     };
 
     /// Mono L16, in its static 44.1 kHz and dynamic 8 kHz forms.
     pub const L16: Self = Self {
-        ordered: [Some(CodecPreference::L16), None, None, None],
+        ordered: [Some(CodecPreference::L16), None, None, None, None],
     };
 
     /// Validate an application's exact ordered preference list.
@@ -119,7 +148,7 @@ impl Codecs {
         if preferences.is_empty() {
             return Err(CodecSelectionError::Empty);
         }
-        let mut ordered = [None; 4];
+        let mut ordered = [None; 5];
         for (slot, preference) in ordered.iter_mut().zip(preferences.iter().copied()) {
             if preferences
                 .iter()
@@ -134,7 +163,7 @@ impl Codecs {
             }
             *slot = Some(preference);
         }
-        // There are exactly four closed values, so a longer duplicate-free list cannot exist.
+        // There are exactly five closed values, so a longer duplicate-free list cannot exist.
         Ok(Self { ordered })
     }
 
@@ -161,6 +190,14 @@ impl Codecs {
                     capabilities
                         .rtpmaps
                         .push(("8".to_owned(), "PCMA/8000".to_owned()));
+                }
+                CodecPreference::G722 => {
+                    // RFC 3551 §4.5.2: the rtpmap says 8000 although the audio is 16 kHz —
+                    // the historical clock is part of the format's identity on the wire.
+                    capabilities.audio_formats.push("9".to_owned());
+                    capabilities
+                        .rtpmaps
+                        .push(("9".to_owned(), "G722/8000".to_owned()));
                 }
                 CodecPreference::Opus => {
                     // `ordered` refuses this value when the codec implementation is absent.
@@ -195,6 +232,7 @@ impl Codecs {
         self.preferences().any(|preference| match preference {
             CodecPreference::Pcmu => codec == Codec::Pcmu,
             CodecPreference::Pcma => codec == Codec::Pcma,
+            CodecPreference::G722 => codec == Codec::G722,
             #[cfg(feature = "opus")]
             CodecPreference::Opus => codec == Codec::Opus,
             #[cfg(not(feature = "opus"))]
@@ -208,6 +246,8 @@ impl Codecs {
         self.preferences().any(|preference| match preference {
             CodecPreference::Pcmu => codec == Codec::Pcmu && clock_rate == 8_000,
             CodecPreference::Pcma => codec == Codec::Pcma && clock_rate == 8_000,
+            // The 8000 is the RTP clock RFC 3551 §4.5.2 preserves; the audio is 16 kHz.
+            CodecPreference::G722 => codec == Codec::G722 && clock_rate == 8_000,
             #[cfg(feature = "opus")]
             CodecPreference::Opus => codec == Codec::Opus && clock_rate == 48_000,
             #[cfg(not(feature = "opus"))]
@@ -393,6 +433,30 @@ mod tests {
                 .contains(&("96".to_owned(), "L16/8000/1".to_owned()))
         );
         assert!(codecs.carries(Codec::L16));
+    }
+
+    /// M-44: the named G.722 set leads with static type 9 and keeps the G.711 pair behind it,
+    /// exactly the below-Opus-above-G.711 placement the type documentation states.
+    #[test]
+    fn g722_offers_static_type_9_ahead_of_g711() {
+        let capabilities = Codecs::G722.capabilities("192.0.2.9".parse().unwrap(), 40_000);
+        assert_eq!(capabilities.audio_formats, ["9", "0", "8", "101"]);
+        assert!(
+            capabilities
+                .rtpmaps
+                .contains(&("9".to_owned(), "G722/8000".to_owned())),
+            "the rtpmap keeps RFC 3551 §4.5.2's historical 8000 clock"
+        );
+        assert!(Codecs::G722.carries(Codec::G722));
+        assert!(Codecs::G722.carries_format(Codec::G722, 8_000));
+        assert!(
+            !Codecs::G722.carries_format(Codec::G722, 16_000),
+            "G722/16000 names a format nobody has"
+        );
+        assert!(
+            !Codecs::default().carries(Codec::G722),
+            "the compatibility default stays the G.711 pair"
+        );
     }
 
     #[test]

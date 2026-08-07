@@ -72,6 +72,13 @@ pub enum Codec {
     Pcmu,
     /// A-law, payload type 8.
     Pcma,
+    /// G.722 wideband sub-band ADPCM, static payload type 9 (RFC 3551 §4.5.2).
+    ///
+    /// The codec whose two rates differ: the audio is sampled at 16 kHz while the RTP
+    /// timestamp clock advances at 8000 — a historical error the RFC preserves on purpose.
+    /// Like Opus it carries encoder and decoder *state*, which lives in the send and receive
+    /// loops; unlike Opus it is pure Rust and always available.
+    G722,
     /// Signed 16-bit network-order linear PCM (RFC 3551 §4.5.11).
     ///
     /// Static payload type 11 is mono at 44.1 kHz. Other negotiated rates use a dynamic payload
@@ -168,6 +175,7 @@ impl Codec {
         match self {
             Self::Pcmu => 0,
             Self::Pcma => 8,
+            Self::G722 => 9,
             Self::L16 => 11,
             // Opus has no static type — RFC 7587 §7 assigns none — so 111 is convention and
             // nothing more. What goes on the wire is whatever SDP negotiated, which
@@ -179,16 +187,33 @@ impl Codec {
 
     /// The RTP clock rate, which is not always the sample rate.
     ///
-    /// RFC 7587 §7 fixes Opus's RTP clock at 48000 whatever the audio is sampled at. A stack
-    /// that used the sample rate instead produces timestamps the far end reads at the wrong
-    /// speed.
+    /// RFC 7587 §7 fixes Opus's RTP clock at 48000 whatever the audio is sampled at, and
+    /// RFC 3551 §4.5.2 fixes G.722's at 8000 while its audio is 16 kHz. A stack that used the
+    /// sample rate instead produces timestamps the far end reads at the wrong speed.
     #[must_use]
     pub fn clock_rate(self) -> u32 {
         match self {
             Self::Pcmu | Self::Pcma => 8_000,
+            Self::G722 => sipx_audio::g722::CLOCK_RATE,
             Self::L16 => 44_100,
             #[cfg(feature = "opus")]
             Self::Opus => sipx_audio::opus::CLOCK_RATE,
+        }
+    }
+
+    /// How many audio samples one RTP timestamp unit stands for.
+    ///
+    /// One, for every codec except G.722: RFC 3551 §4.5.2 keeps G.722's RTP clock at 8000
+    /// while the audio is sampled at 16 kHz, so each timestamp unit stands for two samples.
+    /// Everything that converts between a sample count and a timestamp advance — packet
+    /// sizing, the send clock, PCM conversion rates — goes through this ratio, because
+    /// advancing timestamps at the sample rate produces audio the far end plays at the wrong
+    /// speed and nothing else catches it.
+    #[must_use]
+    pub fn samples_per_clock_unit(self) -> u32 {
+        match self {
+            Self::G722 => 2,
+            _ => 1,
         }
     }
 
@@ -198,6 +223,10 @@ impl Codec {
         match payload_type {
             0 => Some(Self::Pcmu),
             8 => Some(Self::Pcma),
+            // RFC 3551 §6: 9 is G.722. The field-reported failure this line exists for is a
+            // stack rejecting a bare `m=audio … 9` offer because no `a=rtpmap` accompanied a
+            // static type; the number alone identifies the format (`M-44`).
+            9 => Some(Self::G722),
             // RFC 3551 §6: 11 is mono L16 at 44.1 kHz. Type 10 is stereo, which this mono
             // application boundary deliberately does not claim.
             11 => Some(Self::L16),
@@ -213,8 +242,9 @@ impl Codec {
             Self::Pcmu => g711::ulaw_encode_all(samples),
             Self::Pcma => g711::alaw_encode_all(samples),
             Self::L16 => sipx_audio::l16::encode(samples),
-            // Unreachable: an Opus session encodes through [`Encoding`], which holds the state
-            // this signature has nowhere to put.
+            // Unreachable: a G.722 or Opus session encodes through [`Encoding`], which holds
+            // the state this signature has nowhere to put.
+            Self::G722 => Vec::new(),
             #[cfg(feature = "opus")]
             Self::Opus => Vec::new(),
         }
@@ -225,6 +255,7 @@ impl Codec {
             Self::Pcmu => Some(g711::ulaw_decode_all(payload)),
             Self::Pcma => Some(g711::alaw_decode_all(payload)),
             Self::L16 => sipx_audio::l16::decode(payload).ok(),
+            Self::G722 => None,
             #[cfg(feature = "opus")]
             Self::Opus => None,
         }
@@ -239,6 +270,8 @@ impl Codec {
 enum Encoding {
     /// Stateless — a pure function of the samples.
     Direct(Codec),
+    /// G.722's sub-band predictors, owned like Opus's state and always available.
+    G722(Box<sipx_audio::g722::Encoder>),
     #[cfg(feature = "opus")]
     Opus(Box<sipx_audio::opus::Encoder>),
 }
@@ -247,6 +280,7 @@ impl Encoding {
     #[cfg_attr(not(feature = "opus"), allow(clippy::unnecessary_wraps))]
     fn for_codec(codec: Codec, channels: usize) -> Result<Self, SetupError> {
         match codec {
+            Codec::G722 => Ok(Self::G722(Box::new(sipx_audio::g722::Encoder::new()))),
             #[cfg(feature = "opus")]
             Codec::Opus => match sipx_audio::opus::Encoder::new(channels) {
                 Ok(encoder) => Ok(Self::Opus(Box::new(encoder))),
@@ -271,6 +305,7 @@ impl Encoding {
     fn encode(&mut self, samples: &[i16]) -> Option<Vec<u8>> {
         match self {
             Self::Direct(codec) => Some(codec.encode(samples)),
+            Self::G722(encoder) => Some(encoder.encode(samples)),
             #[cfg(feature = "opus")]
             Self::Opus(encoder) => match encoder.encode(samples) {
                 Ok(packet) => Some(packet),
@@ -288,6 +323,7 @@ impl Encoding {
 #[derive(Debug)]
 enum Decoding {
     Direct(Codec),
+    G722(Box<sipx_audio::g722::Decoder>),
     #[cfg(feature = "opus")]
     Opus(Box<sipx_audio::opus::Decoder>),
 }
@@ -296,6 +332,7 @@ impl Decoding {
     #[cfg_attr(not(feature = "opus"), allow(clippy::unnecessary_wraps))]
     fn for_codec(codec: Codec, channels: usize) -> Result<Self, SetupError> {
         match codec {
+            Codec::G722 => Ok(Self::G722(Box::new(sipx_audio::g722::Decoder::new()))),
             #[cfg(feature = "opus")]
             Codec::Opus => match sipx_audio::opus::Decoder::new(channels) {
                 Ok(decoder) => Ok(Self::Opus(Box::new(decoder))),
@@ -317,6 +354,7 @@ impl Decoding {
     fn decode(&mut self, payload: &[u8]) -> Option<Vec<i16>> {
         match self {
             Self::Direct(codec) => codec.decode(payload),
+            Self::G722(decoder) => Some(decoder.decode(payload)),
             #[cfg(feature = "opus")]
             Self::Opus(decoder) => match decoder.decode(payload) {
                 Ok(samples) => Some(samples),
@@ -431,11 +469,33 @@ impl Config {
         }
     }
 
-    /// How many samples one packet carries.
+    /// How many *audio samples* one packet carries.
+    ///
+    /// For every codec except G.722 this equals [`Self::clock_units_per_packet`]. G.722 is
+    /// the codec whose audio runs at twice its RTP clock (RFC 3551 §4.5.2): a 20 ms packet
+    /// carries 320 samples of 16 kHz audio and advances the timestamp by 160.
     #[must_use]
     pub fn samples_per_packet(&self) -> usize {
+        self.clock_units_per_packet()
+            .saturating_mul(usize::try_from(self.codec.samples_per_clock_unit()).unwrap_or(1))
+    }
+
+    /// How many RTP timestamp units one packet advances the clock by.
+    #[must_use]
+    pub fn clock_units_per_packet(&self) -> usize {
         let millis = u64::try_from(self.packet_duration.as_millis()).unwrap_or(20);
         usize::try_from(u64::from(self.clock_rate) * millis / 1000).unwrap_or(160)
+    }
+
+    /// The audio sampling rate of the samples this session consumes and produces.
+    ///
+    /// [`Self::clock_rate`] times the codec's samples-per-unit ratio: equal for every codec
+    /// except G.722, whose audio is 16 kHz over an 8000 RTP clock. PCM conversion, resampling
+    /// and WAV headers use this rate; timestamps, jitter and RFC 4733 durations use the clock.
+    #[must_use]
+    pub fn audio_rate(&self) -> u32 {
+        self.clock_rate
+            .saturating_mul(self.codec.samples_per_clock_unit())
     }
 
     /// Check the values used by worker timers before any worker or socket starts.
@@ -1952,7 +2012,10 @@ impl MediaSession {
     /// duration rather than being sent alongside it, and sending both means the far end hears
     /// the keypress twice.
     pub async fn send_digit(&self, digit: Digit, duration: Duration) -> bool {
-        let per_packet = self.samples_per_packet;
+        // RFC 4733 event durations run on the RTP clock, not the audio rate — for G.722 a
+        // 20 ms packet is 320 audio samples but only 160 clock units, and a tone timed in
+        // samples would claim twice its real duration.
+        let per_packet = self.clock_units_per_packet();
         let packets = (duration.as_millis() / self.packet_duration.as_millis().max(1)).max(1);
         let events = dtmf::tone(
             digit,
@@ -2107,10 +2170,29 @@ impl MediaSession {
     /// The RTP timestamp clock negotiated for this stream.
     ///
     /// This is intentionally the wire clock rather than an inferred playback rate. In
-    /// particular, RFC 7587 fixes Opus at 48 kHz on the RTP timeline.
+    /// particular, RFC 7587 fixes Opus at 48 kHz on the RTP timeline, and RFC 3551 §4.5.2
+    /// fixes G.722's timeline at 8000 while its audio is 16 kHz — a caller that wants the
+    /// rate of the *samples* wants [`Self::audio_rate`].
     #[must_use]
     pub fn clock_rate(&self) -> u32 {
         self.clock_rate
+    }
+
+    /// The audio sampling rate of the samples this session consumes and produces.
+    ///
+    /// Equal to [`Self::clock_rate`] for every codec except G.722, whose audio runs at twice
+    /// its RTP clock (RFC 3551 §4.5.2). This is the rate for PCM conversion, resampling and
+    /// WAV headers; the clock rate is for timestamps and jitter.
+    #[must_use]
+    pub fn audio_rate(&self) -> u32 {
+        self.clock_rate
+            .saturating_mul(self.codec.samples_per_clock_unit())
+    }
+
+    /// How many RTP timestamp units one packet advances the clock by.
+    fn clock_units_per_packet(&self) -> usize {
+        self.samples_per_packet
+            / usize::try_from(self.codec.samples_per_clock_unit().max(1)).unwrap_or(1)
     }
 
     /// Hand received packets on still encoded, rather than decoding them to samples.
@@ -2182,7 +2264,9 @@ impl MediaSession {
         Ok(PcmCapture {
             session: self,
             format,
-            resampler: sipx_audio::LinearResampler::new(self.clock_rate, format.sample_rate())?,
+            // The received samples are at the *audio* rate — for G.722 that is 16 kHz, not
+            // the 8000 the RTP clock says (RFC 3551 §4.5.2).
+            resampler: sipx_audio::LinearResampler::new(self.audio_rate(), format.sample_rate())?,
         })
     }
 
@@ -2296,7 +2380,9 @@ impl MediaSession {
         pcm: &sipx_audio::Pcm,
         interrupt: Interrupt,
     ) -> Result<Playback, sipx_audio::PcmError> {
-        let samples = pcm.to_i16(self.clock_rate)?;
+        // Converted to the *audio* rate: a G.722 session plays 16 kHz samples even though its
+        // RTP clock is 8000 (RFC 3551 §4.5.2).
+        let samples = pcm.to_i16(self.audio_rate())?;
         Ok(self.start_playback(samples, interrupt))
     }
 
@@ -2701,6 +2787,7 @@ impl SendClock {
         payload_type: u8,
         ssrc: u32,
         samples: &[i16],
+        samples_per_clock_unit: u32,
     ) -> Option<(Packet, u32)> {
         // A tone that has just finished owes the clock its duration; pay it before stamping the
         // audio that follows, or the audio overlaps the keypress.
@@ -2725,7 +2812,13 @@ impl SendClock {
         // sending 10 ms frames on a 20 ms config — advancing by the configured size builds a
         // timeline at the wrong rate, and the far end plays the call with a gap between every
         // packet.
-        Some((packet, u32::try_from(samples.len()).unwrap_or(0)))
+        //
+        // Carried samples are converted to *clock units* first. For every codec but G.722 the
+        // divisor is one; for G.722 the RTP clock runs at half the sample rate
+        // (RFC 3551 §4.5.2), and advancing by the sample count doubles the timeline.
+        let advance =
+            u32::try_from(samples.len()).unwrap_or(0) / samples_per_clock_unit.max(1);
+        Some((packet, advance))
     }
 
     /// Build one packet of an RFC 4733 tone.
@@ -2837,9 +2930,13 @@ async fn send_loop(socket: Arc<UdpSocket>, mut outgoing: mpsc::Receiver<Frame>, 
 
         let (packet, advance) = match &frame {
             Frame::Audio { samples, .. } => {
-                let Some(built) =
-                    clock.audio(&mut encoding, config.wire_payload_type(), ssrc, samples)
-                else {
+                let Some(built) = clock.audio(
+                    &mut encoding,
+                    config.wire_payload_type(),
+                    ssrc,
+                    samples,
+                    config.codec.samples_per_clock_unit(),
+                ) else {
                     discards
                         .opus_encode_failures
                         .fetch_add(1, Ordering::Relaxed);
@@ -2852,8 +2949,8 @@ async fn send_loop(socket: Arc<UdpSocket>, mut outgoing: mpsc::Receiver<Frame>, 
                 payload,
             } => {
                 // Verbatim, on this leg's own sequence and timestamp. The advance is the
-                // configured packet size: the bytes came from a stream with the same
-                // packetisation, and nothing here can look inside them to check.
+                // configured packet duration in *clock units*: the bytes came from a stream
+                // with the same packetisation, and nothing here can look inside them to check.
                 let packet = Packet::new(
                     *payload_type,
                     clock.sequence,
@@ -2863,7 +2960,7 @@ async fn send_loop(socket: Arc<UdpSocket>, mut outgoing: mpsc::Receiver<Frame>, 
                 );
                 (
                     packet,
-                    u32::try_from(config.samples_per_packet()).unwrap_or(0),
+                    u32::try_from(config.clock_units_per_packet()).unwrap_or(0),
                 )
             }
             Frame::Dtmf {
@@ -5144,6 +5241,50 @@ mod tests {
         assert_eq!(ten_ms.samples_per_packet(), 80);
     }
 
+    /// RFC 3551 §4.5.2 preserves a historical error on purpose: G.722 samples audio at
+    /// 16 kHz, but its RTP timestamp clock advances at 8000 per second. A stack that
+    /// advances timestamps at the sample rate produces audio the far end plays at the
+    /// wrong speed, and nothing else catches it — the packets parse, the codec decodes,
+    /// only the timeline is double.
+    #[test]
+    fn g722_advances_rtp_timestamps_at_8000_while_the_audio_is_16_khz() {
+        let codec = Codec::from_payload_type(9)
+            .expect("G.722 is negotiable as static payload type 9 (RFC 3551 §6)");
+        assert_eq!(codec.clock_rate(), 8_000, "the RTP clock stays at 8000");
+        let config = Config::new("127.0.0.1:1".parse().expect("valid"), codec);
+        assert_eq!(config.clock_rate, 8_000, "and the session keeps the wire clock");
+        assert_eq!(
+            config.samples_per_packet(),
+            320,
+            "while a 20 ms packet carries 16 kHz audio: 320 samples"
+        );
+        assert_eq!(
+            config.clock_units_per_packet(),
+            160,
+            "which advance the RTP timestamp by only 160"
+        );
+        assert_eq!(config.audio_rate(), 16_000, "and the sample rate is 16 kHz");
+
+        // The send clock itself: a full 320-sample G.722 frame moves the timestamp by 160.
+        // Advancing by the sample count is the wrong-speed-audio defect this test pins.
+        let mut clock = SendClock::new();
+        let before = clock.timestamp;
+        let mut encoding = Encoding::for_codec(codec, 1).expect("G.722 always constructs");
+        let (packet, advance) = clock
+            .audio(
+                &mut encoding,
+                9,
+                0x5155,
+                &vec![0i16; 320],
+                codec.samples_per_clock_unit(),
+            )
+            .expect("G.722 encodes a full frame");
+        assert_eq!(packet.payload.len(), 160, "one octet per two samples");
+        assert_eq!(advance, 160, "the timestamp advance is in clock units");
+        clock.advance(advance);
+        assert_eq!(clock.timestamp, before.wrapping_add(160));
+    }
+
     #[tokio::test]
     async fn zero_packet_duration_is_rejected_before_binding_or_spawning() {
         let reservation = UdpSocket::bind(any()).await.expect("reserves a port");
@@ -5936,11 +6077,13 @@ mod tests {
     fn codecs_map_to_their_static_payload_types() {
         assert_eq!(Codec::Pcmu.payload_type(), 0);
         assert_eq!(Codec::Pcma.payload_type(), 8);
+        assert_eq!(Codec::G722.payload_type(), 9);
         assert_eq!(Codec::L16.payload_type(), 11);
         assert_eq!(Codec::from_payload_type(0), Some(Codec::Pcmu));
         assert_eq!(Codec::from_payload_type(8), Some(Codec::Pcma));
+        // M-44 reversed X-26's pinned absence: 9 is G.722 and G.722 is ours now.
+        assert_eq!(Codec::from_payload_type(9), Some(Codec::G722));
         assert_eq!(Codec::from_payload_type(11), Some(Codec::L16));
         assert_eq!(Codec::from_payload_type(10), None, "stereo L16 is not ours");
-        assert_eq!(Codec::from_payload_type(9), None, "G.722 is not ours");
     }
 }

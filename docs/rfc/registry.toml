@@ -677,10 +677,11 @@ layer = "media"
 status = "partial"
 evidence = [
   "crates/sipx-audio/src/l16.rs",
+  "crates/sipx-audio/src/g722.rs",
   "crates/sipx-media/src/session.rs",
   "crates/sipx-call/src/media_policy.rs",
 ]
-note = "The static payload types sipx carries are PCMU 0, PCMA 8, and mono 44.1 kHz L16 11. Mono 8 kHz L16 is offered with an explicit dynamic mapping; stereo type 10 is refused because the public PCM boundary is mono. L16 encode/decode is signed 16-bit network byte order, selected through the call policy, and the negotiated clock is retained independently of the codec. The rest of the profile is not implemented."
+note = "The static payload types sipx carries are PCMU 0, PCMA 8, G.722 9, and mono 44.1 kHz L16 11. G.722 implements §4.5.2's preserved historical error explicitly: the audio is sampled at 16 kHz while the RTP timestamp clock and the G722/8000 rtpmap stay at 8000, the session layer keeps the two rates apart, and a bare `m=audio … 9` offer with no rtpmap is accepted because the static number identifies the format. The codec is native Rust, selected through the call policy and the diagnostic CLI, and verified bit-exactly against the ITU-T G.722 Appendix II digital test sequences rather than by round-tripping. Mono 8 kHz L16 is offered with an explicit dynamic mapping; stereo type 10 is refused because the public PCM boundary is mono. L16 encode/decode is signed 16-bit network byte order, selected through the call policy, and the negotiated clock is retained independently of the codec. The rest of the profile is not implemented."
 
 [[rfc]]
 number = 4733
