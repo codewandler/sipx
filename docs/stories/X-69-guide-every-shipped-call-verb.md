@@ -2,7 +2,7 @@
 id: X-69
 title: Guide every shipped call verb
 pillar: Build
-status: backlog
+status: in-progress
 priority: 17
 design: docs/designs/docs-depth.md
 epic: docs-depth
