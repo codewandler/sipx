@@ -4,7 +4,10 @@
 //! refreshes it (§7.2, §7.4), the refresher re-offers before it fires, and the other side
 //! hangs up a call whose refresher has gone silent (§10).
 
-use super::*;
+use super::{
+    Bytes, Call, Duration, EndCause, Error, HeaderName, Instant, MinSe, Response, Result,
+    SessionExpires, in_dialog_target, session,
+};
 
 /// A negotiated session timer and the deadline it is currently counting down to.
 #[derive(Debug, Clone, Copy)]

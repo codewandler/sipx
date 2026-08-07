@@ -4,7 +4,10 @@
 //! is nothing but both credentials changing (RFC 8839 §4.4.1.1.1). The initial gathering lives
 //! with the dial and answer paths in `call.rs`; this is the running call's share.
 
-use super::*;
+use super::{
+    Call, ComponentId, Connection, IceCredentials, IceNegotiation, LocalDescription, Result,
+    SessionDescription, token,
+};
 
 /// Put one gathered local description into the audio stream it belongs to.
 pub(super) fn add_ice(

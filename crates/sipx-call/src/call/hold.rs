@@ -5,7 +5,10 @@
 //! read back with [`Call::is_on_hold`], and mute is deliberately not here: it never signals.
 
 use super::ice::IceOffer;
-use super::*;
+use super::{
+    Call, Direction, Error, Keying, MediaProfile, Result, in_dialog_target, negotiated, offer_from,
+    preserve_rtcp_mode, update,
+};
 
 impl Call {
     /// Whether the far end has put the call on hold.

@@ -4,7 +4,9 @@
 //! renegotiation: building an offer from capabilities, settling the peer's answer against it,
 //! and reading a description into the [`Negotiated`] facts a media session is built from.
 
-use super::*;
+use super::{
+    Capabilities, Codec, Codecs, Direction, Error, Result, SessionDescription, SocketAddr,
+};
 
 /// Refuse a socket-ownership change until renegotiation can replace the media session atomically.
 pub(super) fn preserve_rtcp_mode(
@@ -463,6 +465,7 @@ const fn offered_rtpmap(codec: Codec) -> &'static str {
 )]
 pub(crate) mod tests {
     use std::fmt::Write as _;
+    use std::net::IpAddr;
 
     use super::*;
 
