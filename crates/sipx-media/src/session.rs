@@ -2566,6 +2566,7 @@ async fn flush(
     decoding: &mut Decoding,
     digits: &Keypresses,
     dtmf: &mut sipx_rtp::dtmf::Receiver,
+    dtmf_deadline: &mut Option<tokio::time::Instant>,
     config: &Config,
     stop: &Stop,
 ) -> bool {
@@ -2573,8 +2574,16 @@ async fn flush(
         if !deliver(to, decoding, digits, dtmf, config, stop, &packet).await {
             return false;
         }
+        if dtmf.in_progress().is_none() {
+            *dtmf_deadline = None;
+        }
     }
     true
+}
+
+fn is_telephone_report(packet: &Packet, config: &Config) -> bool {
+    config.dtmf_payload_type == Some(packet.payload_type)
+        && DtmfEvent::decode(&packet.payload).is_some()
 }
 
 /// Authenticate and decrypt a datagram, or drop it.
@@ -3391,7 +3400,7 @@ impl ReceiveInput {
 
     async fn next(
         &mut self,
-        flush_after: Duration,
+        deadline: tokio::time::Instant,
         config: &Config,
         ice: Option<&crate::ice::driver::Handle>,
         stop: &Stop,
@@ -3401,7 +3410,7 @@ impl ReceiveInput {
                 Self::Socket { socket, datagram } => {
                     let read = tokio::select! {
                         () = stop.wait() => return ReceivedDatagram::Closed,
-                        read = tokio::time::timeout(flush_after, socket.recv_from(datagram)) => read,
+                        read = tokio::time::timeout_at(deadline, socket.recv_from(datagram)) => read,
                     };
                     let (length, source) = match read {
                         Ok(Ok(received)) => received,
@@ -3438,7 +3447,7 @@ impl ReceiveInput {
                 Self::Browser(media) => {
                     let next = tokio::select! {
                         () = stop.wait() => return ReceivedDatagram::Closed,
-                        next = tokio::time::timeout(flush_after, async {
+                        next = tokio::time::timeout_at(deadline, async {
                             tokio::select! {
                                 packet = media.srtp.recv() => packet.map(|packet| (false, packet)),
                                 packet = media.srtcp.recv() => packet.map(|packet| (true, packet)),
@@ -3503,12 +3512,22 @@ async fn receive_loop(mut input: ReceiveInput, inbound: Inbound) {
         .packet_duration
         .saturating_mul(4)
         .max(Duration::from_millis(60));
+    // RFC 4733 §2.5.2.2 bounds a receiver's stuck-tone extension at three packet intervals.
+    // This is a definition of media silence, not a substitute for a happens-before relation: the
+    // next accepted event or ordinary-media packet closes the tone immediately.
+    let dtmf_silence = config.packet_duration.saturating_mul(3);
+    let mut dtmf_deadline = None;
 
     loop {
         if stop.is_stopped() {
             return;
         }
-        let (media, source) = match input.next(flush_after, &config, ice.as_ref(), &stop).await {
+        let silence_deadline =
+            dtmf_deadline.unwrap_or_else(|| tokio::time::Instant::now() + flush_after);
+        let (media, source) = match input
+            .next(silence_deadline, &config, ice.as_ref(), &stop)
+            .await
+        {
             ReceivedDatagram::Rtp { source, bytes } => (bytes, source),
             ReceivedDatagram::Rtcp { bytes } => {
                 process_rtcp(
@@ -3526,12 +3545,14 @@ async fn receive_loop(mut input: ReceiveInput, inbound: Inbound) {
             ReceivedDatagram::Silence => {
                 // Silence. Release what is held rather than holding it against a packet that is
                 // not coming — otherwise the last `depth - 1` packets of every clip are lost.
+                let to = delivery(&incoming, &encoded, &relay, &discards);
                 if !flush(
                     &mut buffer,
-                    &delivery(&incoming, &encoded, &relay, &discards),
+                    &to,
                     &mut decoding,
                     &digits,
                     &mut dtmf,
+                    &mut dtmf_deadline,
                     &config,
                     &stop,
                 )
@@ -3539,6 +3560,12 @@ async fn receive_loop(mut input: ReceiveInput, inbound: Inbound) {
                 {
                     return;
                 }
+                // `flush` may have delivered an E-bit report. Only an event still current after
+                // that ordered drain is completed by the fired RFC 4733 silence input.
+                if let Some(completed) = dtmf.timeout() {
+                    deliver_digit(&to, &digits, completed, config.clock_rate);
+                }
+                dtmf_deadline = None;
                 continue;
             }
         };
@@ -3591,6 +3618,12 @@ async fn receive_loop(mut input: ReceiveInput, inbound: Inbound) {
         let arrival = arrival_in_timestamp_units(started, config.clock_rate);
         note_arrival(&stats, &packet, &config, arrival).await;
 
+        // Arrival, rather than later jitter-buffer release, arms the RFC 4733 silence bound.
+        // Keeping the absolute deadline outside `ReceiveInput::next` means ignored datagrams and
+        // RTCP cannot postpone it by repeatedly restarting a relative timeout.
+        if is_telephone_report(&packet, &config) {
+            dtmf_deadline = Some(tokio::time::Instant::now() + dtmf_silence);
+        }
         buffer.push_at(packet, arrival);
 
         while let Some(packet) = buffer.pop() {
@@ -3611,6 +3644,9 @@ async fn receive_loop(mut input: ReceiveInput, inbound: Inbound) {
             .await
             {
                 return;
+            }
+            if dtmf.in_progress().is_none() {
+                dtmf_deadline = None;
             }
         }
     }
@@ -4001,36 +4037,17 @@ async fn deliver(
     // audio one — decoding a four-byte event payload as µ-law injects four garbage samples and
     // is heard as a click.
     if config.dtmf_payload_type == Some(packet.payload_type) {
-        if let Some(event) = DtmfEvent::decode(&packet.payload)
-            && let Some(digit) = dtmf.push(packet.timestamp, &event)
-        {
-            // The event's own duration, in its own clock units (RFC 4733 §2.2 — the same
-            // clock the session negotiated for audio), converted to wall-clock time here so
-            // every consumer of the channel gets a real duration without knowing the clock
-            // rate itself.
-            let millis = u64::from(event.duration) * 1000 / u64::from(config.clock_rate.max(1));
-            // A full channel means the application is not reading digits. Dropping is
-            // right: a keypress delivered late is worse than one not delivered, since the
-            // application has already moved on.
-            if digits
-                .to
-                .try_send((digit, Duration::from_millis(millis)))
-                .is_ok()
-            {
-                // Announced only once the digit is on its way to the application, and only when
-                // it got there (`M-17`). This is the ordering that makes interrupt-on-digit safe
-                // to build a `gather` on: a playback can only ever be cut short by a keypress
-                // that the application will go on to read, so the digit that stopped the prompt
-                // is never the one the prompt swallowed.
-                digits
-                    .arrivals
-                    .send_modify(|count| *count = count.wrapping_add(1));
-            } else {
-                to.discards
-                    .dtmf_delivery_failures
-                    .fetch_add(1, Ordering::Relaxed);
-                tracing::debug!(%digit, "dropping a DTMF digit the application queue could not take");
+        match DtmfEvent::decode(&packet.payload) {
+            Some(event) => {
+                for completed in dtmf
+                    .push(packet.sequence, packet.timestamp, packet.marker, &event)
+                    .into_iter()
+                    .flatten()
+                {
+                    deliver_digit(to, digits, completed, config.clock_rate);
+                }
             }
+            None => dtmf.observe_non_event(packet.sequence),
         }
         return true;
     }
@@ -4039,6 +4056,9 @@ async fn deliver(
     // put it on its own wire with its own sequence and timestamp, which is right — the two
     // legs are separate RTP streams that happen to carry the same audio.
     if to.relay.load(Ordering::SeqCst) {
+        if let Some(completed) = dtmf.finish_on_media(packet.sequence) {
+            deliver_digit(to, digits, completed, config.clock_rate);
+        }
         let encoded = Encoded {
             payload_type: packet.payload_type,
             payload: packet.payload.clone(),
@@ -4056,6 +4076,7 @@ async fn deliver(
     if packet.payload_type != config.receive_wire_payload_type()
         && Codec::from_payload_type(packet.payload_type).is_none()
     {
+        dtmf.observe_non_event(packet.sequence);
         to.discards
             .unknown_payload_type
             .fetch_add(1, Ordering::Relaxed);
@@ -4064,6 +4085,10 @@ async fn deliver(
             "dropping a packet with an unknown payload type"
         );
         return true;
+    }
+
+    if let Some(completed) = dtmf.finish_on_media(packet.sequence) {
+        deliver_digit(to, digits, completed, config.clock_rate);
     }
 
     // The stop signal is checked here too. This is the one await that can park indefinitely —
@@ -4079,6 +4104,40 @@ async fn deliver(
     tokio::select! {
         () = stop.wait() => false,
         result = to.audio.send(samples) => result.is_ok(),
+    }
+}
+
+fn deliver_digit(
+    to: &Delivery<'_>,
+    digits: &Keypresses,
+    completed: sipx_rtp::dtmf::Completed,
+    clock_rate: u32,
+) {
+    // The event's own duration, in its own clock units (RFC 4733 §2.3.5), converted to
+    // wall-clock time here so every consumer of the channel gets a real duration without knowing
+    // the clock rate itself.
+    let millis = u64::from(completed.duration) * 1000 / u64::from(clock_rate.max(1));
+    // A full channel means the application is not reading digits. Dropping is right: a keypress
+    // delivered late is worse than one not delivered, since the application has already moved on.
+    if digits
+        .to
+        .try_send((completed.digit, Duration::from_millis(millis)))
+        .is_ok()
+    {
+        // Announced only once the digit is on its way to the application, and only when it got
+        // there (`M-17`). This is the ordering that makes interrupt-on-digit safe to build a
+        // `gather` on: a playback can only be cut short by a keypress the application can read.
+        digits
+            .arrivals
+            .send_modify(|count| *count = count.wrapping_add(1));
+    } else {
+        to.discards
+            .dtmf_delivery_failures
+            .fetch_add(1, Ordering::Relaxed);
+        tracing::debug!(
+            digit = %completed.digit,
+            "dropping a DTMF digit the application queue could not take"
+        );
     }
 }
 
@@ -4290,6 +4349,73 @@ mod tests {
             .await
             .expect("retry joined every old socket worker");
         drop(rebound);
+    }
+
+    /// M-71: hold/resume and negotiated payload changes rebuild the media generation. An
+    /// unfinished event belongs to the stopped receiver and must not time out into the fresh
+    /// generation's application queue.
+    #[tokio::test]
+    async fn reconfiguration_does_not_leak_an_incomplete_digit_between_generations() {
+        let raw = UdpSocket::bind(any()).await.expect("raw peer binds");
+        let mut config = Config::new(raw.local_addr().expect("raw peer address"), Codec::Pcmu);
+        config.dtmf_payload_type = Some(96);
+        config.jitter_depth = 1;
+        config.jitter_max_depth = None;
+        let mut session = MediaSession::start(any(), config.clone())
+            .await
+            .expect("session starts");
+
+        let mut start = Packet::new(
+            96,
+            1,
+            1000,
+            7,
+            DtmfEvent::new(Digit::Number(7), 160).encode(),
+        );
+        start.marker = true;
+        raw.send_to(&start.encode(), session.local_addr())
+            .await
+            .expect("event start sends");
+        let deadline = tokio::time::Instant::now() + DELIVERY_BOUND;
+        while session.packets_received() == 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the old generation did not accept the event start"
+            );
+            tokio::task::yield_now().await;
+        }
+
+        assert!(session.reconfigure(config).await.expect("reconfigures"));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), session.recv_digit())
+                .await
+                .is_err(),
+            "the stopped generation's timeout cannot enter the replacement queue"
+        );
+
+        let mut complete = Packet::new(
+            96,
+            1,
+            5000,
+            7,
+            DtmfEvent {
+                digit: Digit::Number(8),
+                end: true,
+                volume: 10,
+                duration: 800,
+            }
+            .encode(),
+        );
+        complete.marker = true;
+        raw.send_to(&complete.encode(), session.local_addr())
+            .await
+            .expect("replacement event sends");
+        assert_eq!(
+            tokio::time::timeout(DELIVERY_BOUND, session.recv_digit())
+                .await
+                .expect("replacement digit is bounded"),
+            Some((Digit::Number(8), Duration::from_millis(100)))
+        );
     }
 
     /// The failing-first test for this story.
@@ -5206,6 +5332,131 @@ mod tests {
             "an unknown payload must not become audio samples: {after:?}"
         );
         assert_eq!(session.discard_counts().unknown_payload_type, 1);
+    }
+
+    /// D9: `telephone-event` has no static number. SDP selected 96 here, so the same valid event
+    /// bytes on 101 are an unknown payload and cannot become a digit.
+    #[tokio::test]
+    async fn only_the_negotiated_non_101_payload_can_create_a_digit() {
+        let (audio, _audio_rx) = mpsc::channel(1);
+        let (encoded, _encoded_rx) = mpsc::channel(1);
+        let relay = AtomicBool::new(false);
+        let discards = Arc::new(DiscardMeters::default());
+        let delivery = Delivery {
+            audio: &audio,
+            encoded: &encoded,
+            relay: &relay,
+            discards: &discards,
+        };
+        let (digits_tx, mut digits_rx) = mpsc::channel(32);
+        let digits = Keypresses {
+            to: digits_tx,
+            arrivals: Arc::new(watch::Sender::new(0)),
+        };
+        let mut decoding = Decoding::for_codec(Codec::Pcmu, 1).expect("codec");
+        let mut receiver = sipx_rtp::dtmf::Receiver::new();
+        let mut config = Config::new(any(), Codec::Pcmu);
+        config.dtmf_payload_type = Some(96);
+        let stop = Stop::default();
+        let event = DtmfEvent {
+            digit: Digit::Number(6),
+            end: true,
+            volume: 10,
+            duration: 800,
+        };
+
+        let wrong = Packet::new(101, 1, 1000, 7, event.encode());
+        assert!(
+            deliver(
+                &delivery,
+                &mut decoding,
+                &digits,
+                &mut receiver,
+                &config,
+                &stop,
+                &wrong,
+            )
+            .await
+        );
+        assert!(digits_rx.try_recv().is_err(), "PT 101 was not negotiated");
+        assert_eq!(discards.snapshot().unknown_payload_type, 1);
+
+        let mut negotiated = Packet::new(96, 2, 2000, 7, event.encode());
+        negotiated.marker = true;
+        assert!(
+            deliver(
+                &delivery,
+                &mut decoding,
+                &digits,
+                &mut receiver,
+                &config,
+                &stop,
+                &negotiated,
+            )
+            .await
+        );
+        assert_eq!(
+            digits_rx.try_recv(),
+            Ok((Digit::Number(6), Duration::from_millis(100)))
+        );
+    }
+
+    /// D7 at the worker boundary: losing every final report cannot leave a digit stuck forever.
+    /// The media timer fires into the pure RTP receiver, which retains the wire duration.
+    #[tokio::test]
+    async fn media_silence_completes_an_event_whose_final_reports_were_lost() {
+        let raw = UdpSocket::bind(any()).await.expect("raw peer binds");
+        let mut config = Config::new(raw.local_addr().expect("raw peer address"), Codec::Pcmu);
+        config.dtmf_payload_type = Some(96);
+        config.jitter_depth = 1;
+        config.jitter_max_depth = None;
+        let session = MediaSession::start(any(), config)
+            .await
+            .expect("session starts");
+
+        for (sequence, duration, marker) in [(1, 160, true), (2, 320, false)] {
+            let mut packet = Packet::new(
+                96,
+                sequence,
+                3000,
+                7,
+                DtmfEvent::new(Digit::Number(3), duration).encode(),
+            );
+            packet.marker = marker;
+            raw.send_to(&packet.encode(), session.local_addr())
+                .await
+                .expect("event report sends");
+        }
+
+        assert_eq!(
+            tokio::time::timeout(DELIVERY_BOUND, session.recv_digit())
+                .await
+                .expect("silence completion is bounded"),
+            Some((Digit::Number(3), Duration::from_millis(40)))
+        );
+
+        let late_end = Packet::new(
+            96,
+            3,
+            3000,
+            7,
+            DtmfEvent {
+                digit: Digit::Number(3),
+                end: true,
+                volume: 10,
+                duration: 320,
+            }
+            .encode(),
+        );
+        raw.send_to(&late_end.encode(), session.local_addr())
+            .await
+            .expect("late end sends");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), session.recv_digit())
+                .await
+                .is_err(),
+            "a late final report cannot duplicate the timed-out digit"
+        );
     }
 
     /// S-36 / RFC 3264 §6.1: each description assigns the dynamic number its author receives.

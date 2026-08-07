@@ -68,7 +68,9 @@ pub use policy::{
     MessageObservation, RequestPolicy, RequestPolicyDecision, RequestPolicyRef, SourcePrefix,
     TransactionClass,
 };
-pub use resolve::{Naptr, Resolver, Srv, resolve};
+pub use resolve::{
+    Naptr, ResolutionError, ResolutionLimits, Resolver, Srv, resolve, resolve_bounded,
+};
 pub use stun::Reply as StunReply;
 pub use target::{ConnectionKey, Target, TransportKind};
 pub use tcp::{Pool, PoolConfig};

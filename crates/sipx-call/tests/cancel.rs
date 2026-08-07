@@ -265,27 +265,17 @@ async fn a_caller_that_gives_up_before_the_answer_ends_the_invitation() {
     );
 }
 
-/// An answer that failed before sending anything leaves the invitation cancellable.
-///
-/// `Invitation::answer` takes the invitation for itself so that a CANCEL racing an answer never
-/// puts a `487` behind a `200`. That claim is taken as late as it can be — immediately before the
-/// `200` is handed to the transport — precisely because everything ahead of it can still fail
-/// with nothing on the wire. An unparseable offer is the cheapest of those failures to reach: no
-/// hostile peer, just a body `sipx-sdp` cannot read and an application that called `answer`.
-///
-/// If the claim outlived such a failure, the INVITE would never be answered at all: the CANCEL
-/// would draw its `200`, the `487` would be suppressed as "already answered", and the caller
-/// would sit out Timer B against a transaction that had sent it nothing. That is the failure
-/// this project keeps deciding it will not ship, so it is pinned here.
+/// M-69: an unparseable initial offer is itself answered 400 and claims the invitation immediately
+/// before that response leaves. A later CANCEL still receives 200 for its own transaction, but it
+/// cannot replace the already-sent 400 with 487. Both responses retain the invitation's one tag.
 #[tokio::test]
-async fn an_invitation_whose_answer_failed_before_responding_is_still_cancellable() {
+async fn a_malformed_invitation_is_refused_before_a_late_cancel() {
     let (callee, callee_incoming) = endpoint().await;
     let callee_addr = callee.local_addr();
     let mut pumped = pump(&callee, callee_incoming);
     let (peer, _peer_incoming) = endpoint().await;
 
-    // An INVITE whose body is not SDP at all. Everything about the transaction is well formed;
-    // it is the offer that cannot be read, which is a failure `answer` hits before it responds.
+    // An INVITE whose body is not SDP at all. Everything about the transaction is well formed.
     let invite = invite_with_body(
         &peer,
         "answer-failed@sipx",
@@ -307,27 +297,26 @@ async fn an_invitation_whose_answer_failed_before_responding_is_still_cancellabl
         "an offer that cannot be parsed fails the answer"
     );
 
-    // The answer sent nothing, so the invitation is exactly where it was: still ringing, and
-    // still the dispatcher's to end.
+    let refused = tokio::time::timeout(Duration::from_secs(5), invited.final_response())
+        .await
+        .expect("the malformed invitation is answered")
+        .expect("a final response to the INVITE");
+    assert_eq!(refused.status.code(), 400);
+
     assert!(
         !invitation.is_cancelled(),
-        "a failed answer must not leave the invitation looking answered"
+        "a local 400 refusal is an answer, not a caller cancellation"
     );
 
-    // And the caller can still get the invitation withdrawn, which is the whole point.
+    // The CANCEL transaction is still answered, but it arrived after the INVITE's final response.
     let cancelled = ask(&peer, callee_addr, cancel_for(&invite)).await;
     assert_eq!(cancelled.status.code(), 200);
-
-    let terminated = tokio::time::timeout(Duration::from_secs(5), invited.final_response())
-        .await
-        .expect("the INVITE is answered rather than left to time out")
-        .expect("a final response to the INVITE");
     assert_eq!(
-        terminated.status.code(),
-        487,
-        "the INVITE a CANCEL withdraws is answered 487, even if an answer failed first"
+        to_tag(&cancelled),
+        to_tag(&refused),
+        "the late CANCEL and malformed-offer response share the invitation tag"
     );
-    assert!(invitation.is_cancelled());
+    assert!(!invitation.is_cancelled());
 }
 
 /// `Invitation::answer`'s future is `Send`, so it can still be spawned.
@@ -726,7 +715,7 @@ async fn cancelling_while_early_dial_waits_withdraws_the_invitation() {
         result
             .expect("the cancellation-safe dial finishes")
             .expect("the dial task finishes"),
-        Err(Error::Cancelled(duration)) if duration == Duration::ZERO
+        Err(Error::Cancelled(cancellation)) if !cancellation.timed_out
     ));
     assert!(matches!(
         ended.expect("the target is told to stop ringing"),
@@ -778,7 +767,7 @@ async fn cancelling_while_an_early_handle_awaits_confirmation_withdraws_it() {
         result
             .expect("confirmation cancellation finishes")
             .expect("the confirmation task finishes"),
-        Err(Error::Cancelled(duration)) if duration == Duration::ZERO
+        Err(Error::Cancelled(cancellation)) if !cancellation.timed_out
     ));
     assert!(matches!(
         ended.expect("the target is told to stop ringing"),

@@ -1,6 +1,6 @@
 # Diagnostic phone specification
 
-**Status:** normative target · **Epic:** `phone` · **Stories:** `P-8` … `P-13`
+**Status:** normative target · **Epic:** `phone` · **Stories:** `P-8` … `P-16`
 
 ## 1. Scope
 
@@ -88,10 +88,16 @@ the required server identity for TLS/WSS; outbound-only name and trust options a
 secure URI cannot be combined with a cleartext transport. Certificate verification is on by
 default; disabling it is not part of this contract.
 
-An invocation that does not use `--transport` retains its existing output byte for byte. An
-explicit selection adds `requested_transport` and `negotiated_transport` to terminal results; the
-pre-call `answer` announcement carries only the requested transport because nothing has negotiated
-yet.
+Transport selection itself adds no fields when `--transport` is omitted. An explicit selection
+adds `requested_transport` and `negotiated_transport` to terminal results; the pre-call `answer`
+announcement carries only the requested transport because nothing has negotiated yet.
+
+Outbound setup preserves the terminal cause from the transport transaction. A concrete stream
+connection, handshake, certificate-verification or established-connection failure maps to
+`failed`/exit 1 and retains the transport cause. A datagram request that was handed to a usable
+socket but received no final SIP response maps to `timeout`/exit 5. The command MUST NOT infer this
+classification from elapsed time or error text, and it MUST NOT rewrite a concrete transport
+failure as `NoResponse` merely because no SIP response object exists.
 
 `dial` and `answer` accept repeatable ordered `--codec` values, `--media-security`, `--ice`,
 `--stun-server`, `--audio-input` and `--audio-output`. An audio endpoint is written
@@ -100,6 +106,31 @@ the remainder is its value. `--play <path>` is exactly `--audio-input wav:<path>
 `--record <path>` is exactly `--audio-output wav:<path>`. Naming both spellings for one direction
 is a setup error rather than an ordering rule. Generator kinds are closed by the story that ships
 them; an unknown or not-yet-shipped kind is refused.
+
+### 3.1 WAV output ownership
+
+`dial` and `answer` normalize `--record <path>` and `--audio-output wav:<path>` into the same WAV
+output selection and use one reservation/finalization implementation. After command syntax, local
+audio selection and WAV input validation, but before destination resolution, transport bind, listener
+readiness or SIP emission, the command MUST reserve its output:
+
+1. The requested final path MUST name a file whose parent already exists. An existing file or
+   symlink at the final path is a usage refusal and MUST NOT be truncated, replaced or followed.
+2. The command creates a uniquely named sibling temporary file with exclusive creation and keeps
+   that exact file handle open for the call lifetime. Name collisions are retried a finite number
+   of times. Failure names the requested path, not only the internal temporary name.
+3. Captured samples remain in memory until the call's bounded media work joins. Finalization writes
+   the complete WAV through the reserved handle, flushes it durably, closes the handle, and installs
+   the sibling at the requested path without replacing a file created after preflight. A same-
+   filesystem atomic link/rename operation is used where the platform permits it.
+4. Successful installation is never undone by a later reporting or cleanup failure. Before
+   installation, every usage refusal, call failure, cancellation, remote hangup, media failure,
+   write failure and ordinary drop closes the handle and removes the sibling temporary entry.
+
+The temporary name is derived only from the operator-supplied destination and local randomness;
+network identities and header values never become paths. A destination race after preflight is a
+terminal command failure that names the final path and does not rewrite the call as never having
+occurred. The final result names `recording` only after installation succeeds.
 
 `dial --early-media` opts into the reliable-provisional call path. The command consumes provisional
 responses until an SDP-bearing reliable response starts a media session or a final response
@@ -169,6 +200,113 @@ device relay task it started is still live.
 | stopping | callback producer dropped; relay observes stop | relay observes stop; callback receives silence until paused |
 | joined | relay task awaited; stream dropped | relay task awaited; stream dropped |
 
+### 3.2 Invitation deadline and cancellation
+
+`dial --timeout <S>` is the invitation-answer budget. A positive value starts when the initial
+INVITE is handed to the endpoint and ends before cancellation begins; zero delegates answer
+expiry to the SIP client transaction. `--cancel-timeout <S>` is a separate cancellation-cleanup
+allowance and defaults to two seconds. It starts only when the answer budget or an operator
+interrupt wins. The documented process bound for a positive answer budget is therefore the sum of
+these two values followed by the endpoint's causal task-join barrier; the error MUST NOT describe
+the answer budget alone as total elapsed time.
+
+Cancellation is one owned operation with this state table:
+
+| State | Input | Required action | Next state |
+|---|---|---|---|
+| inviting | final response before answer deadline | retain that final result; do not cancel | terminal or confirmed |
+| inviting | answer deadline | freeze the timeout result; begin cancellation allowance | cancelling |
+| inviting | operator interrupt | freeze the interrupt result; begin cancellation allowance | cancelling |
+| cancelling | provisional observed and allowance remains | create exactly one CANCEL for the INVITE transaction | joining |
+| cancelling | final non-2xx INVITE response | retain the frozen local cause; no CANCEL or BYE | joining |
+| cancelling | final 2xx INVITE response | ACK it, originate BYE, retain the frozen local cause | joining |
+| cancelling | allowance expires | stop waiting; retain the frozen cause and mark cleanup exhausted | joining |
+| joining | endpoint work reaches zero | emit the terminal record | reported |
+
+The deadline branch wins an exact-boundary tie with a newly readable final response. A response
+that was observed before the deadline wins normally; one observed after the deadline can only
+complete cancellation cleanup and MUST NOT turn the timeout into success. A zero cancellation
+allowance performs no timed wait: already-ready cancellation state may be consumed, then endpoint
+shutdown joins every owned task. It does not mean an unbounded fallback.
+
+Timeout text and JSON contain the same fields: `status=timeout`, `invitation_limit_ms`, measured
+`invitation_elapsed_ms`, `cancel_limit_ms`, measured `cancel_elapsed_ms`, `cancel_sent`,
+`cancel_final_observed`, `cancel_cleanup_completed`, `cancel_cleanup_exhausted` and an actionable
+`error`. Interrupted setup uses the same cleanup facts with `status=interrupted`; a pre-deadline SIP
+rejection retains its SIP status and does not invent cancellation fields. Durations use the
+monotonic clock. A fixed duration may bound failed cleanup, but transaction events and the endpoint
+join barrier are the successful happens-before relations.
+
+### 3.3 Confirmed-call lifecycle
+
+After `dial` or `answer` confirms a dialog, the command MUST continuously drive that dialog while
+media work runs. The same input pump consumes ACK, BYE and every other in-dialog request admitted by
+the call layer; a media future or local duration MUST NOT replace that pump. In particular, an ACK
+is dequeued promptly enough to stop INVITE 2xx retransmission, and an accepted BYE receives its
+final response before terminal output.
+
+The command has these states and transitions:
+
+| State | Input | Required action | Next state |
+|---|---|---|---|
+| confirming | supported process stop | cancel the owned INVITE; send CANCEL, or ACK then BYE if confirmation crossed cancellation | joining |
+| confirmed | valid remote BYE | stop originating requests, answer the BYE, stop media | joining |
+| confirmed | supported process stop | stop media work, originate at most one BYE, finitely await its final response | joining |
+| confirmed | local duration or completed media work | originate at most one BYE and finitely await its final response | joining |
+| confirmed | terminal transport/session failure | stop media and retain the typed failure | joining |
+| joining | crossed remote BYE | answer it; do not originate another BYE | joining |
+| joining | owned work reaches zero | close the endpoint and finalize counters | reported |
+
+When multiple confirmed inputs are ready in one poll, a valid remote BYE wins over a process stop, which
+wins over local completion. After local teardown has started, a crossed valid BYE is still answered
+but cannot change the already selected terminal cause or cause a second originated BYE. A pending
+outbound invitation never manufactures a BYE before a dialog exists: cancellation retains the call
+layer's CANCEL/late-2xx cleanup behavior.
+
+The terminal result adds `ended_by`, with value `remote`, `duration` or `interrupt`. When this side
+originates BYE and observes a valid final response, `bye_status` carries its status code; a remote
+end originates no BYE and omits that field. Remote BYE and local-duration completion retain
+`status=answered` and exit 0. A handled process stop emits `status=interrupted`,
+`ended_by=interrupt`, the `stop_signal` defined below, and exits 0 after cleanup. A typed transport,
+session, media or cleanup failure emits `status=failed` and exits 1. An unanswered local BYE is
+bounded and does not resurrect an ended call; a concrete failure to hand the BYE to the transport
+is a cleanup failure.
+
+Terminal output is a join barrier, not a request to begin cleanup. Before the record is emitted,
+the command MUST stop or finish media operations, join device relays and media workers, release the
+call, shut down the endpoint driver, and finalize its counter export. No dialog, transport, media
+or device task owned by the invocation may still be running after terminal output.
+
+### 3.4 Process stop signals
+
+`dial`, `answer`, `load` and `load-responder` share one process-stop abstraction. SIGINT is the
+portable interactive stop supported by the runtime. On Unix, SIGTERM is additionally supported as
+the supervisor stop. A platform without Unix signals MUST still compile and exercise the same
+library cancellation inputs, but the command does not claim a SIGTERM name that its runtime cannot
+install. Failure to install or receive a supported handler is an internal failure, not an
+interruption.
+
+The first supported signal freezes `stop_signal` as `interrupt` or `terminate`, closes admission
+and requests the command's existing graceful cleanup. A second or later supported signal during
+cleanup does not escalate to immediate process death, restart cleanup or emit another result; the
+first signal and existing finite cleanup deadline continue to own the outcome. This makes repeated
+supervisor delivery idempotent while retaining a hard bound:
+
+| Command state | Cleanup bound after first signal |
+|---|---|
+| `dial`, invitation pending | `--cancel-timeout` |
+| `dial` or `answer`, confirmed dialog | two-second BYE-response failure bound, then causal endpoint/media/device joins |
+| `answer`, waiting for an invitation | immediate admission close followed by causal endpoint/device join |
+| `load` | forty seconds |
+| `load-responder` | configured `--cleanup` |
+
+A fully joined signal stop emits exactly one terminal result after any readiness result,
+`status=interrupted`, `stop_signal`, and exit 0. `dial` and `answer` retain
+`ended_by=interrupt` for compatibility. Cleanup exhaustion or handler failure emits
+`status=failed`, an actionable reason and exit 1; a signal MUST NOT turn an internal worker failure
+into `interrupted`. Natural completion reports `stop_signal=null` in the versioned load summaries
+and adds no stop field to ordinary call results.
+
 `--header 'Name: value'` MAY be repeated. Values pass the same injection checks as the message
 builders. These stack-owned fields **MUST** be refused: `Via`, `Route`, `Record-Route`,
 `Max-Forwards`, `Call-ID`, `CSeq`, `From`, `To`, `Contact` and `Content-Length`. The command reports
@@ -178,6 +316,8 @@ the refused name before binding or dialing.
 
 `sipx scenario` reads one JSON object per line and writes the existing versioned JSON event envelope
 one object per line. Every command carries a caller-supplied `id`; completion or refusal echoes it.
+The normative frame grammar, command fields, correlation, recovery and process-exit rules are in
+[`scenario-automation.md`](scenario-automation.md).
 The v1 command set is:
 
 ```text
@@ -214,18 +354,47 @@ status codes are decimal strings):
 {
   "schema":"sipx.load.v1",
   "status":"completed|interrupted|failed",
+  "stop_signal":null,
+  "reason":null,
+  "mode":"signalling",
   "seed":0,
   "target":"sip:load@192.0.2.1:5060",
   "limits":{"rate":10.0,"concurrency":32,"calls":100,"duration_ms":null,"call_duration_ms":0,"setup_timeout_ms":20000,"cleanup_ms":40000},
   "outcomes":{"attempted":100,"connected":98,"rejected":1,"timed_out":1,"failed":0,"peak_concurrency":12},
   "response_codes":{"200":98,"486":1},
   "setup_ms":{"p50":18,"p95":31,"p99":45},
-  "media":{"snapshots":98,"packets_lost":0,"mean_loss":0.0000,"mean_jitter_ms":1,"mean_mos":4.38}
+  "media":{"snapshots":0,"packets_lost":0,"mean_loss":null,"mean_jitter_ms":null,"mean_mos":null}
 }
 ```
 
 An unavailable percentile or media aggregate is `null`, not zero. Per-call events are optional,
 but this summary is emitted only after cleanup and is always exactly one machine-readable record.
+
+### 5.1 Shared workload modes and terminal causes
+
+`load` and `load-responder` share the same `--mode` vocabulary. `signalling` is the default on both
+commands. It sends a bodyless INVITE, completes the bodyless 2xx/ACK dialog, holds it for the
+configured call/dialog duration, and completes it with BYE. It creates no SDP, media port, RTP task
+or media snapshot. `generated-media` is selected explicitly on both commands and retains the
+deterministic PCMU offer/answer, one bounded generated frame and RTP quality snapshot used by the
+media workload. The `mode` field appears in both terminal summaries; signalling summaries report
+zero media snapshots and unavailable media aggregates as `null`.
+
+Every INVITE emitted by `load` carries the private extension field
+`X-Sipx-Workload-Mode: signalling|generated-media`. The paired responder checks a present field
+before admitting the dialog. A value different from its configured mode receives 488 `Workload
+Mode Mismatch`, is counted as a pre-admission rejection, closes the paired run as `failed`, and
+exits 1 after cleanup. The marker is advisory for other clients: an absent field retains the
+body-based interoperability behavior. An unknown local `--mode` is command usage, exits 2, and
+opens no socket.
+
+`completed` means a configured call or duration admission bound was reached and every admitted
+worker joined. `interrupted` is reserved for an operator or supported process stop request whose
+cleanup completed. A worker error, workload-mode mismatch, poisoned measurement store, media
+failure or exhausted cleanup budget closes admission, cancels and joins owned calls, emits
+`status=failed` with an actionable `reason`, and exits 1. Such a failure MUST NOT be reported as an
+operator interruption merely because the internal error used the common stop token. Ordinary SIP
+policy rejections remain measured call outcomes and do not alone make a bounded run fail.
 
 ## 6. Secrets and output
 
@@ -243,7 +412,38 @@ the three requested fields because no call exists yet.
 An implemented lower-layer capability receives no product credit unless this result can show that
 a real call selected it.
 
-### 6.1 Public-reference drift contract
+### 6.1 Command capability preflight and version output
+
+After declarative argument parsing and before destination parsing or resolution, every command runs
+one shared capability preflight over its closed command values. The preflight performs no resolver,
+socket, filesystem or device operation. A refusal is command usage: exit 2, `status=usage` in JSON,
+and an error that names both the selected value and missing build feature.
+
+The phase covers every available selector rather than relying on when a command happens to build
+its media policy:
+
+| Selection | Preflight requirement |
+|---|---|
+| explicit `--codec opus` | the `opus` build feature |
+| explicit `--media-security dtls-srtp` | the `dtls` build feature |
+| `--profile browser-audio` | both `opus` and `dtls` build features |
+| `--ice disabled|host|stun` | baseline capability; STUN requires `--stun-server`, which is refused for other ICE modes |
+| `--audio-input device:<id>` or `--audio-output device:<id>` | the `device-audio` build feature |
+| `load`/`load-responder --mode signalling|generated-media` | baseline capability; neither mode silently selects an optional codec |
+
+`dial`, `answer`, `load`, `load-responder` and `scenario` all pass through this phase where their
+command model exposes a selector. Full policy validation still follows: for example, SDES requires
+protected signalling and the browser profile requires WSS. Those checks may inspect the parsed URI
+or selected transport, but an absent compiled capability MUST NOT be deferred behind them or behind
+a peer outcome. Opening a WAV/device or reserving a recording is local-resource preflight after
+capability preflight and still precedes network I/O.
+
+`sipx version` has no positional arguments. In text mode it emits exactly the existing single line
+`sipx <workspace-version>`. With `--json` it uses the common report renderer to emit exactly one
+object, `{"status":"version","version":"<workspace-version>"}`. Both forms exit 0; a stray
+positional is the ordinary parser-owned usage error in the requested output format.
+
+### 6.2 Public-reference drift contract
 
 The public CLI reference MUST be checked against the executable, not against a second copy of its
 Rust help constants. The check builds the default `sipx-cli` package once, executes `sipx --help`
@@ -264,6 +464,60 @@ a documented flag absent from help, a missing JSON field and a newly discovered 
 The checker and its fixture tests are separate gate steps. The executable comparison runs after the
 workspace build in the local gate and CI, so it observes the binary that will ship.
 
+### 6.3 Unique structured fields
+
+Every JSON object emitted by the diagnostic phone MUST contain each member name at most once.
+Parsing into a map is not evidence of this property because an ordinary decoder may retain only
+one value. Repository assertions therefore deserialize with a recursive visitor that records the
+raw member names of every object before accepting its values. The visitor MUST reject a duplicate
+at the root or inside an array or nested object.
+
+The common text/JSON `Report` uses an order-preserving unique field collection. Inserting a name
+already present retains one member at its original position; storage and rendering cannot
+represent two members with the same name. The common-field test proves replacement itself remains
+unique, while media composition MUST NOT rely on replacement to resolve ownership. Requested media
+owns `media_profile`, `requested_codecs`, `requested_media_security` and `requested_ice`.
+Negotiated media owns only the `negotiated_*` fields and browser component observations. Thus a
+terminal dial or answer report contains the requested `media_profile` exactly once while all prior
+field spelling, values and ordering remain unchanged.
+
+The strict recursive visitor is applied to representative output from every versioned CLI JSON
+producer listed by the public contract inventory: devices, bounded load, comparative-load
+readiness, load responder and scenario. The inventory check and strict-output test use the same
+discovered producer names, so adding a versioned producer without a duplicate-member assertion is
+a failure. Text output is rendered from the same ordered unique collection as JSON and therefore
+retains fact parity and deterministic order.
+
+### 6.4 INFO progress vocabulary
+
+One `-v` selects INFO progress on stderr. Default verbosity emits none of these records; `-vv` and
+any additional `v` retain the existing DEBUG saturation. Result stdout and its schemas do not
+change. Each progress record carries the stable `event` field below in addition to the tracing
+message:
+
+| Event | Transition | Required fields |
+|---|---|---|
+| `call.waiting` | answer listener is bound and begins its bounded wait | `role=answer`, `address`, `wait_ms` |
+| `call.placed` | dial has selected and bound its route immediately before invitation | `role=dial`, `peer`, `transport` |
+| `call.caller_observed` | answer admits a transport-compatible invitation | `role=answer`, `caller` |
+| `call.answered` | a confirmed call is available to the media exchange | `role`, `peer`, `setup_ms` |
+| `call.ended` | signalling, media, device and export cleanup have joined | `role`, `peer`, `status`, `cause`, `elapsed_ms` |
+| `load.admission_started` | the bounded plan is complete immediately before admission | `target`, `mode`, `rate`, `concurrency`, `calls`, `duration_ms` |
+| `load.summary` | admission is closed and every owned attempt has joined | `status`, `attempted`, `connected`, `rejected`, `timed_out`, `failed`, `peak_concurrency` |
+
+For answer, the caller is the parsed `From` value already used by the terminal result; an admitted
+call emits `call.caller_observed` and `call.answered` in that order. The same typed terminal cause
+provides the result's `status`/`ended_by` and `call.ended`'s `status`/`cause`. Supported causes are
+`remote`, `duration`, `interrupted`, `refused`, `timeout` and `failed`. First terminal cause wins,
+and only the owner that emits the terminal result emits `call.ended`, after cleanup. A refusal or
+failure before confirmation still gets one truthful terminal progress event but never an answered
+event.
+
+Load progress is deliberately aggregate. A run emits exactly one `load.admission_started` and one
+`load.summary`; it MUST NOT emit per-attempt INFO. The summary fields are the same calculated facts
+used by `sipx.load.v1`, including internal-failure classification, so logging cannot call a failed
+run completed. This bounds INFO volume independently of `--calls`, `--duration` and rate.
+
 ## 7. Vectors
 
 | ID | Scenario | Required result |
@@ -280,3 +534,16 @@ workspace build in the local gate and CI, so it observes the binary that will sh
 | `DPH-10` | Load run reaches its call bound | No new call starts; every owned call is cleaned up |
 | `DPH-11` | Load run is interrupted | Admission stops and cleanup finishes before the summary |
 | `DPH-12` | WAV input and a Linux virtual microphone containing the same deterministic clip call the same recorder | Both 8 kHz recordings pass the same quantised-sample assertion; the device result names its exact configuration and reports all three loss counters |
+| `DPH-13` | `dial` or `answer`, using either WAV-output spelling, names a missing parent, an existing final file or a destination whose sibling cannot be created | usage refusal names the requested path before resolver, bind, readiness or peer traffic; an existing final file retains its bytes |
+| `DPH-14` | a reserved destination becomes occupied before finalization | the call outcome remains observable, finalization fails without replacing the competing file, and no reservation temporary remains |
+| `DPH-15` | invitation limits 1, 2, 3, 5 and 8 seconds expire against a ringing peer; cancellation allowance is 2 seconds | paused time reaches each invitation limit and at most its explicit cancellation allowance; one CANCEL is sent and the timeout report separates both measured phases |
+| `DPH-16` | final response is ready immediately before, exactly at or immediately after the invitation deadline | before wins as a final result; exact and after retain timeout while cleanup handles the crossed response at most once |
+| `DPH-17` | each long-running command receives SIGINT and, on Unix, SIGTERM after readiness; a cleanup case receives the same signal twice | admission closes, owned work joins inside the command-specific bound, and exactly one terminal record names the first signal |
+| `DPH-18` | `version` in text and JSON modes, then each with a stray positional | exact one-line version result in the selected format; both stray forms exit usage without a success result |
+| `DPH-19` | each unavailable optional media/device selection targets a bound local observer; scenario and both call roles are included | exit 2 names the missing feature before local-resource or network I/O; the observer receives zero bytes |
+| `DPH-20` | browser-audio dial and answer terminal results are tokenized before map construction | `media_profile` and every other object member occur exactly once; both roles retain the documented values |
+| `DPH-21` | a duplicate member is placed at the root, in a nested object and in an object inside an array | the strict result decoder rejects all three and names the repeated member |
+| `DPH-22` | representative output from each discovered versioned CLI producer is checked | every object is accepted by the strict recursive decoder; a newly discovered producer without a fixture fails the inventory assertion |
+| `DPH-23` | one completed two-process call with `-v` on dial and answer | dial orders placed/answered/ended; answer orders waiting/caller-observed/answered/ended; caller and terminal cause match each result; stdout remains result-only |
+| `DPH-24` | bounded three-attempt load with `-v`, then the same run without it | verbose stderr has exactly one admission start and one aggregate summary; quiet stderr has neither; stdout objects are unchanged |
+| `DPH-25` | refusal, timeout, supported stop and internal failure race with terminal completion | first truthful cause produces one `call.ended` after cleanup; no duplicate end and no false answered event |

@@ -1,149 +1,102 @@
 //! `sipx dial`.
 
-use std::net::IpAddr;
+use std::future::Future;
+use std::pin::Pin;
 use std::time::Duration;
 
-use sipx_audio::{Wav, read_wav, write_wav};
-use sipx_call::{Call, Credentials};
-use sipx_sip::{Address, Host, Uri};
-use sipx_transport::{Config as TransportConfig, TransportKind, bind};
+use sipx_audio::{Wav, read_wav};
+use sipx_call::{Call, Credentials, EndCause, Served};
+use sipx_sip::{Address, Uri};
+use sipx_transport::{Config as TransportConfig, bind};
 
+use crate::cli::DialOptions;
 use crate::output::{Exit, Format, Report, fail};
-
-pub(crate) const HELP: &str = "\
-sipx dial — place a call
-
-USAGE:
-    sipx dial <URI> [OPTIONS]
-
-ARGS:
-    <URI>    Who to call, e.g. sip:bob@192.0.2.1:5060
-
-OPTIONS:
-    --play <FILE>     Play mono 16-bit WAV at the negotiated codec clock
-    --record <FILE>   Record the far end to WAV at the negotiated codec clock
-    --dtmf <DIGITS>   Send these digits once the call is up
-    --duration <S>    Hang up after this many seconds once connected (default 30)
-    --timeout <S>     Give up if the call is not answered in this many seconds (default 20).
-                      0 waits as long as the transaction layer does, which is 32 seconds.
-    --from <URI>      Our own address (default sip:sipx@<local>)
-    --password <P>    Password. Prefer SIPX_PASSWORD, since argv is world-readable.
-    --local <ADDR>    Local address to bind (default 0.0.0.0:0)
-    --advertise <IP>  Address to put in Via, Contact and SDP independently of --local
-    --transport <T>   Signalling: udp, tcp, tls, ws or wss (default udp)
-    --tcp             Legacy alias for --transport tcp
-    --tls-server-name <N>  Certificate identity to verify (default URI host)
-    --tls-ca <FILE>   Add PEM trust roots to the platform store
-    --tls-cert <FILE> Client certificate chain for mutual TLS (with --tls-key)
-    --tls-key <FILE>  Client private key for mutual TLS (with --tls-cert)
-    --profile <P>     Media profile: standard or browser-audio (default standard)
-    --codec <C>       Ordered codec preference; repeat pcmu, pcma, l16 or opus (default pcmu, pcma)
-    --media-security <M>  auto, plain, sdes or dtls-srtp (default auto)
-    --ice <P>         disabled, host or stun (default disabled)
-    --stun-server <ADDR>  STUN server for --ice stun, as host:port
-    --audio-input <E>  Local source: wav:<path>, device:<id> or null
-    --audio-output <E> Local sink: wav:<path>, device:<id> or null
-    --early-media     Receive a reliable provisional media session before the final answer
-    --header <H>      Add an application-owned INVITE field; repeat 'Name: value'
-    --stats           Report call quality on exit: loss, jitter, round trip, MOS estimate
-    --capture <FILE>  Record signalling to this pcapng file. Credentials are redacted;
-                      TLS is recorded decrypted. Still identifies who called whom
-    --counters <FILE> Write this run's signalling counters to this file, as JSON.
-                      Implied by --capture, as <capture>.counters.json
-    --json            Report as JSON
-";
 
 #[allow(
     clippy::too_many_lines,
     reason = "the command lifecycle is kept in execution order so validation-before-I/O remains auditable"
 )]
-pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
-    // Help, then any flag given no value — refused before the URI is even looked at, so a dropped
-    // `--play` or `--record` cannot turn into a call that carries no audio (`S-30`).
-    let args = match crate::arguments(raw, HELP, format) {
-        Ok(args) => args,
-        Err(exit) => return exit,
-    };
-
-    let Some(uri) = args.positional() else {
-        eprint!("{HELP}");
-        return fail(format, Exit::Usage, "a URI to call is required");
-    };
+pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
+    let uri = options.uri.as_str();
 
     let Ok(to) = Uri::parse(bytes::Bytes::from(uri.to_owned())) else {
         return fail(format, Exit::Usage, &format!("not a SIP URI: {uri}"));
     };
-    let transport = match crate::signalling::Selection::from_args(&args, to.scheme().is_secure()) {
+    let mut transport = match crate::signalling::Selection::from_options(
+        &options.signalling,
+        to.scheme().is_secure(),
+    ) {
         Ok(transport) => transport,
         Err(message) => return fail(format, Exit::Usage, &message),
     };
-    let media = match crate::media::Selection::from_args(&args, transport.kind()) {
-        Ok(media) => media,
-        Err(message) => return fail(format, Exit::Usage, &message),
-    };
-    let audio = match crate::device::Selection::from_args(&args) {
+    let audio = match crate::device::Selection::from_options(&options.audio) {
         Ok(audio) => audio,
         Err(message) => return fail(format, Exit::Usage, &message),
     };
-    let headers = match crate::header::from_args(&args) {
+    let headers = match crate::header::from_options(&options.headers) {
         Ok(headers) => headers,
         Err(message) => return fail(format, Exit::Usage, &message),
     };
 
-    // A password on the command line is visible to every process on the machine, so the
-    // environment is the documented route and the flag is the convenience.
-    let password = args
-        .value("password")
-        .map(str::to_owned)
-        .or_else(|| std::env::var("SIPX_PASSWORD").ok());
-
-    let Some((target_addr, server_name)) = target_of(&to, transport.kind()) else {
-        return fail(
-            format,
-            Exit::Usage,
-            &format!("{uri} must name an address and port, e.g. sip:bob@192.0.2.1:5060"),
-        );
-    };
-    let target = match transport.target(&args, target_addr, &server_name) {
-        Ok(target) => target,
-        Err(message) => return fail(format, Exit::Usage, &message),
-    };
-    let negotiated_transport = target.transport;
-
-    // Audio to play is read before the call is placed: failing after the far end has answered
-    // means hanging up on someone for a mistake that was visible beforehand.
+    // Local file failures are knowable without a peer. Read input and reserve output before even
+    // destination resolution, which may itself perform network I/O.
     let clip = match audio.wav_input().map(read_clip) {
         Some(Ok(clip)) => Some(clip),
         Some(Err(message)) => return fail(format, Exit::Usage, &message),
         None => None,
+    };
+    let recording = match audio.reserve_wav_output() {
+        Ok(recording) => recording,
+        Err(message) => return fail(format, Exit::Usage, &message),
     };
     let mut devices = match audio.open() {
         Ok(devices) => devices,
         Err(message) => return fail(format, Exit::Failed, &message),
     };
 
-    let local: std::net::SocketAddr = match args.value("local").unwrap_or("0.0.0.0:0").parse() {
-        Ok(local) => local,
-        Err(_) => return fail(format, Exit::Usage, "--local must be host:port"),
+    let password = options.password.clone();
+
+    let resolver = crate::destination::Resolver::system();
+    let candidates = match resolver
+        .resolve(&to, None, transport, &options.signalling)
+        .await
+    {
+        Ok(candidates) => candidates,
+        Err(error) => return fail(format, error.exit(), &error.to_string()),
     };
+    let target = match crate::destination::first(&candidates) {
+        Ok(target) => target.clone(),
+        Err(error) => return fail(format, error.exit(), &error.to_string()),
+    };
+    let target_addr = target.addr;
+    transport = transport.negotiated(target.transport);
+    let media = match crate::media::Selection::from_options(
+        &options.media,
+        transport.kind(),
+        options.early_media,
+    ) {
+        Ok(media) => media,
+        Err(message) => return fail(format, Exit::Usage, &message),
+    };
+
+    let local = options.local;
     // Media has to advertise something reachable, and an unspecified address is not.
-    let advertised = match args.value("advertise") {
-        Some(value) => match value.parse::<IpAddr>() {
-            Ok(address) if !address.is_unspecified() => Some(address),
-            _ => {
-                return fail(
-                    format,
-                    Exit::Usage,
-                    "--advertise must be a non-unspecified IP",
-                );
-            }
-        },
+    let advertised = match options.advertise {
+        Some(address) if !address.is_unspecified() => Some(address),
+        Some(_) => {
+            return fail(
+                format,
+                Exit::Usage,
+                "--advertise must be a non-unspecified IP",
+            );
+        }
         None => None,
     };
     let media_addresses = crate::advertise::media_addresses(local, target_addr.ip(), advertised);
     let media_address = media_addresses.advertised;
-    let from = args
-        .value("from")
+    let from = options
+        .from
+        .as_deref()
         .map_or_else(|| format!("<sip:sipx@{media_address}>"), str::to_owned);
     let credentials = match password {
         Some(password) => {
@@ -165,35 +118,41 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
 
     let mut config = TransportConfig::new(local);
     config.sent_by = media_address.to_string();
-    crate::apply_capture(&args, &mut config);
-    if let Err(message) = transport.configure_client(&args, &mut config) {
+    crate::apply_capture(&options.capture, &mut config);
+    if let Err(message) = transport.configure_client(&options.signalling, &mut config) {
         return fail(format, Exit::Usage, &message);
     }
-    let (handle, _incoming) = match bind(config).await {
+    let mut progress = crate::progress::Call::new(crate::progress::CallRole::Dial, uri);
+    let (handle, mut incoming) = match bind(config).await {
         Ok(bound) => bound,
         Err(error) => return fail(format, Exit::Failed, &format!("bind: {error}")),
     };
 
     // Armed here, not at the end: the run that most needs the numbers is the one that fails, and
     // every `return fail(…)` below now takes the counters file with it.
-    let export = crate::counters::Export::arm(&args, &handle);
+    let export = crate::counters::Export::arm(&options.capture, &handle);
+    let process_stop = crate::stop::Stop::new();
+    let interrupted = process_stop.wait();
+    tokio::pin!(interrupted);
 
     // The bound is handed to the library rather than wrapped around it. Dropping the call
     // future partway through would leave the far end believing it is in a call, and only code
     // inside the exchange can send the CANCEL that stops it ringing.
-    let attempt = Duration::from_secs(args.number("timeout").unwrap_or(DEFAULT_TIMEOUT_SECS));
+    let attempt = Duration::from_secs(options.timeout);
+    let cancellation = Duration::from_secs(options.cancel_timeout);
 
-    let mut options = sipx_call::DialOptions::new(from, media_address)
+    let mut call_options = sipx_call::DialOptions::new(from, media_address)
         .with_media_bind_address(media_addresses.bind)
-        .with_media_policy(media.policy());
+        .with_media_policy(media.policy())
+        .with_cancellation_timeout(cancellation);
     for header in headers {
-        options = options.with_header(header);
+        call_options = call_options.with_header(header);
     }
     if !attempt.is_zero() {
-        options = options.with_timeout(attempt);
+        call_options = call_options.with_timeout(attempt);
     }
     if let Some(credentials) = credentials {
-        options = options.with_credentials(credentials);
+        call_options = call_options.with_credentials(credentials);
     }
 
     // What `-v` is *for*, and what it used to be worth nothing on: a call's own progress. The
@@ -202,19 +161,56 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     // help text got silence from the level it documents (`X-57`). These three records are the
     // lifecycle a shell already sees on stdout — placed, answered, ended — on the stream that is
     // allowed to narrate it.
-    tracing::info!(peer = uri, transport = ?negotiated_transport, "calling");
+    progress.placed(target.transport);
 
-    let duration = Duration::from_secs(args.number("duration").unwrap_or(30));
-    let early_requested = args.flag("early-media");
-    let started = std::time::Instant::now();
-    let (mut call, early_recorded, early_media) = if early_requested {
-        let mut dialing = match sipx_call::dial_early(&handle, target, &to, &options).await {
+    let duration = Duration::from_secs(options.duration);
+    let early_requested = options.early_media;
+    let (mut call, selected_target, early_recorded, early_media) = if early_requested {
+        let (mut dialing, selected) = match dial_early_candidates(
+            &handle,
+            &candidates,
+            &to,
+            &call_options,
+            interrupted.as_mut(),
+        )
+        .await
+        {
             Ok(dialing) => dialing,
-            Err(error) => return report_failure(format, &error),
+            Err(sipx_call::Error::Cancelled(cancellation)) if !cancellation.timed_out => {
+                return report_pending_interrupt(
+                    format,
+                    export,
+                    &handle,
+                    &process_stop,
+                    cancellation,
+                    &mut progress,
+                )
+                .await;
+            }
+            Err(error) => {
+                return report_failure(format, export, &handle, &error, &mut progress).await;
+            }
         };
-        let early_media = match dialing.wait_for_early_media().await {
+        let early_media = match tokio::select! {
+            biased;
+            () = interrupted.as_mut() => {
+                let cancellation = dialing.cancel_observed().await;
+                return report_pending_interrupt(
+                    format,
+                    export,
+                    &handle,
+                    &process_stop,
+                    cancellation,
+                    &mut progress,
+                )
+                .await;
+            }
+            available = dialing.wait_for_early_media() => available,
+        } {
             Ok(available) => available,
-            Err(error) => return report_failure(format, &error),
+            Err(error) => {
+                return report_failure(format, export, &handle, &error, &mut progress).await;
+            }
         };
         let early_recorded = if early_media {
             let Some(session) = dialing.media() else {
@@ -224,51 +220,156 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
                     "early media was reported without a running media session",
                 );
             };
-            crate::record_media(session, duration, crate::RECORD_IDLE).await
+            tokio::select! {
+                biased;
+                () = interrupted.as_mut() => {
+                    let cancellation = dialing.cancel_observed().await;
+                    return report_pending_interrupt(
+                        format,
+                        export,
+                        &handle,
+                        &process_stop,
+                        cancellation,
+                        &mut progress,
+                    )
+                    .await;
+                }
+                recorded = crate::record_media(session, duration, crate::RECORD_IDLE) => recorded,
+            }
         } else {
             Vec::new()
         };
-        let call = match dialing.answered().await {
+        let call = match dialing.answered_until(interrupted.as_mut()).await {
             Ok(call) => call,
-            Err(error) => return report_failure(format, &error),
+            Err(sipx_call::Error::Cancelled(cancellation)) if !cancellation.timed_out => {
+                return report_pending_interrupt(
+                    format,
+                    export,
+                    &handle,
+                    &process_stop,
+                    cancellation,
+                    &mut progress,
+                )
+                .await;
+            }
+            Err(error) => {
+                return report_failure(format, export, &handle, &error, &mut progress).await;
+            }
         };
-        (call, early_recorded, early_media)
+        (call, selected, early_recorded, early_media)
     } else {
-        let call = match sipx_call::dial(&handle, target, &to, &options).await {
+        let (call, selected) = match dial_candidates(
+            &handle,
+            &candidates,
+            &to,
+            &call_options,
+            interrupted.as_mut(),
+        )
+        .await
+        {
             Ok(call) => call,
-            Err(error) => return report_failure(format, &error),
+            Err(sipx_call::Error::Cancelled(cancellation)) if !cancellation.timed_out => {
+                return report_pending_interrupt(
+                    format,
+                    export,
+                    &handle,
+                    &process_stop,
+                    cancellation,
+                    &mut progress,
+                )
+                .await;
+            }
+            Err(error) => {
+                return report_failure(format, export, &handle, &error, &mut progress).await;
+            }
         };
-        (call, Vec::new(), false)
+        (call, selected, Vec::new(), false)
     };
-    tracing::info!(peer = uri, setup = ?started.elapsed(), "answered");
+    let negotiated_transport = selected_target.transport;
+    progress.answered();
 
-    let exchanged = match exchange(
+    let served = sipx_call::serve_until(
         &mut call,
-        clip.as_ref(),
-        args.value("dtmf"),
-        duration,
-        &mut devices,
+        &mut incoming,
+        |media, cancelled| {
+            exchange(
+                media,
+                clip.as_ref(),
+                options.dtmf.as_deref(),
+                duration,
+                &mut devices,
+                cancelled,
+            )
+        },
+        interrupted.as_mut(),
     )
-    .await
-    {
+    .await;
+    devices.stop();
+    let served = match served {
+        Ok(served) => served,
+        Err(error) => {
+            drop(call);
+            handle.shutdown().await;
+            return fail(format, Exit::Failed, &error.to_string());
+        }
+    };
+    let (exchanged, end, bye) = match served {
+        Served::Remote {
+            cause: EndCause::RemoteBye,
+            output,
+        } => (output, crate::progress::CallEnd::Remote, None),
+        Served::Remote { cause, output } => {
+            let _ = output;
+            drop(call);
+            handle.shutdown().await;
+            return fail(
+                format,
+                Exit::Failed,
+                &format!("call ended unexpectedly: {cause:?}"),
+            );
+        }
+        Served::Local { output, bye } => (output, crate::progress::CallEnd::Duration, Some(bye)),
+        Served::Interrupted { output, bye } => {
+            (output, crate::progress::CallEnd::Interrupted, Some(bye))
+        }
+        _ => {
+            drop(call);
+            handle.shutdown().await;
+            return fail(format, Exit::Failed, "unknown confirmed-call outcome");
+        }
+    };
+    let exchanged = match exchanged {
         Ok(exchanged) => exchanged,
         Err(message) => {
-            let _ = call.hang_up().await;
+            drop(call);
+            handle.shutdown().await;
             return fail(format, Exit::Failed, &message);
+        }
+    };
+    let bye_status = match bye.transpose() {
+        Ok(status) => status,
+        Err(sipx_call::Error::SignallingTeardownTimeout(_)) => None,
+        Err(error) => {
+            drop(call);
+            handle.shutdown().await;
+            return fail(format, Exit::Failed, &error.to_string());
         }
     };
 
     let early_samples = early_recorded.len();
     let total_samples = early_samples.saturating_add(exchanged.samples_received);
+    let status = end.status();
+    let ended_by = end.ended_by();
     let report = media.requested_report(
         Report::new()
-            .text("status", "answered")
+            .text("status", status)
+            .text("ended_by", ended_by)
             .text("peer", uri)
             .text("media_advertised", media_address.to_string())
             .text("media_bound", call.media().local_addr().to_string())
             .number(
                 "duration_ms",
-                i64::try_from(started.elapsed().as_millis()).unwrap_or(0),
+                i64::try_from(progress.elapsed().as_millis()).unwrap_or(0),
             )
             .number(
                 "samples_recorded",
@@ -278,6 +379,14 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     );
     let report = media.negotiated_report(report, &call, "browser-offerer");
     let mut report = devices.report(transport.report(report, negotiated_transport));
+    if status == "interrupted"
+        && let Some(signal) = process_stop.signal()
+    {
+        report = report.text("stop_signal", signal);
+    }
+    if let Some(status) = bye_status {
+        report = report.number("bye_status", i64::from(status));
+    }
     if early_requested {
         report = report.boolean("early_media", early_media).number(
             "early_samples_recorded",
@@ -285,54 +394,102 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         );
     }
 
-    if args.flag("stats") {
+    if options.stats {
         report = with_quality(report, &call.media().quality().await);
     }
 
-    if let Some(path) = audio.wav_output() {
+    if let Some(recording) = recording {
         let mut recorded = early_recorded;
         recorded.extend_from_slice(&exchanged.recorded);
-        match write_clip(path, &recorded, call.media().clock_rate()) {
-            Ok(()) => report = report.text("recording", path),
-            Err(message) => return fail(format, Exit::Failed, &message),
+        match recording.finish(&recorded, call.media().clock_rate()) {
+            Ok(path) => report = report.text("recording", path),
+            Err(message) => {
+                drop(call);
+                handle.shutdown().await;
+                return fail(format, Exit::Failed, &message);
+            }
         }
     }
 
-    let _ = call.hang_up().await;
-    tracing::info!(
-        peer = uri,
-        elapsed = ?started.elapsed(),
-        samples_recorded = exchanged.samples_received,
-        "hung up"
-    );
+    drop(call);
+    handle.shutdown().await;
+    if let Some(message) = process_stop.failure() {
+        return fail(format, Exit::Failed, &message);
+    }
     report = match export.into_report(report) {
         Ok(report) => report,
         Err(message) => return fail(format, Exit::Failed, &message),
     };
+    progress.finish(end);
     report.emit(format);
     Exit::Success
 }
 
+/// Try only concrete transport failures on the next RFC 3263 candidate. SIP refusals and response
+/// deadlines belong to the transaction that was sent and are never rewritten as routing retries.
+async fn dial_candidates(
+    handle: &sipx_transport::Handle,
+    candidates: &[sipx_transport::Target],
+    to: &Uri,
+    options: &sipx_call::DialOptions,
+    mut interrupted: Pin<&mut (dyn Future<Output = ()> + Send)>,
+) -> Result<(Call, sipx_transport::Target), sipx_call::Error> {
+    let mut last_transport = None;
+    for target in candidates.iter().take(crate::destination::MAX_ATTEMPTS) {
+        match sipx_call::dial_until(handle, target.clone(), to, options, interrupted.as_mut()).await
+        {
+            Ok(call) => return Ok((call, target.clone())),
+            Err(error @ sipx_call::Error::Transport(_)) => last_transport = Some(error),
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_transport.unwrap_or(sipx_call::Error::NoResponse))
+}
+
+async fn dial_early_candidates(
+    handle: &sipx_transport::Handle,
+    candidates: &[sipx_transport::Target],
+    to: &Uri,
+    options: &sipx_call::DialOptions,
+    mut interrupted: Pin<&mut (dyn Future<Output = ()> + Send)>,
+) -> Result<(sipx_call::Dialing, sipx_transport::Target), sipx_call::Error> {
+    let mut last_transport = None;
+    for target in candidates.iter().take(crate::destination::MAX_ATTEMPTS) {
+        match sipx_call::dial_early_until(handle, target.clone(), to, options, interrupted.as_mut())
+            .await
+        {
+            Ok(dialing) => return Ok((dialing, target.clone())),
+            Err(error @ sipx_call::Error::Transport(_)) => last_transport = Some(error),
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_transport.unwrap_or(sipx_call::Error::NoResponse))
+}
+
 /// Play, send digits and record for the duration of the call.
 async fn exchange(
-    call: &mut Call,
+    media: std::sync::Arc<sipx_media::MediaSession>,
     clip: Option<&Wav>,
     dtmf: Option<&str>,
     duration: Duration,
     devices: &mut crate::device::Driver,
+    cancelled: tokio_util::sync::CancellationToken,
 ) -> Result<Exchange, String> {
-    let media = call.media();
-
     let playing = async {
         if let Some(clip) = clip {
             let pcm = pcm_clip(clip)?;
-            call.play_pcm(&pcm)
+            media
+                .play_pcm(&pcm)
                 .await
                 .map_err(|error| error.to_string())?;
         }
         if let Some(digits) = dtmf {
             // After the audio, so a menu hears the prompt before the keypress.
-            call.send_digits(digits, Duration::from_millis(100)).await;
+            for character in digits.chars() {
+                if let Some(digit) = sipx_rtp::Digit::from_char(character) {
+                    let _ = media.send_digit(digit, Duration::from_millis(100)).await;
+                }
+            }
         }
         Ok::<(), String>(())
     };
@@ -348,10 +505,10 @@ async fn exchange(
         if output_device {
             Vec::new()
         } else {
-            crate::record(call, duration, crate::RECORD_IDLE).await
+            crate::record_media(&media, duration, crate::RECORD_IDLE).await
         }
     };
-    let device_audio = devices.run(media, duration);
+    let device_audio = devices.run(&media, duration, &cancelled);
 
     let (played, recorded, device_samples) = tokio::join!(
         tokio::time::timeout(duration, playing),
@@ -378,20 +535,97 @@ struct Exchange {
     samples_received: usize,
 }
 
-/// How long to wait for an answer.
-///
-/// Deliberately *under* 64·T1 — the transaction layer's own 32-second expiry — so that when a
-/// call goes unanswered it is always this bound that fires. Setting them equal makes which one
-/// wins a matter of scheduling, and the error a script reads changes between runs.
-const DEFAULT_TIMEOUT_SECS: u64 = 20;
+/// Report a deliberate stop which the call layer has already drained as CANCEL or late-2xx BYE.
+async fn report_pending_interrupt(
+    format: Format,
+    export: crate::counters::Export,
+    handle: &sipx_transport::Handle,
+    process_stop: &crate::stop::Stop,
+    cancellation: sipx_call::InvitationCancellation,
+    progress: &mut crate::progress::Call,
+) -> Exit {
+    handle.shutdown().await;
+    if let Some(message) = process_stop.failure() {
+        return fail(format, Exit::Failed, &message);
+    }
+    let mut report = with_cancellation(
+        Report::new()
+            .text("status", "interrupted")
+            .text("ended_by", "interrupt"),
+        &cancellation,
+    );
+    if let Some(signal) = process_stop.signal() {
+        report = report.text("stop_signal", signal);
+    }
+    match export.into_report(report) {
+        Ok(report) => {
+            progress.finish(crate::progress::CallEnd::Interrupted);
+            report.emit(format);
+            Exit::Success
+        }
+        Err(message) => {
+            progress.finish(crate::progress::CallEnd::Failed);
+            fail(format, Exit::Failed, &message)
+        }
+    }
+}
 
-fn report_failure(format: Format, error: &sipx_call::Error) -> Exit {
-    let exit = match error {
-        sipx_call::Error::Rejected { status, .. } => Exit::for_status(*status),
-        sipx_call::Error::NoResponse | sipx_call::Error::Cancelled(_) => Exit::Timeout,
-        _ => Exit::Failed,
+async fn report_failure(
+    format: Format,
+    export: crate::counters::Export,
+    handle: &sipx_transport::Handle,
+    error: &sipx_call::Error,
+    progress: &mut crate::progress::Call,
+) -> Exit {
+    let (exit, end) = match error {
+        sipx_call::Error::Rejected { status, .. } => {
+            let exit = Exit::for_status(*status);
+            (exit, crate::progress::CallEnd::Refused(exit.as_str()))
+        }
+        sipx_call::Error::NoResponse | sipx_call::Error::Cancelled(_) => {
+            (Exit::Timeout, crate::progress::CallEnd::Timeout)
+        }
+        _ => (Exit::Failed, crate::progress::CallEnd::Failed),
     };
-    fail(format, exit, &error.to_string())
+    handle.shutdown().await;
+    let report = Report::new()
+        .text("status", exit.as_str())
+        .text("error", error.to_string());
+    let report = match error {
+        sipx_call::Error::Cancelled(cancellation) => with_cancellation(report, cancellation),
+        _ => report,
+    };
+    match export.into_report(report) {
+        Ok(report) => {
+            progress.finish(end);
+            eprintln!("{}", report.render(format));
+            exit
+        }
+        Err(message) => {
+            progress.finish(crate::progress::CallEnd::Failed);
+            fail(format, Exit::Failed, &message)
+        }
+    }
+}
+
+fn with_cancellation(
+    mut report: Report,
+    cancellation: &sipx_call::InvitationCancellation,
+) -> Report {
+    if let Some(limit) = cancellation.invitation_limit {
+        report = report.millis("invitation_limit_ms", limit);
+    }
+    report
+        .millis("invitation_elapsed_ms", cancellation.invitation_elapsed)
+        .millis("cancel_limit_ms", cancellation.cleanup.limit)
+        .millis("cancel_elapsed_ms", cancellation.cleanup.elapsed)
+        .boolean("cancel_sent", cancellation.cleanup.cancel_sent())
+        .boolean(
+            "cancel_final_observed",
+            cancellation.cleanup.final_response_observed(),
+        )
+        .boolean("cancel_cleanup_completed", cancellation.cleanup.completed())
+        .boolean("cancel_cleanup_exhausted", cancellation.cleanup.exhausted())
 }
 
 /// Read and structurally validate a clip before signalling starts.
@@ -412,30 +646,6 @@ pub(crate) fn pcm_clip(clip: &Wav) -> Result<sipx_audio::Pcm, String> {
         sipx_audio::PcmSamples::Signed16(clip.samples.clone()),
     )
     .map_err(|error| error.to_string())
-}
-
-pub(crate) fn write_clip(path: &str, samples: &[i16], sample_rate: u32) -> Result<(), String> {
-    let file = std::fs::File::create(path).map_err(|error| format!("{path}: {error}"))?;
-    write_wav(
-        file,
-        &Wav {
-            sample_rate,
-            samples: samples.to_vec(),
-        },
-    )
-    .map_err(|error| format!("{path}: {error}"))
-}
-
-/// The address and port a URI names, if it names one directly.
-pub(crate) fn target_of(
-    uri: &Uri,
-    transport: TransportKind,
-) -> Option<(std::net::SocketAddr, String)> {
-    let Host::Ip(ip) = uri.host()? else {
-        return None;
-    };
-    let port = uri.port().unwrap_or_else(|| transport.default_port());
-    Some((std::net::SocketAddr::new(*ip, port), ip.to_string()))
 }
 
 /// Add the call's quality to a report.
@@ -463,6 +673,9 @@ fn with_quality(report: Report, quality: &sipx_rtp::Quality) -> Report {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    use clap::Parser as _;
+
+    use crate::cli::{Cli, Command};
     /// Both formats must carry the same facts — that is the rule the whole output module is
     /// built on, and a statistics block added to one and not the other is the easiest way to
     /// break it.
@@ -520,49 +733,7 @@ mod tests {
     }
 
     use super::*;
-
-    fn target(input: &str, transport: TransportKind) -> Option<std::net::SocketAddr> {
-        let uri = Uri::parse(bytes::Bytes::from(input.to_owned())).expect("a URI");
-        target_of(&uri, transport).map(|(addr, _)| addr)
-    }
-
-    #[test]
-    fn a_uri_naming_an_address_and_port_is_the_target() {
-        assert_eq!(
-            target("sip:bob@192.0.2.1:5080", TransportKind::Udp).map(|a| a.to_string()),
-            Some("192.0.2.1:5080".to_owned())
-        );
-    }
-
-    #[test]
-    fn a_uri_without_a_port_gets_the_default() {
-        assert_eq!(
-            target("sip:bob@192.0.2.1", TransportKind::Udp).map(|a| a.to_string()),
-            Some("192.0.2.1:5060".to_owned())
-        );
-    }
-
-    #[test]
-    fn a_uri_with_no_user_still_yields_its_host() {
-        assert_eq!(
-            target("sip:192.0.2.1:5060", TransportKind::Udp).map(|a| a.to_string()),
-            Some("192.0.2.1:5060".to_owned())
-        );
-    }
-
-    #[test]
-    fn uri_parameters_are_not_part_of_the_host() {
-        assert_eq!(
-            target("sip:bob@192.0.2.1:5060;transport=tcp", TransportKind::Tcp)
-                .map(|a| a.to_string()),
-            Some("192.0.2.1:5060".to_owned())
-        );
-    }
-
-    #[test]
-    fn a_name_is_not_a_target_this_command_can_use() {
-        assert!(target("sip:bob@example.com", TransportKind::Udp).is_none());
-    }
+    use sipx_audio::write_wav;
 
     /// The behavioural half of `S-27`, and the one that actually matters: the *command* refuses,
     /// not just a helper. This needs no network and no peer, which is the point — the check happens
@@ -572,17 +743,14 @@ mod tests {
     /// helper. It needs no network and no peer, which is the point — the refusal happens before a
     /// transport is chosen, so there is no window in which a cleartext datagram could leave.
     ///
-    /// **The first argument must be the subcommand.** `Args::positional` skips index 0 as the
-    /// subcommand name (`main.rs:137-139`), so a slice holding only the URI has *no* positional and
-    /// this returns `Usage` for "a URI to call is required" instead — which passes whether or not the
-    /// scheme is checked. That is how this test was first written, and it detected nothing.
     #[tokio::test]
     async fn the_dial_command_refuses_a_sips_uri_before_touching_the_network() {
-        let exit = Box::pin(run(
-            &["dial".to_owned(), "sips:bob@192.0.2.1".to_owned()],
-            Format::Text,
-        ))
-        .await;
+        let parsed =
+            Cli::try_parse_from(["sipx", "dial", "sips:bob@192.0.2.1"]).expect("valid syntax");
+        let Some(Command::Dial(options)) = parsed.command else {
+            panic!("dial command expected");
+        };
+        let exit = Box::pin(run(options, Format::Text)).await;
         assert_eq!(
             exit.code(),
             Exit::Usage.code(),

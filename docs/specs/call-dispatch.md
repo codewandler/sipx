@@ -282,22 +282,17 @@ machine rather than as a condition, with three states and no more:
 | `Answered` — a final response has gone out | `200`, and nothing else | answers (a second time, which is the caller's business) |
 | `Cancelled` — a CANCEL ended it | `200`, and nothing else | `Error::InvitationCancelled` |
 
-`Answered` is entered **immediately before the `200` is handed to the transport**, and that exact
-placement is the contract. A CANCEL arriving mid-answer must not put a `487` on the wire behind a
-`200`, because that is the one ordering that leaves the two ends disagreeing about whether there is
-a call — so the transition has to precede the send. But it must not precede it by any more than
-necessary, because every fallible step that builds the response (parsing the offer, binding the
-media port, negotiating the session, building the response, forming the dialog) can return `Err`
-with **nothing on the wire**. An invitation taken by one of those failures is one no CANCEL can
-ever end: the CANCEL draws its `200`, the `487` is suppressed because the invitation looks
-answered, and the INVITE transaction is left with no final response at all for the caller's Timer B
-to resolve. That is a request that reached sipx and produced no response, which is the failure this
-project does not ship.
+`Answered` is entered **immediately before the selected final response is handed to the transport**,
+and that exact placement is the contract. A CANCEL arriving mid-answer must not put a `487` on the
+wire behind a 2xx, 400 or 488 already selected for the INVITE, so the transition has to precede the
+send. But it must not precede it by any more than necessary. Successful response construction and
+the peer-caused failure responses in `call-initial-offer.md` build every byte first, then claim and
+send. A local failure for which no final response was built does not claim the invitation and a
+crossing CANCEL may still end it.
 
-So the claim is a hook (`call::Claim`) handed down from `Invitation::answer` and invoked at one
-line in `answer_negotiated`, directly above `endpoint.respond`. From that line on, the only
-fallible expression is `respond` itself; everything after it — the retransmit task, the event sink,
-the `Call` construction — is infallible.
+So the claim is a hook (`call::Claim`) handed down from `Invitation::answer` and invoked directly
+above the applicable `endpoint.respond`: in `answer_negotiated` for success and in the initial-offer
+refusal helper for 400/488. Response construction has already succeeded at that line.
 
 `respond` failing is therefore the single case that stays claimed, and it stays claimed on purpose:
 a stream transport can write part of a response before erroring, so a failure is not proof that
@@ -349,7 +344,7 @@ transaction below absorbs them and replays the response it already sent.
 | §9.1's added identifier term, with the transaction match satisfied | `a_cancel_on_the_right_transaction_from_the_wrong_dialog_is_refused` |
 | §9.3, the negative | `a_cancel_after_the_answer_does_not_tear_the_dialog_down` |
 | §9.5, and cancelled-once | `a_replayed_cancel_draws_the_same_answer_and_nothing_more` |
-| §9.3's claim placement — a failed answer sent nothing, so the invitation is still cancellable | `an_invitation_whose_answer_failed_before_responding_is_still_cancellable` |
+| §9.3's refusal claim placement — malformed SDP gets 400 before a late CANCEL can replace it | `a_malformed_invitation_is_refused_before_a_late_cancel` |
 | `Invitation::answer`'s future is still `Send`, so it can be spawned | `an_answer_future_is_spawnable` |
 | A third party cannot end someone else's invitation | `a_cancel_from_a_third_party_does_not_reach_someone_elses_invitation` |
 | §9.4 | `a_ringing_host_is_told_the_caller_gave_up_and_why` |
@@ -362,12 +357,10 @@ That second one is why both of those tests watch the invitation's **event stream
 loop survives a stray `487` and the caller's client transaction has already finished, so the only
 instrument sharp enough to see the difference is the event that a cancellation would have emitted.
 
-The claim's *placement* is mutation-checked from both sides, because it is a position rather than a
-condition and either direction of drift is a real bug. Moving it earlier — taking the invitation
-before the response is built, as this first did — fails
-`an_invitation_whose_answer_failed_before_responding_is_still_cancellable` with the INVITE never
-answered at all (`the INVITE is answered rather than left to time out: Elapsed(())`). Removing it
-altogether fails three: `a_cancel_after_the_answer_does_not_tear_the_dialog_down`,
+The claim's *placement* is checked from both sides because it is a position rather than a condition.
+`a_malformed_invitation_is_refused_before_a_late_cancel` proves the failure response is already the
+INVITE's final result when a later CANCEL arrives. Removing the success claim fails three:
+`a_cancel_after_the_answer_does_not_tear_the_dialog_down`,
 `a_caller_that_gives_up_before_the_answer_ends_the_invitation` and
 `a_ringing_host_is_told_the_caller_gave_up_and_why`.
 

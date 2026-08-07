@@ -7,8 +7,13 @@ use bytes::Bytes;
 use sipx_sip::{Header, HeaderName};
 
 /// Parse every repeatable `--header 'Name: value'` occurrence in order.
-pub(crate) fn from_args(args: &crate::Args<'_>) -> Result<Vec<Header>, String> {
-    args.values("header").map(parse).collect()
+pub(crate) fn from_options(options: &crate::cli::HeaderOptions) -> Result<Vec<Header>, String> {
+    options
+        .header
+        .iter()
+        .map(String::as_str)
+        .map(parse)
+        .collect()
 }
 
 pub(crate) fn parse(raw: &str) -> Result<Header, String> {

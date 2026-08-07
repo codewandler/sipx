@@ -93,6 +93,11 @@ Terminal two calls it and hangs up after two seconds:
 sipx dial sip:you@127.0.0.1:5060 --duration 2 --timeout 5 --json
 ```
 
+Add `-v` to either call role for bounded INFO progress on stderr: dial reports placed, answered and
+ended; answer reports waiting, caller observed, answered and ended. `load -v` emits one aggregate
+admission record and one aggregate summary, never one INFO line per attempted call. Result text or
+JSON remains on stdout, so the same invocation stays safe in a pipeline.
+
 That proves the signalling and media session without needing an account. Add `--play hello.wav` or
 `--record reply.wav` to move audio samples; WAV input is 16-bit mono at the negotiated clock
 (8 kHz for G.711, 44.1 or 8 kHz for L16, or 48 kHz for an Opus-only call), and recordings preserve
@@ -105,12 +110,15 @@ registration, expected output, and installing from `main`.
 The workspace deliberately publishes modular crates rather than one facade crate. Pin every sipx
 dependency to the same exact prerelease while the API remains pre-1.0:
 
+<!-- BEGIN generated:answer-consumer-dependencies -->
 ```toml
 [dependencies]
 sipx-call = "=1.0.0-rc.2"
+sipx-sip = "=1.0.0-rc.2"
 sipx-transport = "=1.0.0-rc.2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
+<!-- END generated:answer-consumer-dependencies -->
 
 The call guides inline real example files that CI compiles:
 

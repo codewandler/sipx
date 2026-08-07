@@ -72,9 +72,13 @@ cargo build --workspace --examples --quiet
 
 echo "==> testing the public-doc generators and guards"
 python3 scripts/test-sync-website.py
+python3 scripts/test-published-onboarding.py
 
 echo "==> checking the inlined samples match the files"
 ./scripts/sync-website.py --check
+
+echo "==> compiling the published answer consumer"
+./scripts/check-published-onboarding.py --check
 
 # The unpublished half. Docusaurus never sees `docs/`, so its link graph is checked here or
 # nowhere — and anchors are part of the link, not decoration on it.
@@ -94,6 +98,9 @@ fi
 # The exit code is the build's, not tee's — see `pipefail` above.
 npm run build 2>&1 | tee "$site_log"
 cd "$HERE"
+
+echo "==> checking the built onboarding sentence"
+./scripts/check-published-onboarding.py --built
 
 # Check 5. A handler nobody audited, or one Docusaurus adds in a later version, would otherwise
 # print here and exit 0 all over again — this time under a heading we have not read yet.

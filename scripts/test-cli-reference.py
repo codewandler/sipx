@@ -93,6 +93,18 @@ class JsonComparison(unittest.TestCase):
         problems = checker.json_drift(DOCUMENT, actual)
         self.assertTrue(any("sipx.new.v1" in problem for problem in problems))
 
+    def test_a_versioned_producer_without_strict_output_coverage_is_a_failure(self):
+        actual = {"sipx.test.v1": checker.JsonContract("dial", {"schema"})}
+        problems = checker.strict_output_drift(actual, set())
+        self.assertTrue(any("dial" in problem for problem in problems))
+
+    def test_current_versioned_producers_have_strict_process_coverage(self):
+        actual = checker.discover_json_contracts(ROOT)
+        covered = checker.strict_result_producers(
+            checker.STRICT_JSON_TEST.read_text(encoding="utf-8")
+        )
+        self.assertEqual(checker.strict_output_drift(actual, covered), [])
+
     def test_current_source_inventory_matches_the_public_table(self):
         document = checker.DOCUMENT.read_text(encoding="utf-8")
         self.assertEqual(checker.json_drift(document, checker.discover_json_contracts(ROOT)), [])

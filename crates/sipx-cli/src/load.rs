@@ -5,49 +5,46 @@ use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use bytes::Bytes;
 use sipx_call::load::{AdmissionEnd, BoundedPlan, Cause, Stop, run_bounded};
 use sipx_call::{Credentials, DialOptions};
-use sipx_sip::{Address, Uri};
+use sipx_sip::build::RequestBuilder;
+use sipx_sip::headers::CSeq;
+use sipx_sip::{Address, HeaderName, Method, Request, Response, Uri};
 use sipx_transport::{Config as TransportConfig, bind};
 
+use crate::cli::{LoadOptions, WorkloadMode};
 use crate::output::{Exit, Format, fail};
 
-pub(crate) const HELP: &str = "\
-sipx load — place a finite, reproducible call load
-
-USAGE:
-    sipx load <URI> --rate <CALLS/S> --concurrency <N> (--calls <N> | --duration <S>) [OPTIONS]
-
-ARGS:
-    <URI>             Target called by every admitted call
-
-REQUIRED OPTIONS:
-    --rate <CALLS/S>  Positive finite arrival rate
-    --concurrency <N> Positive maximum active calls
-
-BOUNDS:
-    --calls <N>       Stop after admitting this many calls
-    --duration <S>    Stop admission after this many seconds
-    --call-duration <S> End each answered call after this many seconds (default 0)
-    --timeout <S>     Bound each call setup (default 20)
-
-REPRODUCIBILITY:
-    --seed <N>        Arrival-jitter and media seed (default 0)
-
-CALL OPTIONS:
-    --from <URI>      Our own address (default sip:sipx@<local>)
-    --password <P>    Password. Prefer SIPX_PASSWORD, since argv is world-readable
-    --local <ADDR>    Local address to bind (default 0.0.0.0:0)
-    --transport <T>   Signalling: udp, tcp, tls, ws or wss (default udp)
-    --tcp             Legacy alias for --transport tcp
-    --tls-server-name <N>  Certificate identity to verify (default URI host)
-    --tls-ca <FILE>   Add PEM trust roots to the platform store
-    --tls-cert <FILE> Client certificate chain for mutual TLS (with --tls-key)
-    --tls-key <FILE>  Client private key for mutual TLS (with --tls-cert)
-    --json            Emit the stable sipx.load.v1 summary as one JSON line
-";
-
 const CLEANUP: Duration = Duration::from_secs(40);
+const WORKLOAD_MODE_FIELD: &[u8] = b"X-Sipx-Workload-Mode";
+pub(crate) const MODE_MISMATCH_REASON: &str = "Workload Mode Mismatch";
+
+pub(crate) fn workload_mode_name() -> HeaderName {
+    HeaderName::Other(Bytes::from_static(WORKLOAD_MODE_FIELD))
+}
+
+pub(crate) fn requested_mode(request: &Request) -> Result<Option<WorkloadMode>, String> {
+    let name = workload_mode_name();
+    match request.headers.count(&name) {
+        0 => Ok(None),
+        1 => {
+            let value = request
+                .headers
+                .value(&name)
+                .ok_or_else(|| "workload mode field disappeared".to_owned())?;
+            match value.as_ref() {
+                b"signalling" => Ok(Some(WorkloadMode::Signalling)),
+                b"generated-media" => Ok(Some(WorkloadMode::GeneratedMedia)),
+                _ => Err(format!(
+                    "invalid X-Sipx-Workload-Mode value {:?}",
+                    String::from_utf8_lossy(&value)
+                )),
+            }
+        }
+        _ => Err("repeated X-Sipx-Workload-Mode field".to_owned()),
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 struct Limits {
@@ -58,28 +55,29 @@ struct Limits {
     call_duration: Duration,
     setup_timeout: Duration,
     seed: u64,
+    mode: WorkloadMode,
 }
 
 impl Limits {
-    fn parse(args: &crate::Args<'_>) -> Result<Self, String> {
-        let rate = parse_positive_f64(args.value("rate"), "--rate")?;
+    fn parse(options: &LoadOptions) -> Result<Self, String> {
+        let rate = positive_f64(options.rate, "--rate")?;
         let interval = Duration::try_from_secs_f64(1.0 / rate)
             .map_err(|_| "--rate cannot be represented by the scheduler clock".to_owned())?;
         if interval.is_zero() {
             return Err("--rate is faster than the scheduler clock can represent".to_owned());
         }
-        let concurrency = parse_positive_usize(args.value("concurrency"), "--concurrency")?;
+        let concurrency = positive_usize(options.concurrency, "--concurrency")?;
         if concurrency > tokio::sync::Semaphore::MAX_PERMITS {
             return Err(format!(
                 "--concurrency must not exceed {}",
                 tokio::sync::Semaphore::MAX_PERMITS
             ));
         }
-        let calls = args
-            .value("calls")
-            .map(|value| parse_positive_usize(Some(value), "--calls"))
+        let calls = options
+            .calls
+            .map(|value| positive_usize(value, "--calls"))
             .transpose()?;
-        let duration = args.number("duration").map(Duration::from_secs);
+        let duration = options.duration.map(Duration::from_secs);
         if duration.is_some_and(|value| value.is_zero()) {
             return Err("--duration must be greater than zero for load admission".to_owned());
         }
@@ -91,9 +89,9 @@ impl Limits {
                 "load requires at least one finite bound: --calls or --duration".to_owned(),
             );
         }
-        let seed = parse_u64(args.value("seed").unwrap_or("0"), "--seed")?;
-        let call_duration = Duration::from_secs(args.number("call-duration").unwrap_or(0));
-        let setup_timeout = Duration::from_secs(args.number("timeout").unwrap_or(20));
+        let seed = options.seed;
+        let call_duration = Duration::from_secs(options.call_duration);
+        let setup_timeout = Duration::from_secs(options.timeout);
 
         Ok(Self {
             rate,
@@ -103,104 +101,82 @@ impl Limits {
             call_duration,
             setup_timeout,
             seed,
+            mode: options.mode,
         })
     }
 }
 
-fn parse_positive_f64(value: Option<&str>, flag: &str) -> Result<f64, String> {
-    let Some(value) = value else {
-        return Err(format!("{flag} is required"));
-    };
-    let parsed = value
-        .parse::<f64>()
-        .map_err(|_| format!("{flag} must be a positive finite number, not {value:?}"))?;
-    if !parsed.is_finite() || parsed <= 0.0 {
+fn positive_f64(value: f64, flag: &str) -> Result<f64, String> {
+    if !value.is_finite() || value <= 0.0 {
         return Err(format!(
             "{flag} must be a positive finite number, not {value:?}"
         ));
     }
-    Ok(parsed)
+    Ok(value)
 }
 
-fn parse_positive_usize(value: Option<&str>, flag: &str) -> Result<usize, String> {
-    let Some(value) = value else {
-        return Err(format!("{flag} is required"));
-    };
-    let parsed = value
-        .parse::<usize>()
-        .map_err(|_| format!("{flag} must be a positive whole number, not {value:?}"))?;
-    if parsed == 0 {
+fn positive_usize(value: usize, flag: &str) -> Result<usize, String> {
+    if value == 0 {
         return Err(format!("{flag} must be greater than zero"));
     }
-    Ok(parsed)
-}
-
-fn parse_u64(value: &str, flag: &str) -> Result<u64, String> {
-    value.parse::<u64>().map_err(|_| {
-        format!(
-            "{flag} must be a whole number from 0 through {}, not {value:?}",
-            u64::MAX
-        )
-    })
+    Ok(value)
 }
 
 #[derive(Debug, Clone, Copy)]
 struct Measurement {
     setup: Duration,
     status: u16,
-    quality: sipx_rtp::Quality,
+    quality: Option<sipx_rtp::Quality>,
 }
 
 #[allow(
     clippy::too_many_lines,
     reason = "validation, endpoint construction, owned execution and final reporting stay in lifecycle order"
 )]
-pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
-    let args = match crate::arguments(raw, HELP, format) {
-        Ok(args) => args,
-        Err(exit) => return exit,
-    };
-    let Some(uri_text) = args.positional() else {
-        eprint!("{HELP}");
-        return fail(format, Exit::Usage, "a target URI is required");
-    };
-    let limits = match Limits::parse(&args) {
+pub(crate) async fn run(command: LoadOptions, format: Format) -> Exit {
+    let uri_text = command.uri.as_str();
+    let limits = match Limits::parse(&command) {
         Ok(limits) => limits,
         Err(message) => return fail(format, Exit::Usage, &message),
     };
     let Ok(to) = Uri::parse(bytes::Bytes::from(uri_text.to_owned())) else {
         return fail(format, Exit::Usage, &format!("not a SIP URI: {uri_text}"));
     };
-    let transport = match crate::signalling::Selection::from_args(&args, to.scheme().is_secure()) {
+    let mut transport = match crate::signalling::Selection::from_options(
+        &command.signalling,
+        to.scheme().is_secure(),
+    ) {
         Ok(transport) => transport,
         Err(message) => return fail(format, Exit::Usage, &message),
     };
-    let Some((target_addr, server_name)) = crate::dial::target_of(&to, transport.kind()) else {
-        return fail(
-            format,
-            Exit::Usage,
-            &format!("{uri_text} must name an address and port"),
-        );
+    let resolver = crate::destination::Resolver::system();
+    let candidates = match resolver
+        .resolve(&to, None, transport, &command.signalling)
+        .await
+    {
+        Ok(candidates) => candidates,
+        Err(error) => return fail(format, error.exit(), &error.to_string()),
     };
-    let target = match transport.target(&args, target_addr, &server_name) {
-        Ok(target) => target,
-        Err(message) => return fail(format, Exit::Usage, &message),
+    let target = match crate::destination::first(&candidates) {
+        Ok(target) => target.clone(),
+        Err(error) => return fail(format, error.exit(), &error.to_string()),
     };
-    let Ok(local) = args.value("local").unwrap_or("0.0.0.0:0").parse() else {
-        return fail(format, Exit::Usage, "--local must be host:port");
-    };
+    let target_addr = target.addr;
+    transport = transport.negotiated(target.transport);
+    let local = command.local;
     let media_address: IpAddr = crate::advertise::reachable_ip(local, target_addr.ip());
-    let from = args
-        .value("from")
+    let from = command
+        .from
+        .as_deref()
         .map_or_else(|| format!("<sip:sipx@{media_address}>"), str::to_owned);
-    let credentials = match credentials(&args, &from) {
+    let credentials = match credentials(&command, &from) {
         Ok(credentials) => credentials,
         Err(message) => return fail(format, Exit::Usage, &message),
     };
 
     let mut config = TransportConfig::new(local);
     config.sent_by = media_address.to_string();
-    if let Err(message) = transport.configure_client(&args, &mut config) {
+    if let Err(message) = transport.configure_client(&command.signalling, &mut config) {
         return fail(format, Exit::Usage, &message);
     }
     let (handle, _incoming) = match bind(config).await {
@@ -208,28 +184,49 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         Err(error) => return fail(format, Exit::Failed, &format!("bind: {error}")),
     };
 
+    let signalling_from = from.clone();
     let mut options = DialOptions::new(from, media_address);
     if !limits.setup_timeout.is_zero() {
         options = options.with_timeout(limits.setup_timeout);
     }
-    if let Some(credentials) = credentials {
+    let mode_header = match sipx_sip::Header::build(
+        workload_mode_name(),
+        Bytes::from_static(limits.mode.as_str().as_bytes()),
+    ) {
+        Ok(header) => header,
+        Err(error) => return fail(format, Exit::Failed, &error.to_string()),
+    };
+    options = options.with_header(mode_header);
+    if let Some(credentials) = credentials.clone() {
         options = options.with_credentials(credentials);
     }
 
     let stop = Stop::new();
     let interrupt = stop.clone();
+    let process_stop = crate::stop::Stop::new();
+    let signal_listener = process_stop.clone();
     let signal_task = tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            interrupt.request();
-        }
+        signal_listener.wait().await;
+        interrupt.request();
     });
     let measurements = Arc::new(Mutex::new(Vec::<Measurement>::new()));
     let observed = Arc::clone(&measurements);
     let handle = Arc::new(handle);
     let to = Arc::new(to);
+    let signalling_from = Arc::new(signalling_from);
     let options = Arc::new(options);
-    let target = Arc::new(target);
+    let credentials = Arc::new(credentials);
+    let candidates = Arc::new(candidates);
 
+    crate::progress::LoadStart {
+        target: uri_text,
+        mode: limits.mode.as_str(),
+        rate: limits.rate,
+        concurrency: limits.concurrency,
+        calls: limits.calls,
+        duration: limits.duration,
+    }
+    .emit();
     let bounded = run_bounded(
         BoundedPlan {
             calls: limits.calls,
@@ -243,59 +240,34 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         move |index, stop| {
             let handle = Arc::clone(&handle);
             let to = Arc::clone(&to);
+            let signalling_from = Arc::clone(&signalling_from);
             let options = Arc::clone(&options);
-            let target = Arc::clone(&target);
+            let credentials = Arc::clone(&credentials);
+            let candidates = Arc::clone(&candidates);
             let measurements = Arc::clone(&observed);
             async move {
-                let started = tokio::time::Instant::now();
-                let mut call = sipx_call::dial_until(
+                let measurement = run_attempt(
+                    index,
+                    limits,
                     &handle,
-                    (*target).clone(),
+                    &candidates,
                     &to,
+                    &signalling_from,
                     &options,
-                    stop.requested(),
+                    credentials.as_ref().as_ref(),
+                    &stop,
                 )
                 .await
-                .map_err(|error| {
-                    let cause = classify(error);
-                    if matches!(&cause, Cause::Other(_)) {
+                .inspect_err(|cause| {
+                    if matches!(cause, Cause::Other(_)) {
                         stop.request();
                     }
-                    cause
                 })?;
-                let setup = started.elapsed();
-                let status = call.initial_status();
-                // One bounded packet is enough to make media deterministic and observable without
-                // allocating in proportion to an operator-supplied call duration.
-                let frame = deterministic_frame(limits.seed, index);
-                let played = call.media().play(&frame, frame.len()).await;
-                if !limits.call_duration.is_zero() {
-                    tokio::select! {
-                        () = stop.requested() => {}
-                        () = tokio::time::sleep(limits.call_duration) => {}
-                    }
-                }
-                let quality = call.media().quality().await;
-                let hung_up = call.hang_up().await;
-                let measurement = Measurement {
-                    setup,
-                    status,
-                    quality,
-                };
                 let Ok(mut measurements) = measurements.lock() else {
                     stop.request();
                     return Err(Cause::Other("measurement store poisoned".to_owned()));
                 };
                 measurements.push(measurement);
-                drop(measurements);
-                if let Err(error) = hung_up {
-                    stop.request();
-                    return Err(Cause::Other(format!("hang up failed: {error}")));
-                }
-                if !played {
-                    stop.request();
-                    return Err(Cause::Other("media playback failed".to_owned()));
-                }
                 Ok(())
             }
         },
@@ -304,17 +276,440 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
 
     signal_task.abort();
     let _ = signal_task.await;
+    let signal_failure = process_stop.failure();
     let measurements = match measurements.lock() {
         Ok(values) => values.clone(),
         Err(_) => return fail(format, Exit::Failed, "measurement store poisoned"),
     };
-    emit_summary(format, uri_text, limits, &bounded, &measurements);
+    emit_summary(
+        format,
+        uri_text,
+        limits,
+        &bounded,
+        &measurements,
+        process_stop.signal(),
+        signal_failure.as_deref(),
+    );
 
-    if !bounded.cleanup_complete || has_internal_failure(&bounded.outcome.failures) {
+    if signal_failure.is_some()
+        || !bounded.cleanup_complete
+        || has_internal_failure(&bounded.outcome.failures)
+    {
         Exit::Failed
     } else {
         Exit::Success
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_attempt(
+    index: usize,
+    limits: Limits,
+    handle: &sipx_transport::Handle,
+    candidates: &[sipx_transport::Target],
+    to: &Uri,
+    from: &str,
+    options: &DialOptions,
+    credentials: Option<&Credentials>,
+    stop: &Stop,
+) -> Result<Measurement, Cause> {
+    match limits.mode {
+        WorkloadMode::Signalling => {
+            let identity = SignallingIdentity::new(handle, to, from, limits.seed, index)?;
+            let mut last_transport = None;
+            for target in candidates.iter().take(crate::destination::MAX_ATTEMPTS) {
+                match run_signalling_attempt(
+                    handle,
+                    target.clone(),
+                    to,
+                    &identity,
+                    credentials,
+                    limits,
+                    stop,
+                )
+                .await
+                {
+                    Err(Cause::Transport) => last_transport = Some(Cause::Transport),
+                    result => return result,
+                }
+            }
+            Err(last_transport.unwrap_or(Cause::Transport))
+        }
+        WorkloadMode::GeneratedMedia => {
+            run_generated_media_attempt(handle, candidates, to, options, limits, index, stop).await
+        }
+    }
+}
+
+async fn run_generated_media_attempt(
+    handle: &sipx_transport::Handle,
+    candidates: &[sipx_transport::Target],
+    to: &Uri,
+    options: &DialOptions,
+    limits: Limits,
+    index: usize,
+    stop: &Stop,
+) -> Result<Measurement, Cause> {
+    let started = tokio::time::Instant::now();
+    let mut last_transport = None;
+    let mut connected = None;
+    for target in candidates.iter().take(crate::destination::MAX_ATTEMPTS) {
+        match sipx_call::dial_until(handle, target.clone(), to, options, stop.requested()).await {
+            Ok(call) => {
+                connected = Some(call);
+                break;
+            }
+            Err(error @ sipx_call::Error::Transport(_)) => last_transport = Some(error),
+            Err(error) => {
+                last_transport = Some(error);
+                break;
+            }
+        }
+    }
+    let mut call = connected.ok_or_else(|| {
+        let error = last_transport.unwrap_or(sipx_call::Error::NoResponse);
+        classify(error)
+    })?;
+    let setup = started.elapsed();
+    let status = call.initial_status();
+    // One bounded packet is enough to make media deterministic and observable without allocating
+    // in proportion to an operator-supplied call duration.
+    let frame = deterministic_frame(limits.seed, index);
+    let played = call.media().play(&frame, frame.len()).await;
+    wait_for_call_end(limits.call_duration, stop).await;
+    let quality = call.media().quality().await;
+    call.hang_up()
+        .await
+        .map_err(|error| Cause::Other(format!("hang up failed: {error}")))?;
+    if !played {
+        return Err(Cause::Other("media playback failed".to_owned()));
+    }
+    Ok(Measurement {
+        setup,
+        status,
+        quality: Some(quality),
+    })
+}
+
+#[derive(Debug)]
+struct SignallingIdentity {
+    to: Bytes,
+    from: Bytes,
+    call_id: Bytes,
+    contact: Bytes,
+}
+
+impl SignallingIdentity {
+    fn new(
+        handle: &sipx_transport::Handle,
+        to: &Uri,
+        from: &str,
+        seed: u64,
+        index: usize,
+    ) -> Result<Self, Cause> {
+        let from = Address::parse(from.as_bytes(), "From")
+            .map_err(|error| Cause::Other(format!("invalid load From address: {error}")))?;
+        let run_tail = seed.rotate_left(29) ^ 0x6c6f_6164_2d72_756e;
+        let run_id = format!("{seed:016x}{run_tail:016x}");
+        let index = u64::try_from(index).unwrap_or(u64::MAX);
+        Ok(Self {
+            to: Bytes::from(format!("<{}>", String::from_utf8_lossy(&to.to_bytes()))),
+            from: Bytes::from(format!(
+                "<{}>;tag=f-{seed:016x}-{index:x}",
+                String::from_utf8_lossy(&from.uri.to_bytes())
+            )),
+            call_id: Bytes::from(format!("cl-{run_id}-{index}@driver.invalid")),
+            contact: Bytes::from(format!("<sip:load@{}>", handle.advertised())),
+        })
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_signalling_attempt(
+    handle: &sipx_transport::Handle,
+    target: sipx_transport::Target,
+    to: &Uri,
+    identity: &SignallingIdentity,
+    credentials: Option<&Credentials>,
+    limits: Limits,
+    stop: &Stop,
+) -> Result<Measurement, Cause> {
+    let started = tokio::time::Instant::now();
+    let mut authorization = None;
+    let mut invite_cseq = 1_u32;
+    let (invite, accepted) = loop {
+        let invite = signalling_invite(
+            handle,
+            &target,
+            to,
+            identity,
+            invite_cseq,
+            authorization.take(),
+        )?;
+        let mut responses = handle
+            .send(invite.clone(), target.clone())
+            .await
+            .map_err(|_| Cause::Transport)?;
+        let response = wait_for_invite(handle, &mut responses, limits.setup_timeout, stop).await?;
+        if matches!(response.status.code(), 401 | 407)
+            && let Some(credentials) = credentials
+            && invite_cseq == 1
+            && let Some(header) = authorization_for(&invite, &response, credentials)
+        {
+            invite_cseq = invite_cseq.saturating_add(1);
+            authorization = Some(header);
+            continue;
+        }
+        if !response.status.is_success() {
+            return Err(rejection_cause(&response));
+        }
+        break (invite, response);
+    };
+
+    let mut dialog = sipx_call::Dialog::from_response(&invite, &accepted)
+        .ok_or_else(|| Cause::Other("signalling answer created no dialog".to_owned()))?;
+    let ack = signalling_dialog_request(handle, &target, &dialog, &Method::Ack, invite_cseq)?;
+    handle
+        .send_directly(ack, target.clone())
+        .await
+        .map_err(|_| Cause::Transport)?;
+    let setup = started.elapsed();
+    wait_for_call_end(limits.call_duration, stop).await;
+
+    let bye_cseq = dialog.next_cseq();
+    let bye = signalling_dialog_request(handle, &target, &dialog, &Method::Bye, bye_cseq)?;
+    let mut responses = handle
+        .send(bye, target)
+        .await
+        .map_err(|_| Cause::Transport)?;
+    let response = responses.final_response().await.ok_or(Cause::Timeout)?;
+    if !signalling_response_matches(&response, &dialog, bye_cseq) {
+        return Err(Cause::Other(
+            "signalling BYE received an invalid response".to_owned(),
+        ));
+    }
+    if !response.status.is_success() {
+        return Err(Cause::Other(format!(
+            "hang up failed: rejected {} {}",
+            response.status.code(),
+            String::from_utf8_lossy(&response.reason)
+        )));
+    }
+    Ok(Measurement {
+        setup,
+        status: accepted.status.code(),
+        quality: None,
+    })
+}
+
+fn signalling_invite(
+    handle: &sipx_transport::Handle,
+    target: &sipx_transport::Target,
+    to: &Uri,
+    identity: &SignallingIdentity,
+    cseq: u32,
+    authorization: Option<sipx_sip::Header>,
+) -> Result<Request, Cause> {
+    let builder = RequestBuilder::new(Method::Invite, to.clone())
+        .header(
+            HeaderName::Via,
+            Bytes::from(format!(
+                "SIP/2.0/{} {};rport;branch={}",
+                target.transport.as_str(),
+                handle.sent_by_for(target.transport),
+                sipx_transport::new_branch()
+            )),
+        )
+        .map_err(build_cause)?
+        .header(HeaderName::To, identity.to.clone())
+        .map_err(build_cause)?
+        .header(HeaderName::From, identity.from.clone())
+        .map_err(build_cause)?
+        .header(HeaderName::CallId, identity.call_id.clone())
+        .map_err(build_cause)?
+        .cseq(cseq, &Method::Invite)
+        .map_err(build_cause)?
+        .header(HeaderName::Contact, identity.contact.clone())
+        .map_err(build_cause)?
+        .header(
+            workload_mode_name(),
+            Bytes::from_static(WorkloadMode::Signalling.as_str().as_bytes()),
+        )
+        .map_err(build_cause)?
+        .max_forwards(70);
+    let mut request = builder.build();
+    if let Some(header) = authorization {
+        request.headers.push(header);
+    }
+    Ok(request)
+}
+
+fn signalling_dialog_request(
+    handle: &sipx_transport::Handle,
+    target: &sipx_transport::Target,
+    dialog: &sipx_call::Dialog,
+    method: &Method,
+    cseq: u32,
+) -> Result<Request, Cause> {
+    let (local, remote) = dialog.local_and_remote();
+    let (uri, routes) = dialog.request_target();
+    let mut builder = RequestBuilder::new(method.clone(), uri)
+        .header(
+            HeaderName::Via,
+            Bytes::from(format!(
+                "SIP/2.0/{} {};rport;branch={}",
+                target.transport.as_str(),
+                handle.sent_by_for(target.transport),
+                sipx_transport::new_branch()
+            )),
+        )
+        .map_err(build_cause)?
+        .header(HeaderName::To, Bytes::from(remote))
+        .map_err(build_cause)?
+        .header(HeaderName::From, Bytes::from(local))
+        .map_err(build_cause)?
+        .header(HeaderName::CallId, Bytes::from(dialog.id.call_id.clone()))
+        .map_err(build_cause)?
+        .cseq(cseq, method)
+        .map_err(build_cause)?
+        .max_forwards(70);
+    for route in routes {
+        builder = builder
+            .header(HeaderName::Route, Bytes::from(route))
+            .map_err(build_cause)?;
+    }
+    Ok(builder.build())
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "the function is passed directly to Result::map_err at each builder step"
+)]
+fn build_cause(error: sipx_sip::BuildError) -> Cause {
+    Cause::Other(format!(
+        "could not build signalling workload request: {error}"
+    ))
+}
+
+async fn wait_for_invite(
+    handle: &sipx_transport::Handle,
+    responses: &mut sipx_transport::Responses,
+    within: Duration,
+    stop: &Stop,
+) -> Result<Response, Cause> {
+    let deadline = (!within.is_zero()).then(|| tokio::time::Instant::now() + within);
+    loop {
+        tokio::select! {
+            biased;
+            () = stop.requested() => {
+                return cancel_signalling_invite(handle, responses)
+                    .await
+                    .ok_or(Cause::Timeout);
+            }
+            () = wait_until(deadline), if deadline.is_some() => {
+                return cancel_signalling_invite(handle, responses)
+                    .await
+                    .ok_or(Cause::Timeout);
+            }
+            event = responses.next() => match event {
+                Some(sipx_sip::transaction::TuEvent::Response(response)) if response.status.is_final() => {
+                    return Ok(*response);
+                }
+                Some(sipx_sip::transaction::TuEvent::Timeout) => return Err(Cause::Timeout),
+                Some(sipx_sip::transaction::TuEvent::TransportError) | None => {
+                    return Err(Cause::Transport);
+                }
+                Some(_) => {}
+            }
+        }
+    }
+}
+
+async fn cancel_signalling_invite(
+    handle: &sipx_transport::Handle,
+    responses: &mut sipx_transport::Responses,
+) -> Option<Response> {
+    // The load runner's 40-second cleanup cap is the bound on failure. The transport helper waits
+    // for the RFC 3261 provisional-response precondition and preserves a crossing final response.
+    match handle.cancel_invite(responses, None).await.ok()? {
+        sipx_transport::CancelInviteOutcome::FinalResponse { response, .. } => Some(response),
+        sipx_transport::CancelInviteOutcome::Sent(mut cancellation) => {
+            let _ = cancellation.outcome().await;
+            // A successful final response can cross a correctly created CANCEL. It still creates
+            // a dialog and therefore must be returned to the ACK/BYE path above.
+            responses
+                .final_response()
+                .await
+                .filter(|response| response.status.is_success())
+        }
+        _ => None,
+    }
+}
+
+async fn wait_until(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn wait_for_call_end(duration: Duration, stop: &Stop) {
+    if duration.is_zero() {
+        return;
+    }
+    tokio::select! {
+        () = stop.requested() => {}
+        () = tokio::time::sleep(duration) => {}
+    }
+}
+
+fn authorization_for(
+    request: &Request,
+    response: &Response,
+    credentials: &Credentials,
+) -> Option<sipx_sip::Header> {
+    let from_proxy = response.status.code() == 407;
+    let name = if from_proxy {
+        HeaderName::ProxyAuthenticate
+    } else {
+        HeaderName::WwwAuthenticate
+    };
+    let challenges = response
+        .headers
+        .get_all(&name)
+        .filter_map(|header| sipx_sip::auth::Challenge::parse(&header.value(), from_proxy))
+        .collect();
+    let challenge = sipx_sip::auth::strongest(challenges)?;
+    let uri_bytes = request.uri.to_bytes();
+    let uri = String::from_utf8_lossy(&uri_bytes);
+    let cnonce = sipx_transport::new_branch();
+    let value = sipx_sip::auth::respond(&challenge, credentials, "INVITE", &uri, 1, &cnonce);
+    sipx_sip::Header::build(challenge.response_header(), Bytes::from(value)).ok()
+}
+
+fn rejection_cause(response: &Response) -> Cause {
+    let reason = String::from_utf8_lossy(&response.reason);
+    if response.status.code() == 488 && reason == MODE_MISMATCH_REASON {
+        Cause::Other(format!(
+            "workload mode mismatch: peer refused {}",
+            WorkloadMode::Signalling.as_str()
+        ))
+    } else {
+        Cause::Rejected(response.status.code())
+    }
+}
+
+fn signalling_response_matches(response: &Response, dialog: &sipx_call::Dialog, cseq: u32) -> bool {
+    response.headers.count(&HeaderName::CallId) == 1
+        && response
+            .headers
+            .value(&HeaderName::CallId)
+            .is_some_and(|value| value.as_ref() == dialog.id.call_id.as_slice())
+        && response
+            .headers
+            .typed::<CSeq>()
+            .and_then(Result::ok)
+            .is_some_and(|value| value.sequence == cseq && value.method == Method::Bye)
 }
 
 fn deterministic_frame(seed: u64, index: usize) -> [i16; 160] {
@@ -330,11 +725,8 @@ fn deterministic_frame(seed: u64, index: usize) -> [i16; 160] {
     frame
 }
 
-fn credentials(args: &crate::Args<'_>, from: &str) -> Result<Option<Credentials>, String> {
-    let password = args
-        .value("password")
-        .map(str::to_owned)
-        .or_else(|| std::env::var("SIPX_PASSWORD").ok());
+fn credentials(options: &LoadOptions, from: &str) -> Result<Option<Credentials>, String> {
+    let password = options.password.clone();
     let Some(password) = password else {
         return Ok(None);
     };
@@ -348,6 +740,13 @@ fn credentials(args: &crate::Args<'_>, from: &str) -> Result<Option<Credentials>
 
 fn classify(error: sipx_call::Error) -> Cause {
     match error {
+        sipx_call::Error::Rejected {
+            status: 488,
+            reason,
+        } if reason == MODE_MISMATCH_REASON => Cause::Other(format!(
+            "workload mode mismatch: peer refused {}",
+            WorkloadMode::GeneratedMedia.as_str()
+        )),
         sipx_call::Error::Rejected { status, .. } => Cause::Rejected(status),
         sipx_call::Error::Cancelled(_) | sipx_call::Error::NoResponse => Cause::Timeout,
         sipx_call::Error::Transport(_) | sipx_call::Error::Io(_) => Cause::Transport,
@@ -356,17 +755,15 @@ fn classify(error: sipx_call::Error) -> Cause {
 }
 
 fn has_internal_failure(failures: &BTreeMap<Cause, usize>) -> bool {
-    failures.keys().any(|cause| {
-        matches!(
-            cause,
-            Cause::Other(message)
-                if message == "panicked"
-                    || message == "cancelled"
-                    || message == "cleanup budget exhausted"
-                    || message == "measurement store poisoned"
-                    || message == "media playback failed"
-                    || message.starts_with("hang up failed:")
-        )
+    failures
+        .keys()
+        .any(|cause| matches!(cause, Cause::Other(_)))
+}
+
+fn internal_reason(failures: &BTreeMap<Cause, usize>) -> Option<&str> {
+    failures.keys().find_map(|cause| match cause {
+        Cause::Other(message) => Some(message.as_str()),
+        _ => None,
     })
 }
 
@@ -406,12 +803,18 @@ fn percentile(values: &[Duration], numerator: usize, denominator: usize) -> Opti
     clippy::cast_precision_loss,
     reason = "a process cannot collect enough media snapshots to exceed f64's exact integer range"
 )]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one summary calculation feeds JSON, text and bounded INFO from the same facts"
+)]
 fn emit_summary(
     format: Format,
     target: &str,
     limits: Limits,
     bounded: &sipx_call::load::BoundedOutcome,
     measurements: &[Measurement],
+    stop_signal: Option<&str>,
+    signal_failure: Option<&str>,
 ) {
     let outcome = &bounded.outcome;
     let rejected: usize = outcome
@@ -424,16 +827,24 @@ fn emit_summary(
     let connected = measurements.len();
     let responses = response_counts(outcome, measurements);
     let setup: Vec<_> = measurements.iter().map(|value| value.setup).collect();
-    let snapshots = measurements.len();
-    let packets_lost: i64 = measurements
+    let quality: Vec<_> = measurements
         .iter()
-        .map(|value| value.quality.cumulative_lost)
-        .sum();
+        .filter_map(|value| value.quality.as_ref())
+        .collect();
+    let snapshots = quality.len();
+    let packets_lost: i64 = quality.iter().map(|value| value.cumulative_lost).sum();
     let divisor = snapshots as f64;
-    let mean = |value: fn(&Measurement) -> f64| {
-        (snapshots > 0).then(|| measurements.iter().map(value).sum::<f64>() / divisor)
+    let mean = |value: fn(&sipx_rtp::Quality) -> f64| {
+        (snapshots > 0).then(|| quality.iter().map(|item| value(item)).sum::<f64>() / divisor)
     };
-    let status = if !bounded.cleanup_complete || has_internal_failure(&outcome.failures) {
+    let reason = if signal_failure.is_some() {
+        signal_failure
+    } else if bounded.cleanup_complete {
+        internal_reason(&outcome.failures)
+    } else {
+        Some("cleanup budget exhausted")
+    };
+    let status = if reason.is_some() {
         "failed"
     } else if bounded.admission_end == AdmissionEnd::Requested {
         "interrupted"
@@ -443,6 +854,9 @@ fn emit_summary(
     let summary = serde_json::json!({
         "schema": "sipx.load.v1",
         "status": status,
+        "stop_signal": stop_signal,
+        "reason": reason,
+        "mode": limits.mode.as_str(),
         "seed": limits.seed,
         "target": target,
         "limits": {
@@ -471,16 +885,34 @@ fn emit_summary(
         "media": {
             "snapshots": snapshots,
             "packets_lost": packets_lost,
-            "mean_loss": mean(|value| value.quality.loss),
-            "mean_jitter_ms": mean(|value| value.quality.jitter.as_secs_f64() * 1000.0),
-            "mean_mos": mean(|value| value.quality.mos),
+            "mean_loss": mean(|value| value.loss),
+            "mean_jitter_ms": mean(|value| value.jitter.as_secs_f64() * 1000.0),
+            "mean_mos": mean(|value| value.mos),
         }
     });
+
+    crate::progress::LoadSummary {
+        status,
+        attempted: outcome.attempted,
+        connected,
+        rejected,
+        timed_out,
+        failed,
+        peak_concurrency: bounded.peak_in_flight,
+    }
+    .emit();
 
     match format {
         Format::Json => println!("{summary}"),
         Format::Text => {
             println!("status             {status}");
+            if let Some(signal) = stop_signal {
+                println!("stop_signal        {signal}");
+            }
+            println!("mode               {}", limits.mode.as_str());
+            if let Some(reason) = reason {
+                println!("reason             {reason}");
+            }
             println!("target             {target}");
             println!("seed               {}", limits.seed);
             println!("attempted          {}", outcome.attempted);
@@ -498,9 +930,22 @@ fn emit_summary(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use clap::Parser as _;
+
+    use crate::cli::{Cli, Command};
 
     fn raw(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| (*item).to_owned()).collect()
+    }
+
+    fn command(raw: &[String]) -> LoadOptions {
+        let cli =
+            Cli::try_parse_from(std::iter::once("sipx").chain(raw.iter().map(String::as_str)))
+                .expect("argument shape");
+        let Some(Command::Load(options)) = cli.command else {
+            panic!("load command expected");
+        };
+        options
     }
 
     #[test]
@@ -513,8 +958,7 @@ mod tests {
             "--concurrency",
             "3",
         ]);
-        let args = crate::Args::new(&unbounded).expect("argument shape");
-        assert!(Limits::parse(&args).is_err());
+        assert!(Limits::parse(&command(&unbounded)).is_err());
 
         let bounded = raw(&[
             "load",
@@ -526,8 +970,7 @@ mod tests {
             "--calls",
             "4",
         ]);
-        let args = crate::Args::new(&bounded).expect("argument shape");
-        let limits = Limits::parse(&args).expect("finite plan");
+        let limits = Limits::parse(&command(&bounded)).expect("finite plan");
         assert_eq!(limits.calls, Some(4));
         assert_eq!(CLEANUP, Duration::from_secs(40));
     }
@@ -606,8 +1049,7 @@ mod tests {
                 "0",
             ]),
         ] {
-            let args = crate::Args::new(&values).expect("argument shape");
-            assert!(Limits::parse(&args).is_err(), "{values:?}");
+            assert!(Limits::parse(&command(&values)).is_err(), "{values:?}");
         }
 
         let excessive = raw(&[
@@ -622,8 +1064,10 @@ mod tests {
             "--calls",
             "4",
         ]);
-        let args = crate::Args::new(&excessive).expect("argument shape");
-        assert!(Limits::parse(&args).is_err(), "{excessive:?}");
+        assert!(
+            Limits::parse(&command(&excessive)).is_err(),
+            "{excessive:?}"
+        );
     }
 
     #[test]
@@ -631,13 +1075,13 @@ mod tests {
         let measurements = [Measurement {
             setup: Duration::from_millis(2),
             status: 202,
-            quality: sipx_rtp::Quality {
+            quality: Some(sipx_rtp::Quality {
                 loss: 0.0,
                 cumulative_lost: 0,
                 jitter: Duration::ZERO,
                 round_trip: None,
                 mos: 4.4,
-            },
+            }),
         }];
         let mut outcome = sipx_call::load::Outcome::default();
         outcome.failures.insert(Cause::Rejected(486), 2);

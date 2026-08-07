@@ -43,42 +43,8 @@ use sipx_ua::event_client::{
 };
 use sipx_ua::reginfo::{RegistrationConsumer, RegistrationSnapshot};
 
+use crate::cli::PeersOptions;
 use crate::output::{Exit, Format, Report, fail};
-
-pub(crate) const HELP: &str = "\
-sipx peers — list what can be called
-
-USAGE:
-    sipx peers [OPTIONS]
-
-OPTIONS:
-    --book <FILE>        Read this peer book; with --registrar, merge it explicitly
-    --registrar <AOR>    Subscribe to this registrar's current registrations
-    --password <P>       Registrar password. Prefer SIPX_PASSWORD; argv is world-readable
-    --target <ADDR>      Registrar address if not derived from the AOR (host:port)
-    --expires <S>        Subscription lifetime to ask for (default 3600)
-    --watch <S>          Observe updates this many seconds after the first snapshot (default 0)
-    --local <ADDR>       Local signalling address (default 0.0.0.0:0)
-    --transport <T>      Signalling: udp, tcp, tls, ws or wss (default udp)
-    --tcp                Legacy alias for --transport tcp
-    --tls-server-name <N> Certificate identity to verify (default AOR domain)
-    --tls-ca <FILE>      Add PEM trust roots to the platform store
-    --tls-cert <FILE>    Client certificate chain for mutual TLS (with --tls-key)
-    --tls-key <FILE>     Client private key for mutual TLS (with --tls-cert)
-    --json               Report as JSON, one object per peer
-    --help               Show this message
-
-THE PEER BOOK:
-    One peer per line: a name, whitespace, and the URI to dial. Blank lines and lines
-    starting with `#` are ignored.
-
-        # who this phone knows about
-        alice   sip:alice@192.0.2.17:5060
-
-    Looked for in --book, then $SIPX_PEERS, then $XDG_CONFIG_HOME/sipx/peers, then
-    $HOME/.config/sipx/peers. A book that cannot be read is an error and not an empty
-    list — a fresh machine with no book has not told you there is nobody to call.
-";
 
 /// Where a peer was learned from.
 ///
@@ -203,16 +169,9 @@ impl std::error::Error for Error {
     }
 }
 
-pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
-    // A `--book` with no path is refused rather than silently falling through to the environment
-    // and reporting whichever book happens to be there (`S-30`).
-    let args = match crate::arguments(raw, HELP, format) {
-        Ok(args) => args,
-        Err(exit) => return exit,
-    };
-
-    let registrar = args.value("registrar");
-    let mut peers = match (registrar, args.value("book")) {
+pub(crate) async fn run(options: PeersOptions, format: Format) -> Exit {
+    let registrar = options.registrar.as_deref();
+    let mut peers = match (registrar, options.book.as_deref()) {
         (Some(_), None) => Vec::new(),
         (_, explicit) => match load(explicit) {
             Ok(peers) => peers,
@@ -220,7 +179,7 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
         },
     };
     if let Some(registrar) = registrar {
-        match discover(&args, registrar).await {
+        match discover(&options, registrar).await {
             Ok(discovered) => peers.extend(discovered),
             Err((exit, message)) => return fail(format, exit, &message),
         }
@@ -242,7 +201,7 @@ pub(crate) async fn run(raw: &[String], format: Format) -> Exit {
     clippy::too_many_lines,
     reason = "validation, endpoint ownership and terminal cleanup remain visible in protocol order"
 )]
-async fn discover(args: &crate::Args<'_>, registrar: &str) -> Result<Vec<Peer>, (Exit, String)> {
+async fn discover(options: &PeersOptions, registrar: &str) -> Result<Vec<Peer>, (Exit, String)> {
     let parsed = Uri::parse(Bytes::copy_from_slice(registrar.as_bytes())).map_err(|_| {
         (
             Exit::Usage,
@@ -255,30 +214,38 @@ async fn discover(args: &crate::Args<'_>, registrar: &str) -> Result<Vec<Peer>, 
             format!("not a SIP registrar address of record: {registrar}"),
         ));
     };
-    let selection = crate::signalling::Selection::from_args(args, parsed.scheme().is_secure())
-        .map_err(|message| (Exit::Usage, message))?;
-    let unresolved =
-        crate::register::resolve_target(args.value("target"), &domain, selection.kind())
-            .map_err(|message| (Exit::Usage, message))?;
-    let selected = selection
-        .target(args, unresolved.addr, &domain)
-        .map_err(|message| (Exit::Usage, message))?;
-    let expires = Duration::from_secs(args.number("expires").unwrap_or(3_600));
+    let mut selection = crate::signalling::Selection::from_options(
+        &options.signalling,
+        parsed.scheme().is_secure(),
+    )
+    .map_err(|message| (Exit::Usage, message))?;
+    let resolver = crate::destination::Resolver::system();
+    let candidates = resolver
+        .resolve(
+            &parsed,
+            options.target.as_deref(),
+            selection,
+            &options.signalling,
+        )
+        .await
+        .map_err(|error| (error.exit(), error.to_string()))?;
+    let selected = crate::destination::first(&candidates)
+        .map_err(|error| (error.exit(), error.to_string()))?
+        .clone();
+    selection = selection.negotiated(selected.transport);
+    let expires = Duration::from_secs(options.expires);
     if expires.is_zero() {
         return Err((
             Exit::Usage,
             "--expires must be positive for a registrar subscription".to_owned(),
         ));
     }
-    let local = args.value("local").unwrap_or("0.0.0.0:0");
-    let local = local
-        .parse()
-        .map_err(|_| (Exit::Usage, format!("not an address: {local}")))?;
+    let local = options.local;
     let mut transport_config = TransportConfig::new(local);
     transport_config.sent_by =
         crate::advertise::reachable_ip(local, selected.addr.ip()).to_string();
     selection
-        .configure_client(args, &mut transport_config)
+        .configure_client(&options.signalling, &mut transport_config)
         .map_err(|message| (Exit::Usage, message))?;
     let (endpoint, incoming) = bind(transport_config)
         .await
@@ -291,10 +258,9 @@ async fn discover(args: &crate::Args<'_>, registrar: &str) -> Result<Vec<Peer>, 
     let dispatch = tokio::spawn(async move { while dispatcher.next().await.is_some() {} });
 
     let nonce: u64 = rand::rng().random();
-    let credentials = args
-        .value("password")
-        .map(str::to_owned)
-        .or_else(|| std::env::var("SIPX_PASSWORD").ok())
+    let credentials = options
+        .password
+        .clone()
         .map(|password| Credentials::new(user.clone(), password));
     let contact = format!("<sip:{user}@{}>", endpoint.advertised());
     let consumer = RegistrationConsumer::new(registrar, 4_096).map_err(|_| {
@@ -320,11 +286,7 @@ async fn discover(args: &crate::Args<'_>, registrar: &str) -> Result<Vec<Peer>, 
     };
     let result = match subscriptions.subscribe(start) {
         Ok(mut subscription) => {
-            let result = observe(
-                &mut subscription,
-                Duration::from_secs(args.number("watch").unwrap_or(0)),
-            )
-            .await;
+            let result = observe(&mut subscription, Duration::from_secs(options.watch)).await;
             let _ = subscription.unsubscribe().await;
             result.map(registrar_peers)
         }
@@ -429,7 +391,7 @@ fn event_peer(target: &Target) -> EventPeer {
 fn load(explicit: Option<&str>) -> Result<Vec<Peer>, Error> {
     let path = locate(
         explicit,
-        std::env::var("SIPX_PEERS").ok(),
+        None,
         std::env::var("XDG_CONFIG_HOME").ok(),
         std::env::var("HOME").ok(),
     )?;

@@ -20,7 +20,10 @@ use hickory_resolver::proto::op::{Message, MessageType, OpCode, ResponseCode};
 use hickory_resolver::proto::rr::rdata::{A, SRV};
 use hickory_resolver::proto::rr::{Name, RData, Record, RecordType};
 use hickory_resolver::proto::serialize::binary::{BinDecodable, BinEncodable};
-use sipx_transport::dns::{Answer, DnsResolver, Prefetched};
+use sipx_transport::TransportKind;
+use sipx_transport::dns::{
+    Answer, DnsResolver, Prefetched, ResolutionError, ResolutionPolicy, resolve_uri_bounded,
+};
 use sipx_transport::resolve::{Resolver as _, SeededRng, resolve};
 use tokio::net::UdpSocket;
 
@@ -229,6 +232,33 @@ async fn a_second_lookup_is_served_from_cache() {
     );
 }
 
+#[tokio::test]
+async fn the_cache_capacity_is_one_total_across_record_types() {
+    let (server, queries) = fixture_server().await;
+    let resolver = DnsResolver::for_nameserver(server, Duration::from_secs(2))
+        .expect("a resolver")
+        .with_cache_capacity(1);
+
+    assert_eq!(
+        resolver.srv("_sip._udp.sipx.test").await.or_empty().len(),
+        2
+    );
+    assert_eq!(
+        resolver.addresses("one.sipx.test").await.or_empty().len(),
+        1
+    );
+    assert_eq!(
+        resolver.srv("_sip._udp.sipx.test").await.or_empty().len(),
+        2
+    );
+
+    assert_eq!(
+        queries.load(std::sync::atomic::Ordering::SeqCst),
+        4,
+        "A and AAAA share the one-entry budget with SRV, so the older SRV row is evicted"
+    );
+}
+
 /// An entry past its TTL is asked for again rather than served stale. Holding a record past
 /// its TTL points calls at a server that has moved.
 #[tokio::test]
@@ -286,7 +316,7 @@ async fn prefetching_gathers_everything_the_selection_needs() {
 /// was measured to change nothing and removed. This test is what makes that a checked fact rather
 /// than an assumption: if the client is swapped or configured differently, it fails here.
 #[tokio::test]
-async fn two_concurrent_resolutions_of_one_name_make_one_query() {
+async fn concurrent_resolutions_make_one_query_per_address_family() {
     let (server, queries) = slow_fixture_server(Duration::from_millis(200)).await;
     let resolver = resolver_for(server);
 
@@ -315,8 +345,8 @@ async fn two_concurrent_resolutions_of_one_name_make_one_query() {
     );
     assert_eq!(
         queries.load(std::sync::atomic::Ordering::SeqCst),
-        1,
-        "eight concurrent lookups of one name must reach the nameserver once"
+        2,
+        "eight concurrent lookups must make one shared A and one shared AAAA query"
     );
 }
 
@@ -340,8 +370,8 @@ async fn single_flight_does_not_outlive_the_lookup_it_shares() {
 
     assert_eq!(
         queries.load(std::sync::atomic::Ordering::SeqCst),
-        2,
-        "a lookup after the entry expired must ask again"
+        4,
+        "a lookup after the A and AAAA entries expired must ask for both again"
     );
 }
 
@@ -531,4 +561,109 @@ async fn a_uri_resolves_to_candidates_in_one_await() {
         vec!["192.0.2.11:5060".to_owned(), "192.0.2.12:5062".to_owned()],
         "the same list the two-step form produces"
     );
+}
+
+#[tokio::test]
+async fn a_literal_uri_performs_no_dns_question() {
+    let (server, queries) = fixture_server().await;
+    let resolver = resolver_for(server);
+    let uri =
+        sipx_sip::Uri::parse(bytes::Bytes::from_static(b"sip:alice@192.0.2.44:5090")).expect("URI");
+
+    let targets = resolve_uri_bounded(
+        &uri,
+        &resolver,
+        &mut SeededRng::new(1),
+        None,
+        ResolutionPolicy::default(),
+    )
+    .await
+    .expect("literal target");
+
+    assert_eq!(targets[0].addr.to_string(), "192.0.2.44:5090");
+    assert_eq!(
+        queries.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a literal is the complete route and must not touch DNS"
+    );
+}
+
+#[tokio::test]
+async fn a_named_explicit_port_asks_only_for_both_address_families() {
+    let (server, queries) = fixture_server().await;
+    let resolver = resolver_for(server);
+    let uri = sipx_sip::Uri::parse(bytes::Bytes::from_static(b"sip:alice@one.sipx.test:5090"))
+        .expect("URI");
+
+    let targets = resolve_uri_bounded(
+        &uri,
+        &resolver,
+        &mut SeededRng::new(1),
+        Some(TransportKind::Udp),
+        ResolutionPolicy::default(),
+    )
+    .await
+    .expect("named explicit port");
+
+    assert_eq!(targets[0].addr.to_string(), "192.0.2.11:5090");
+    assert_eq!(
+        queries.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "one A and one AAAA question, with no NAPTR or SRV"
+    );
+}
+
+#[tokio::test]
+async fn a_per_question_deadline_is_not_reported_as_an_empty_answer() {
+    let (server, _queries) = slow_fixture_server(Duration::from_millis(200)).await;
+    let resolver = resolver_for(server);
+    let uri = sipx_sip::Uri::parse(bytes::Bytes::from_static(b"sip:alice@slow.sipx.test:5090"))
+        .expect("URI");
+    let policy = ResolutionPolicy {
+        lookup_timeout: Duration::from_millis(10),
+        resolution_timeout: Duration::from_secs(1),
+        ..ResolutionPolicy::default()
+    };
+
+    let error = resolve_uri_bounded(
+        &uri,
+        &resolver,
+        &mut SeededRng::new(1),
+        Some(TransportKind::Udp),
+        policy,
+    )
+    .await
+    .expect_err("the delayed answer misses the question deadline");
+
+    assert!(matches!(error, ResolutionError::LookupTimeout { .. }));
+}
+
+#[tokio::test]
+async fn cancelling_resolution_joins_the_caller_owned_future() {
+    let (server, queries) = slow_fixture_server(Duration::from_secs(1)).await;
+    let resolver = resolver_for(server);
+    let uri = sipx_sip::Uri::parse(bytes::Bytes::from_static(b"sip:alice@slow.sipx.test:5090"))
+        .expect("URI");
+    let task = tokio::spawn(async move {
+        resolve_uri_bounded(
+            &uri,
+            &resolver,
+            &mut SeededRng::new(1),
+            Some(TransportKind::Udp),
+            ResolutionPolicy::default(),
+        )
+        .await
+    });
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while queries.load(std::sync::atomic::Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("both family questions became active");
+    task.abort();
+    let joined = task.await.expect_err("the cancelled owner joins");
+    assert!(joined.is_cancelled());
+    assert_eq!(queries.load(std::sync::atomic::Ordering::SeqCst), 2);
 }

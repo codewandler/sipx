@@ -10,13 +10,15 @@ use std::net::SocketAddr;
 use sipx_transport::tls::{ClientTls, Identity, ServerTls, TrustAnchors};
 use sipx_transport::{Config, Handle, Target, TransportKind};
 
-use crate::Args;
+use crate::cli::{SignallingOptions, TransportChoice};
 use crate::output::Report;
 
 /// A validated command-line transport selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Selection {
     kind: TransportKind,
+    /// Whether the command selected a transport rather than accepting URI/DNS policy.
+    explicit: bool,
     /// Only the new `--transport` surface changes result records. The legacy default and `--tcp`
     /// keep their existing byte-for-byte output contract.
     report: bool,
@@ -24,19 +26,21 @@ pub(crate) struct Selection {
 
 impl Selection {
     /// Resolve `--transport`, retaining `--tcp` as the compatible alias it already was.
-    pub(crate) fn from_args(args: &Args<'_>, secure_uri: bool) -> Result<Self, String> {
-        let requested = args.value("transport");
-        if requested.is_some() && args.flag("tcp") {
-            return Err(
-                "--transport and the legacy --tcp alias cannot be used together".to_owned(),
-            );
-        }
+    pub(crate) fn from_options(
+        options: &SignallingOptions,
+        secure_uri: bool,
+    ) -> Result<Self, String> {
+        let requested = options.transport.transport;
 
         let kind = match requested {
-            Some(token) => parse(token)?,
-            None if args.flag("tcp") => TransportKind::Tcp,
-            None => TransportKind::Udp,
+            Some(TransportChoice::Tcp) => TransportKind::Tcp,
+            Some(TransportChoice::Tls) => TransportKind::Tls,
+            Some(TransportChoice::Ws) => TransportKind::Ws,
+            Some(TransportChoice::Wss) => TransportKind::Wss,
+            None if options.transport.tcp => TransportKind::Tcp,
+            Some(TransportChoice::Udp) | None => TransportKind::Udp,
         };
+        let explicit = requested.is_some() || options.transport.tcp;
         if secure_uri && !kind.is_secure() {
             return Err(format!(
                 "a sips: URI requires --transport tls or --transport wss; {} is cleartext and no downgrade is permitted",
@@ -44,19 +48,21 @@ impl Selection {
             ));
         }
 
-        let has_tls_option = ["tls-server-name", "tls-ca", "tls-cert", "tls-key"]
-            .iter()
-            .any(|option| args.value(option).is_some());
+        let has_tls_option = options.peer.tls_server_name.is_some()
+            || options.peer.tls_ca.is_some()
+            || options.identity.tls_cert.is_some()
+            || options.identity.tls_key.is_some();
         if has_tls_option && !kind.is_secure() {
             return Err(format!(
                 "TLS identity and trust options require --transport tls or --transport wss, not {}",
                 name(kind)
             ));
         }
-        identity(args, false)?;
+        identity(options, false)?;
 
         Ok(Self {
             kind,
+            explicit,
             report: requested.is_some(),
         })
     }
@@ -65,6 +71,19 @@ impl Selection {
     #[must_use]
     pub(crate) fn kind(self) -> TransportKind {
         self.kind
+    }
+
+    /// Explicit command policy passed to RFC 3263 selection; an implicit default stays implicit.
+    #[must_use]
+    pub(crate) fn requested(self) -> Option<TransportKind> {
+        self.explicit.then_some(self.kind)
+    }
+
+    /// Bind reporting and media preflight to the first resolved candidate.
+    #[must_use]
+    pub(crate) fn negotiated(mut self, kind: TransportKind) -> Self {
+        self.kind = kind;
+        self
     }
 
     /// Whether an inbound request belongs to this command's listener contract.
@@ -98,16 +117,27 @@ impl Selection {
         }
     }
 
-    /// Build an outbound target and carry the name that TLS/WSS must verify.
-    pub(crate) fn target(
+    /// Apply command verification policy to a resolver-produced target without replacing its
+    /// selected transport or address.
+    pub(crate) fn resolved_target(
         self,
-        args: &Args<'_>,
-        addr: SocketAddr,
+        options: &SignallingOptions,
+        target: Target,
         default_server_name: &str,
     ) -> Result<Target, String> {
-        let target = Target::new(addr, self.kind);
-        if self.kind.is_secure() {
-            let verify_as = args.value("tls-server-name").unwrap_or(default_server_name);
+        if self.explicit && target.transport != self.kind {
+            return Err(format!(
+                "resolved transport {} conflicts with requested transport {}",
+                name(target.transport),
+                name(self.kind)
+            ));
+        }
+        if target.transport.is_secure() {
+            let verify_as = options
+                .peer
+                .tls_server_name
+                .as_deref()
+                .unwrap_or(default_server_name);
             sipx_transport::tls::verification_name(verify_as)
                 .map_err(|error| format!("--tls-server-name: {error}"))?;
             Ok(target.verifying(verify_as))
@@ -119,7 +149,7 @@ impl Selection {
     /// Configure verification and optional mutual-TLS identity for outbound connections.
     pub(crate) fn configure_client(
         self,
-        args: &Args<'_>,
+        options: &SignallingOptions,
         config: &mut Config,
     ) -> Result<(), String> {
         if !self.kind.is_secure() {
@@ -127,13 +157,13 @@ impl Selection {
         }
 
         let mut anchors = TrustAnchors::system();
-        if let Some(path) = args.value("tls-ca") {
+        if let Some(path) = options.peer.tls_ca.as_deref() {
             let pem = read(path, "trust roots")?;
             anchors
                 .add_pem(&pem)
                 .map_err(|error| format!("--tls-ca {path}: {error}"))?;
         }
-        let client_identity = identity(args, false)?;
+        let client_identity = identity(options, false)?;
         config.tls_client = Some(
             ClientTls::with_identity(&anchors, client_identity)
                 .map_err(|error| format!("TLS client configuration: {error}"))?,
@@ -144,10 +174,10 @@ impl Selection {
     /// Configure the one listener `answer --transport` promises.
     pub(crate) fn configure_listener(
         self,
-        args: &Args<'_>,
+        options: &SignallingOptions,
         config: &mut Config,
     ) -> Result<(), String> {
-        if args.value("tls-server-name").is_some() || args.value("tls-ca").is_some() {
+        if options.peer.tls_server_name.is_some() || options.peer.tls_ca.is_some() {
             return Err(
                 "--tls-server-name and --tls-ca configure an outbound TLS peer and are not valid for answer"
                     .to_owned(),
@@ -167,7 +197,8 @@ impl Selection {
             TransportKind::Udp | TransportKind::Tcp => Ok(()),
             TransportKind::Tls => {
                 let server = ServerTls::new(
-                    identity(args, true)?.ok_or_else(|| "TLS identity is required".to_owned())?,
+                    identity(options, true)?
+                        .ok_or_else(|| "TLS identity is required".to_owned())?,
                 )
                 .map_err(|error| format!("TLS server configuration: {error}"))?;
                 config.tls_server = Some((server, config.bind.port()));
@@ -179,7 +210,8 @@ impl Selection {
             }
             TransportKind::Wss => {
                 let server = ServerTls::new(
-                    identity(args, true)?.ok_or_else(|| "TLS identity is required".to_owned())?,
+                    identity(options, true)?
+                        .ok_or_else(|| "TLS identity is required".to_owned())?,
                 )
                 .map_err(|error| format!("TLS server configuration: {error}"))?;
                 config.wss_server = Some((server, config.bind.port()));
@@ -218,23 +250,10 @@ pub(crate) fn name(kind: TransportKind) -> &'static str {
     }
 }
 
-fn parse(token: &str) -> Result<TransportKind, String> {
-    match token {
-        "udp" => Ok(TransportKind::Udp),
-        "tcp" => Ok(TransportKind::Tcp),
-        "tls" => Ok(TransportKind::Tls),
-        "ws" => Ok(TransportKind::Ws),
-        "wss" => Ok(TransportKind::Wss),
-        _ => Err(format!(
-            "--transport must be one of udp, tcp, tls, ws or wss; got {token}"
-        )),
-    }
-}
-
 /// Read the optional certificate/key pair, requiring both halves whenever either is present.
-fn identity(args: &Args<'_>, required: bool) -> Result<Option<Identity>, String> {
-    let cert = args.value("tls-cert");
-    let key = args.value("tls-key");
+fn identity(options: &SignallingOptions, required: bool) -> Result<Option<Identity>, String> {
+    let cert = options.identity.tls_cert.as_deref();
+    let key = options.identity.tls_key.as_deref();
     match (cert, key) {
         (Some(cert), Some(key)) => {
             let cert_pem = read(cert, "certificate")?;
@@ -263,36 +282,43 @@ mod tests {
     use super::*;
     use crate::output::Format;
 
-    fn arguments(items: &[&str]) -> Vec<String> {
-        items.iter().map(|item| (*item).to_owned()).collect()
-    }
-
     #[test]
     fn a_secure_uri_cannot_select_cleartext() {
-        let raw = arguments(&["dial", "sip:a@b", "--transport", "tcp"]);
-        let args = Args::new(&raw).expect("arguments");
-        let error = Selection::from_args(&args, true).expect_err("cleartext refused");
+        let options = SignallingOptions {
+            transport: crate::cli::TransportOptions {
+                transport: Some(TransportChoice::Tcp),
+                ..crate::cli::TransportOptions::default()
+            },
+            ..SignallingOptions::default()
+        };
+        let error = Selection::from_options(&options, true).expect_err("cleartext refused");
         assert!(error.contains("no downgrade"), "{error}");
     }
 
     #[test]
-    fn the_legacy_tcp_alias_keeps_working_but_cannot_conflict() {
-        let raw = arguments(&["dial", "sip:a@b", "--tcp"]);
-        let args = Args::new(&raw).expect("arguments");
-        let selected = Selection::from_args(&args, false).expect("selected");
+    fn the_legacy_tcp_alias_keeps_working() {
+        let options = SignallingOptions {
+            transport: crate::cli::TransportOptions {
+                tcp: true,
+                ..crate::cli::TransportOptions::default()
+            },
+            ..SignallingOptions::default()
+        };
+        let selected = Selection::from_options(&options, false).expect("selected");
         assert_eq!(selected.kind(), TransportKind::Tcp);
         assert!(!selected.report);
-
-        let raw = arguments(&["dial", "sip:a@b", "--tcp", "--transport", "tcp"]);
-        let args = Args::new(&raw).expect("arguments");
-        assert!(Selection::from_args(&args, false).is_err());
     }
 
     #[test]
     fn explicit_results_name_requested_and_negotiated_in_both_formats() {
-        let raw = arguments(&["dial", "sip:a@b", "--transport", "wss"]);
-        let args = Args::new(&raw).expect("arguments");
-        let selected = Selection::from_args(&args, false).expect("selected");
+        let options = SignallingOptions {
+            transport: crate::cli::TransportOptions {
+                transport: Some(TransportChoice::Wss),
+                ..crate::cli::TransportOptions::default()
+            },
+            ..SignallingOptions::default()
+        };
+        let selected = Selection::from_options(&options, false).expect("selected");
         let report = selected.report(Report::new().text("status", "answered"), TransportKind::Wss);
         for rendered in [report.render(Format::Json), report.render(Format::Text)] {
             assert!(rendered.contains("requested_transport"), "{rendered}");
@@ -303,9 +329,8 @@ mod tests {
 
     #[test]
     fn the_default_does_not_change_an_existing_result_record() {
-        let raw = arguments(&["dial", "sip:a@b"]);
-        let args = Args::new(&raw).expect("arguments");
-        let selected = Selection::from_args(&args, false).expect("selected");
+        let selected =
+            Selection::from_options(&SignallingOptions::default(), false).expect("selected");
         let before = Report::new().text("status", "answered");
         let expected = before.render(Format::Json);
         assert_eq!(

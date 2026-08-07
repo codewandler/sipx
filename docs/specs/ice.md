@@ -205,6 +205,12 @@ minimum across both agents. sipx offers component 2 only when [`MediaPort`](../.
 control port; when it did not, it offers component 1 alone and the peer's RTCP candidates go
 unpaired, which is exactly the case §6.1.2.2 describes.
 
+That reduction applies even when an initial remote offer carries component-2 candidates as its
+RFC 5761 separate-port fallback. If the answer selects `a=rtcp-mux`, those candidates produce no
+pair and MUST NOT cause a component-2 socket, route, check or worker to be created. A profile may
+discard them before constructing `RemoteDescription`; it still has to require at least one usable
+component-1 candidate and bound the discarded lines.
+
 ### 6.2 Pair priority and order (§6.1.2.3)
 
 With `G` the controlling agent's candidate priority and `D` the controlled agent's:

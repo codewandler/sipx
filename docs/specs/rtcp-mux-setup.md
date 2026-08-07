@@ -88,7 +88,11 @@ by `sipx-media`; negotiating mux does not create an unbounded handoff.
 An initial ICE offer that permits the separate-port fallback still advertises both components and
 an `a=rtcp` fallback destination, as RFC 5761 §5.1.3 requires. An answer agreeing to mux emits only
 component 1, and the offerer then checks component 1 only. The stricter browser-audio profile has no
-fallback and therefore gathers component 1 alone from the start.
+local fallback and therefore gathers component 1 alone from the start. It may nevertheless receive
+an otherwise valid initial offer that advertises component-2 fallback candidates. Agreeing to mux
+discards those candidates before ICE checklist construction; their presence alone neither declines
+mux nor authorizes a second component. A mux answer carrying component 2 remains a contradiction,
+because the negotiation has already selected the one-port mode.
 
 ## 4. DTLS setup-role negotiation
 
