@@ -39,8 +39,13 @@ application code.
 - Spec landed as [`docs/specs/speech-providers.md`](../specs/speech-providers.md): sans-I/O contract
   placement (§2), discovery descriptor (§3), selection precedence with typed refusal order (§4),
   recognition and synthesis session contracts (§5–§6), lifecycle disjoint from SIP (§7), default
-  bounds (§8), the prospective public API review (§9) and 33 conformance vectors (§10) that seed
+  bounds (§8), the prospective public API review (§9) and 34 conformance vectors (§10) that seed
   X-105's suites. No code was written; M-54/M-55/M-56/A-26/A-27 implement against this contract.
+- Review round 1 addressed: selection documents are total (§4 field table, `MalformedSelection`,
+  operating-format and effective-language rules), fallback chains are id-only under the top-level
+  document, `Lost` joined both output vocabularies distinct from the `ProviderLost` cancellation
+  reason, recognition discontinuity kinds adopt the seam's `Loss`/`Overflow`/`Realign` vocabulary
+  (M-57), and the design doc now names this spec as the contract of record.
 - The §9 extensibility record is written against planned types; the row above also requires the
   full gate, so it is ticked only once the gate run for this change is green. Re-verify §9 against
   the real public API in the first implementation story that introduces the types (M-54 or M-55).

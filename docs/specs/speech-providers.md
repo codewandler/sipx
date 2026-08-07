@@ -107,17 +107,33 @@ measure those declarations in fixtures.
 
 ## 4. Selection: defaults, overrides, precedence
 
-A **selection document** names one provider `id` and constraints: language range (RFC 4647),
-voice token (synthesis), an optional pinned provider-side `PcmFormat`, an optional required device
-capability, and a `conversion` policy (default `allow`: the M-54 seam converts between the call
-clock and the provider format using the M-43 resampler; `deny`: only exact format matches are
-acceptable). A document MAY carry an ordered **fallback chain** of further selection documents.
+A **selection document** is the unit of speech policy. Its fields are total: every field is either
+required, forbidden for the kind, or optional with the absence meaning stated here — no field's
+absence is ever filled from another document.
+
+| Field | Recognition | Synthesis | When absent |
+|---|---|---|---|
+| `provider` | required id | required id | malformed |
+| `language` | required RFC 4647 range | required RFC 4647 range | malformed |
+| `voice` | forbidden | required voice token | malformed (synthesis) |
+| `format` | optional pinned provider-side `PcmFormat` | optional pinned provider-side `PcmFormat` | the operating format is derived by the rule below |
+| `device` | optional required device capability | optional required device capability | no device constraint is imposed |
+| `conversion` | optional `allow`/`deny` | optional `allow`/`deny` | `allow` |
+| `fallback` | optional ordered list of provider ids | optional ordered list of provider ids | empty — a refusal is final |
+
+A document missing a required field, carrying a field its kind forbids, or whose `fallback` entries
+are anything other than bare provider ids is refused as `MalformedSelection` before the registry is
+read; well-formedness is a property of the document alone. `voice` is required for synthesis
+precisely so that no machinery — neither a provider's preferred ordering nor a fallback step —
+ever chooses a voice: the host wrote it, or selection refuses. The `language` wildcard `*` is
+permitted; it is the host explicitly stating that any declared language is acceptable, not an
+omission.
 
 Precedence is deterministic and total:
 
 | Rank | Source | Rule |
 |---|---|---|
-| 1 | per-call override | a complete selection document; it replaces the endpoint default entirely — absent fields take this spec's defaults, never the endpoint default's values |
+| 1 | per-call override | a complete selection document; it replaces the endpoint default entirely — an absent optional field means what the table above says, never what the endpoint default's field says |
 | 2 | endpoint default | one optional document per contract kind |
 | 3 | nothing configured | the operation returns `NoProviderConfigured`; no provider is ever selected implicitly, and discovery order never implies a default |
 
@@ -131,20 +147,42 @@ value and the descriptor facts consulted:
 
 | Step | Check | Typed reason on failure |
 |---|---|---|
-| 1 | `id` is registered with the requested `kind` | `UnknownProvider` |
+| 1 | `provider` is registered with the requested `kind` | `UnknownProvider` |
 | 2 | host locality policy admits `off_host`/`network` (A-28 opt-ins) | `LocalityRefused` |
-| 3 | language range matches `languages` | `UnsupportedLanguage` |
-| 4 | voice token exists and speaks the matched language | `UnsupportedVoice` |
-| 5 | pinned format is in `accepted_formats`/`emitted_formats`, or `conversion = allow` and an M-43 conversion exists | `UnsupportedFormat` |
+| 3 | `language` range matches `languages` per RFC 4647 §3.3.1 | `UnsupportedLanguage` |
+| 4 | the named voice exists and speaks a tag matching the range | `UnsupportedVoice` |
+| 5 | the operating-format rule below yields a format | `UnsupportedFormat` |
 | 6 | required device capability is present in `devices` | `UnsupportedDevice` |
 
+**Effective language tag.** When several declared tags match the range, the effective tag is the
+first matching tag in the descriptor's declared order. It is derived, deterministic, and reported
+in the selection result and in `FallbackEngaged`; the *policy* is the range, which no selection
+step can alter.
+
+**Operating format.** Every session runs in exactly one provider-side `PcmFormat`, fixed at
+selection:
+
+- a pinned `format` must appear in the descriptor's `accepted_formats`/`emitted_formats`; under
+  `conversion = allow` an M-43 conversion between the pin and the negotiated call clock must
+  exist, and under `deny` the pin must itself be the seam's call-clock format — signed 16-bit at
+  the negotiated media clock ([`linear-pcm.md`](linear-pcm.md) §3);
+- with no pin and `conversion = allow`, the operating format is the first entry in the
+  descriptor's declared format list for which an M-43 conversion to and from the call clock
+  exists;
+- with no pin and `conversion = deny`, the operating format is the seam's call-clock format,
+  which must appear in the declared list.
+
+Any branch that yields no format is `UnsupportedFormat`. The operating format is part of the
+selection result, so nothing downstream re-decides it.
+
 A refusal MUST NOT select a different provider, language, voice, format or device. The only path
-past a refusal is the explicit fallback chain: candidates are evaluated in configured order under
-the *same* constraint document, every candidate's refusal is recorded with its typed reason, and
-the first satisfying candidate is selected. Selecting a fallback candidate is therefore never a
-policy change — a candidate that would change language, voice, format or device policy fails the
-same evaluation. If no candidate satisfies, the operation fails with the ordered per-candidate
-reasons. An empty or absent chain means a refusal is final.
+past a refusal is the explicit `fallback` chain: an ordered list of provider ids — ids only, never
+nested documents and never further chains. Each candidate is evaluated in configured order under
+the top-level document with only `provider` replaced by the candidate id; the constraint fields
+never vary across the chain, so engaging a candidate cannot change language, voice, format, device
+or conversion policy. Every candidate's refusal is recorded with its typed reason and the first
+satisfying candidate is selected. If no candidate satisfies, the operation fails with the ordered
+per-candidate reasons. An empty or absent chain means a refusal is final.
 
 Selection runs at session start and is fixed for the session's lifetime. The same chain, and the
 same rule, governs runtime provider loss (§7). Selection is part of the sans-I/O state machine: it
@@ -157,8 +195,8 @@ outputs are applied in order.
 
 | Input | Data |
 |---|---|
-| `Frame` | owned PCM in the session's accepted format, direction, sample time, sequence |
-| `Discontinuity` | typed reason and the lost span (sequence gap and duration in samples) |
+| `Frame` | owned PCM in the session's operating format (§4), direction, sample time, sequence |
+| `Discontinuity` | the seam's typed kind — `Loss`, `Overflow` or `Realign` — and the lost span (sequence gap and duration in samples) |
 | `Flush` | end of audio input; no `Frame` may follow |
 | `Cancel` | session scope, with a typed reason (§7) |
 | `DeadlineFired` | deadline kind (warm-up, drain) and generation |
@@ -171,6 +209,7 @@ outputs are applied in order.
 | `Final` | terminal: the utterance's complete text and span |
 | `Cancelled` | terminal for the open utterance, with a typed reason |
 | `Failed` | terminal for the session, with a typed cause |
+| `Lost` | the provider's engine or execution device became unavailable (§7); open work has already been resolved terminally |
 | `Stopped` | the session owns no task, queue, buffer or device allocation; always the last output |
 
 **Utterance state.** At most one utterance is open per session; identities are strictly increasing
@@ -188,17 +227,21 @@ before `Flush`; it still emits each utterance's `Partial` (revision 1) immediate
 sample times. A provider MUST NOT stamp results from any clock.
 
 **Input bound and backpressure.** The driver owns a bounded frame queue (§8). At the bound the
-oldest queued frame is dropped and the driver MUST deliver one `Discontinuity` input naming the
-accumulated lost span before the next `Frame`. Frames offered before `Ready` follow the same
+oldest queued frame is dropped and the driver MUST deliver one `Discontinuity` input with kind
+`Overflow` naming the accumulated lost span before the next `Frame`. Frames offered before `Ready` follow the same
 policy, so a slow warm-up is a bounded loss, never a stall. RTP decode, playback and capture are
 never blocked by recognition; that guarantee is the M-54 seam's and is restated here as a driver
 obligation.
 
-**Discontinuity semantics.** `Discontinuity` is an ordered input. Every output derived from
-pre-gap audio MUST be emitted before any output derived from post-gap audio, and each result event
-carries the count of discontinuity spans inside its covered span. A provider MAY bridge a gap
-inside one utterance; it MUST NOT reorder around one. The deterministic test provider (§10)
-terminates its open utterance at every discontinuity, which is what makes the vectors exact.
+**Discontinuity semantics.** `Discontinuity` is an ordered input, and its kind vocabulary is the
+seam's, pinned normatively by M-57's call-audio processing contract (`call-audio-processing.md`):
+`Loss` — upstream frames were lost (network or decode); `Overflow` — frames were dropped under the
+bounded-queue loss policy, which is what the recognition input bound above delivers; `Realign` —
+the seam re-anchored the timeline. Every output derived from pre-gap audio MUST be emitted before
+any output derived from post-gap audio, and each result event carries the count of discontinuity
+spans inside its covered span. A provider MAY bridge a gap inside one utterance; it MUST NOT
+reorder around one. The deterministic test provider (§10) terminates its open utterance at every
+discontinuity, which is what makes the vectors exact.
 
 **Output bound.** Non-terminal outputs coalesce per utterance: at most one pending revision, newest
 wins. Terminal and lifecycle outputs are never coalesced or dropped. When unconsumed terminals
@@ -230,11 +273,12 @@ reportable provider defect, not a hang.
 | `Accepted` | the request is queued, with its queue position |
 | `Refused` | typed: `QueueFull`, `TextTooLarge`, `SessionEnded`; a refused request has no further events |
 | `Started` | the request began producing audio |
-| `Chunk` | request identity, per-request monotonic sequence, sample-time offset from request start, owned PCM in the session's emitted format |
+| `Chunk` | request identity, per-request monotonic sequence, sample-time offset from request start, owned PCM in the session's operating format (§4) |
 | `Discontinuity` | a named production gap inside the current request (duration in samples) |
 | `Completed` | terminal: total samples produced |
 | `Cancelled` | terminal, with a typed reason |
 | `Failed` | terminal for a request or — with no request identity — for the session, with a typed cause |
+| `Lost` | the provider's engine or execution device became unavailable (§7); open work has already been resolved terminally |
 | `Stopped` | nothing owned remains; always the last output |
 
 **Request state.** `Enqueue` yields exactly one of `Accepted`/`Refused`. An accepted request is
@@ -282,11 +326,14 @@ Both session kinds share one lifecycle:
   `SessionFailed` in queue order per §6; only an `Enqueue` arriving after session end is
   `Refused(SessionEnded)`. The deadline is driver-fired; the provider reads no clock.
 - **Loss.** On loss, the session resolves all open work terminally (`Cancelled`, reason
-  `ProviderLost`), emits `ProviderLost` with a typed cause, and stops. If the selection document
-  carries a fallback chain, the host re-runs §4 over the chain and starts a **new** session on the
-  first satisfying candidate, emitting `FallbackEngaged` naming both provider identities and the
-  chain position. Utterance and request identities do not carry across sessions, and every output
-  of the lost session precedes the successor's first output.
+  `ProviderLost`), emits the `Lost` output with a typed cause, and stops. `Lost` is a session
+  output (§5, §6); the reason token `ProviderLost` names the same fact on a cancellation and is
+  deliberately not the event's name. If the selection document carries a fallback chain, the host
+  re-runs §4 over the chain and starts a **new** session on the first satisfying candidate,
+  emitting `FallbackEngaged` — a host output on the speech event stream, never a session output —
+  naming both provider identities and the chain position. Utterance and request identities do not
+  carry across sessions, and every output of the lost session precedes the successor's first
+  output.
 - **Cancellation reasons** are one closed-for-meaning, open-for-extension set used by both
   contracts: `Application`, `Replaced`, `CallEnded`, `ProviderLost`, `SessionFailed`, `Shutdown`.
 
@@ -326,7 +373,8 @@ M-55/M-56/A-26/A-27 and downstream providers (X-105) inherit one compatibility r
 **Extended compatibly (marked `#[non_exhaustive]`):**
 
 - all reason and cause enums: selection refusal reasons (§4), cancellation reasons (§7), session
-  failure causes, discontinuity reasons;
+  failure causes, and the discontinuity kinds (`Loss`/`Overflow`/`Realign`, shared with the seam
+  contract);
 - all output enums of both contracts and the lifecycle events — consumers must write a wildcard
   arm, so a new event variant is additive;
 - descriptor data: `ProviderDescriptor`, voice and device entries, resource estimates — constructed
@@ -375,8 +423,9 @@ utterance at every discontinuity, and declares `off_host = false`, `network = fa
 | SEL-5 | pinned format with `conversion = deny` not in the provider's list | `UnsupportedFormat`; with `conversion = allow` and an M-43 conversion, selection succeeds |
 | SEL-6 | required accelerator capability absent | `UnsupportedDevice`; no silent CPU substitution |
 | SEL-7 | nothing configured | `NoProviderConfigured`; nothing selected implicitly |
-| SEL-8 | fallback chain [incompatible, compatible] | first candidate's typed refusal recorded, second selected; effective language/voice/format/device equal the constraint document's |
-| SEL-9 | override absent field vs endpoint default field | the contract default applies, not the endpoint default's value — documents replace, never merge |
+| SEL-8 | `fallback` of two provider ids, the first incompatible | first candidate's typed refusal recorded, second selected; effective language/voice/format/device equal the top-level document's |
+| SEL-9 | override omitting `conversion` and `device` while the endpoint default sets `conversion = deny` and a device requirement | the override reads as `conversion = allow` and no device constraint — the §4 absence meanings, never the endpoint document's values |
+| SEL-10 | document missing `language`, synthesis document missing `voice`, or a `fallback` entry that is itself a document | `MalformedSelection` before any registry read |
 
 ### Recognition
 
@@ -384,8 +433,8 @@ utterance at every discontinuity, and declares `off_host = false`, `network = fa
 |---|---|---|
 | REC-1 | scripted frames into the deterministic provider, twice | identical ordered event sequences: `Warming`, `Ready`, then per-utterance `Partial` → `Replacement`* → `Final` |
 | REC-2 | script with two revisions before final | revisions strictly increment; each event carries complete text; nothing follows `Final` for that utterance; utterance ids strictly increase |
-| REC-3 | stall the provider past the input bound | oldest frames dropped; exactly one `Discontinuity` input names the accumulated span; RTP-side progress unaffected |
-| REC-4 | frames, `Discontinuity`, frames | all pre-gap outputs precede post-gap outputs; the open utterance terminates at the gap; the next utterance has a new identity |
+| REC-3 | stall the provider past the input bound | oldest frames dropped; exactly one `Discontinuity(Overflow)` input names the accumulated span; RTP-side progress unaffected |
+| REC-4 | frames, `Discontinuity(Loss)`, frames | all pre-gap outputs precede post-gap outputs; the open utterance terminates at the gap; the next utterance has a new identity |
 | REC-5 | `Cancel(Application)` with an utterance open | exactly one `Cancelled(Application)` terminal, then `Stopped`; no output after `Stopped`; no owned buffer or task remains |
 | REC-6 | scripted engine failure mid-utterance | `Cancelled(SessionFailed)` for the open utterance, `Failed` with the scripted cause, `Stopped`; the SIP call remains established |
 | REC-7 | stop consuming outputs until the terminal bound | revisions coalesce to the newest; no terminal is lost; input frames degrade by the REC-3 policy |
@@ -409,7 +458,7 @@ utterance at every discontinuity, and declares `off_host = false`, `network = fa
 |---|---|---|
 | LIF-1 | start either session kind | `Warming` then `Ready` precede any result or `Started` output; frames offered while `Warming` follow the REC-3 policy |
 | LIF-2 | fire the warm-up deadline before `Ready` | queued synthesis requests `Cancelled(SessionFailed)` in order, then session `Failed(WarmupTimeout)`, then `Stopped`; a later `Enqueue` is `Refused(SessionEnded)`; the call remains established |
-| LIF-3 | scripted provider loss, no fallback chain | open work `Cancelled(ProviderLost)`, then `ProviderLost`, then `Stopped`; no successor session |
+| LIF-3 | scripted provider loss, no fallback chain | open work `Cancelled(ProviderLost)`, then `Lost`, then `Stopped`; no successor session |
 | LIF-4 | scripted provider loss with a satisfying chain | every lost-session output precedes the successor's first output; `FallbackEngaged` names both identities; policy fields unchanged; identities restart |
 | LIF-5 | tear down the call mid-session | session-scope cancel with reason `CallEnded`; drains observable via `Stopped`; distinguishable by type from every failure event |
 | LIF-6 | fire the drain deadline against a wedged scripted provider | the driver aborts and emits an aborted `Stopped`; nothing owned remains |

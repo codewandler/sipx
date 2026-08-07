@@ -27,7 +27,12 @@ unopinionated PCM/resampling boundary, and this epic is one explicitly requested
 provider identity, local/offline status, languages, voices, accepted/emitted sample formats,
 streaming support, accelerator kinds, CPU support and resource estimates. Endpoint configuration
 chooses defaults; a call may choose another compatible provider. Selection is explicit and returns
-typed reasons when the requested language, voice, format or execution device is unavailable.
+typed reasons when the requested language, voice, format or execution device is unavailable. The
+normative contract is [`docs/specs/speech-providers.md`](../specs/speech-providers.md): the
+sans-I/O boundary (§2), the discovery descriptor (§3), total selection documents with deterministic
+precedence and id-only fallback chains (§4), the recognition and synthesis session contracts
+(§5–§6), the shared lifecycle disjoint from SIP (§7), bounds (§8), the extensibility record (§9)
+and the `DIS`/`SEL`/`REC`/`SYN`/`LIF` vectors (§10).
 
 `M-54` adds one call-owned PCM processing seam after decode and before application fan-out, with
 explicit direction, sample time, discontinuities and resampling. It is bounded and non-blocking: a
