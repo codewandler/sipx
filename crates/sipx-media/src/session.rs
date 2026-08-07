@@ -2816,8 +2816,7 @@ impl SendClock {
         // Carried samples are converted to *clock units* first. For every codec but G.722 the
         // divisor is one; for G.722 the RTP clock runs at half the sample rate
         // (RFC 3551 §4.5.2), and advancing by the sample count doubles the timeline.
-        let advance =
-            u32::try_from(samples.len()).unwrap_or(0) / samples_per_clock_unit.max(1);
+        let advance = u32::try_from(samples.len()).unwrap_or(0) / samples_per_clock_unit.max(1);
         Some((packet, advance))
     }
 
@@ -5252,7 +5251,10 @@ mod tests {
             .expect("G.722 is negotiable as static payload type 9 (RFC 3551 §6)");
         assert_eq!(codec.clock_rate(), 8_000, "the RTP clock stays at 8000");
         let config = Config::new("127.0.0.1:1".parse().expect("valid"), codec);
-        assert_eq!(config.clock_rate, 8_000, "and the session keeps the wire clock");
+        assert_eq!(
+            config.clock_rate, 8_000,
+            "and the session keeps the wire clock"
+        );
         assert_eq!(
             config.samples_per_packet(),
             320,
