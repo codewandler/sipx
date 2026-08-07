@@ -150,7 +150,7 @@ workspace, parsers are fuzzed, and unknown headers survive a parse/serialize rou
 |---|---|
 | `sipx-app` | SIP application host with webhook, session, and realtime audio bindings |
 | `sipx-app-protocol` | The sipx.app.v1 application contract: its types, JSON wire format, and sans-IO instruction interpreter |
-| `sipx-audio` | Telephony audio: G.711 µ-law and A-law, L16, linear PCM conversion and resampling, WAV I/O, and Opus behind the `opus` feature |
+| `sipx-audio` | Telephony audio: G.711 µ-law and A-law, G.722, L16, linear PCM conversion and resampling, WAV I/O, and Opus behind the `opus` feature |
 | `sipx-call` | Call framework: dial, answer, couple dialogs, play, record, send DTMF, and transfer |
 | `sipx-cli` | sipx — a command line SIP softphone |
 | `sipx-media` | Media sessions: RTP/RTCP sockets bound to negotiated SDP with NAT handling, bridging and conferencing |

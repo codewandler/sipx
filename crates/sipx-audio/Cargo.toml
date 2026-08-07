@@ -1,6 +1,6 @@
 [package]
 name = "sipx-audio"
-description = "Telephony audio: G.711 µ-law and A-law, L16, linear PCM conversion and resampling, WAV I/O, and Opus behind the `opus` feature"
+description = "Telephony audio: G.711 µ-law and A-law, G.722, L16, linear PCM conversion and resampling, WAV I/O, and Opus behind the `opus` feature"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
