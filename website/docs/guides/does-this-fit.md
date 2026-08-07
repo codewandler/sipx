@@ -10,26 +10,31 @@ test client, dialler, or voice application. It is not a proxy, registrar, or PBX
 
 ## It fits when you need
 
-- **Calls from Rust or a shell.** Place and answer calls, send DTMF, hold, resume, transfer,
-  play audio, record audio, and read quality statistics.
+- **Calls from Rust or a shell.** [Place](place-a-call.md) and [answer](answer-a-call.md) calls,
+  [send DTMF](send-and-collect-dtmf.md), [hold and resume](hold-and-resume.md), transfer
+  [blind](blind-transfer.md) or [attended](attended-transfer.md), [play audio](play-audio.md),
+  [record audio](record-a-call.md), and read quality statistics.
 - **A registered endpoint.** Digest authentication, automatic lease refresh, `Path`,
   `Service-Route`, GRUU, RFC 5626 Outbound on a client-opened flow, and push-assisted binding
-  refresh are available.
+  refresh are available — see [Register against a PBX](register.md).
 - **Telephony audio.** G.711 µ-law and A-law are the default. Mono L16 is selectable at its static
   44.1 kHz assignment or dynamic 8 kHz mapping. Opus is selectable through `sipx-call`'s `opus`
   feature and links a C library.
 - **SIP building blocks.** Use the parser, transaction and dialog machines, or SDP offer/answer
-  without bringing in an async runtime, socket, or clock.
+  without bringing in an async runtime, socket, or clock — see
+  [Use sipx as a library](as-a-library.md).
 - **Secure transports.** The transport layer and diagnostic CLI support TLS and secure WebSocket
   with certificate verification. Calls can select plain RTP, SDES-keyed SRTP, or DTLS-SRTP without
   falling back to a weaker mode.
-- **A scriptable test endpoint.** The CLI emits JSON and distinct exit codes, and moves audio
-  through WAV files for repeatable automation. Its optional `device-audio` feature also opens an
-  explicitly selected microphone or speaker through a bounded leaf-only driver.
+- **A scriptable test endpoint.** The [CLI](../reference/cli.md) emits JSON and distinct exit
+  codes, and moves audio through WAV files for repeatable automation. Its optional `device-audio`
+  feature also opens an explicitly selected microphone or speaker through a bounded leaf-only
+  driver.
 - **NAT traversal without a relay.** Calls can gather host candidates and use a configured STUN
   server to select a server-reflexive ICE path.
 - **A two-leg call controller.** `sipx-call::EarlyCoupling` and `Coupling` own both dialogs, relay
-  offer/answer changes and termination, and can attach the bounded media bridge.
+  offer/answer changes and termination, and can attach the bounded media bridge — see
+  [Couple two calls](couple-two-calls.md).
 - **Managed transport endpoints.** New TLS and secure-WebSocket handshakes can select an atomically
   replaced server identity while established connections survive. Bounded observation, immutable
   pre-transaction request policy, and live source-prefix admission let a host inspect or constrain
