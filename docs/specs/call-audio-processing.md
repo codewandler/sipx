@@ -62,8 +62,9 @@ which is what makes every vector in §11 a single-stream replay.
 ### 3.2 Sample rate and format
 
 The sample format is mono signed 16-bit linear PCM at a declared rate in the
-[linear-pcm.md](linear-pcm.md) domain: 1..=384,000 Hz. Rate 0 and rates above 384,000 are the same
-typed refusal as that boundary's PCM-4 vector, at construction and at `declare_format` alike. The
+[linear-pcm.md](linear-pcm.md) domain: 1..=384,000 Hz. Rate 0 and rates above 384,000 are refused
+with that boundary's existing `UnsupportedSampleRate` type — reused, not re-minted — exactly as in
+its PCM-4 vector, at construction and at `declare_format` alike. The
 seam owns conversion into this format (`M-54` reusing `M-43`); the processor never resamples,
 never guesses a rate from buffer length, and carries no per-frame rate — the rate is declared
 state, changed only by §7.2.
@@ -107,7 +108,8 @@ processor infers.
 
 Everything the processor emits is a pure function of (configuration, ordered inputs). Normatively:
 
-- All decision arithmetic is two's-complement integer arithmetic at the widths stated in §5, with
+- All decision arithmetic is two's-complement integer arithmetic at the widths stated in §5 and
+  §6, with
   no floating point, no platform-width types in any comparison, and no wrapping: §5's width proofs
   make overflow unreachable, and an implementation MUST debug-assert that, not saturate silently.
 - Divisions appear only in the two exactly-specified places: the duration derivation below and
@@ -198,7 +200,7 @@ emission: a fact computed over fewer than `W` samples would compare against thre
 ## 6. Activity, hangover and the silence timeout
 
 Voice activity is edge-triggered over the per-window `active` fact. State: `Inactive` or `Active`,
-an inactive-run sample counter, and the end position of the last active window.
+an inactive-run sample counter (`u64`), and the end position of the last active window (`u64`).
 
 | State | Completed window | Effect |
 |---|---|---|
@@ -212,7 +214,7 @@ The hangover is a sample count derived by §4's formula; a hangover of 0 ends vo
 inactive window. `at_sample` positions are in the current epoch's sample index (they restart at 0
 after each reset, with the epoch identified by the `Reset` observation that opened it).
 
-The silence timeout is independent of activity: a run counter accumulates `W` per consecutive
+The silence timeout is independent of activity: a run counter (`u64`) accumulates `W` per consecutive
 `silent` window and clears on any non-silent window. When the run first reaches the derived
 timeout count, the processor emits `SilenceElapsed { at_sample: first sample of the run }` exactly
 once, and re-arms only after a non-silent window or a reset. `silence_timeout_ms: None` disables
@@ -246,7 +248,7 @@ samples are consumed, so those samples open the new epoch.
 `declare_format(rate)` with a rate in 1..=384,000 re-derives every sample count from §4's formula
 against the new rate (re-checking the §5.1 domains, `W <= 65,536` included) and performs a
 `FormatChange` reset. A rate outside the domain — and a re-derivation that leaves the domain — is
-a typed refusal (`UnsupportedRate` / `ProfileError`) and the previous declared format remains in
+a typed refusal (`UnsupportedSampleRate` / `ProfileError`) and the previous declared format remains in
 force, untouched (CAP-F2). A malformed format change never half-applies.
 
 ### 7.3 Frame refusals
@@ -370,7 +372,7 @@ every call. Sample patterns are given as exact signed decimal values.
 | ID | Input | Expected |
 |---|---|---|
 | CAP-F1 | one zero window at 8,000; `declare_format(16,000)`; 320 × `0` | `Reset { FormatChange { 16,000 } }`; derived `W = 320`; the 320 samples complete the new epoch's window 0 |
-| CAP-F2 | `declare_format(0)`, then `declare_format(384,001)` | both refused `UnsupportedRate`; no observation; 8,000 Hz remains in force and the next in-sequence frame is accepted |
+| CAP-F2 | `declare_format(0)`, then `declare_format(384,001)` | both refused `UnsupportedSampleRate`; no observation; 8,000 Hz remains in force and the next in-sequence frame is accepted |
 | CAP-F3 | `declare_format(8,193)` | accepted; `W = ceil(20 · 8,193 / 1000) = 164` — the derivation rounds up, never truncates a window to fewer samples than the duration covers |
 
 ### 11.5 Sequence and discontinuity
@@ -403,5 +405,5 @@ every call. Sample patterns are given as exact signed decimal values.
 | CAP-C1 | `window_ms = 0` | `ProfileError` naming `window_ms` |
 | CAP-C2 | `window_ms = 200` at rate 384,000 | derived 76,800 > 65,536; `ProfileError` — refused, never clamped |
 | CAP-C3 | `queue_capacity = 1`; `queue_capacity = 4,097` | `ProfileError` naming `queue_capacity` |
-| CAP-C4 | rate 0; rate 384,001 | `UnsupportedRate`, aligned with [linear-pcm.md](linear-pcm.md) PCM-4 |
+| CAP-C4 | rate 0; rate 384,001 | `UnsupportedSampleRate`, the [linear-pcm.md](linear-pcm.md) PCM-4 type reused |
 | CAP-C5 | `silence_timeout_ms = Some(0)` | `ProfileError` — a zero timeout would fire before any silence existed |
