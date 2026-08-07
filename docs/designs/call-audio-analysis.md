@@ -16,7 +16,11 @@ without loading the local-speech runtime.
 `M-57` specifies a sans-I/O processor: bounded PCM frames plus explicit sample rate, sequence and
 discontinuity inputs produce typed observations. It reads no clock, socket or device and owns no
 task. Time thresholds are sample counts derived from the declared rate, so a fixture produces the
-same events on every machine. The processor consumes `M-54`'s shared call-media seam.
+same events on every machine. The processor consumes `M-54`'s shared call-media seam. The
+normative contract is [`docs/specs/call-audio-processing.md`](../specs/call-audio-processing.md):
+frame and observation types (§3, §5), exact integer window predicates (§5.3), the
+activity/hangover/timeout state machine (§6), reset and refusal taxonomy (§7), bounds (§8), the
+`M-54` seam assignment (§9) and the `CAP-*` vectors (§11).
 
 `M-58` adds voice activity with start, end and hangover transitions and carries those transitions
 through `CallEvent` and the application SDK. `M-59` exposes level, energy, clipping and silence

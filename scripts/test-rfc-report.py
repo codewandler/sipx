@@ -661,14 +661,14 @@ class ClaimReachability(unittest.TestCase):
         repeated here: deleting the caller must fail this mutation guard even if the rows and their
         citations are left untouched.
         """
-        call_source = (ROOT / "crates" / "sipx-call" / "src" / "call.rs").read_text()
+        call_source = (ROOT / "crates" / "sipx-call" / "src" / "call" / "mod.rs").read_text()
         self.assertIn("capabilities.with_dtls_srtp(", call_source)
 
         by_number = {e["number"]: e for e in registry_entries()}
         for number in (5763, 5764, 8122):
             with self.subTest(rfc=number):
                 self.assertEqual(["uac", "uas"], by_number[number]["roles"])
-                self.assertIn("crates/sipx-call/src/call.rs", by_number[number]["evidence"])
+                self.assertIn("crates/sipx-call/src/call/mod.rs", by_number[number]["evidence"])
                 self.assertIn(
                     "crates/sipx-call/tests/secure_media.rs",
                     by_number[number]["evidence"],

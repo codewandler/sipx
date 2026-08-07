@@ -327,7 +327,7 @@ status = "implemented"
 roles = ["uac", "uas"]
 evidence = [
   "crates/sipx-sdp/src/answer.rs",
-  "crates/sipx-call/src/call.rs",
+  "crates/sipx-call/src/call/offer_answer.rs",
   "crates/sipx-call/tests/call.rs",
   "docs/specs/call-initial-offer.md",
 ]
@@ -354,7 +354,7 @@ status = "partial"
 roles = ["uac", "uas"]
 spec = "docs/specs/call-early-media.md"
 evidence = [
-  "crates/sipx-call/src/call.rs",
+  "crates/sipx-call/src/call/mod.rs",
   "crates/sipx-call/src/rel.rs",
   "crates/sipx-call/tests/reliable_provisional.rs",
 ]
@@ -372,7 +372,8 @@ evidence = [
   "crates/sipx-sip/src/update.rs",
   "crates/sipx-call/src/update.rs",
   "crates/sipx-call/src/rel.rs",
-  "crates/sipx-call/src/call.rs",
+  "crates/sipx-call/src/call/reinvite.rs",
+  "crates/sipx-call/src/call/hold.rs",
   "crates/sipx-call/tests/update.rs",
   "crates/sipx-call/tests/dispatch.rs",
 ]
@@ -386,7 +387,7 @@ status = "implemented"
 headers = ["SessionExpires", "MinSe"]
 evidence = [
   "crates/sipx-sip/src/session.rs",
-  "crates/sipx-call/src/call.rs",
+  "crates/sipx-call/src/call/timers.rs",
   "crates/sipx-call/src/snapshot.rs",
   "crates/sipx-call/tests/dialog_persistence.rs",
   "crates/sipx-call/tests/session_timer.rs",
@@ -491,7 +492,7 @@ headers = ["Reason"]
 spec = "docs/specs/sip-history-info.md"
 evidence = [
   "crates/sipx-sip/src/headers/history.rs",
-  "crates/sipx-call/src/call.rs",
+  "crates/sipx-call/src/call/mod.rs",
   "crates/sipx-call/tests/call.rs",
 ]
 note = "The UA behavior is implemented for both call roles: a typed comma-separated header validates SIP and Q.850 causes, locally generated CANCEL and BYE requests carry causes matching the action, and the call API accepts an explicit reason so a coupled leg can report the winning SIP status from §3.1. The initial INVITE never carries Reason. Received values remain available through typed headers and RFC 7044 retargeting embeds them in the prior target URI. Partial because sipx has no proxy/fork controller and does not generate Reason in responses whose defining RFC separately permits it."
@@ -645,7 +646,7 @@ evidence = [
   "crates/sipx-sdp/src/parse.rs",
   "crates/sipx-sdp/src/session.rs",
   "crates/sipx-sdp/src/rtpmap.rs",
-  "crates/sipx-call/src/call.rs",
+  "crates/sipx-call/src/call/offer_answer.rs",
 ]
 note = "A real AST with round-tripping, rather than string manipulation over the body. Every call goes through it: `call.rs` builds the offer and parses and answers the peer's, on the INVITE, on a re-INVITE and on an UPDATE. §6.6's `a=rtpmap` is read in exactly one place (`rtpmap.rs`), which decides format identity once — the encoding name case-insensitively, the clock rate and the channel count **by value**, with an omitted channel count meaning one. It was decided twice until `M-31`, textually where the answer was built and numerically where the codec was chosen, so an offer carrying `a=rtpmap:0 PCMU/08000` was answered A-law and then played back through µ-law: audible garbage rather than silence, with nothing reporting an error. A clock rate that is empty, is not a decimal digit string, or overflows a `u32` is a typed error and a non-match, never a panic. `docs/specs/sdp-format-identity.md` is normative for the rule and lists the vectors."
 
@@ -691,7 +692,7 @@ status = "implemented"
 evidence = [
   "crates/sipx-rtp/src/dtmf.rs",
   "crates/sipx-media/src/session.rs",
-  "crates/sipx-call/src/call.rs",
+  "crates/sipx-call/src/call/mod.rs",
   "crates/sipx-call/tests/call.rs",
   "crates/sipx-cli/tests/cli.rs",
 ]
@@ -705,7 +706,7 @@ status = "implemented"
 evidence = [
   "crates/sipx-audio/src/opus.rs",
   "crates/sipx-call/src/media_policy.rs",
-  "crates/sipx-call/src/call.rs",
+  "crates/sipx-call/src/call/offer_answer.rs",
   "crates/sipx-call/tests/opus.rs",
   "crates/sipx-cli/src/media.rs",
   "crates/sipx-cli/tests/cli.rs",
@@ -722,7 +723,7 @@ evidence = [
   "crates/sipx-audio/src/opus.rs",
   "crates/sipx-media/tests/opus.rs",
   "crates/sipx-call/src/media_policy.rs",
-  "crates/sipx-call/src/call.rs",
+  "crates/sipx-call/src/call/offer_answer.rs",
   "crates/sipx-call/tests/opus.rs",
   "crates/sipx-cli/src/media.rs",
   "crates/sipx-cli/tests/cli.rs",
@@ -758,7 +759,7 @@ evidence = [
   "crates/sipx-sdp/src/crypto.rs",
   "crates/sipx-sdp/src/answer.rs",
   "crates/sipx-media/src/session.rs",
-  "crates/sipx-call/src/call.rs",
+  "crates/sipx-call/src/call/offer_answer.rs",
   "crates/sipx-sdp/tests/srtp_negotiation.rs",
   "crates/sipx-call/tests/secure_media.rs",
   "crates/sipx-call/tests/update.rs",
@@ -778,7 +779,7 @@ evidence = [
   "crates/sipx-sdp/tests/browser_audio_profile.rs",
   "crates/sipx-sdp/tests/rtcp_mux_setup.rs",
   "crates/sipx-media/src/session.rs",
-  "crates/sipx-call/src/call.rs",
+  "crates/sipx-call/src/call/offer_answer.rs",
   "crates/sipx-call/examples/browser_audio_proof.rs",
   "tests/browser-audio/peer.js",
 ]
@@ -795,7 +796,7 @@ evidence = [
   "crates/sipx-media/src/dtls/mod.rs",
   "crates/sipx-media/src/dtls/openssl.rs",
   "crates/sipx-media/tests/dtls_srtp.rs",
-  "crates/sipx-call/src/call.rs",
+  "crates/sipx-call/src/call/mod.rs",
   "crates/sipx-call/tests/secure_media.rs",
   "crates/sipx-cli/src/media.rs",
   "crates/sipx-cli/tests/cli.rs",
@@ -814,7 +815,7 @@ roles = ["uac", "uas"]
 evidence = [
   "crates/sipx-sdp/src/answer.rs",
   "crates/sipx-media/src/dtls/mod.rs",
-  "crates/sipx-call/src/call.rs",
+  "crates/sipx-call/src/call/mod.rs",
   "crates/sipx-call/tests/secure_media.rs",
   "crates/sipx-cli/src/media.rs",
   "crates/sipx-cli/tests/cli.rs",
@@ -831,7 +832,7 @@ roles = ["uac", "uas"]
 evidence = [
   "crates/sipx-sdp/src/fingerprint.rs",
   "crates/sipx-media/src/dtls/mod.rs",
-  "crates/sipx-call/src/call.rs",
+  "crates/sipx-call/src/call/mod.rs",
   "crates/sipx-call/tests/secure_media.rs",
 ]
 note = "Both initial-call roles emit and consume SHA-256 certificate fingerprints through explicit DTLS-SRTP policy, and §6.2's certificate comparison completes before exported keys reach a media session. A mismatch yields no keys. Media- and session-level attributes, digest-length validation, uppercase generation and MD5/MD2 refusal remain covered below the call layer. Partial because this stack implements the fingerprint for UDP DTLS-SRTP, not the connection-oriented TLS media transport named by the RFC title, and early-media DTLS is not exposed."
@@ -841,7 +842,7 @@ number = 4145
 title = "TCP-Based Media Transport in SDP"
 layer = "media"
 status = "partial"
-evidence = ["crates/sipx-sdp/src/fingerprint.rs", "crates/sipx-call/src/call.rs"]
+evidence = ["crates/sipx-sdp/src/fingerprint.rs", "crates/sipx-call/src/call/mod.rs"]
 note = "`a=setup` is emitted and acted on by initial DTLS-SRTP calls at media or session level: the offer says actpass, the answer prefers active or selects passive when that is the role available, and the offerer takes the complementary role. Missing, unresolved and locally unsupported answer roles are typed refusals before the handshake; a DTLS `holdconn` offer is refused before answer resources are acquired. The selected role decides which side sends ClientHello and which exporter half protects outbound media. The `a=connection` attribute and TCP media transport itself are not implemented: sipx carries media over UDP."
 
 [[rfc]]
@@ -858,7 +859,7 @@ evidence = [
   "crates/sipx-media/src/ice/gather.rs",
   "crates/sipx-media/src/ice/driver.rs",
   "crates/sipx-media/tests/ice.rs",
-  "crates/sipx-call/src/call.rs",
+  "crates/sipx-call/src/call/ice.rs",
   "crates/sipx-call/tests/ice_call.rs",
   "crates/sipx-cli/src/media.rs",
   "crates/sipx-cli/tests/cli.rs",
@@ -879,7 +880,7 @@ evidence = [
   "crates/sipx-media/src/ice/negotiate.rs",
   "crates/sipx-media/src/ice/gather.rs",
   "crates/sipx-media/tests/ice.rs",
-  "crates/sipx-call/src/call.rs",
+  "crates/sipx-call/src/call/ice.rs",
   "crates/sipx-call/tests/ice_call.rs",
   "crates/sipx-cli/src/media.rs",
   "crates/sipx-cli/tests/cli.rs",
@@ -899,7 +900,7 @@ spec = "docs/specs/webrtc-audio.md"
 evidence = [
   "crates/sipx-sdp/src/browser_audio.rs",
   "crates/sipx-sdp/tests/browser_audio_profile.rs",
-  "crates/sipx-call/src/call.rs",
+  "crates/sipx-call/src/call/mod.rs",
   "crates/sipx-cli/tests/cli.rs",
   "crates/sipx-call/examples/browser_audio_proof.rs",
 ]
@@ -912,7 +913,7 @@ layer = "media"
 status = "partial"
 roles = ["uac", "uas"]
 spec = "docs/specs/webrtc-audio.md"
-evidence = ["crates/sipx-call/src/call.rs", "crates/sipx-cli/tests/cli.rs"]
+evidence = ["crates/sipx-call/src/call/mod.rs", "crates/sipx-cli/tests/cli.rs"]
 note = "sipx implements the overview's separation of signalling, description, ICE, DTLS-SRTP and media ownership for one named audio profile. Partial by design: this is a SIP endpoint profile, not a browser API, full WebRTC stack, data-channel implementation or video session."
 
 [[rfc]]
@@ -923,7 +924,7 @@ status = "partial"
 roles = ["uac", "uas"]
 spec = "docs/specs/webrtc-audio.md"
 evidence = [
-  "crates/sipx-call/src/call.rs",
+  "crates/sipx-call/src/call/mod.rs",
   "crates/sipx-media/src/browser.rs",
   "crates/sipx-cli/tests/cli.rs",
 ]
@@ -939,7 +940,7 @@ spec = "docs/specs/webrtc-audio.md"
 evidence = [
   "crates/sipx-sdp/src/browser_audio.rs",
   "crates/sipx-sdp/tests/browser_audio_profile.rs",
-  "crates/sipx-call/src/call.rs",
+  "crates/sipx-call/src/call/mod.rs",
 ]
 note = "The pure SDP boundary validates and answers the one-audio subset, including a completed native-browser offer shape, dynamic required payloads, safe extras, setup roles and fail-closed answer application. Partial because sipx does not implement the JavaScript API, multiple sections, BUNDLE behavior, incremental trickling or the complete JSEP state machine."
 
@@ -953,7 +954,7 @@ spec = "docs/specs/webrtc-audio.md"
 evidence = [
   "crates/sipx-sdp/src/browser_audio.rs",
   "crates/sipx-media/src/browser.rs",
-  "crates/sipx-call/src/call.rs",
+  "crates/sipx-call/src/call/mod.rs",
   "crates/sipx-cli/tests/cli.rs",
 ]
 note = "One secure audio stream uses RTP/SAVPF, mandatory RTP/RTCP multiplexing, one ICE-nominated component, DTLS-SRTP and the required audio formats in both call roles. Partial because the broader feedback, congestion, header-extension, multi-stream and video requirements are not implemented as a general WebRTC media engine."
@@ -1009,7 +1010,7 @@ layer = "services"
 status = "partial"
 roles = ["uac", "uas"]
 methods = ["MESSAGE"]
-evidence = ["crates/sipx-sip/src/message.rs", "crates/sipx-call/src/extension.rs", "crates/sipx-call/src/call.rs"]
+evidence = ["crates/sipx-sip/src/message.rs", "crates/sipx-call/src/extension.rs", "crates/sipx-call/src/call/mod.rs"]
 note = "Applications can send and answer bounded MESSAGE requests inside an established dialog, including a bounded digest-authentication retry. Out-of-dialog instant messaging and message-store policy are not implemented."
 
 [[rfc]]
@@ -1019,7 +1020,7 @@ layer = "services"
 status = "partial"
 roles = ["uac", "uas"]
 methods = ["INFO"]
-evidence = ["crates/sipx-sip/src/message.rs", "crates/sipx-call/src/extension.rs", "crates/sipx-call/src/call.rs"]
+evidence = ["crates/sipx-sip/src/message.rs", "crates/sipx-call/src/extension.rs", "crates/sipx-call/src/call/mod.rs"]
 note = "Applications can send and answer bounded INFO requests inside an established dialog, including a bounded digest-authentication retry. INFO package negotiation and package semantics remain application policy; sipx sends DTMF as RFC 4733 rather than as INFO."
 
 [[rfc]]
@@ -1097,7 +1098,7 @@ spec = "docs/specs/sip-history-info.md"
 evidence = [
   "crates/sipx-sip/src/headers/history.rs",
   "crates/sipx-ua/src/history.rs",
-  "crates/sipx-call/src/call.rs",
+  "crates/sipx-call/src/call/mod.rs",
   "crates/sipx-call/tests/call.rs",
 ]
 note = "The UA side for both call roles: History-Info is a typed ordered list with hierarchical indices and rc/mp/np target-change references. Initial calls advertise histinfo and index their first target at 1; non-100 responses return the cache and calls retain the received history. `sipx_ua::retarget` preserves received entries, exposes an omitted previous hop with `.0`, appends the forwarding `.1`, and embeds the typed Reason in the previous SIP/SIPS URI; tel targets correctly have no URI-header component. Message- and entry-level history privacy anonymize identifying targets while retaining indices. Partial because sipx is not a proxy and does not build a fork's sibling branches; automatic cache extension from every received 3xx/timeout remains the retargeting caller's explicit status input."
