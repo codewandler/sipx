@@ -401,7 +401,9 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
     if let Some(recording) = recording {
         let mut recorded = early_recorded;
         recorded.extend_from_slice(&exchanged.recorded);
-        match recording.finish(&recorded, call.media().clock_rate()) {
+        // The WAV header carries the audio rate, which for G.722 is 16 kHz — twice the RTP
+        // clock (RFC 3551 §4.5.2).
+        match recording.finish(&recorded, call.media().audio_rate()) {
             Ok(path) => report = report.text("recording", path),
             Err(message) => {
                 drop(call);

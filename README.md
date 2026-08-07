@@ -12,7 +12,7 @@ transfer, and carry real audio from a Rust library or a shell command.
 <a href="CHANGELOG.md"><img alt="release: 1.0.0-rc.2" src="https://img.shields.io/static/v1?label=release&message=1.0.0-rc.2&color=blue"></a>
 <a href="#try-the-cli"><img alt="MSRV: rustc 1.88" src="https://img.shields.io/static/v1?label=MSRV&message=rustc%201.88&color=blue"></a>
 <a href="docs/compliance.md"><img alt="RFCs: 36 implemented of 82" src="https://img.shields.io/static/v1?label=RFCs&message=36%20implemented%20of%2082&color=blue"></a>
-<a href="docs/compliance.md"><img alt="codecs: G.711 · L16 · Opus" src="https://img.shields.io/static/v1?label=codecs&message=G.711%20%C2%B7%20L16%20%C2%B7%20Opus&color=blue"></a>
+<a href="docs/compliance.md"><img alt="codecs: G.711 · G.722 · L16 · Opus" src="https://img.shields.io/static/v1?label=codecs&message=G.711%20%C2%B7%20G.722%20%C2%B7%20L16%20%C2%B7%20Opus&color=blue"></a>
 <a href="#license"><img alt="license: MIT OR Apache-2.0" src="https://img.shields.io/static/v1?label=license&message=MIT%20OR%20Apache-2.0&color=blue"></a>
 <!-- END generated:badges -->
 
@@ -45,7 +45,7 @@ PBX, browser media engine, or video stack.
 | Need | Today |
 |---|---|
 | Calls | Place and answer, hold and resume, blind and attended transfer, session timers, bounded confirmed-dialog snapshots |
-| Audio | G.711, L16, DTMF, rate-converting PCM/WAV playback and recording; optional Opus and explicitly selected live devices behind Cargo features |
+| Audio | G.711, G.722, L16, DTMF, rate-converting PCM/WAV playback and recording; optional Opus and explicitly selected live devices behind Cargo features |
 | Security | TLS and secure WebSocket; selectable plain RTP, SDES-keyed SRTP, optional DTLS-SRTP, and a fail-closed browser-audio composition profile |
 | Reachability | `rport`, symmetric RTP, Path, Service-Route, Outbound, GRUU and push refresh; host and STUN-derived ICE candidates, but no TURN relay |
 | SIP events | Bounded inbound notifier, package-generic authenticated subscriber, live registration discovery, and conditional presence publication in both roles |
@@ -99,9 +99,9 @@ admission record and one aggregate summary, never one INFO line per attempted ca
 JSON remains on stdout, so the same invocation stays safe in a pipeline.
 
 That proves the signalling and media session without needing an account. Add `--play hello.wav` or
-`--record reply.wav` to move audio samples; WAV input is 16-bit mono at the negotiated clock
-(8 kHz for G.711, 44.1 or 8 kHz for L16, or 48 kHz for an Opus-only call), and recordings preserve
-that rate. Input at another supported rate is resampled. The
+`--record reply.wav` to move audio samples; WAV input is 16-bit mono at the negotiated audio rate
+(8 kHz for G.711, 16 kHz for G.722, 44.1 or 8 kHz for L16, or 48 kHz for an Opus-only call), and
+recordings preserve that rate. Input at another supported rate is resampled. The
 **[getting-started guide](https://codewandler.github.io/sipx/docs/getting-started)** continues with
 registration, expected output, and installing from `main`.
 
