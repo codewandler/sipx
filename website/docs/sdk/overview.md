@@ -81,6 +81,15 @@ The normative contract is
 The [contract tour](contract.md) describes its envelope, vocabulary, implemented bindings, and
 remaining embedded-runtime boundary.
 
+The contract is runnable end to end without any host: the `sipx-app-protocol` example
+[`canned_program`](https://github.com/codewandler/sipx/blob/main/crates/sipx-app-protocol/examples/canned_program.rs)
+drives a real loopback call — answer, play, gather digits, hang up — through the interpreter
+against a canned application, with the whole driver in one readable file:
+
+```bash
+cargo run -p sipx-app-protocol --example canned_program --features call
+```
+
 ## What to use now
 
 Use the [CLI](../reference/cli.md) for shell automation and bounded call tasks. Use
