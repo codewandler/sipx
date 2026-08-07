@@ -2,7 +2,7 @@
 id: X-67
 title: Split the call module along its seams
 pillar: Build
-status: backlog
+status: in-progress
 priority: 20
 design:
 epic: depth
@@ -22,22 +22,34 @@ unrelated feature's neighbourhood.
 
 ## Acceptance
 
-- [ ] `crates/sipx-call/src/call.rs` is decomposed along concern seams — at minimum hold and resume,
+- [x] `crates/sipx-call/src/call.rs` is decomposed along concern seams — at minimum hold and resume,
       transfer, session timers, re-INVITE and offer/answer, and ICE restart — into sibling modules,
       with `call.rs` retaining the `Call` type and its lifecycle.
-- [ ] **The public API is unchanged.** No path, name, or signature a user can observe moves. Proven by
+- [x] **The public API is unchanged.** No path, name, or signature a user can observe moves. Proven by
       the existing test suite passing without edits to test code, and by `cargo doc` producing the
       same public item set.
-- [ ] This is a pure move. **No behaviour change, no bug fix, and no cleanup rides along** — anything
+- [x] This is a pure move. **No behaviour change, no bug fix, and no cleanup rides along** — anything
       found while moving is filed as its own story rather than fixed in this diff.
-- [ ] Doc comments move with the code they document, and every intra-doc link still resolves under
+- [x] Doc comments move with the code they document, and every intra-doc link still resolves under
       `RUSTDOCFLAGS=-D warnings`.
-- [ ] Test modules move with their subject and keep their `#[allow]` annotations at module scope per
+- [x] Test modules move with their subject and keep their `#[allow]` annotations at module scope per
       `AGENTS.md`.
 - [ ] `./scripts/gate.py` green.
 
 ## Progress
-- (not started)
+- Split into six private submodules under `crates/sipx-call/src/call/` — `hold`, `ice`,
+  `offer_answer`, `refer`, `reinvite`, `timers` — with the `Call` type and its lifecycle staying in
+  `call/mod.rs` (the file formerly `call.rs`; the rename to the repository's `mod.rs` layout is what
+  `check-audio-claims.py`'s module reader resolves). Every moved item is either an inherent `Call`
+  method or re-exported from the `call` module, so no public path moves; the rustdoc item listing
+  (pages + anchors, all features) is byte-identical to the merge base, and the test suite passes with
+  zero edits under `tests/`. Private-to-`pub(super)` widenings and per-module import lists are the
+  only non-verbatim lines, plus module docs. `docs/rfc/registry.toml` evidence paths,
+  `docs/specs/srtp.md`'s `srtp_keys` link, and `scripts/test-rfc-report.py`'s hardcoded path now name
+  the seam files. Gate status is recorded in the implementor report: every step this diff touches is
+  green; the remaining red steps are the pre-existing failures the coordinator listed (cli ANSI-env
+  tests, packaged-opus usage literal, comparison staleness cascade, cli rustdoc), none reachable from
+  this diff.
 
 ## Notes
 - Found by the 2026-08-04 capability review. Nine files exceed 1,500 lines; this is the worst and the
