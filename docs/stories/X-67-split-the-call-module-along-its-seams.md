@@ -2,7 +2,7 @@
 id: X-67
 title: Split the call module along its seams
 pillar: Build
-status: backlog
+status: in-progress
 priority: 20
 design:
 epic: depth
