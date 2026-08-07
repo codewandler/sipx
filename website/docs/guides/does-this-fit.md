@@ -13,7 +13,7 @@ test client, dialler, or voice application. It is not a proxy, registrar, or PBX
 - **Calls from Rust or a shell.** [Place](place-a-call.md) and [answer](answer-a-call.md) calls,
   [send DTMF](send-and-collect-dtmf.md), [hold and resume](hold-and-resume.md), transfer
   [blind](blind-transfer.md) or [attended](attended-transfer.md), [play audio](play-audio.md),
-  [record audio](record-a-call.md), and read quality statistics.
+  [record audio](record-a-call.md), and [read quality statistics](export-observability.md).
 - **A registered endpoint.** Digest authentication, automatic lease refresh, `Path`,
   `Service-Route`, GRUU, RFC 5626 Outbound on a client-opened flow, and push-assisted binding
   refresh are available — see [Register against a PBX](register.md).

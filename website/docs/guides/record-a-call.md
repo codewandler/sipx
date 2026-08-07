@@ -56,10 +56,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // has to be before "they stopped talking" is true. The trailing silence that detected
         // the end is not part of what comes back. For "record this much, however long it takes",
         // `record_at_least` is the counted twin, whose duration is a bound on failure instead.
-        let heard = call
-            .media()
-            .record_until_idle(Duration::from_millis(500))
-            .await;
+        // The call-level verb also reports the recording on the call's event stream.
+        let heard = call.record_until_idle(Duration::from_millis(500)).await;
 
         // Stamp the WAV with the negotiated clock rate, so the file plays back at the speed the
         // caller spoke — the samples are whatever rate the codec agreed, not always 8 kHz.
