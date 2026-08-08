@@ -2,7 +2,7 @@
 id: M-79
 title: Carry the header extension through the relay path
 pillar: Media
-status: in-progress
+status: done
 priority: 5
 design:
 epic: media
@@ -29,7 +29,7 @@ it at the boundary between the packet and the relay.
       extension must reach each.
 - [x] Dropping an extension, where that is correct for a given relay role, is a stated decision
       rather than an omission.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -95,3 +95,6 @@ it at the boundary between the packet and the relay.
 
 - `M-75` deliberately did not widen `Encoded`: adding a field to it changes the shape every relay
   consumer sees, which is a decision about the relay contract rather than about packet parsing.
+
+- 2026-08-08: closed at the `1.0.0-rc.10` boundary. The gate row is ticked against the wave
+  gate run on this commit's tree; if that run had been red this line would say so instead.

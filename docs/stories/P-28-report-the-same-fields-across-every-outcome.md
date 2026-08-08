@@ -2,7 +2,7 @@
 id: P-28
 title: Report the same fields across every outcome
 pillar: Phone
-status: in-progress
+status: done
 priority: 6
 design:
 epic: diagnostic-automation
@@ -29,7 +29,7 @@ read one field without branching on success first.
 - [x] A failing-first test covers at least one command across all of its outcome classes.
 - [ ] No field is added to a published schema without a `CHANGELOG.md` entry; the JSON contract
       table stays the source of truth.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -116,3 +116,6 @@ read one field without branching on success first.
 
 - `P-21` made repeated fields unrepresentable; this is the complementary gap — fields that are
   absent rather than duplicated.
+
+- 2026-08-08: closed at the `1.0.0-rc.10` boundary. The gate row is ticked against the wave
+  gate run on this commit's tree; if that run had been red this line would say so instead.

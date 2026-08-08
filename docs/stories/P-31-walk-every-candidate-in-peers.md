@@ -2,7 +2,7 @@
 id: P-31
 title: Walk every candidate in peers
 pillar: Phone
-status: in-progress
+status: done
 priority: 3
 design: docs/designs/endpoint-resolution.md
 epic: endpoint-resolution
@@ -28,7 +28,7 @@ instead of giving up after the first address.
 - [x] The failure report carries the same `candidates_attempted` / `candidates_resolved` fields
       `T-41` established, so a script reads one shape across commands.
 - [x] The serial pass is not written a fifth time: reuse the helper `register` now delegates to.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -131,3 +131,6 @@ instead of giving up after the first address.
   cannot say how far they got. `walk` now exists for them to take.
 - `P-26` made `--expires` the resolution ceiling for `peers`, which was a judgement call recorded
   in that story; if this work gives `peers` a real attempt deadline, revisit that reading.
+
+- 2026-08-08: closed at the `1.0.0-rc.10` boundary. The gate row is ticked against the wave
+  gate run on this commit's tree; if that run had been red this line would say so instead.

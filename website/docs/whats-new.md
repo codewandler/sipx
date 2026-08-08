@@ -1,13 +1,45 @@
 ---
 title: What's new
-description: Release highlights and adoption notes for the sipx 1.0.0-rc.9 release candidate.
+description: Release highlights and adoption notes for the sipx 1.0.0-rc.10 release candidate.
 ---
 
 # What's new
 
 <!-- BEGIN generated:release-heading -->
-## 1.0.0-rc.9 — 2026-08-08
+## 1.0.0-rc.10 — 2026-08-08
 <!-- END generated:release-heading -->
+
+RC.10 answers a question this project had been guessing at for three releases — whether its own
+tests fail because the machine is busy — and carries nine stories besides.
+
+```bash
+cargo install --locked --version =1.0.0-rc.10 sipx-cli
+```
+
+- **The flakiness was measured rather than assumed, and it was real.** A proof loads the machine
+  with two spinning processes per core and runs the bounded command-line assertions under it, beside
+  a control that cannot pass. One assertion failed. Those bounds are now derived from what starting
+  a `sipx` process costs on the host rather than from a number written on an idle box — clamped, so
+  a command that never answers is still reported as one, and nothing asserted after a wait changed.
+- **Two calls a host owns can be bridged, and several joined to a conference**, through the public
+  API. DTMF while bridged is selectable when the bridge is made, and both ends of the coupling are
+  reported on the call event stream.
+- **A bridged call forwards the RTP header extension it received.** A conference mix deliberately
+  does not: the mix is a packet this endpoint composed from several contributors, and no rule picks
+  whose extension describes it.
+- **One stated deadline funds a whole command.** `dial --timeout 2` could spend two seconds
+  resolving and two more inviting; every phase now draws from what the last one left.
+- **`peers` tries every resolved address of a registrar**, the way the other outbound commands do,
+  and says how many it attempted when none answers.
+- **`dial` names the peer it called on every outcome**, and a repository check now derives each
+  command's field set from its report builders so an outcome cannot quietly omit one.
+- **Public enums are guarded by reachability rather than by a name ending in `Error`.** Twenty-five
+  became `#[non_exhaustive]` and twenty-one carry a written argument for being exhaustive.
+  **Matching any of the twenty-five exhaustively now needs a fallback arm.**
+- **Registry publication is paced by the registry's own limits** and by the deadline it returns
+  with a `429`, within a finite budget.
+
+## 1.0.0-rc.9 — 2026-08-08
 
 RC.9 puts stated bounds on two waits that had none, and enforces the browser kernel's artifact
 checks.
@@ -597,5 +629,5 @@ answer calls, but application callback bindings are not implemented.
 This website is built from `main`, so a page or API link may describe work newer than the tagged
 release. Use the exact crates.io version when reproducibility matters, and consult the
 [complete changelog](https://github.com/codewandler/sipx/blob/main/CHANGELOG.md) before updating a
-Git revision. Unreleased behavior is not part of `1.0.0-rc.9` merely because it appears on this
+Git revision. Unreleased behavior is not part of `1.0.0-rc.10` merely because it appears on this
 site.

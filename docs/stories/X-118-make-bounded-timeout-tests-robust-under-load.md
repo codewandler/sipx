@@ -2,7 +2,7 @@
 id: X-118
 title: Make bounded-timeout tests robust under load
 pillar: Build
-status: ready
+status: done
 priority: 31
 design:
 epic: test-surfaces
@@ -27,7 +27,7 @@ weakening what they assert.
 - [x] A failing-first proof runs the suite under deliberate CPU contention and shows the assertion
       surviving, while a genuinely unbounded operation still fails it.
 - [x] `check-fixed-sleep.py` stays green — this must not become a sleep.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -111,3 +111,6 @@ weakening what they assert.
   that load can only push it up so a starved run fails there rather than passing wrongly. Scaling it
   to 144 s would destroy that discrimination. Left as written, and now recorded as a decision.
   `check-fixed-sleep.py` stays green at 43 of 43; the gate is 44 steps and `--check` reports parity.
+
+- 2026-08-08: closed at the `1.0.0-rc.10` boundary. The gate row is ticked against the wave
+  gate run on this commit's tree; if that run had been red this line would say so instead.

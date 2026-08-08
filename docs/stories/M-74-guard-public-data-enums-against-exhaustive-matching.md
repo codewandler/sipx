@@ -2,7 +2,7 @@
 id: M-74
 title: Guard public data enums against exhaustive matching
 pillar: Media
-status: in-progress
+status: done
 priority: 8
 design:
 epic: media
@@ -31,7 +31,7 @@ the media path and nothing enforces it.
       unguarded one.
 - [ ] Any enum that becomes `#[non_exhaustive]` gets a `CHANGELOG.md` entry, since it changes what
       downstream `match` arms must handle.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -108,3 +108,6 @@ whoever owns that file:
   made `crypto::Suite` and `dtls::Profile` `#[non_exhaustive]` precisely because it was adding
   variants. Each addition to an unguarded enum breaks every downstream exhaustive `match`.
 - `A-9` froze what a published crate can add; this is the part of that contract nothing checks.
+
+- 2026-08-08: closed at the `1.0.0-rc.10` boundary. The gate row is ticked against the wave
+  gate run on this commit's tree; if that run had been red this line would say so instead.

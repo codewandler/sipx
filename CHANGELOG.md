@@ -7,6 +7,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0-rc.10] — 2026-08-08
+
+Nine stories: a measured answer to the flakiness question, the relay's header extension, one budget
+per command, a candidate walk in `peers`, call-level bridging, an extensibility rule that selects by
+reachability, and registry pacing.
+
 ### Fixed
 
 - **The `device-audio` build is no longer broken on macOS and Windows.** A test helper was gated on
@@ -4029,7 +4035,8 @@ Stated so nobody has to discover it from a stack trace:
 - **Interop is verified against Kamailio only.** A second implementation with different
   opinions — Asterisk, as a B2BUA rather than a proxy — has not been tried.
 
-[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.9...HEAD
+[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.10...HEAD
+[1.0.0-rc.10]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.9...v1.0.0-rc.10
 [1.0.0-rc.9]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.8...v1.0.0-rc.9
 [1.0.0-rc.8]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.7...v1.0.0-rc.8
 [1.0.0-rc.7]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.6...v1.0.0-rc.7

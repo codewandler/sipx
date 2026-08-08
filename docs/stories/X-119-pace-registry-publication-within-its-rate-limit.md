@@ -2,7 +2,7 @@
 id: X-119
 title: Pace registry publication within its rate limit
 pillar: Build
-status: in-progress
+status: done
 priority: 32
 design:
 epic: conformance
@@ -29,7 +29,7 @@ in for knowing the limit.
       without a retry hint, with no wall-clock sleep in the test.
 - [x] Publication remains resumable: a paced run that stops mid-frontier restarts without
       republishing or moving anything already published.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -88,3 +88,6 @@ in for knowing the limit.
   Left open for the coordinator: `.github/workflows/crates-io.yml` and `crates-io-resume.yml` do not
   pass `--registry-retry-budget-seconds`, so both take the 1800 s default. That is finite and within
   the job bound, but naming it in the workflow would make the release's total wait reviewable.
+
+- 2026-08-08: closed at the `1.0.0-rc.10` boundary. The gate row is ticked against the wave
+  gate run on this commit's tree; if that run had been red this line would say so instead.

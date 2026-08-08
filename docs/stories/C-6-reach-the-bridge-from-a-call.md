@@ -95,3 +95,6 @@ API, without `Arc<Mutex<Call>>` and without constructing media sessions from raw
   `C-2`), and upgrades the contract's `bridge` verb without changing it.
 - Needed by the host (`crates/sipx-app`): `bridge` and `dial`-then-connect are contract
   verbs.
+
+- 2026-08-08: closed at the `1.0.0-rc.10` boundary. The gate row is ticked against the wave
+  gate run on this commit's tree; if that run had been red this line would say so instead.

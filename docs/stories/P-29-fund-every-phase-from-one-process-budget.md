@@ -2,7 +2,7 @@
 id: P-29
 title: Fund every phase from one process budget
 pillar: Phone
-status: in-progress
+status: done
 priority: 33
 design:
 epic: diagnostic-automation
@@ -36,7 +36,7 @@ invitation.
       resolution bounded, the honest worst case is three.
 - [x] `load` consults `--duration` as well as `--timeout` when bounding resolution: a run with
       `--duration 2 --timeout 20` can currently spend eight seconds resolving.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -102,3 +102,6 @@ invitation.
 
 - `P-25`'s `register` is the reference: each candidate is funded from the remainder.
 - This is a contract change, not a bug fix — treat the published field semantics as the hard part.
+
+- 2026-08-08: closed at the `1.0.0-rc.10` boundary. The gate row is ticked against the wave
+  gate run on this commit's tree; if that run had been red this line would say so instead.

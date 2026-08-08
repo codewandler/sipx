@@ -2,7 +2,7 @@
 id: M-78
 title: Guard public enums by reachability, not by name
 pillar: Media
-status: in-progress
+status: done
 priority: 4
 design:
 epic: media
@@ -29,7 +29,7 @@ than the ones whose name happens to end in `Error`.
 - [x] Every enum the corrected rule reports is resolved — `#[non_exhaustive]` or an adjacent
       `/// Exhaustive by design:` rationale — with the reason recorded per enum. Each addition is a
       breaking change for downstream `match` arms and needs a `CHANGELOG.md` statement.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -74,3 +74,6 @@ than the ones whose name happens to end in `Error`.
   consumer would have hit.
 - `sipx-app-protocol` is deliberately excluded — it owns a closed, versioned application vocabulary
   and documents its own exceptions.
+
+- 2026-08-08: closed at the `1.0.0-rc.10` boundary. The gate row is ticked against the wave
+  gate run on this commit's tree; if that run had been red this line would say so instead.
