@@ -209,6 +209,55 @@ exits non-zero when the pattern *is* found: `grep -q` stops at the first match, 
 takes SIGPIPE, and `pipefail` reports the pipeline by that. Every log guard here would have fired
 precisely when the thing it looked for was present. The log is read into a variable once instead.
 
+## What the media-security role does *not* prove — the AEAD suites
+
+`PEER_KEYINGS` says how a peer keys SRTP; it says nothing about which transform the keying settles
+on, and the two are not the same claim. Both keyings run here in counter mode, because the pinned
+peer cannot do anything else: **it is built without AEAD-GCM support entirely.** Measured rather
+than assumed, twice, at `andrius/asterisk:20.20.1-alpine-3.24`:
+
+- Its SRTP module references `srtp_crypto_policy_set_aes_cm_*` and no `srtp_crypto_policy_set_aes_gcm_*`,
+  though the `libsrtp2` 2.7.0 beside it exports them and is built against OpenSSL. Its RTP module
+  contains the strings `SRTP_AES128_CM_SHA1_80` and `SRTP_AES128_CM_SHA1_32`, and no
+  `SRTP_AEAD_*`, so it cannot offer a GCM profile in a DTLS handshake either.
+- Offered a single `a=crypto` line by hand, to the same endpoint on the same run: with
+  `AES_CM_128_HMAC_SHA1_80` it answers `200 OK`; with `AEAD_AES_256_GCM` and with
+  `AEAD_AES_128_GCM` it answers `488 Not Acceptable Here`, logging `Couldn't negotiate stream
+  0:audio`. The control is what makes the two refusals mean the suite and not the probe.
+
+So `a_real_peer_accepts_media_sipx_encrypted_with_sdes` passing is a fact about RFC 3711's key
+derivation, which a published vector already pins — not about RFC 7714's, which none does. Nothing
+in this directory currently exercises the AEAD derivation, and a reader who took the
+`media-security` role at face value would think otherwise. What does exercise it, over DTLS-SRTP
+and for `AEAD_AES_256_GCM` only, is the native-browser proof in `../browser-audio/`; see
+[`docs/specs/srtp.md`](../../docs/specs/srtp.md) §12.10 for what that settles and what it leaves
+open.
+
+Closing the rest needs a SIP peer built with AEAD-GCM, pinned and public, that can be made to
+*require* a GCM suite so a silent fall back to counter mode fails the run rather than passing it.
+That is a peer this harness does not have, not a gap in the harness.
+
+### The candidate, measured rather than read about
+
+`holius/baresip:v2` was checked on the wire and does both keyings, which no peer here does:
+
+- **SDES.** Offered `a=crypto:1 AEAD_AES_256_GCM inline:…` it answers `200` echoing that suite and
+  logs `SRTP is Enabled (cryptosuite=AEAD_AES_256_GCM)`; same for `AEAD_AES_128_GCM`. Its SRTP
+  comes from a library that implements the ciphers itself against OpenSSL's primitives rather than
+  delegating to `libsrtp`, so it is a third reading of RFC 7714 rather than a second copy of one.
+- **DTLS-SRTP.** It advertises `SRTP_AES128_CM_SHA1_80:SRTP_AES128_CM_SHA1_32:SRTP_AEAD_AES_128_GCM:SRTP_AEAD_AES_256_GCM`
+  and completed a handshake in *both* roles against an OpenSSL peer advertising GCM only.
+
+Two things a reviewer should weigh before it becomes a profile. It is an image in a personal
+namespace at 833 MB, against criterion 4 above — pinned and public, but neither official nor quick.
+And it **never originates a GCM `a=crypto`**: one hardcoded suite, no configuration key. That is
+fine while sipx is the offerer, which is the direction the media-security role runs.
+
+`AEAD_AES_128_GCM` needs one more thing in either keying, and it is on our side: sipx offers
+strongest-first and there is no public way to narrow a call's offer to a single suite.
+`Capabilities::with_srtp_suites` does it at the `sipx-sdp` layer and `DialOptions` exposes nothing
+equivalent, so covering the 128-bit suite is an API question, not only a peer question.
+
 ## Still to do
 
 The five released signalling transports run against both profiles. A profile can put WS and WSS on

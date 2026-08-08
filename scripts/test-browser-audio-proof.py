@@ -47,7 +47,18 @@ def browser(role: str) -> dict:
             "dtls_state": "connected",
             "setup_role": "active" if role == "browser-offerer" else "passive",
             "dtls_cipher": "cipher",
-            "srtp_profile": "profile",
+            # The profiles a real run of this harness negotiates, per role. The browser picks
+            # when it is the DTLS server, which is the offerer role, and picks counter mode;
+            # sipx picks in the answerer role and picks its strongest, which is AEAD-GCM. That
+            # asymmetry is what makes the answerer role M-72's key-derivation witness.
+            "srtp_profile": (
+                "AES_CM_128_HMAC_SHA1_80" if role == "browser-offerer" else "AEAD_AES_256_GCM"
+            ),
+        },
+        "peer": {
+            "browser_name": "chrome",
+            "browser_version": "150.0.7871.46",
+            "driver_version": "150.0.7871.46",
         },
         "candidate_pair": {
             "id": "pair-1",
@@ -163,6 +174,26 @@ class BrowserAudioProofTest(unittest.TestCase):
         with self.assertRaises(DRIVER.ProofError):
             DRIVER.validate_proof(directory or self.directory, PIN)
 
+    def rebind_negatives(self) -> None:
+        """Re-derive each negative's binding digest from the evidence now on disk.
+
+        Every negative carries the SHA-256 of the positive it was recorded against, so *any*
+        edit to a role's evidence makes `validate_proof` refuse on that binding alone. A test
+        that mutated a field and stopped there would be refused whatever the validator did with
+        the field under test, and would pass against a validator that ignored it entirely —
+        which is how the first draft of the three tests below passed at the merge base.
+        """
+        for name in ("FingerprintMismatch", "NoNominatedPair", "WeakerMedia"):
+            role = "browser-offerer" if name == "FingerprintMismatch" else "browser-answerer"
+            digest = DRIVER.proof_digest(
+                json.loads((self.directory / role / "browser.json").read_text(encoding="utf-8")),
+                json.loads((self.directory / role / "sipx.json").read_text(encoding="utf-8")),
+            )
+            path = self.directory / "negatives" / f"{name}.json"
+            value = json.loads(path.read_text(encoding="utf-8"))
+            value["positive_sha256"] = digest
+            path.write_text(json.dumps(value), encoding="utf-8")
+
     def test_complete_two_role_proof_is_accepted(self) -> None:
         result = DRIVER.validate_proof(self.directory, PIN)
         self.assertEqual(set(DRIVER.ROLES), set(result["roles"]))
@@ -212,6 +243,59 @@ class BrowserAudioProofTest(unittest.TestCase):
         changed = copy.deepcopy(original)
         changed["sip"]["order"].remove("bye-final")
         target.write_text(json.dumps(changed), encoding="utf-8")
+        self.assert_refused()
+
+    def test_a_counter_mode_only_proof_does_not_prove_the_aead_derivation(self) -> None:
+        """M-72: the run must refuse to call itself a proof when no role keyed with AEAD-GCM.
+
+        RFC 7714 publishes no key-derivation vector, so where the 96-bit master salt sits in the
+        PRF input block rests on a reading of the spec. Two sipx endpoints sharing a wrong
+        reading interoperate perfectly with each other, and every round-trip test in the tree
+        still passes. Only a foreign implementation deriving the same session keys can catch it,
+        and only the AEAD profiles exercise that derivation — a counter-mode run proves the
+        RFC 3711 derivation, which a published vector already pins.
+        """
+        for role in DRIVER.ROLES:
+            target = self.directory / role / "browser.json"
+            result = json.loads(target.read_text(encoding="utf-8"))
+            result["security"]["srtp_profile"] = "AES_CM_128_HMAC_SHA1_80"
+            target.write_text(json.dumps(result), encoding="utf-8")
+        self.rebind_negatives()
+        self.assert_refused()
+
+    def test_the_negotiated_profile_must_be_a_name_the_registry_carries(self) -> None:
+        """A profile field nothing checks records a string, not a negotiation.
+
+        Presence alone is satisfied by any non-empty value, including a placeholder, so the
+        evidence would survive the harness losing track of what was negotiated.
+        """
+        target = self.directory / "browser-answerer/browser.json"
+        original = json.loads(target.read_text(encoding="utf-8"))
+        for value in ("profile", "AEAD_AES_192_GCM", "aead_aes_256_gcm"):
+            changed = copy.deepcopy(original)
+            changed["security"]["srtp_profile"] = value
+            target.write_text(json.dumps(changed), encoding="utf-8")
+            self.rebind_negatives()
+            self.assert_refused()
+
+    def test_the_peer_and_its_exact_revision_are_recorded(self) -> None:
+        """Evidence a stranger can audit has to say which build agreed with us.
+
+        "A browser interoperated" is not a fact anyone can check twice; "this browser at this
+        revision negotiated this profile" is.
+        """
+        target = self.directory / "browser-answerer/browser.json"
+        original = json.loads(target.read_text(encoding="utf-8"))
+        for mutation in ({}, {"browser_name": "chrome"}, {"browser_name": "chrome", "browser_version": ""}):
+            changed = copy.deepcopy(original)
+            changed["peer"] = mutation
+            target.write_text(json.dumps(changed), encoding="utf-8")
+            self.rebind_negatives()
+            self.assert_refused()
+        changed = copy.deepcopy(original)
+        del changed["peer"]
+        target.write_text(json.dumps(changed), encoding="utf-8")
+        self.rebind_negatives()
         self.assert_refused()
 
     def test_negatives_are_bound_to_validated_positive_and_layer(self) -> None:

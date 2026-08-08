@@ -29,6 +29,22 @@ ROLES = ("browser-offerer", "browser-answerer")
 MAX_IDENTIFIER_CHARS = 256
 MAX_ERROR_CHARS = 4096
 
+#: The SRTP protection profiles RFC 5764 §4.1.2 registers and this harness can meet, spelled the
+#: way the IANA registry spells them. Membership is checked rather than presence: a field nothing
+#: compares against a known name records a string, not a negotiation, and would go on reading as
+#: satisfied after the harness lost track of what was negotiated.
+COUNTER_MODE_SRTP_PROFILES = frozenset({"AES_CM_128_HMAC_SHA1_80", "AES_CM_128_HMAC_SHA1_32"})
+
+#: The AEAD profiles of RFC 7714. These are the ones that carry M-72's claim, because they are the
+#: only ones whose key derivation no published vector pins. RFC 7714 shortens the master salt to 96
+#: bits and says nothing about moving anything in the PRF input block, so where that salt sits
+#: rests on a reading of the spec (`docs/specs/srtp.md` §4.3). Two sipx endpoints sharing a wrong
+#: reading derive the same wrong session keys, interoperate perfectly, and pass every round-trip
+#: test in this repository. Only a foreign implementation deriving the same keys can contradict it.
+AEAD_SRTP_PROFILES = frozenset({"AEAD_AES_128_GCM", "AEAD_AES_256_GCM"})
+
+KNOWN_SRTP_PROFILES = COUNTER_MODE_SRTP_PROFILES | AEAD_SRTP_PROFILES
+
 
 class ProofError(RuntimeError):
     """A harness or evidence boundary failed closed."""
@@ -248,7 +264,17 @@ def validate_browser_result(value: Any, role: str, expected_pin: str) -> dict[st
     require(security.get("wss_spki_sha256") == expected_pin, "browser did not report the pinned WSS identity")
     require(security.get("dtls_state") == "connected", "DTLS is not connected")
     require(security.get("setup_role") in ("active", "passive"), "DTLS setup role is unresolved")
-    require(bool(security.get("srtp_profile")), "SRTP profile/cipher evidence is absent")
+    require(
+        security.get("srtp_profile") in KNOWN_SRTP_PROFILES,
+        "the negotiated SRTP profile is not a name the registry carries",
+    )
+
+    # Which build agreed with us, from the driver rather than from the page under test. "A browser
+    # interoperated" is not a fact anyone can check twice; "this browser at this revision
+    # negotiated this profile" is, which is the difference between evidence and an assertion.
+    peer = _mapping(result.get("peer"), "peer evidence")
+    _bounded_string(peer.get("browser_name"), "peer browser name")
+    _bounded_string(peer.get("browser_version"), "peer browser revision")
 
     pair = _mapping(result.get("candidate_pair"), "candidate-pair evidence")
     _bounded_string(pair.get("id"), "candidate-pair identifier")
@@ -420,11 +446,42 @@ def validate_proof(directory: pathlib.Path, expected_pin: str) -> dict[str, Any]
     )
     for name in ("FingerprintMismatch", "NoNominatedPair", "WeakerMedia"):
         validate_negative(load_json(directory / "negatives" / f"{name}.json"), name, roles)
+
+    # M-72. At least one role has to have keyed with AEAD-GCM, or this run proves nothing about
+    # the one SRTP parameter no published vector pins. A counter-mode run is not worthless — it is
+    # simply already pinned by RFC 3711 §B.3's vector, which sipx reproduces in-tree — so a proof
+    # that quietly became counter-mode-only would keep passing while the claim it carries evaporated.
+    #
+    # The witness is the browser-answerer role: sipx is the DTLS server there and picks its
+    # strongest offered profile, whereas in the offerer role the browser picks and picks counter
+    # mode. Neither side is asked to prefer anything for the test's benefit.
+    aead = {
+        role: evidence["browser"]["security"]["srtp_profile"]
+        for role, evidence in roles.items()
+        if evidence["browser"]["security"]["srtp_profile"] in AEAD_SRTP_PROFILES
+    }
+    require(
+        bool(aead),
+        "no role negotiated an AEAD-GCM profile, so the AEAD key derivation is unproven",
+    )
+    witness = sorted(aead)[0]
+    peer = roles[witness]["browser"]["peer"]
     return {
         "contract": CONTRACT,
         "type": "proof.complete",
         "roles": roles,
         "unused_rtcp_candidate": compatibility,
+        # Hoisted out of the roles so the claim is legible without reading the whole record:
+        # who agreed, at exactly what revision, on which profile.
+        "aead_key_derivation": {
+            "role": witness,
+            "srtp_profile": aead[witness],
+            "peer": peer,
+            "profiles_by_role": {
+                role: evidence["browser"]["security"]["srtp_profile"]
+                for role, evidence in roles.items()
+            },
+        },
     }
 
 
@@ -432,6 +489,7 @@ class WebDriver:
     def __init__(self, base: str):
         self.base = base.rstrip("/")
         self.session: str | None = None
+        self.peer: dict[str, str] = {}
 
     def request(self, method: str, path: str, payload: Any | None = None, timeout: float = 10) -> Any:
         data = None if payload is None else json.dumps(payload).encode("utf-8")
@@ -472,6 +530,25 @@ class WebDriver:
         require(isinstance(value, dict), "WebDriver session response is not an object")
         self.session = value.get("sessionId")
         require(bool(self.session), "WebDriver did not return a session id")
+
+        # The peer's identity as the *driver* reports it, not as the page under test claims it.
+        # A page can say anything about itself; the session's negotiated capabilities are the
+        # browser's own answer, which is what makes the revision auditable.
+        negotiated = value.get("capabilities")
+        negotiated = negotiated if isinstance(negotiated, dict) else {}
+        peer = {
+            "browser_name": str(negotiated.get("browserName", "")),
+            "browser_version": str(negotiated.get("browserVersion", "")),
+        }
+        for section in negotiated.values():
+            if isinstance(section, dict) and "chromedriverVersion" in section:
+                # The driver reports its build as "<version> (<commit>)"; the version alone is
+                # what identifies it, and the whole string is kept bounded by the caller.
+                peer["driver_version"] = str(section["chromedriverVersion"]).split(" ")[0]
+                break
+        require(bool(peer["browser_name"]), "WebDriver did not name the browser it started")
+        require(bool(peer["browser_version"]), "WebDriver did not report the browser revision")
+        self.peer = peer
 
     def close(self) -> None:
         if self.session:
@@ -690,6 +767,8 @@ def main() -> int:
         try:
             driver.start(load_json(args.capabilities), args.pin, args.timeout)
             result = driver.run(args.page, config, args.timeout)
+            if isinstance(result, dict):
+                result["peer"] = driver.peer
             write_json_evidence(args.output, result)
             validate_browser_result(result, args.role, args.pin)
         finally:
