@@ -73,25 +73,24 @@ appeared twice before anyone named it.
 ## Now (in progress)
 - [A-10 — Publish the stable crate set and diagnostic CLI artifacts](A-10-publish-the-stable-crates-and-cli.md) · Application · promote the public beta only after every v1 predicate; stable archives and SBOM live here
 - [A-38 — Publish and verify the second release candidate](A-38-publish-and-verify-rc3.md) · Application · after X-113 · the post-rc.2 wave as one immutable prerelease · no stable-1.0 claim widens
+- [C-8 — Relay the early negotiation carriers](C-8-relay-the-early-negotiation-carriers.md) · Call · C-7 refuses reliable provisionals, PRACK and offerless INVITE rather than half-relaying them · relaying those means authoring a description this role has no media for
+- [M-60 — Calibrate and adapt audio-activity thresholds deterministically](M-60-calibrate-audio-activity-thresholds.md) · Media · after M-58 and M-59 · bounded adaptation with observable reset and limits
+- [M-63 — Specify the custom call-DSP contract](M-63-specify-custom-call-dsp-contract.md) · Media · after M-54 · M18 admission · frame contract, execution profiles and minimum failure policy
 - [M-70 — Accept multiplexed browser offers with unused component candidates](M-70-accept-multiplexed-browser-offers-with-unused-component-candidates.md) · Media · external review finding 9 · a second browser engine reaches SDP then fails the multiplexed profile
 - [M-72 — Prove the AEAD SRTP key derivation against an independent peer](M-72-prove-the-aead-srtp-key-derivation-against-a-peer.md) · Media · RFC 7714 publishes no KDF vector · a wrong salt placement makes two sipx endpoints interoperate with each other and nobody else, and every round-trip test still passes
+- [M-81 — Make the SRTP protect-error discard tell the truth](M-81-count-the-srtp-protect-discard.md) · Media · a spec sentence says the branch is unreachable · M-79 made it reachable, and it increments nothing
+- [X-93 — Make protected release evidence faster without weakening it](X-93-make-protected-release-evidence-faster.md) · Build · measure cache and preflight changes against the 12m37 cold beta gate · follow-up
 
 ## Next (ready — take the top one unless the user named a story)
 
 ### Conformance
 - [X-125 — See what only the non-Linux jobs compile](X-125-see-what-only-the-non-linux-jobs-compile.md) · Build · two CI jobs were red for a day over a cfg that disagreed with its only caller · the Linux gate compiles the caller, so it cannot see it
-- [X-93 — Make protected release evidence faster without weakening it](X-93-make-protected-release-evidence-faster.md) · Build · measure cache and preflight changes against the 12m37 cold beta gate · follow-up
 
 ### Reliable diagnostic automation
 - [P-30 — Bound the first NOTIFY in a registrar subscription](P-30-bound-the-first-notify-in-a-registrar-subscription.md) · Phone · peers --registrar waits Timer N — 64*T1, 32 seconds — with no operator control · the dominant unbounded wait once resolution is bounded
 
-### Edge / B2BUA
-_A programmable SIP and media edge — transports, endpoints and routes, with dialog bridging and_
-- [C-8 — Relay the early negotiation carriers](C-8-relay-the-early-negotiation-carriers.md) · Call · C-7 refuses reliable provisionals, PRACK and offerless INVITE rather than half-relaying them · relaying those means authoring a description this role has no media for
-
 ### Media
 _Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
-- [M-81 — Make the SRTP protect-error discard tell the truth](M-81-count-the-srtp-protect-discard.md) · Media · a spec sentence says the branch is unreachable · M-79 made it reachable, and it increments nothing
 - [M-80 — Decide non-exhaustive for the two relayed packet structs](M-80-decide-non-exhaustive-before-the-freeze.md) · Media · two field additions in two stories, both breaking · the choice stops being reversible at 1.0
 - [M-83 — Extend the extensibility guard past the media path](M-83-extend-the-reachability-guard-past-the-media-path.md) · Media · 98 reachable public enums outside the guarded five crates · the boundary names crates, so no enum is individually excused
 
@@ -123,24 +122,31 @@ _Beta.4 proves that sipx can interoperate with a browser audio endpoint, but it 
 ### real-time call-audio analysis
 _Applications need small, predictable facts about live audio even when no speech model is enabled:_
 - [A-29 — Publish a runnable live call-audio analysis example](A-29-publish-call-audio-analysis-example.md) · Application · M16 analysis exit after X-106 · no model or special hardware required
-- [M-60 — Calibrate and adapt audio-activity thresholds deterministically](M-60-calibrate-audio-activity-thresholds.md) · Media · after M-58 and M-59 · bounded adaptation with observable reset and limits
 - [M-61 — Harden call-audio analysis against adversarial input](M-61-harden-call-audio-analysis.md) · Media · after M-57 · hostile audio, bounded resources, cross-call isolation and no retention
+- [M-84 — Carry calibrated thresholds onto the application wire](M-84-carry-calibrated-thresholds-to-applications.md) · Media · after M-60 · the effective thresholds are Rust-only; an app-protocol client cannot see them
 - [X-106 — Measure call-audio analysis accuracy and resource cost](X-106-measure-call-audio-analysis.md) · Build · after M-58 through M-61 · versioned corpus, error rates, event latency, CPU and memory
+
+### Conformance
+- [X-127 — Bound registry pacing across the whole publication, not one invocation](X-127-bound-registry-pacing-across-the-whole-publication.md) · Build · found while verifying X-119 against X-93's rate-limit row · the per-run budget resets
 
 ### custom call-audio DSP
 _Applications need to shape live call audio without forking the media runtime: ordinary gain and_
 - [A-34 — Publish a runnable custom call-DSP example](A-34-publish-custom-call-dsp-example.md) · Application · M18 exit after M-67 and X-109 · live graph, custom fixture, effects/noise reduction, bypass
-- [M-63 — Specify the custom call-DSP contract](M-63-specify-custom-call-dsp-contract.md) · Media · after M-54 · M18 admission · frame contract, execution profiles and minimum failure policy
 - [M-64 — Attach bounded DSP graphs to calls](M-64-attach-bounded-dsp-graphs-to-calls.md) · Media · after M-54 and M-63 · ordered per-direction graphs, atomic replacement and teardown barrier
 - [M-65 — Ship deterministic audio effects and filters](M-65-ship-deterministic-audio-effects-and-filters.md) · Media · after M-63 · gain/filter/distortion/bit-crush/stutter processors use the public contract
 - [M-66 — Ship interchangeable local noise reduction](M-66-ship-interchangeable-noise-reduction.md) · Media · after M-63 · optional M-58 VAD input · provider-neutral contract and local baseline
 - [M-67 — Control call DSP graphs through the application SDK](M-67-control-dsp-graphs-through-the-sdk.md) · Media · after M-64 · typed registry and sample-boundary parameters, never SDK callbacks on media work
 - [M-68 — Harden DSP real-time and failure isolation](M-68-harden-dsp-realtime-failure-isolation.md) · Media · after M-63/M-64 · measured budgets and explicit fail-open/fail-closed policy
 - [X-109 — Measure custom DSP quality and real-time cost](X-109-measure-custom-dsp-quality-and-cost.md) · Build · after M-65/M-66/M-68 · exact effects, quality, cost, isolation and packaged conformance
+- [X-128 — Measure DSP processor heap growth](X-128-measure-processor-heap-growth.md) · Build · after M-63 · DSP-K9 reports heap growth `Unproven` because no counting allocator can be installed
 
 ### Endpoint discovery
 _sipx can call any endpoint you can already name, and cannot help you name one. `sipx dial` takes a_
 - [P-6 — Dial a peer by name](P-6-dial-a-peer-by-name.md) · Phone · needs P-5 — `sipx dial alice` where alice came out of `sipx peers`
+
+### Edge / B2BUA
+_A programmable SIP and media edge — transports, endpoints and routes, with dialog bridging and_
+- [C-10 — Answer a delayed offer in the 2xx and its answer in the ACK](C-10-answer-a-delayed-offer-in-the-2xx.md) · Signalling · RFC 3264 §5's other delayed-offer carrier · the only one available to a peer with no 100rel, and the reason C-8 still refuses that INVITE
 
 ### Bounded endpoint resolution
 - [T-42 — Take the shared candidate pass in dial, load and scenario](T-42-take-the-shared-pass-in-dial-load-and-scenario.md) · Transport · five hand-rolled candidate loops remain across dial, load and scenario; three of them count no attempts, so their connection failures cannot say how far they got
@@ -156,6 +162,10 @@ _A live call on a machine with a local accelerator should be able to transcribe 
 - [M-56 — Ship a practical local offline speech-synthesis provider](M-56-ship-local-offline-speech-synthesis.md) · Media · after A-25, A-28 and M-54 · accelerator path plus defined CPU behavior
 - [X-104 — Publish a runnable local live-call speech example and measurements](X-104-publish-local-call-speech-example.md) · Build · M16 exit after X-105 · accelerator when available and bounded CPU fixture everywhere
 - [X-105 — Prove speech-provider substitution with one conformance suite](X-105-prove-speech-provider-substitution.md) · Build · after M-55, M-56, A-26, A-27 and A-28 · same suite for bundled and downstream providers
+
+### Media
+_Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
+- [M-85 — Refuse a header extension that disagrees with itself, at the send boundary](M-85-refuse-a-self-inconsistent-header-extension.md) · Media · M-81 counted the packets SRTP refuses · the in-bounds case is refused by nothing, and sends media octets outside the encryption
 
 ### Media interoperability closure
 - [M-82 — Say what a forwarded extension means to a peer that negotiated none](M-82-say-what-a-forwarded-extension-means-to-a-peer.md) · Media · sipx negotiates no extmap and now forwards element identifiers verbatim across a bridge
