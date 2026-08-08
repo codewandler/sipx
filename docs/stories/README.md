@@ -77,6 +77,7 @@ appeared twice before anyone named it.
 - [M-70 — Accept multiplexed browser offers with unused component candidates](M-70-accept-multiplexed-browser-offers-with-unused-component-candidates.md) · Media · external review finding 9 · a second browser engine reaches SDP then fails the multiplexed profile
 - [M-72 — Prove the AEAD SRTP key derivation against an independent peer](M-72-prove-the-aead-srtp-key-derivation-against-a-peer.md) · Media · RFC 7714 publishes no KDF vector · a wrong salt placement makes two sipx endpoints interoperate with each other and nobody else, and every round-trip test still passes
 - [T-33 — Bind browser WebSocket signalling](T-33-bind-browser-websocket-signalling.md) · Transport · after A-16 and S-41 · browser owns I/O, WASM core consumes bytes
+- [T-42 — Take the shared candidate pass in dial, load and scenario](T-42-take-the-shared-pass-in-dial-load-and-scenario.md) · Transport · five hand-rolled candidate loops remain across dial, load and scenario; three of them count no attempts, so their connection failures cannot say how far they got
 - [X-93 — Make protected release evidence faster without weakening it](X-93-make-protected-release-evidence-faster.md) · Build · measure cache and preflight changes against the 12m37 cold beta gate · follow-up
 
 ## Next (ready — take the top one unless the user named a story)
@@ -96,6 +97,7 @@ _Signalling that cannot carry audio is a curiosity. The media layer is also wher
 - [T-24 — Discover SIP endpoints on the local link](T-24-discover-on-the-local-link.md) · Transport · blocked on a scope decision — mDNS is a second protocol and a new parser eating unauthenticated multicast
 
 ## Backlog
+- [T-44 — Stop the last admitted load call racing its own cleanup](T-44-stop-the-last-admitted-load-call-racing-its-own-cleanup.md) · Transport · reaching the call bound requests cleanup immediately, so the call that reached it is cancelled mid-setup and `load --calls 1` can never report a connected call
 - [X-129 — Say what --max-active costs a caller who sizes it to their concurrency](X-129-say-what-max-active-costs-a-caller-who-sizes-it-to-their-concurrency.md) · Quality · load-responder sheds calls by design when --max-active equals the generator's concurrency, and nothing tells the operator sizing a run
 
 ### The application host
@@ -147,7 +149,7 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 - [C-10 — Answer a delayed offer in the 2xx and its answer in the ACK](C-10-answer-a-delayed-offer-in-the-2xx.md) · Signalling · RFC 3264 §5's other delayed-offer carrier · the only one available to a peer with no 100rel, and the reason C-8 still refuses that INVITE
 
 ### Bounded endpoint resolution
-- [T-42 — Take the shared candidate pass in dial, load and scenario](T-42-take-the-shared-pass-in-dial-load-and-scenario.md) · Transport · five hand-rolled candidate loops remain across dial, load and scenario; three of them count no attempts, so their connection failures cannot say how far they got
+- [T-45 — Give each load candidate its own call identity](T-45-give-each-load-candidate-its-own-call-identity.md) · Transport · load's signalling workload reuses one Call-ID and From tag across every address of a target, so a second candidate arrives at the same server as a merged request
 
 ### Ice
 - [M-24 — Gather a relayed candidate from a configured relay](M-24-ice-relayed-candidate.md) · Media · ice · RFC 8656 · after M-22 · the third RFC that made M-16 impossible as one story

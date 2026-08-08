@@ -7,6 +7,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **`load` and `scenario` report `candidates_attempted` and `candidates_resolved`** when a
+  connection failure ends a candidate pass, and `load` bounds all of a call's candidates by one
+  `--timeout` rather than each. All five remaining hand-rolled candidate loops now take the shared
+  pass `register` and `peers` use, and three of them counted nothing at all before. A `dial` pass
+  its deadline ended now exits `timeout` rather than `failed`, matching what `register` and `peers`
+  already do with an expired pass.
+
 ## [1.0.0-rc.11] — 2026-08-08
 
 Six stories: the custom call-DSP contract, calibrated voice thresholds, two RTP header-extension

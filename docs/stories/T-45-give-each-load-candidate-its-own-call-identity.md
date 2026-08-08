@@ -1,5 +1,5 @@
 ---
-id: T-43
+id: T-45
 title: Give each load candidate its own call identity
 pillar: Transport
 status: backlog
@@ -46,3 +46,9 @@ first address is dead is reachable at the second even when both addresses lead t
 
   Not fixed in `T-42` because that story's contract was the pass and its reporting, and changing
   what goes on the wire for every load call is a separate, separately testable decision.
+
+- 2026-08-08: renumbered from `T-43` to `T-45`. The coordinator reserved `T-43` for this story's
+  author without noticing `T-33` had already filed a `T-43` for reaching a real WSS endpoint from a
+  browser fixture — so the reservation that was meant to stop id collisions caused this one. Only
+  the id moved.
+
