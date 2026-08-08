@@ -29,6 +29,12 @@
 //! that is ringing and a host that is talking both need to be told the thing ended and why, and
 //! giving the pre-answer half a channel of its own would mean two vocabularies for one question.
 //!
+//! `VoiceStarted` and `VoiceEnded` are emitted only after
+//! [`Call::detect_voice_activity`](crate::Call::detect_voice_activity) has been asked for (`M-58`),
+//! by a watcher the call owns and joins before it ends — which is what keeps `Ended` the last event
+//! on the stream even though the transitions come from a task. See [`crate::voice`] for the
+//! transition and coalescing policy behind them.
+//!
 //! `PlaybackFinished` and `RecordingFinished` are emitted by [`Call::play`](crate::Call::play)
 //! and [`Call::record_until_idle`](crate::Call::record_until_idle). `M-17` added the *control*
 //! half of playback — a queue, stopping, interrupting on a digit — and reports completion
@@ -132,6 +138,27 @@ pub enum CallEvent {
     Muted,
     /// This side let its outbound audio through again ([`Call::unmute`](crate::Call::unmute)).
     Unmuted,
+    /// Voice began on one side of this call's audio (`M-58`).
+    ///
+    /// Deterministic signal analysis, not recognition: no speech model is loaded to produce this,
+    /// and the decision is the integer window predicate of
+    /// [`docs/specs/call-audio-processing.md`](../../../docs/specs/call-audio-processing.md) §5.3.
+    /// Emitted only after [`Call::detect_voice_activity`](crate::Call::detect_voice_activity) has
+    /// been asked for, and only on transitions — the payload says which call, which direction,
+    /// where in the audio, and where in this call's ordered observations.
+    VoiceStarted(crate::VoiceActivity),
+    /// Voice ended on one side of this call's audio (`M-58`).
+    ///
+    /// The position is the end of the last active window, not where the decision was reached: a
+    /// hangover is how long the analyser waits before concluding, and reporting the wait as part of
+    /// the speech would move every ending later than it happened.
+    VoiceEnded {
+        /// Which call, which direction, and where.
+        activity: crate::VoiceActivity,
+        /// Whether the hangover elapsed, or a reset cut it — a discontinuity, a format change, or
+        /// the call's audio finishing.
+        cause: sipx_audio::analysis::VoiceEndCause,
+    },
     /// An application-owned method arrived inside this dialog.
     ///
     /// INFO and MESSAGE are admitted directly. A private extension token appears here only after
@@ -316,6 +343,24 @@ impl EventSink {
         self.emitter().emit(event);
     }
 
+    /// An emitter that also holds a slot reserved for one event it must never lose.
+    ///
+    /// `M-58`'s voice-activity watcher is the case this exists for. It reports *transitions*, so a
+    /// dropped close would leave an application believing voice is still open on a call whose audio
+    /// has finished — the one drop in that stream that is a correctness failure rather than lost
+    /// history. The reservation is taken when detection starts and held, unused, until it ends,
+    /// exactly as [`EventSink::new`] reserves the slot for `Ended`.
+    ///
+    /// It costs one of the channel's [`CAPACITY`] slots for as long as it is held, so ordinary
+    /// events compete for one fewer. That is the price of the guarantee, and it is bounded: there
+    /// is at most one such reservation per attached watcher, and the seam bounds those.
+    pub(crate) fn reserved_emitter(&self) -> ReservedEmitter {
+        ReservedEmitter {
+            emitter: self.emitter(),
+            reserved: self.tx.clone().try_reserve_owned().ok(),
+        }
+    }
+
     /// A handle that can emit ordinary events from somewhere the `Call` itself is not.
     ///
     /// Needed by playback (`M-17`): a clip started with
@@ -373,6 +418,16 @@ pub(crate) struct Emitter {
 
 impl Emitter {
     pub(crate) fn emit(&self, event: CallEvent) {
+        let _ = self.try_emit(event);
+    }
+
+    /// Emit, and say whether the consumer got it.
+    ///
+    /// The overflow policy is unchanged — dropped rather than awaited, and counted. What the
+    /// answer buys is a producer that reports *transitions* rather than facts: `M-58`'s watcher
+    /// keeps the state it could not deliver and retries it against the latest one, instead of
+    /// leaving an application holding a picture the drop made wrong.
+    pub(crate) fn try_emit(&self, event: CallEvent) -> bool {
         debug_assert!(
             !matches!(event, CallEvent::Ended(_)),
             "Ended must go through `EventSink::end`, which spends the reserved slot"
@@ -383,6 +438,48 @@ impl Emitter {
             // read by the consumer that lost them, through `CallEvents::dropped`.
             self.drops.bump();
             tracing::debug!("a call event was dropped: the consumer is behind");
+            return false;
+        }
+        true
+    }
+}
+
+/// An [`Emitter`] carrying one reserved slot, for a producer with exactly one event it may not
+/// lose.
+///
+/// See [`EventSink::reserved_emitter`] for why voice activity needs one. Dropping this without
+/// spending the reservation releases it back to the channel.
+#[derive(Debug)]
+pub(crate) struct ReservedEmitter {
+    emitter: Emitter,
+    /// Taken when the watcher starts, spent by [`Self::emit_reserved`]. `None` afterwards — or,
+    /// defensively, if the reservation could not be made because the channel was already full of
+    /// events nobody had read.
+    reserved: Option<mpsc::OwnedPermit<CallEvent>>,
+}
+
+impl ReservedEmitter {
+    /// Emit an ordinary event, reporting whether the consumer got it.
+    pub(crate) fn try_emit(&self, event: CallEvent) -> bool {
+        self.emitter.try_emit(event)
+    }
+
+    /// Spend the reservation on the one event that has to arrive.
+    ///
+    /// Never awaits, so nothing about a call's audio finishing can park on whether anyone is
+    /// reading its events.
+    pub(crate) fn emit_reserved(mut self, event: CallEvent) {
+        match self.reserved.take() {
+            // discard: nothing is lost. `OwnedPermit::send` cannot fail — the capacity was reserved
+            // when the watcher started and held until this moment — and what it returns is the
+            // `Sender`, not a result about the event.
+            Some(permit) => {
+                let _ = permit.send(event);
+            }
+            // Only reachable if the reservation itself could not be made. Falling back to the
+            // ordinary path means this is still delivered whenever the queue happens to have room,
+            // and counted when it does not.
+            None => self.emitter.emit(event),
         }
     }
 }

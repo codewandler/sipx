@@ -122,6 +122,8 @@ and never carries fields the host uses to route (`Via`, `Route`, `CSeq`, …). `
 | `call.early_media.started` | — | a reliable provisional completed offer/answer and its media session is running |
 | `call.answered` | — | the 2xx/ACK completed; media may flow |
 | `call.dtmf` | `digit`, `duration_ms` | an RFC 4733 event ended |
+| `call.voice.started` | `direction` (`inbound · outbound`), `sequence`, `sample_time`, `sample_rate` | deterministic signal analysis found voice on one side of the call's audio |
+| `call.voice.ended` | `sequence`, `sample_time`, `sample_rate`, `direction`, `cause` (`hangover · cut`) | that voice stopped, at the end of the last active window |
 | `call.playback.finished` | `instruction_id`, `completed` | a `play` ran out or was cut |
 | `call.gather.finished` | `instruction_id`, `digits`, `reason` (`terminator · max · timeout`) | a `gather` resolved |
 | `call.recording.finished` | `instruction_id`, `duration_ms` | a `record` resolved |
@@ -131,6 +133,19 @@ and never carries fields the host uses to route (`Via`, `Route`, `CSeq`, …). `
 | `call.bridged` / `call.unbridged` | `leg` | the media coupling changed |
 | `call.hold` / `call.resumed` | — | the far end changed the media direction |
 | `call.ended` | `cause` (`hangup · remote · rejected{status} · timeout · error`) | the call is over; always the last event, never dropped |
+
+**[sipx]** The two voice events are **deterministic signal analysis, never recognition** — no speech
+model is loaded to produce them, and a host built without a speech runtime still emits them.
+`sample_time` is a position in samples at `sample_rate`, counted from the start of the current
+analysis epoch, which re-opens whenever the audio timeline is re-anchored; it is derived from the
+declared rate rather than read from a clock, so the same audio yields the same positions on every
+host. `sequence` orders one call's voice observations and nothing else — it is neither the
+envelope's `seq` nor a SIP `CSeq` — and unlike `seq` it *may* gap: a gap is exactly the transitions
+a host could not deliver, and what follows one is where the call is rather than the next thing it
+did. Which call an observation belongs to is the envelope's own §5.2 `call.id`, not a field
+repeated here. The normative analysis behind them is
+[call-audio-processing.md](call-audio-processing.md) §5.3 and §6; a host that emits neither is
+conformant, because both are reported only where an application asked for detection.
 
 ## 6. Instructions (app → host)
 

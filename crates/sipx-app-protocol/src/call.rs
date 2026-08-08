@@ -8,9 +8,18 @@
 //! reports; [`crate::EventKind`] is what §5.3 of the contract puts on a wire; this module is the
 //! one mapping between them, so the two cannot drift into three.
 
+use sipx_call::voice::{AudioDirection as CallAudioDirection, VoiceEndCause as CallVoiceEndCause};
 use sipx_call::{CallEvent, EndCause as CallEndCause, TransferState as CallTransferState};
 
-use crate::event::{EndCause, EventKind, TransferState};
+use crate::event::{AudioDirection, EndCause, EventKind, TransferState, VoiceEndCause};
+
+/// The seam's audio-direction vocabulary as the contract's (§5.3).
+fn audio_direction(direction: CallAudioDirection) -> AudioDirection {
+    match direction {
+        CallAudioDirection::Inbound => AudioDirection::Inbound,
+        CallAudioDirection::Outbound => AudioDirection::Outbound,
+    }
+}
 
 /// One `sipx-call` event as a contract event (§5.3).
 ///
@@ -34,6 +43,27 @@ pub fn event_from_call(event: &CallEvent, instruction_id: &str) -> Option<EventK
         CallEvent::Dtmf { digit, duration } => EventKind::Dtmf {
             digit: digit.as_char(),
             duration_ms: u32::try_from(duration.as_millis()).unwrap_or(u32::MAX),
+        },
+        // `M-58`. The call identity `sipx-call` puts on the transition is deliberately not repeated
+        // here: §5.2's snapshot already names the call every envelope is about, and a second
+        // spelling of it in the event body is a second thing that can disagree.
+        CallEvent::VoiceStarted(activity) => EventKind::VoiceStarted {
+            direction: audio_direction(activity.direction()),
+            sequence: activity.sequence(),
+            sample_time: activity.at_sample(),
+            sample_rate: activity.sample_rate(),
+        },
+        CallEvent::VoiceEnded { activity, cause } => EventKind::VoiceEnded {
+            direction: audio_direction(activity.direction()),
+            sequence: activity.sequence(),
+            sample_time: activity.at_sample(),
+            sample_rate: activity.sample_rate(),
+            cause: match cause {
+                CallVoiceEndCause::Hangover => VoiceEndCause::Hangover,
+                // The analyser's vocabulary is `#[non_exhaustive]`. Anything added to it that is
+                // not a hangover is a reset of some kind, which §5.3 spells `cut`.
+                _ => VoiceEndCause::Cut,
+            },
         },
         CallEvent::PlaybackFinished { completed, .. } => EventKind::PlaybackFinished {
             instruction_id: instruction_id.to_owned(),

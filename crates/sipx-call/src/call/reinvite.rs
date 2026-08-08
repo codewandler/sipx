@@ -404,6 +404,12 @@ impl Call {
             let previous = std::mem::replace(&mut self.media, Arc::new(replacement));
             self.retired_media.push(previous);
             self.reap_retired_media().await;
+            // Voice-activity detection is call-owned policy too (`M-58`). The retired session's
+            // seam attachments do not migrate, so the watcher is stopped and joined — reporting its
+            // terminal end, which is what keeps activity from staying latched across a
+            // renegotiation — and the successor is started against the new audio.
+            self.stop_voice_activity().await;
+            self.resume_voice_activity();
         }
         self.current = to;
         Ok(())

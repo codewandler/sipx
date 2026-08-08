@@ -124,6 +124,12 @@ pub enum Error {
     /// The transport failed.
     #[error("transport: {0}")]
     Transport(#[from] sipx_transport::Error),
+    /// A voice-activity profile was refused before anything was attached to the call (`M-58`).
+    #[error("voice activity profile: {0}")]
+    VoiceActivityProfile(#[from] sipx_audio::analysis::AnalysisError),
+    /// The call's bounded PCM processing seam refused an attachment (`M-54`).
+    #[error("call audio processing: {0}")]
+    CallAudioProcessing(#[from] sipx_media::ProcessingError),
     /// A message could not be built.
     #[error("build: {0}")]
     Build(#[from] sipx_sip::error::BuildError),

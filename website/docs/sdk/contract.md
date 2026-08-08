@@ -39,8 +39,14 @@ An event identifies the contract version and sequence and carries a call snapsho
 }
 ```
 
-The vocabulary covers incoming, ringing, answered, and ended calls; DTMF; playback, gather,
-recording, and dial completion; transfer progress; bridge state; and hold state.
+The vocabulary covers incoming, ringing, answered, and ended calls; DTMF; voice activity; playback,
+gather, recording, and dial completion; transfer progress; bridge state; and hold state.
+
+Voice activity is `call.voice.started` and `call.voice.ended`, and it is **deterministic signal
+analysis rather than recognition** — no speech model is loaded to produce it, so a host built
+without a speech runtime still reports it. Each carries the side of the audio it was observed on,
+the position in samples at the rate those samples are counted at, and an observation number that
+orders one call's voice events. Which call it is about is the envelope's own `call.id`.
 
 ## Instruction program
 
