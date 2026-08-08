@@ -742,24 +742,32 @@ pub struct Encoded {
     /// `None` for a payload this endpoint authored rather than relayed — see [`Encoded::new`],
     /// which is how such a payload should be built.
     ///
-    /// **What these bytes have to be, and what happens when they are not** (`M-81`). RFC 3550
+    /// **What these bytes have to be, and what happens when they are not** (`M-85`). RFC 3550
     /// §5.3.1's shape: a two-octet profile field, a length in 32-bit words, then exactly that many
-    /// words. sipx interprets none of it, but the packet layer and SRTP both read that length
-    /// word, so an extension that disagrees with itself is not carried the way a well-formed one
-    /// is, and neither this field nor [`MediaSession::send_encoded`] validates it:
+    /// words. sipx interprets none of it, but that length word is where every reader of the packet
+    /// finds the payload, so an extension that disagrees with it cannot be written at all.
     ///
-    /// - **Shorter than four octets**, so there is no length word at all:
-    ///   [`Packet::encode`](sipx_rtp::packet::Packet::encode) leaves the extension off and clears
-    ///   the X bit rather than writing a header the next reader would run off the end of. The
-    ///   payload goes out; the extension does not, and nothing counts that.
-    /// - **A length word claiming more words than follow**, so the header runs past the packet: on
-    ///   an encrypted leg SRTP refuses to protect it and the whole packet is dropped, counted as
-    ///   [`MediaDiscardCounts::srtp_protect_failures`]. On a plain leg it goes out as written and
-    ///   the far end is the one that rejects it.
+    /// **The promise, and its limit.** An extension satisfying
+    /// [`sipx_rtp::extension_is_self_consistent`] goes out on the packet its payload goes out on.
+    /// One that does not — too short to hold a length word, or a length word that overstates or
+    /// understates the bytes behind it — is **left off the packet**, the payload is sent without
+    /// it, and the drop is counted as [`MediaDiscardCounts::malformed_extensions_dropped`]. The
+    /// media is never lost with the metadata, and nothing is guessed at: sipx does not repair the
+    /// length word, because a word that is wrong says nothing about which of the two numbers the
+    /// caller meant.
+    ///
+    /// What the far end then sees is a packet with no extension, which is the same thing it sees
+    /// whenever this side has no metadata to attach — so a receiver relying on an RFC 8285
+    /// element is not handed a wrong value, it is handed none. A caller that needs the far end to
+    /// receive the extension has to build one that agrees with itself, and can check with the same
+    /// predicate before sending.
     ///
     /// A relayed extension is well formed by construction —
     /// [`Packet::decode`](sipx_rtp::packet::Packet::decode) bounds-checks it against the packet it
-    /// arrived on — so this is a constraint on an extension a caller builds itself.
+    /// arrived on and slices exactly the words its length word claims — so this is a constraint on
+    /// an extension a caller builds itself. It is also why
+    /// [`MediaDiscardCounts::srtp_protect_failures`] and this counter both describe the
+    /// application on this side rather than a peer.
     pub extension: Option<Bytes>,
 }
 
@@ -2414,10 +2422,10 @@ impl MediaSession {
     /// Put a payload on the wire exactly as given, bypassing the codec.
     ///
     /// A **well-formed** header extension on the [`Encoded`] goes out on the same packet (`M-79`).
-    /// Nothing here validates one: [`Encoded::extension`] states the shape the bytes have to have,
-    /// and what an extension that disagrees with itself costs — an encrypted leg loses the whole
-    /// packet to [`MediaDiscardCounts::srtp_protect_failures`], and a short one is left off the
-    /// packet by the encoder. A caller authoring its own payload gets all of that right by
+    /// One that disagrees with its own length word is left off it and counted as
+    /// [`MediaDiscardCounts::malformed_extensions_dropped`], and the payload is sent without it
+    /// (`M-85`); [`Encoded::extension`] states the shape the bytes have to have and what a caller
+    /// is promised either way. A caller authoring its own payload gets all of that right by
     /// construction with [`Encoded::new`].
     ///
     /// The answer is whether the frame was queued: `false` means this session has stopped. `true`
@@ -3222,7 +3230,25 @@ async fn send_loop(socket: Arc<UdpSocket>, mut outgoing: mpsc::Receiver<Frame>, 
                 // is rewritten (`M-79`). The sequence, timestamp and SSRC are this leg's because
                 // the two legs are separate RTP streams; the extension is not, because it
                 // describes the media rather than the stream that is carrying it.
-                packet.extension.clone_from(extension);
+                //
+                // Unless it disagrees with itself, in which case it cannot be written at all
+                // (`M-85`). `Packet::encode` is the boundary that refuses it, for every caller and
+                // both legs; this is the only place with counters, so it asks the same published
+                // question first and says so. A relayed extension always passes — `Packet::decode`
+                // bounds-checked it — so what fails here was built by hand on this side.
+                match extension {
+                    Some(bytes) if !sipx_rtp::extension_is_self_consistent(bytes) => {
+                        discards
+                            .malformed_extensions_dropped
+                            .fetch_add(1, Ordering::Relaxed);
+                        tracing::warn!(
+                            octets = bytes.len(),
+                            "dropping a header extension whose length word disagrees with its \
+                             bytes; the payload is sent without it"
+                        );
+                    }
+                    carried => packet.extension.clone_from(carried),
+                }
                 (
                     packet,
                     u32::try_from(config.clock_units_per_packet()).unwrap_or(0),

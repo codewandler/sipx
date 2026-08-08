@@ -38,7 +38,10 @@ pub mod srtp;
 
 pub use dtmf::{Digit, Event as DtmfEvent, Receiver as DtmfReceiver};
 pub use jitter::JitterBuffer;
-pub use packet::{HEADER_LEN, Packet, RtpError, sequence_distance, sequence_is_newer};
+pub use packet::{
+    HEADER_LEN, Packet, RtpError, extension_is_self_consistent, sequence_distance,
+    sequence_is_newer,
+};
 pub use quality::{Quality, ntp_now, round_trip};
 pub use rtcp::{
     ReceiverReport, ReportBlock, Rtcp, RtcpError, Sdes, SdesChunk, SdesItem, SenderReport,
