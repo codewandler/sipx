@@ -2800,6 +2800,13 @@ const RESOLVES: &str = "reachable.sipx.test";
 const NEGATIVE: &str = "absent.sipx.test";
 /// A name the fixture never answers about at all.
 const SILENT: &str = "silent.sipx.test";
+/// A name the zone answers correctly and late: `127.0.0.1`, after [`SLOW_ANSWER`]. It makes
+/// resolution a phase with a known cost rather than a rounding error, which is what turns "one
+/// budget or one per phase" into a question a wall clock can answer.
+const SLOW: &str = "slow.sipx.test";
+/// How late `SLOW` is. Far enough above the noise between two process runs that the two accountings
+/// cannot be confused for each other, and far below the per-question bound it is answered under.
+const SLOW_ANSWER: Duration = Duration::from_millis(1_200);
 /// A name the zone has three addresses for, all of them inside `127.0.0.0/8` and therefore this
 /// machine. It is what makes "how many candidates were attempted" a question with two different
 /// answers rather than a constant.
@@ -2835,9 +2842,11 @@ impl Drop for Nameserver {
 }
 
 async fn fixture_nameserver() -> Nameserver {
-    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
-        .await
-        .expect("the fixture nameserver binds");
+    let socket = std::sync::Arc::new(
+        tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("the fixture nameserver binds"),
+    );
     let address = socket.local_addr().expect("has an address");
     let served = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counted = std::sync::Arc::clone(&served);
@@ -2855,6 +2864,19 @@ async fn fixture_nameserver() -> Nameserver {
                 continue;
             }
             let response = question.answer(&datagram[..length]);
+            if question.name == SLOW {
+                // Answered late, from its own task: a resolver asks for both address families at
+                // once, and a delay taken on this loop would serialise them into two.
+                let socket = std::sync::Arc::clone(&socket);
+                tokio::spawn(async move {
+                    // The clock is itself the measurement: this duration *is* the resolution phase
+                    // the test measures, so there is nothing here to wait for and load can only
+                    // push the number up — the direction that fails.
+                    tokio::time::sleep(SLOW_ANSWER).await;
+                    let _ = socket.send_to(&response, from).await;
+                });
+                continue;
+            }
             let _ = socket.send_to(&response, from).await;
         }
     });
@@ -2912,14 +2934,14 @@ impl Question {
     fn answer(&self, datagram: &[u8]) -> Vec<u8> {
         const A: u16 = 1;
         let (rcode, answers, authority) = match self.name.as_str() {
-            RESOLVES if self.kind == A => (0u8, vec![a_record([127, 0, 0, 1])], Vec::new()),
+            RESOLVES | SLOW if self.kind == A => (0u8, vec![a_record([127, 0, 0, 1])], Vec::new()),
             SPREAD if self.kind == A => (
                 0,
                 SPREAD_ADDRESSES.into_iter().map(a_record).collect(),
                 Vec::new(),
             ),
             // The other address family, answered and empty rather than left unanswered.
-            RESOLVES | SPREAD => (0, Vec::new(), vec![soa_record()]),
+            RESOLVES | SPREAD | SLOW => (0, Vec::new(), vec![soa_record()]),
             NEGATIVE => (3, Vec::new(), vec![soa_record()]),
             // No SOA. RFC 2308 §5's negative answer is exactly the part that is missing, which is
             // how a resolver that could not establish an answer is told from one that did.
@@ -3671,6 +3693,165 @@ async fn every_command_deadline_is_the_ceiling_over_target_resolution() {
         elapsed < overshot,
         "scenario answered after {elapsed:?}, which is the resolver's own bound rather than the \
          one second the dial command was given"
+    );
+}
+
+/// `P-29`: the stated deadline is the budget for the whole process, not a value each phase gets a
+/// fresh copy of. `P-26` bounded resolution *by* the deadline rather than subtracting it *from*
+/// it, so the worst case — a name that resolves slowly followed by a peer that never answers —
+/// spent the stated deadline twice: once looking the name up, then all of it again waiting for an
+/// answer that never came.
+///
+/// The clock is the measurement, and the two accountings are `SLOW_ANSWER` apart: one budget lands
+/// near the two seconds asked for, a fresh copy per phase near three and a quarter. `dial` and a
+/// `scenario` dial frame are both checked, because the frame carries its own deadline and one
+/// process places many calls under many of them.
+#[tokio::test]
+async fn one_stated_deadline_funds_resolution_and_the_invitation_together() {
+    let _scenario = process_scenario().await;
+    let dns = fixture_nameserver().await;
+    // Bound and never read: the invitation reaches a real port, and nothing but the deadline can
+    // end it. Held for the whole test so no other process can take the port back.
+    let black_hole = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("the black-hole peer binds");
+    let peer = black_hole.local_addr().expect("has an address").port();
+    let uri = format!("sip:bob@{SLOW}:{peer}");
+
+    // Two seconds stated. One budget spends `SLOW_ANSWER` of it resolving and the rest inviting;
+    // a copy per phase spends `SLOW_ANSWER` and then two seconds more. Anything at or above this
+    // is the second accounting, whatever the machine's load.
+    let overshot = Duration::from_millis(2_700);
+
+    let started = std::time::Instant::now();
+    let output = through_nameserver(
+        &dns,
+        &[
+            "dial",
+            uri.as_str(),
+            "--timeout",
+            "2",
+            // No cancellation allowance, so the only phases left in the measurement are the two
+            // this story is about. `--cancel-timeout` is a separate published bound and stays one.
+            "--cancel-timeout",
+            "0",
+            "--duration",
+            "0",
+        ],
+        true,
+    )
+    .await;
+    let elapsed = started.elapsed();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+    assert_eq!(
+        output.status.code(),
+        Some(5),
+        "a deadline that ran out is a timeout: {stderr}"
+    );
+    assert!(
+        elapsed < overshot,
+        "dial answered after {elapsed:?}: the two seconds it was given funded resolution and then \
+         the invitation over again, rather than both: {stderr}"
+    );
+    // The published pair keeps the number the caller typed, on the clock that number bounds —
+    // never the slice of it one phase happened to be funded from.
+    assert_eq!(
+        reported_number(&stderr, "invitation_limit_ms", true),
+        Some(2_000),
+        "the reported limit is the deadline that was stated: {stderr}"
+    );
+    assert!(
+        reported_number(&stderr, "invitation_elapsed_ms", true)
+            .is_some_and(|elapsed| elapsed >= 2_000),
+        "the measured elapsed is read on the same clock as the limit beside it: {stderr}"
+    );
+
+    let started = std::time::Instant::now();
+    let output = scenario_through_nameserver(
+        &dns,
+        &format!(
+            "{{\"id\":\"dial-1\",\"command\":\"dial\",\"uri\":\"sip:bob@{SLOW}:{peer}\",\
+             \"timeout_ms\":2000}}\n\
+             {{\"id\":\"shutdown-1\",\"command\":\"shutdown\"}}\n"
+        ),
+    )
+    .await;
+    let elapsed = started.elapsed();
+    let lines = scenario_lines(&output);
+    assert!(
+        lines.iter().any(|line| {
+            line["event"]["type"] == "scenario.command.refused" && line["event"]["id"] == "dial-1"
+        }),
+        "the dial has to be refused: {lines:?}"
+    );
+    // Two seconds of deadline, then the frame's own cancellation allowance, which `scenario` does
+    // not expose and which defaults to two more.
+    assert!(
+        elapsed < overshot + Duration::from_secs(2),
+        "the scenario dial answered after {elapsed:?}: its frame's deadline funded resolution and \
+         then the invitation over again, rather than both"
+    );
+}
+
+/// `P-29`: `--duration` is a bound the run states, so resolution is under it too. `--timeout`
+/// alone cannot see that — it is twenty seconds here and lowers nothing — so a run allowed one
+/// second spent longer than its whole bound looking the target up before placing a call.
+///
+/// The name resolves in `SLOW_ANSWER`, which is more than the run has. The exit code is what
+/// carries the finding: a run that obeys its own bound gives up on the lookup and says so, where
+/// one that does not resolves successfully and goes on to admit calls.
+#[tokio::test]
+async fn a_load_run_bounds_resolution_by_its_duration_as_well_as_its_setup_timeout() {
+    let _scenario = process_scenario().await;
+    let dns = fixture_nameserver().await;
+
+    // Reserved and released, so the port is one nothing on this machine accepts on: any call the
+    // run does admit fails at once rather than holding the process open on a setup timeout.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").expect("reserves a loopback port");
+    let refused = closed.local_addr().expect("reserved address").port();
+    drop(closed);
+
+    // The clock is the measurement, beside the exit code: below this is the run's own second
+    // deciding when it ends, above it is a lookup that outlived the run that asked for it.
+    let overshot = Duration::from_millis(1_700);
+    let started = std::time::Instant::now();
+    let output = through_nameserver(
+        &dns,
+        &[
+            "load",
+            &format!("sip:bob@{SLOW}:{refused}"),
+            "--transport",
+            "tcp",
+            "--rate",
+            "1",
+            "--concurrency",
+            "1",
+            "--duration",
+            "1",
+            "--timeout",
+            "20",
+        ],
+        true,
+    )
+    .await;
+    let elapsed = started.elapsed();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+    assert_eq!(
+        output.status.code(),
+        Some(5),
+        "a lookup that outlasts the run's own bound is a timeout, not a run: {stderr}"
+    );
+    assert!(
+        reported(&stderr, "error", true)
+            .is_some_and(|error| error.starts_with("target resolution failed:")),
+        "resolution is what ran out of time, and the prefix is what says so: {stderr}"
+    );
+    assert!(
+        elapsed < overshot,
+        "load answered after {elapsed:?}, which is the setup timeout's ceiling rather than the one \
+         second the run was given: {stderr}"
     );
 }
 

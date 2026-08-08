@@ -244,32 +244,41 @@ impl Actor {
         if to.scheme().is_secure() && !self.transport.kind().is_secure() {
             return Err("a sips: target requires tls or wss; no downgrade is permitted".to_owned());
         }
-        // Read before the lookup, because it is the ceiling over it: this command's own deadline,
-        // or the process default when the frame does not carry one. The actor's resolver is
-        // narrowed rather than rebuilt so the cache survives a `dial` that gave a tight bound.
+        // Read before the lookup, because the lookup is funded from it: this command's own
+        // deadline, or the process default when the frame does not carry one. `P-29` — every phase
+        // of the frame draws on the one budget, so a name that takes a second to resolve leaves a
+        // second of a two-second frame to be answered in, rather than starting a fresh two. The
+        // actor's resolver is narrowed rather than rebuilt so the cache survives a `dial` that
+        // gave a tight bound.
         let timeout = optional_u64(value, "timeout_ms")?.map_or_else(
             || Duration::from_secs(self.options.timeout),
             Duration::from_millis,
         );
+        let attempt = crate::budget::Attempt::new(timeout);
         let candidates = self
             .resolver
-            .narrowed((!timeout.is_zero()).then_some(timeout))
+            .narrowed(attempt.remaining())
             .resolve(&to, None, self.transport, &self.options.signalling)
             .await
             .map_err(|error| error.to_string())?;
         let target = crate::destination::first(&candidates)
             .map_err(|error| error.to_string())?
             .clone();
+        if attempt.spent() {
+            return Err(format!(
+                "the {timeout:?} deadline was spent finding the target; no invitation was placed"
+            ));
+        }
         let target_addr = target.addr;
         let media_address: IpAddr =
             crate::advertise::reachable_ip(self.handle.local_addr(), target_addr.ip());
         let from = optional_non_empty_string(value, "from")?
             .map_or_else(|| format!("<sip:sipx@{media_address}>"), str::to_owned);
+        // No answer budget here: each candidate is funded below from what the frame's budget has
+        // left when it is tried, so a name with several addresses cannot spend the frame's
+        // deadline once per address.
         let mut options =
             sipx_call::DialOptions::new(from.clone(), media_address).with_media_policy(self.policy);
-        if !timeout.is_zero() {
-            options = options.with_timeout(timeout);
-        }
         for header in self.headers.iter().cloned() {
             options = options.with_header(header);
         }
@@ -287,6 +296,9 @@ impl Actor {
         let mut last_transport = None;
         let mut connected = None;
         for candidate in candidates.iter().take(crate::destination::MAX_ATTEMPTS) {
+            let Some(options) = attempt.fund(&options) else {
+                break;
+            };
             match sipx_call::dial(&self.handle, candidate.clone(), &to, &options).await {
                 Ok(call) => {
                     connected = Some(call);
