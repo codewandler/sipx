@@ -273,6 +273,11 @@ struct VoiceDetection {
     /// retransmitter is: the call has to be able to prove it has stopped before saying the call is
     /// over, because the watcher's terminal event must precede [`CallEvent::Ended`].
     watcher: Option<OwnedTask>,
+    /// The latest thresholds the running analyser is measuring against (`M-60`).
+    ///
+    /// A receiver, so reading it is a borrow of the latest value: the call cannot reach into the
+    /// analyser and the analyser never waits for the call.
+    thresholds: tokio::sync::watch::Receiver<sipx_audio::analysis::EffectiveThresholds>,
 }
 
 /// One call's signal-metric reporting while it is running (`M-59`).
@@ -621,11 +626,15 @@ impl Call {
             || Arc::new(AtomicU64::new(0)),
             |voice| Arc::clone(&voice.sequence),
         );
+        // Seeded with what the analyser starts from, so a reader that asks before the first frame
+        // is told the configured thresholds rather than nothing.
+        let (publisher, thresholds) = tokio::sync::watch::channel(analyzer.thresholds());
         let reporter = crate::voice::VoiceReporter::new(
             analyzer,
             Arc::from(String::from_utf8_lossy(&self.dialog.id.call_id).into_owned()),
             Arc::clone(&sequence),
             self.events.reserved_emitter(),
+            publisher,
         );
         let stop = CancellationToken::new();
         let watcher = tokio::spawn(crate::voice::watch(processor, reporter, stop.clone()));
@@ -634,8 +643,36 @@ impl Call {
             sequence,
             stop: Some(stop),
             watcher: Some(OwnedTask::new(watcher)),
+            thresholds,
         }));
         Ok(())
+    }
+
+    /// What this call's voice-activity detection is measuring against right now (`M-60`).
+    ///
+    /// `None` until [`Self::detect_voice_activity`] has been asked for. Otherwise the effective
+    /// thresholds of the running analyser: the configured profile, the activation amplitude in
+    /// force — which differs from the configured one exactly when a
+    /// [`CalibrationProfile`](sipx_audio::analysis::CalibrationProfile) has moved it — the derived
+    /// window, hangover, silence-timeout, calibration, update and freeze-limit sample counts, and
+    /// what the last update period did.
+    ///
+    /// **Reading changes nothing.** It takes `&self`, it is a copy of a handful of scalars rather
+    /// than a view into the analyser, and it is not a queue: polling it in a loop leaves the call's
+    /// event stream byte-identical.
+    ///
+    /// **It carries no audio.** The processing contract's §3.3 forbids retaining samples past the
+    /// frame that carried them, and §8.1 enumerates the whole of an analyser's state without an
+    /// audio buffer in it, so there is nothing here for raw call audio to leak through — see
+    /// [`docs/specs/call-audio-processing.md`](../../../docs/specs/call-audio-processing.md) §12.9.
+    /// Applications that need the audio itself use the seam, under its own contract.
+    ///
+    /// Each direction and each call has its own analyser and its own thresholds; nothing is shared
+    /// between them. A media-session replacement starts a fresh analyser, so this reports the
+    /// configured thresholds again from that point.
+    #[must_use]
+    pub fn voice_thresholds(&self) -> Option<sipx_audio::analysis::EffectiveThresholds> {
+        self.voice.as_ref().map(|voice| *voice.thresholds.borrow())
     }
 
     /// Signal and join the voice-activity watcher, if one is running.

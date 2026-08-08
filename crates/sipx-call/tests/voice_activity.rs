@@ -24,7 +24,7 @@
 use std::net::IpAddr;
 use std::time::Duration;
 
-use sipx_call::voice::{AnalysisProfile, AudioDirection, VoiceEndCause};
+use sipx_call::voice::{AnalysisProfile, AudioDirection, CalibrationProfile, VoiceEndCause};
 use sipx_call::{Call, CallEvent, CallEvents, answer, dial};
 use sipx_sip::{Host, HostName, Uri};
 use sipx_transport::{Config, Handle, Incoming, Target, bind};
@@ -205,6 +205,90 @@ async fn ending_a_call_cuts_open_voice_before_ended() {
         "`Ended` must still be the last event: {tail:?}"
     );
     assert!(cut < ended, "the cut must precede the call's last word");
+}
+
+/// An application on a live call can read the active profile and the thresholds in force, and
+/// reading them is a read (`M-60`).
+///
+/// The fixture corpus proves the arithmetic; what it cannot prove is that a running call actually
+/// exposes it. A call with no detection has nothing to report, a call with detection reports its
+/// configured profile from the start, and once a calibration profile has moved the threshold the
+/// call reports the moved value rather than the configured one.
+#[tokio::test]
+async fn a_live_call_reports_the_profile_and_thresholds_it_is_measuring_against() {
+    let (caller, mut callee) = connected().await;
+
+    assert!(
+        callee.voice_thresholds().is_none(),
+        "a call with no detection is measuring against nothing"
+    );
+
+    // A floor of 1 with a 2 ms update period, so a second of quiet audio is enough for the
+    // threshold to leave its configured value within this test rather than eventually.
+    let calibration = CalibrationProfile::new()
+        .with_calibration_ms(20)
+        .with_update_ms(20)
+        .with_floor_amplitude(1)
+        .with_max_step_amplitude(256);
+    callee
+        .detect_voice_activity(profile().with_calibration(Some(calibration)))
+        .await
+        .expect("the calibrated profile is accepted");
+
+    let before = callee
+        .voice_thresholds()
+        .expect("detection is running, so there are thresholds");
+    assert_eq!(before.activation_amplitude(), 2_048, "the configured value");
+    assert_eq!(before.window_samples(), 160);
+    assert_eq!(before.hangover_samples(), 1_600);
+    assert_eq!(before.calibration(), Some(calibration));
+    assert_eq!(before.calibration_samples(), Some(160));
+    assert_eq!(before.update_samples(), Some(160));
+    assert_eq!(before.updates(), 0);
+
+    let mut events = callee.events().expect("the first receiver");
+
+    // A second of silence for the threshold to calibrate against, and then speech. The speech is
+    // what makes this checkable without waiting a fixed time for anything: `VoiceStarted` cannot
+    // arrive until the analyser has consumed it, and it sits behind the silence in stream order, so
+    // that event is a happens-after for every silent window before it.
+    assert!(caller.play(&[0i16; 8_000]).await, "the quiet clip ran out");
+    assert!(caller.play(&speech()).await, "the speech clip ran out");
+    let started = next_matching(&mut events, |event| {
+        matches!(event, CallEvent::VoiceStarted(_))
+    })
+    .await;
+    assert!(matches!(started, CallEvent::VoiceStarted(_)));
+
+    let after = callee.voice_thresholds().expect("still running");
+    assert!(
+        after.updates() > 0,
+        "a second of quiet audio moved the threshold and the call says so"
+    );
+    assert!(after.activation_amplitude() < 2_048, "and says where to");
+    assert_eq!(
+        after.profile(),
+        before.profile(),
+        "the active profile is what was configured, unchanged"
+    );
+    // A snapshot is a value: the one taken before still says what it said.
+    assert_eq!(before.activation_amplitude(), 2_048);
+    assert!(
+        after.activation_amplitude() <= 2_048,
+        "a quiet call moves the threshold toward its floor, never above the configured value: {}",
+        after.activation_amplitude()
+    );
+    assert!(
+        after.activation_amplitude() >= 1,
+        "and never below the declared floor"
+    );
+
+    // Reading is a read: a hundred snapshots leave the call exactly where it was.
+    let repeated = (0..100)
+        .filter_map(|_| callee.voice_thresholds())
+        .collect::<Vec<_>>();
+    assert!(repeated.iter().all(|snapshot| *snapshot == repeated[0]));
+    assert_eq!(repeated[0], callee.voice_thresholds().expect("running"));
 }
 
 /// A profile outside the contract's domains is refused before anything is attached, and the call

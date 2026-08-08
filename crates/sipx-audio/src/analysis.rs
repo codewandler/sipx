@@ -18,6 +18,20 @@
 //! No speech model is loaded and none is reachable from here: voice activity is the integer
 //! variance predicate of §5.3 over a fixed window, not recognition.
 //!
+//! # Calibration
+//!
+//! One threshold may move. Attaching a [`CalibrationProfile`] with
+//! [`AnalysisProfile::with_calibration`] lets the activation amplitude track the quietest window of
+//! each update period, under bounds the profile declares in sample counts and amplitudes: a floor,
+//! a ceiling, a maximum movement per period, a warm-up, and a bound on how long open voice may hold
+//! an update back (§12). Every move is announced as [`Observation::ThresholdUpdated`] and every
+//! limit is readable from [`AudioAnalyzer::thresholds`], so an adapted threshold is a declared
+//! value with a visible history rather than a hidden multiplier — and two analysers fed one input
+//! still drain byte-identical sequences, thresholds included.
+//!
+//! Without a calibration profile nothing adapts, nothing is emitted, and the frame path is exactly
+//! what §5 and §6 describe.
+//!
 //! ```
 //! use sipx_audio::analysis::{AnalysisFrame, AnalysisProfile, AudioAnalyzer, AudioDirection, Observation};
 //!
@@ -108,13 +122,222 @@ impl std::fmt::Display for DiscontinuityKind {
     }
 }
 
+/// The deviation of one completed window, in the units §5.1 states thresholds in (§12.2).
+///
+/// `deviation = isqrt(W · energy − sum²) div W`, which is exactly the quantity §5.3's activation
+/// predicate compares against: for any integer `A >= 0` and `W >= 1`,
+/// `W·energy − sum² >= A²·W²` holds if and only if `deviation >= A`. That equivalence is why
+/// [`CalibrationProfile`] can move a threshold in the same units as the fact it governs, and why
+/// this function is public — a caller holding an [`Observation::Window`] can compute the exact
+/// number calibration measured, from facts the contract already published.
+///
+/// **This is not a level, a loudness or an ITU-T P.56 measurement.** It is the integer standard
+/// deviation of one window about its own mean, with no gain assumption and no speech gating; a
+/// constant signal has deviation 0 however loud it is.
+///
+/// The result is in `0..=32,768` for every supported input (§5.2's width proof gives
+/// `W·energy − sum² <= W² · 2^30`). A `window_samples` of 0 has no window to measure and yields 0.
+#[must_use]
+pub fn window_deviation(window_samples: u32, sum: i64, energy: i64) -> i32 {
+    if window_samples == 0 {
+        return 0;
+    }
+    let width = i64::from(window_samples);
+    // §5.2's proof puts `W · energy <= 2^62` and `sum² <= 2^62`, and Cauchy–Schwarz puts the
+    // difference at or above zero, so the saturating forms below are unreachable rather than
+    // approximate.
+    let variance = width
+        .saturating_mul(energy)
+        .saturating_sub(sum.saturating_mul(sum));
+    debug_assert!(variance >= 0, "§12.2: W · energy >= sum²");
+    let root = u64::try_from(variance).unwrap_or(0).isqrt();
+    i32::try_from(root / u64::from(window_samples)).unwrap_or(i32::MAX)
+}
+
+/// How a threshold may move, and how far (§12.3).
+///
+/// Attached to an [`AnalysisProfile`] by [`AnalysisProfile::with_calibration`]; without one the
+/// analyser never adapts and never emits [`Observation::ThresholdUpdated`]. [`Self::new`] is
+/// §12.12's reference calibration profile `K8`, and the `with_*` methods change one field each.
+/// Nothing is validated here, exactly as in [`AnalysisProfile`]: every domain is checked once, by
+/// [`AudioAnalyzer::new`], before anything is sized by it.
+///
+/// What it promises: the effective activation amplitude stays inside
+/// `[floor_amplitude, ceiling_amplitude]` from the first sample, moves by at most
+/// `max_step_amplitude` per update period, and is a pure function of the input — two analysers
+/// built from one profile and fed one input produce the same thresholds at the same samples.
+///
+/// What it does not promise: that adaptation makes detection *better* on any particular audio.
+/// It tracks the quietest eligible window of each period and sits one margin above it; whether
+/// that is the right thing for a given channel is a measurement question, and `X-106` owns it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CalibrationProfile {
+    calibration_ms: u32,
+    update_ms: u32,
+    margin_amplitude: i32,
+    floor_amplitude: i32,
+    ceiling_amplitude: i32,
+    max_step_amplitude: i32,
+    freeze_limit_ms: Option<u32>,
+}
+
+impl Default for CalibrationProfile {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CalibrationProfile {
+    /// §12.12's reference calibration profile `K8`.
+    ///
+    /// A 200 ms warm-up, a 100 ms update period, a 512 margin, a 256 floor, an 8,192 ceiling, a
+    /// 128 maximum step and a 30 s bound on the voiced freeze. Every duration becomes a sample
+    /// count against the analyser's declared rate (§4), so this profile means the same thing at
+    /// every rate.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            calibration_ms: 200,
+            update_ms: 100,
+            margin_amplitude: 512,
+            floor_amplitude: 256,
+            ceiling_amplitude: 8_192,
+            max_step_amplitude: 128,
+            freeze_limit_ms: Some(30_000),
+        }
+    }
+
+    /// How long the warm-up runs before the first update may apply. Derives `C`; domain `>= 1`.
+    #[must_use]
+    pub const fn with_calibration_ms(mut self, calibration_ms: u32) -> Self {
+        self.calibration_ms = calibration_ms;
+        self
+    }
+
+    /// How often the threshold may move. Derives `U`; domain `>= 1`.
+    #[must_use]
+    pub const fn with_update_ms(mut self, update_ms: u32) -> Self {
+        self.update_ms = update_ms;
+        self
+    }
+
+    /// How far above the observed floor the threshold sits. Domain `1..=32,767`.
+    #[must_use]
+    pub const fn with_margin_amplitude(mut self, amplitude: i32) -> Self {
+        self.margin_amplitude = amplitude;
+        self
+    }
+
+    /// The most sensitive the threshold may ever become. Domain `1..=32,767`.
+    #[must_use]
+    pub const fn with_floor_amplitude(mut self, amplitude: i32) -> Self {
+        self.floor_amplitude = amplitude;
+        self
+    }
+
+    /// The least sensitive it may ever become. Domain `floor_amplitude..=32,767`.
+    #[must_use]
+    pub const fn with_ceiling_amplitude(mut self, amplitude: i32) -> Self {
+        self.ceiling_amplitude = amplitude;
+        self
+    }
+
+    /// The most one update may move the threshold. Domain `1..=32,767`.
+    #[must_use]
+    pub const fn with_max_step_amplitude(mut self, amplitude: i32) -> Self {
+        self.max_step_amplitude = amplitude;
+        self
+    }
+
+    /// How long open voice may hold an update back, or `None` to let it hold indefinitely.
+    ///
+    /// `Some(0)` is refused: a zero bound would apply an update through every period of speech,
+    /// which is the behaviour the freeze exists to prevent.
+    #[must_use]
+    pub const fn with_freeze_limit_ms(mut self, freeze_limit_ms: Option<u32>) -> Self {
+        self.freeze_limit_ms = freeze_limit_ms;
+        self
+    }
+
+    /// The configured warm-up duration.
+    #[must_use]
+    pub const fn calibration_ms(self) -> u32 {
+        self.calibration_ms
+    }
+
+    /// The configured update period.
+    #[must_use]
+    pub const fn update_ms(self) -> u32 {
+        self.update_ms
+    }
+
+    /// The configured margin above the observed floor.
+    #[must_use]
+    pub const fn margin_amplitude(self) -> i32 {
+        self.margin_amplitude
+    }
+
+    /// The configured floor.
+    #[must_use]
+    pub const fn floor_amplitude(self) -> i32 {
+        self.floor_amplitude
+    }
+
+    /// The configured ceiling.
+    #[must_use]
+    pub const fn ceiling_amplitude(self) -> i32 {
+        self.ceiling_amplitude
+    }
+
+    /// The configured maximum movement per update.
+    #[must_use]
+    pub const fn max_step_amplitude(self) -> i32 {
+        self.max_step_amplitude
+    }
+
+    /// The configured bound on the voiced freeze, if it is bounded.
+    #[must_use]
+    pub const fn freeze_limit_ms(self) -> Option<u32> {
+        self.freeze_limit_ms
+    }
+}
+
+/// What one update period did (§12.6).
+///
+/// The vocabulary is extended compatibly — a new freeze condition would be a new variant — so a
+/// consumer writes a wildcard arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum CalibrationOutcome {
+    /// The update rule ran. The threshold moved unless it was already at its target.
+    Applied,
+    /// The epoch had not yet reached its calibration sample count.
+    Warmup,
+    /// The period contained speech, or voice was open when it ended.
+    Voiced,
+    /// Every window in the period was clipping, impulsive or DC, so nothing was measured.
+    NoMeasurement,
+}
+
+impl std::fmt::Display for CalibrationOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Applied => f.write_str("applied"),
+            Self::Warmup => f.write_str("warmup"),
+            Self::Voiced => f.write_str("voiced"),
+            Self::NoMeasurement => f.write_str("no-measurement"),
+        }
+    }
+}
+
 /// A configured analyser (§5.1).
 ///
 /// [`Self::new`] starts from §11.1's reference profile `P8` at the rate given — 20 ms windows, a
 /// 2,048 activation amplitude, a 64 silence floor, a 16,384 impulse amplitude, a 512 DC amplitude,
-/// 8 clipped samples, a 200 ms hangover, a 2 s silence timeout and a 64-observation queue — and the
-/// `with_*` methods change one field each. Nothing is validated here: a profile is data, and every
-/// domain in §5.1 is checked once, by [`AudioAnalyzer::new`], before anything is sized by it.
+/// 8 clipped samples, a 200 ms hangover, a 2 s silence timeout, a 64-observation queue and no
+/// calibration — and the `with_*` methods change one field each. Nothing is validated here: a
+/// profile is data, and every domain in §5.1 and §12.3 is checked once, by [`AudioAnalyzer::new`],
+/// before anything is sized by it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AnalysisProfile {
     direction: AudioDirection,
@@ -128,6 +351,7 @@ pub struct AnalysisProfile {
     hangover_ms: u32,
     silence_timeout_ms: Option<u32>,
     queue_capacity: u32,
+    calibration: Option<CalibrationProfile>,
 }
 
 impl AnalysisProfile {
@@ -146,7 +370,23 @@ impl AnalysisProfile {
             hangover_ms: 200,
             silence_timeout_ms: Some(2_000),
             queue_capacity: 64,
+            calibration: None,
         }
+    }
+
+    /// Let the activation amplitude adapt under the bounds this profile declares (§12), or `None`
+    /// to hold it fixed forever.
+    ///
+    /// Calibration is opt-in and costs nothing when it is off: without a profile here the analyser
+    /// behaves exactly as §5 and §6 specify and emits no [`Observation::ThresholdUpdated`].
+    ///
+    /// [`Self::with_activation_amplitude`] then sets the *initial* threshold, and it must lie in
+    /// the calibration profile's `floor..=ceiling` interval — a value outside it is refused rather
+    /// than clamped, so the interval holds from the first sample.
+    #[must_use]
+    pub const fn with_calibration(mut self, calibration: Option<CalibrationProfile>) -> Self {
+        self.calibration = calibration;
+        self
     }
 
     /// How long one measurement window is. Derives `W`; the domain is `1..=`[`MAX_WINDOW_SAMPLES`].
@@ -278,6 +518,12 @@ impl AnalysisProfile {
     #[must_use]
     pub const fn queue_capacity(self) -> u32 {
         self.queue_capacity
+    }
+
+    /// The calibration bounds in force, or `None` when the activation amplitude is fixed.
+    #[must_use]
+    pub const fn calibration(self) -> Option<CalibrationProfile> {
+        self.calibration
     }
 }
 
@@ -510,6 +756,21 @@ pub enum Observation {
         /// The first sample of the run, in the current epoch.
         at_sample: u64,
     },
+    /// Calibration moved the effective activation amplitude (§12.7).
+    ///
+    /// Emitted only when the value actually changed, so a settled threshold is silent. The new
+    /// value takes effect for the window starting at `at_sample`; the window that ended the update
+    /// period was measured against `previous`.
+    ThresholdUpdated {
+        /// The first sample of the window the new value takes effect for, in the current epoch.
+        at_sample: u64,
+        /// The effective activation amplitude from here on.
+        activation_amplitude: i32,
+        /// The one it replaces.
+        previous: i32,
+        /// The least [`window_deviation`] among the period's eligible windows.
+        observed_floor: i32,
+    },
     /// Measurement restarted; sample positions after this belong to a new epoch and start at 0.
     Reset {
         /// What restarted it.
@@ -533,6 +794,18 @@ struct Derived {
     hangover: u64,
     silence_timeout: Option<u64>,
     queue_capacity: usize,
+    calibration: Option<DerivedCalibration>,
+}
+
+/// §12.3's durations, converted once into the sample counts §12.4 and §12.6 run on.
+#[derive(Debug, Clone, Copy)]
+struct DerivedCalibration {
+    /// `C`: the warm-up.
+    calibration: u64,
+    /// `U`: the update period.
+    update: u64,
+    /// `F`: the bound on the voiced freeze, when it is bounded.
+    freeze_limit: Option<u64>,
 }
 
 /// §4's exact conversion: `ceil(d · rate / 1000)`, in `u64`, with no floating point.
@@ -627,6 +900,11 @@ impl Derived {
             }
         };
 
+        let calibration = match profile.calibration {
+            None => None,
+            Some(calibration) => Some(DerivedCalibration::from(&calibration, profile)?),
+        };
+
         Ok(Self {
             window,
             hangover,
@@ -634,8 +912,86 @@ impl Derived {
             // Proven inside `MIN_QUEUE_CAPACITY..=MAX_QUEUE_CAPACITY` above, so the fallback —
             // that ceiling, spelled as a `usize` — is unreachable.
             queue_capacity: usize::try_from(profile.queue_capacity).unwrap_or(4_096),
+            calibration,
         })
     }
+}
+
+impl DerivedCalibration {
+    /// Check every §12.3 domain and derive every count, or refuse naming the field.
+    fn from(
+        calibration: &CalibrationProfile,
+        profile: &AnalysisProfile,
+    ) -> Result<Self, AnalysisError> {
+        check(
+            i64::from(calibration.margin_amplitude),
+            "margin_amplitude",
+            1,
+            32_767,
+        )?;
+        check(
+            i64::from(calibration.floor_amplitude),
+            "floor_amplitude",
+            1,
+            32_767,
+        )?;
+        // The ceiling's low end is the floor, not 1: an interval whose ceiling sits below its floor
+        // is not an interval, and swapping the two would run a configuration nobody wrote.
+        check(
+            i64::from(calibration.ceiling_amplitude),
+            "ceiling_amplitude",
+            i64::from(calibration.floor_amplitude),
+            32_767,
+        )?;
+        check(
+            i64::from(calibration.max_step_amplitude),
+            "max_step_amplitude",
+            1,
+            32_767,
+        )?;
+        // Refused rather than clamped (§12.3): this is what makes `floor <= A <= ceiling` hold from
+        // sample 0, with no epoch during which the analyser is more sensitive than its own floor.
+        check(
+            i64::from(profile.activation_amplitude),
+            "activation_amplitude",
+            i64::from(calibration.floor_amplitude),
+            i64::from(calibration.ceiling_amplitude),
+        )?;
+
+        if calibration.calibration_ms == 0 {
+            return Err(field("calibration_ms", 0));
+        }
+        if calibration.update_ms == 0 {
+            return Err(field("update_ms", 0));
+        }
+        let warmup = derived_count("calibration_ms", calibration.calibration_ms, profile.rate)?;
+        let update = derived_count("update_ms", calibration.update_ms, profile.rate)?;
+        let freeze_limit = match calibration.freeze_limit_ms {
+            None => None,
+            Some(0) => return Err(field("freeze_limit_ms", 0)),
+            Some(limit_ms) => Some(derived_count("freeze_limit_ms", limit_ms, profile.rate)?),
+        };
+
+        Ok(Self {
+            calibration: warmup,
+            update,
+            freeze_limit,
+        })
+    }
+}
+
+/// §4's conversion, refusing a count that does not fit the `u32` bound §5.1 states for one.
+fn derived_count(field: &'static str, duration_ms: u32, rate: u32) -> Result<u64, AnalysisError> {
+    let samples = samples_for(duration_ms, rate);
+    if samples > u64::from(u32::MAX) {
+        return Err(ProfileError::DerivedCount {
+            field,
+            rate,
+            samples,
+        }
+        .into());
+    }
+    Ok(samples)
 }
 
 fn field(field: &'static str, value: i64) -> AnalysisError {
@@ -675,6 +1031,157 @@ struct SilenceState {
     fired: bool,
 }
 
+/// §12's calibration state: a constant of the configuration, and the whole of it.
+#[derive(Debug, Clone, Copy, Default)]
+struct CalibrationState {
+    /// Samples accumulated in the update period now filling.
+    period: u64,
+    /// The least eligible deviation this period, meaningful only when `eligible > 0`.
+    observed: i32,
+    /// How many windows this period were eligible §12.4 input.
+    eligible: u32,
+    /// Whether any window this period was `active`.
+    voiced: bool,
+    /// Consecutive samples the `Voiced` freeze has withheld an update for.
+    frozen: u64,
+    /// How many updates actually moved the threshold.
+    updates: u64,
+    /// The last completed period's observed floor, when it had one.
+    last_observed: Option<i32>,
+    /// What the last completed period did.
+    outcome: Option<CalibrationOutcome>,
+}
+
+impl CalibrationState {
+    /// The fields §12.8 clears on every reset. The threshold and the update count are not among
+    /// them, and neither is the profile: the timeline broke, the room did not.
+    fn restart(&mut self) {
+        self.period = 0;
+        self.observed = 0;
+        self.eligible = 0;
+        self.voiced = false;
+        self.frozen = 0;
+        self.last_observed = None;
+        self.outcome = None;
+    }
+}
+
+/// What an analyser is measuring against right now (§12.9).
+///
+/// A snapshot taken by shared reference: it mutates nothing, drains nothing, and is a value rather
+/// than a view — what it said when it was taken it goes on saying. Taking it costs one copy of a
+/// handful of scalars, so a caller may take it as often as it likes without changing a single
+/// observation the analyser produces.
+///
+/// **It carries no audio, and there is none to carry.** §3.3 forbids retaining samples past
+/// `process` and §8.1 enumerates the whole of an analyser's state, in which no audio buffer
+/// appears. Every field below is a count or an amplitude — the same class of scalar
+/// [`Observation::Window`] already publishes. There is no accessor in this crate that returns
+/// retained call audio, by construction rather than by omission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EffectiveThresholds {
+    profile: AnalysisProfile,
+    activation_amplitude: i32,
+    window_samples: u32,
+    hangover_samples: u64,
+    silence_timeout_samples: Option<u64>,
+    calibration_samples: Option<u64>,
+    update_samples: Option<u64>,
+    freeze_limit_samples: Option<u64>,
+    updates: u64,
+    observed_floor: Option<i32>,
+    outcome: Option<CalibrationOutcome>,
+    frozen_samples: u64,
+}
+
+impl EffectiveThresholds {
+    /// The profile as it was configured, with every fixed threshold on it.
+    ///
+    /// Its [`AnalysisProfile::activation_amplitude`] is the value the analyser *started* from;
+    /// [`Self::activation_amplitude`] is the one in force now. They differ exactly when calibration
+    /// has moved it.
+    #[must_use]
+    pub const fn profile(&self) -> AnalysisProfile {
+        self.profile
+    }
+
+    /// The activation amplitude §5.3's `active` predicate is comparing against right now.
+    #[must_use]
+    pub const fn activation_amplitude(&self) -> i32 {
+        self.activation_amplitude
+    }
+
+    /// `W`: how many samples one measurement window covers.
+    #[must_use]
+    pub const fn window_samples(&self) -> u32 {
+        self.window_samples
+    }
+
+    /// How many inactive samples end voice.
+    #[must_use]
+    pub const fn hangover_samples(&self) -> u64 {
+        self.hangover_samples
+    }
+
+    /// How many silent samples report elapsed silence, or `None` when the timer is disabled.
+    #[must_use]
+    pub const fn silence_timeout_samples(&self) -> Option<u64> {
+        self.silence_timeout_samples
+    }
+
+    /// The calibration bounds in force, or `None` when the activation amplitude is fixed.
+    #[must_use]
+    pub const fn calibration(&self) -> Option<CalibrationProfile> {
+        self.profile.calibration
+    }
+
+    /// `C`: how many samples of an epoch pass before the first update may apply.
+    #[must_use]
+    pub const fn calibration_samples(&self) -> Option<u64> {
+        self.calibration_samples
+    }
+
+    /// `U`: how many samples one update period covers.
+    #[must_use]
+    pub const fn update_samples(&self) -> Option<u64> {
+        self.update_samples
+    }
+
+    /// `F`: how many samples open voice may hold an update back, when that is bounded.
+    #[must_use]
+    pub const fn freeze_limit_samples(&self) -> Option<u64> {
+        self.freeze_limit_samples
+    }
+
+    /// How many updates have moved the threshold in this analyser's lifetime.
+    ///
+    /// Not reset by a reset (§12.8): it counts what this analyser has done, not what the current
+    /// epoch has.
+    #[must_use]
+    pub const fn updates(&self) -> u64 {
+        self.updates
+    }
+
+    /// The last completed period's least eligible deviation, or `None` when no period has measured
+    /// one yet in this epoch.
+    #[must_use]
+    pub const fn observed_floor(&self) -> Option<i32> {
+        self.observed_floor
+    }
+
+    /// What the last completed update period did, or `None` before the first one in this epoch.
+    #[must_use]
+    pub const fn outcome(&self) -> Option<CalibrationOutcome> {
+        self.outcome
+    }
+
+    /// How many consecutive samples the voiced freeze has currently withheld an update for.
+    #[must_use]
+    pub const fn frozen_samples(&self) -> u64 {
+        self.frozen_samples
+    }
+}
+
 /// The deterministic frame processor of `docs/specs/call-audio-processing.md`.
 ///
 /// Two analysers built from the same profile and fed the same input produce byte-identical drain
@@ -688,6 +1195,10 @@ pub struct AudioAnalyzer {
     window: WindowState,
     activity: ActivityState,
     silence: SilenceState,
+    calibration: CalibrationState,
+    /// The activation amplitude in force. Equal to the configured one forever when no calibration
+    /// profile is attached; moved only by §12.5, and only inside `[floor, ceiling]`.
+    activation: i32,
     /// The index of the window now filling, in the current epoch.
     window_index: u64,
     /// The last accepted frame's sequence, or `None` before the base is established.
@@ -711,6 +1222,8 @@ impl AudioAnalyzer {
             window: WindowState::default(),
             activity: ActivityState::default(),
             silence: SilenceState::default(),
+            calibration: CalibrationState::default(),
+            activation: profile.activation_amplitude,
             window_index: 0,
             sequence: None,
             queue: VecDeque::with_capacity(derived.queue_capacity),
@@ -758,6 +1271,48 @@ impl AudioAnalyzer {
     #[must_use]
     pub const fn is_voiced(&self) -> bool {
         self.activity.voiced
+    }
+
+    /// The activation amplitude §5.3 is comparing against right now (§12.1).
+    ///
+    /// Equal to [`AnalysisProfile::activation_amplitude`] forever when no calibration profile is
+    /// attached, and otherwise the value calibration has moved it to — always inside the
+    /// configured `floor..=ceiling` interval.
+    #[must_use]
+    pub const fn activation_amplitude(&self) -> i32 {
+        self.activation
+    }
+
+    /// Everything this analyser is measuring against, as one snapshot (§12.9).
+    ///
+    /// Reads and only reads: it takes `&self`, mutates nothing, and drains nothing, so a caller may
+    /// poll it as often as it likes without changing one observation. It carries no audio — see
+    /// [`EffectiveThresholds`] for why there is none to carry.
+    #[must_use]
+    pub const fn thresholds(&self) -> EffectiveThresholds {
+        let (calibration_samples, update_samples, freeze_limit_samples) =
+            match self.derived.calibration {
+                None => (None, None, None),
+                Some(derived) => (
+                    Some(derived.calibration),
+                    Some(derived.update),
+                    derived.freeze_limit,
+                ),
+            };
+        EffectiveThresholds {
+            profile: self.profile,
+            activation_amplitude: self.activation,
+            window_samples: self.derived.window,
+            hangover_samples: self.derived.hangover,
+            silence_timeout_samples: self.derived.silence_timeout,
+            calibration_samples,
+            update_samples,
+            freeze_limit_samples,
+            updates: self.calibration.updates,
+            observed_floor: self.calibration.last_observed,
+            outcome: self.calibration.outcome,
+            frozen_samples: self.calibration.frozen,
+        }
     }
 
     /// Consume one frame.
@@ -857,6 +1412,8 @@ impl AudioAnalyzer {
         self.window = WindowState::default();
         self.activity = ActivityState::default();
         self.silence = SilenceState::default();
+        // The in-progress measurement goes; the threshold it was measuring against stays (§12.8).
+        self.calibration.restart();
         self.window_index = 0;
         self.sequence = None;
     }
@@ -896,7 +1453,9 @@ impl AudioAnalyzer {
         let clipping = self.window.clipped >= self.profile.clip_samples;
         let impulsive =
             peak >= i64::from(self.profile.impulse_amplitude) && energy < 2 * peak * peak;
-        let activation = i64::from(self.profile.activation_amplitude);
+        // The value in force, which §12 may have moved — inside the domain §5.2's width proof
+        // assumed for it, so every comparison below still fits `i64` with the same headroom.
+        let activation = i64::from(self.activation);
         // `(W·energy − sum²)/W²` is exactly the window's variance, so this is `variance >= A²` with
         // no division performed — and a constant signal has variance 0 and is not voice.
         let active =
@@ -960,8 +1519,101 @@ impl AudioAnalyzer {
             self.silence.fired = false;
         }
 
+        // Last, so that "the new value takes effect for the next window" is readable straight off
+        // the drain sequence, and so the freeze condition sees the activity state this window left
+        // behind rather than the one it started from (§12.7).
+        self.calibrate(sum, energy, clipping || impulsive || dc_offset, active, end);
+
         self.window = WindowState::default();
         self.window_index += 1;
+    }
+
+    /// §12.4's period accounting and §12.5's update rule, run once per completed window.
+    ///
+    /// Adds nothing to the per-sample path: an analyser with no calibration profile leaves here
+    /// immediately and behaves exactly as §5 and §6 specify.
+    fn calibrate(&mut self, sum: i64, energy: i64, ineligible: bool, active: bool, end: u64) {
+        let (Some(profile), Some(derived)) = (self.profile.calibration, self.derived.calibration)
+        else {
+            return;
+        };
+        let span = u64::from(self.derived.window);
+
+        if active {
+            self.calibration.voiced = true;
+        }
+        // A window §5.3 has already called distortion, a click or a stuck bias is not a measurement
+        // of background noise (§12.4).
+        if !ineligible {
+            let deviation = window_deviation(self.derived.window, sum, energy);
+            if self.calibration.eligible == 0 || deviation < self.calibration.observed {
+                self.calibration.observed = deviation;
+            }
+            self.calibration.eligible += 1;
+        }
+
+        // Period boundaries are a function of sample position alone, never of content (§12.4).
+        self.calibration.period += span;
+        if self.calibration.period < derived.update {
+            return;
+        }
+        let period_samples = self.calibration.period;
+        let eligible = self.calibration.eligible;
+        let observed = self.calibration.observed;
+        let voiced = self.calibration.voiced || self.activity.voiced;
+        self.calibration.period = 0;
+        self.calibration.eligible = 0;
+        self.calibration.observed = 0;
+        self.calibration.voiced = false;
+
+        // §12.6's conditions, in the order the specification states them.
+        let outcome = if end < derived.calibration {
+            self.calibration.frozen = 0;
+            CalibrationOutcome::Warmup
+        } else if voiced
+            && !derived.freeze_limit.is_some_and(|limit| {
+                self.calibration.frozen.saturating_add(period_samples) >= limit
+            })
+        {
+            self.calibration.frozen = self.calibration.frozen.saturating_add(period_samples);
+            CalibrationOutcome::Voiced
+        } else if eligible == 0 {
+            // The run counter stands: nothing was applied, and nothing was withheld by voice.
+            CalibrationOutcome::NoMeasurement
+        } else {
+            self.calibration.frozen = 0;
+            CalibrationOutcome::Applied
+        };
+
+        if outcome == CalibrationOutcome::Applied {
+            // Every term here is at most 65,535 and every operand is `i32`, so §12.5's arithmetic
+            // cannot overflow for any supported sample (`observed <= 32,768`, `margin <= 32,767`).
+            let target = (observed + profile.margin_amplitude)
+                .clamp(profile.floor_amplitude, profile.ceiling_amplitude);
+            let step = (target - self.activation)
+                .clamp(-profile.max_step_amplitude, profile.max_step_amplitude);
+            let next = self.activation + step;
+            debug_assert!(
+                next >= profile.floor_amplitude && next <= profile.ceiling_amplitude,
+                "§12.5: a bounded move toward a bounded target cannot leave the interval"
+            );
+            if next != self.activation {
+                let previous = self.activation;
+                self.activation = next;
+                self.calibration.updates += 1;
+                self.enqueue(Observation::ThresholdUpdated {
+                    at_sample: end,
+                    activation_amplitude: next,
+                    previous,
+                    observed_floor: observed,
+                });
+            }
+        }
+
+        if eligible > 0 {
+            self.calibration.last_observed = Some(observed);
+        }
+        self.calibration.outcome = Some(outcome);
     }
 
     /// §8.3's bounded ring: never blocks, never grows, and never loses an observation silently.
