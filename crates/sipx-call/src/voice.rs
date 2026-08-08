@@ -28,7 +28,7 @@
 //! starts, exactly as [`CallEvent::Ended`] does.
 //!
 //! The same rule reaches back past delivery, into the audio itself, and that part is
-//! [`crate::audio_feed`]'s: a frame the analyser never measured leaves activity latched across a
+//! `audio_feed`'s: a frame the analyser never measured leaves activity latched across a
 //! span nobody looked at, which is the one shape of this failure delivery cannot fix. So the feed
 //! owes the break forward and the next frame restarts the epoch, cutting voice at the last position
 //! anyone actually measured.
