@@ -2,8 +2,8 @@
 id: M-45
 title: Hold incoming audio in a jitter buffer
 pillar: Media
-status: backlog
-priority: 16
+status: ready
+priority: 4
 design: docs/designs/demand.md
 epic: demand
 areas: [sipx-rtp, sipx-media]

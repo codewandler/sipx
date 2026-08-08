@@ -2,8 +2,8 @@
 id: X-66
 title: Measure coverage and publish the number
 pillar: Build
-status: backlog
-priority: 16
+status: ready
+priority: 8
 design:
 epic: conformance
 areas: [scripts, ci]

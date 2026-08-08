@@ -2,7 +2,7 @@
 id: X-112
 title: Take the integrated gate green on main and reconcile derived artifacts
 pillar: Build
-status: ready
+status: in-progress
 priority: 1
 design:
 epic: release

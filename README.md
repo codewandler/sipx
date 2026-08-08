@@ -9,7 +9,7 @@ transfer, and carry real audio from a Rust library or a shell command.
 
 <!-- BEGIN generated:badges -->
 <a href="https://codewandler.github.io/sipx/"><img alt="docs: codewandler.github.io/sipx" src="https://img.shields.io/static/v1?label=docs&message=codewandler.github.io%2Fsipx&color=blue"></a>
-<a href="CHANGELOG.md"><img alt="release: 1.0.0-rc.2" src="https://img.shields.io/static/v1?label=release&message=1.0.0-rc.2&color=blue"></a>
+<a href="CHANGELOG.md"><img alt="release: 1.0.0-rc.3" src="https://img.shields.io/static/v1?label=release&message=1.0.0-rc.3&color=blue"></a>
 <a href="#try-the-cli"><img alt="MSRV: rustc 1.88" src="https://img.shields.io/static/v1?label=MSRV&message=rustc%201.88&color=blue"></a>
 <a href="docs/compliance.md"><img alt="RFCs: 36 implemented of 82" src="https://img.shields.io/static/v1?label=RFCs&message=36%20implemented%20of%2082&color=blue"></a>
 <a href="docs/compliance.md"><img alt="codecs: G.711 · G.722 · L16 · Opus" src="https://img.shields.io/static/v1?label=codecs&message=G.711%20%C2%B7%20G.722%20%C2%B7%20L16%20%C2%B7%20Opus&color=blue"></a>
@@ -70,7 +70,7 @@ The <!-- BEGIN generated:release-tag -->v1.0.0-rc.2<!-- END generated:release-ta
 Rust <!-- BEGIN generated:msrv -->1.88<!-- END generated:msrv --> or newer:
 
 ```sh
-cargo install --locked --version =1.0.0-rc.2 sipx-cli
+cargo install --locked --version =1.0.0-rc.3 sipx-cli
 sipx version
 ```
 
@@ -78,7 +78,7 @@ To use the bounded browser-audio profile, install that same exact release with i
 media features:
 
 ```sh
-cargo install --locked --version =1.0.0-rc.2 --features opus,dtls sipx-cli
+cargo install --locked --version =1.0.0-rc.3 --features opus,dtls sipx-cli
 ```
 
 Then make a bounded loopback call. Terminal one listens for at most 15 seconds:
@@ -113,9 +113,9 @@ dependency to the same exact prerelease while the API remains pre-1.0:
 <!-- BEGIN generated:answer-consumer-dependencies -->
 ```toml
 [dependencies]
-sipx-call = "=1.0.0-rc.2"
-sipx-sip = "=1.0.0-rc.2"
-sipx-transport = "=1.0.0-rc.2"
+sipx-call = "=1.0.0-rc.3"
+sipx-sip = "=1.0.0-rc.3"
+sipx-transport = "=1.0.0-rc.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 <!-- END generated:answer-consumer-dependencies -->

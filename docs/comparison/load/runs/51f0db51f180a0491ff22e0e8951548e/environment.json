@@ -1,0 +1,68 @@
+{
+ "builds": [
+  {
+   "artifact": "scripts/comparative-load-driver.py",
+   "artifact_sha256": "b87006a8c623972300fd30ed620c913c092ccd4612162e7d3e33cf94e472b2f2",
+   "build_command": "none: an interpreted single-file instrument; the artifact hash pins its source bytes",
+   "dependencies": [],
+   "endpoint_id": "profile-driver",
+   "features": [],
+   "revision": "source-sha256:b87006a8c623972300fd30ed620c913c092ccd4612162e7d3e33cf94e472b2f2",
+   "role": "driver",
+   "toolchain": "python3 (exact interpreter recorded per run in environment.json toolchains)"
+  },
+  {
+   "artifact": "target/release/sipx",
+   "artifact_sha256": "9b240cc591abb755a8ea826fe506f1a6b7ee45e5c33bd35aa5e9433a578bbf84",
+   "build_command": "cargo build --release -p sipx-cli",
+   "dependencies": [
+    "resolved by the workspace Cargo.lock at the pinned revision"
+   ],
+   "endpoint_id": "sipx",
+   "features": [
+    "default"
+   ],
+   "revision": "27c8cdb532f9a1f2db404dc2a8e420a0da062d27",
+   "role": "responder",
+   "toolchain": "rustc 1.97.0 (2d8144b78 2026-07-07)"
+  }
+ ],
+ "captured_utc": "2026-08-08T07:33:54Z",
+ "commands": [
+  "scripts/comparative-load-run.py --endpoint docs/comparison/load/endpoints/sipx.json --driver docs/comparison/load/endpoints/profile-driver.json --ceiling 1024 --seed 7"
+ ],
+ "contract_sha256": "b7920e49c8c3a2ecc37fd22b03572f7d3853c9655908e26e244335de1bbe9f1f",
+ "host": {
+  "architecture": "x86_64",
+  "clock": "CLOCK_MONOTONIC",
+  "cpu_governor": "powersave",
+  "kernel": "#1 SMP PREEMPT_DYNAMIC Tue Jul 14 15:26:32 UTC 2026",
+  "logical_cpus": 20,
+  "memory_bytes": 67321196544,
+  "os": "Linux 6.6.144-3-MANJARO"
+ },
+ "schema": "sipx.comparative-load.environment.v1",
+ "seed": 7,
+ "socket_limits": {
+  "rlimit_nofile_hard": 1000000,
+  "rlimit_nofile_soft": 1000000,
+  "rmem_default": 212992,
+  "rmem_max": 212992,
+  "wmem_default": 212992,
+  "wmem_max": 212992
+ },
+ "toolchains": [
+  {
+   "tool": "python3",
+   "version": "Python 3.14.6"
+  },
+  {
+   "tool": "rustc",
+   "version": "rustc 1.97.0 (2d8144b78 2026-07-07)"
+  },
+  {
+   "tool": "cargo",
+   "version": "cargo 1.97.0 (c980f4866 2026-06-30)"
+  }
+ ]
+}

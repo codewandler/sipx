@@ -2,8 +2,8 @@
 id: M-54
 title: Expose bounded call PCM processing and resampling
 pillar: Media
-status: backlog
-priority: 21
+status: ready
+priority: 1
 design: docs/designs/local-speech.md
 epic: local-speech
 areas: [sipx-media, sipx-audio, app-sdk, speech, audio-analysis, m16]

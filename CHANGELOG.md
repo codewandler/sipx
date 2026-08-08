@@ -7,6 +7,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0-rc.3] — 2026-08-08
+
 This boundary answers two independent external sweeps of the published `1.0.0-rc.2` artifacts —
 run from fresh clones against the released musl archive and a pinned registry install, with security
 explicitly out of scope — and lands the work those sweeps made ready. Twenty-five findings across
@@ -3369,7 +3371,8 @@ Stated so nobody has to discover it from a stack trace:
 - **Interop is verified against Kamailio only.** A second implementation with different
   opinions — Asterisk, as a B2BUA rather than a proxy — has not been tried.
 
-[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.2...HEAD
+[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.3...HEAD
+[1.0.0-rc.3]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.2...v1.0.0-rc.3
 [1.0.0-rc.2]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.1...v1.0.0-rc.2
 [1.0.0-rc.1]: https://github.com/codewandler/sipx/compare/v1.0.0-beta.7...v1.0.0-rc.1
 [1.0.0-beta.7]: https://github.com/codewandler/sipx/compare/v1.0.0-beta.6...v1.0.0-beta.7

@@ -1,6 +1,6 @@
 ---
 title: What's new
-description: Release highlights and adoption notes for the sipx 1.0.0-rc.2 release candidate.
+description: Release highlights and adoption notes for the sipx 1.0.0-rc.3 release candidate.
 ---
 
 # What's new
@@ -8,6 +8,102 @@ description: Release highlights and adoption notes for the sipx 1.0.0-rc.2 relea
 <!-- BEGIN generated:release-heading -->
 ## 1.0.0-rc.2 — 2026-08-05
 <!-- END generated:release-heading -->
+
+RC.3 is the second published release candidate. It answers two independent external sweeps of the
+published RC.2 artifacts — each run from a fresh clone against the released archive and a pinned
+registry install, with security excluded from both by declaration — and lands the work those sweeps
+made ready. Twenty-five findings across call lifecycle, endpoint reachability, timeout honesty,
+refusal signalling, automation contracts and published onboarding are fixed. It is a new immutable
+prerelease and does not move or overwrite an existing tag, package or asset.
+
+- **Every outbound command takes a named SIP target.** Calling, registration, bounded load,
+  registrar-backed peer listing and scenario automation share one bounded resolver: NAPTR selects the
+  transport, SRV the host and port, A/AAAA the addresses, and literal addresses bypass resolver setup
+  entirely. Deadlines, lookup and candidate limits and the connection budget are finite, a `sips:`
+  URI never falls back to a cleartext candidate, and the original hostname stays the TLS verification
+  identity. The CLI reference still shows literal addresses; the behaviour is specified but not yet
+  described there.
+- **Calls negotiate and carry G.722.** The codec is native fixed-point sub-band ADPCM, built into
+  every configuration with no feature gate and verified bit-exactly against the ITU-T Appendix II
+  digital test sequences. Following RFC 3551, 16 kHz audio drives packet sizing, PCM conversion,
+  capture, WAV headers and recording durations while the RTP timestamp advances at 8000. Preference
+  sits below Opus and above G.711.
+- **The CLI is parsed once by a typed command model.** An option a command does not define is now a
+  usage error naming the flag instead of being silently discarded, and non-Unicode input is refused
+  rather than panicking before startup. Command and option names, aliases, environment fallbacks,
+  defaults, JSON/text separation and exit codes are preserved, and the
+  [CLI reference](reference/cli.md) is generated from parser-owned help.
+- **Long-running commands survive supervisor termination, not just Ctrl-C.** Calling, answering and
+  both bounded-load roles route interactive interrupt and, on Unix, SIGTERM through one cancellation
+  path: admission closes first, dialog, media and transport work joins within the command's
+  configured bound, and exactly one terminal record follows any earlier readiness record. A clean
+  stop exits 0, and platform support is typed rather than silently promised.
+- **A confirmed call follows the dialog it owns and returns near its configured budget.** A queued
+  remote BYE now outranks interrupt and local completion, teardown joins transport, dialog, media and
+  device work to zero before one terminal result, and invitation expiry reaches a finite join barrier
+  even when neither CANCEL nor INVITE is answered. Previously a peer's BYE was ignored, an
+  interrupted process emitted no terminal record, and an unreported cancellation tail overshot short
+  budgets.
+- **Refusals reach the wire and name their real cause.** An initial offer outside the selected codec
+  policy receives a transaction-owned 488 and malformed SDP a 400, so the caller reports a rejection
+  promptly instead of waiting out its whole invitation timeout. A refused connection is a typed
+  transport failure rather than a SIP timeout, and codec, media-security, profile, ICE and device
+  selections are checked against the compiled build before resolution, bind, file or device open and
+  any datagram.
+- **The call module is six modules.** Hold and resume, ICE restart, offer/answer settlement,
+  transfer, re-INVITE and session timers moved into private siblings, leaving the call type and its
+  lifecycle in the module root. No public path, name or signature moves, so no import changes.
+- **Every shipped call verb has a guide with a compiled example.** Hold and resume, blind transfer,
+  attended transfer, sending and collecting DTMF, playback, recording and two-leg coupling each have
+  a guide whose sample is inlined byte-exactly from a workspace example compiled with the workspace,
+  and the [fit guide](guides/does-this-fit.md) links every capability it claims to the guide that
+  shows it. The displayed dependency snippet is compiled by a registry-shaped consumer crate, so it
+  cannot omit a package the example imports.
+- **Two contracts are specified ahead of the code that will implement them.** Interchangeable local
+  speech providers and deterministic real-time call-audio analysis now have normative session,
+  discovery, precedence, lifecycle and refusal contracts with conformance vectors. Neither ships code
+  in this candidate, and neither should be read as an available capability.
+
+Install the exact CLI release with:
+
+```bash
+cargo install --locked --version =1.0.0-rc.3 sipx-cli
+```
+
+The [getting-started guide](getting-started.md#prebuilt-release-binaries) also shows the exact binary
+archive, checksum and SPDX path. Those portable executables deliberately omit optional native
+features; use Cargo when `device-audio`, `opus` or `dtls` is required. G.722 is not among them and is
+present in every build.
+
+Five changes need an edit in existing scripts and automation:
+
+- **Undefined options exit 2.** A command that previously discarded an option it does not define now
+  fails and names the flag. `register --timeout 3` ran an unbounded registration and gave no
+  indication the flag was ignored; that invocation now fails instead. Remove the flag from such
+  calls.
+- **Cancellation has its own allowance.** `--timeout` remains the invitation-answer phase, and the
+  CANCEL cleanup that follows expiry or interrupt is `--cancel-timeout <S>`, default 2, where `0`
+  performs no timed cancellation wait. A script that treated `--timeout` as the total process budget
+  should now set both values.
+- **Bounded load defaults to signalling on both sides.** Generated media must be selected explicitly
+  and symmetrically on both commands with `--mode generated-media`; an incompatible explicit pair is
+  refused before dialog admission, and an invalid local mode before any I/O.
+- **Scenario streams use the flat frame shape and report failure through exit status.** The canonical
+  `{"id":…,"command":…,…}` form is accepted and the nested one-key-per-command shape the older help
+  implied is not; `do` remains a compatibility alias only when `command` is absent. Any refused
+  command or failed operation exits 1, so a later success cannot hide it.
+- **`version --json` emits an object.** A consumer that parsed the previous plain-text output must
+  read the stable object instead; neither output form accepts a positional argument.
+
+The call-module split moves nothing public, so it needs no action. Supported APIs are still not
+frozen before stable 1.0 and receive migration guidance when they change; Experimental APIs may
+change or disappear without that guide. `register` still accepts no completion deadline, so a check
+against a black-holing registrar blocks for the SIP transaction timeout rather than a stated one. The
+project still has no recorded independent production application or third-party security audit, and
+both sweeps excluded security by declaration, so this candidate remains an invitation to review, not
+a claim that repository evidence can substitute for outside use.
+
+## 1.0.0-rc.2 — 2026-08-05
 
 RC.2 is sipx's first published release candidate. It gathers the complete post-beta.7 transport, media,
 signalling, observability and distribution work into one immutable version for external review. It

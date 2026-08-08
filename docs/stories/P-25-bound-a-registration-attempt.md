@@ -2,8 +2,8 @@
 id: P-25
 title: Bound a registration attempt
 pillar: Phone
-status: backlog
-priority:
+status: ready
+priority: 2
 design:
 epic: diagnostic-automation
 areas: [sipx-cli, sipx-ua]

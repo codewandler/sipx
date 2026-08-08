@@ -2,7 +2,7 @@
 id: A-38
 title: Publish and verify the second release candidate
 pillar: Application
-status: ready
+status: in-progress
 priority: 3
 design:
 epic: release

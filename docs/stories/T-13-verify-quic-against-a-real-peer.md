@@ -2,8 +2,8 @@
 id: T-13
 title: Verify QUIC against a real peer
 pillar: Signalling
-status: backlog
-priority: 13
+status: ready
+priority: 6
 design: docs/specs/sip-quic.md
 epic: quic
 areas: [sipx-transport]

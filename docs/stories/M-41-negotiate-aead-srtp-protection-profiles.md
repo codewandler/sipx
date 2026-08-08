@@ -2,8 +2,8 @@
 id: M-41
 title: Negotiate AEAD SRTP protection profiles
 pillar: Media
-status: backlog
-priority: 18
+status: ready
+priority: 3
 design: docs/designs/media-security-profiles.md
 epic: media-security-profiles
 areas: [sipx-rtp, sipx-sdp, sipx-media]

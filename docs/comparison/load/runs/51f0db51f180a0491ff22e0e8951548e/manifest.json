@@ -1,0 +1,102 @@
+{
+ "builds": [
+  {
+   "argv": [
+    "/usr/bin/python3",
+    "/home/timo/projects/sipx/scripts/comparative-load-driver.py",
+    "--role",
+    "driver",
+    "--target",
+    "{target}",
+    "--seed",
+    "{seed}",
+    "--run-id",
+    "51f0db51f180a0491ff22e0e8951548e",
+    "--max-active",
+    "8192",
+    "--provisional",
+    "trying_100"
+   ],
+   "artifact_sha256": "b87006a8c623972300fd30ed620c913c092ccd4612162e7d3e33cf94e472b2f2",
+   "cwd": "/home/timo/projects/sipx",
+   "endpoint_id": "profile-driver",
+   "env_keys": [
+    "PATH"
+   ],
+   "revision": "source-sha256:b87006a8c623972300fd30ed620c913c092ccd4612162e7d3e33cf94e472b2f2",
+   "role": "driver"
+  },
+  {
+   "argv": [
+    "/home/timo/projects/sipx/target/release/sipx",
+    "load-responder",
+    "--max-active",
+    "{max_active}",
+    "--cleanup",
+    "{cleanup_s}",
+    "--duration",
+    "{duration_s}",
+    "--seed",
+    "{seed}",
+    "--provisional-percent",
+    "100",
+    "--local",
+    "127.0.0.1:0",
+    "--json"
+   ],
+   "artifact_sha256": "9b240cc591abb755a8ea826fe506f1a6b7ee45e5c33bd35aa5e9433a578bbf84",
+   "cwd": "/home/timo/projects/sipx",
+   "endpoint_id": "sipx",
+   "env_keys": [
+    "PATH"
+   ],
+   "revision": "27c8cdb532f9a1f2db404dc2a8e420a0da062d27",
+   "role": "responder"
+  }
+ ],
+ "ceiling": 1024,
+ "direction": {
+  "driver": "profile-driver",
+  "index": 0,
+  "responder": "sipx"
+ },
+ "ladder": {
+  "divisors": [
+   32,
+   16,
+   8,
+   4,
+   2,
+   1
+  ],
+  "repetitions": 5,
+  "stop_after_failed_rates": 2
+ },
+ "limits": {
+  "active": 8192,
+  "event_bytes": 67108864,
+  "events": 65536,
+  "stderr_bytes": 16777216,
+  "stdout_bytes": 16777216
+ },
+ "machine": {
+  "architecture": "x86_64",
+  "clock": "CLOCK_MONOTONIC",
+  "logical_cpus": 20,
+  "memory_bytes": 67321196544,
+  "os": "Linux 6.6.144-3-MANJARO"
+ },
+ "phases": {
+  "correctness_dialogs": 20,
+  "correctness_rate": 1,
+  "drain_ms": 40000,
+  "headroom_multiplier": 2,
+  "measurement_ms": 60000,
+  "readiness_ms": 10000,
+  "warmup_ms": 10000
+ },
+ "provisional_policy": "trying_100",
+ "run_id": "51f0db51f180a0491ff22e0e8951548e",
+ "schema": "sipx.comparative-load.manifest.v1",
+ "seed": 7
+}

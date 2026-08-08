@@ -10,7 +10,7 @@ is the order the remaining gaps close in and why.
 
 ## Status
 
-_As of 2026-08-05:_ **`1.0.0-rc.2` is the current public prerelease; beta.2 through beta.7 remain
+_As of 2026-08-08:_ **`1.0.0-rc.3` is the current public prerelease; beta.2 through beta.7 remain
 immutable.** The first release candidate combines the post-beta.7 transport fallback and drain,
 application-owned observability, explicit PCM/L16 boundary, parser-owned routing/privacy edits,
 field-trap fixes, portable five-target CLI artifacts and a direct architecture guide. The retained

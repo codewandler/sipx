@@ -2,7 +2,7 @@
 id: X-113
 title: Record the post-rc.2 boundary and close the wave stories
 pillar: Build
-status: ready
+status: in-progress
 priority: 2
 design:
 epic: release
