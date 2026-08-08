@@ -432,6 +432,9 @@ pub(crate) struct Emitter {
 
 impl Emitter {
     pub(crate) fn emit(&self, event: CallEvent) {
+        // discard: the dropped *event* is already counted inside `try_emit`, which increments
+        // `drops` on a full channel. What is discarded here is only the boolean saying whether
+        // the consumer got it, which this caller has no use for.
         let _ = self.try_emit(event);
     }
 

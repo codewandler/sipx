@@ -220,8 +220,11 @@ impl VoiceReporter {
             frame = frame.with_discontinuity(kind);
         }
         if let Err(refusal) = self.analyzer.process(&frame) {
-            // The seam's contract makes every refusal here a defect in this join rather than in
-            // the caller's audio, so it is reported and the stream continues at the next frame.
+            // discard: the refused frame is dropped and the analyser's epoch is NOT broken, so a
+            // voice transition spanning this frame can be missed. The seam's contract makes every
+            // refusal here a defect in this join rather than in the caller's audio, which is why
+            // it is a debug record and not a counter. `M-77` carries the discontinuity forward
+            // instead, the way `M-59`'s reducer already does.
             tracing::debug!(%refusal, "the call audio analyser refused a seam frame");
             return;
         }
