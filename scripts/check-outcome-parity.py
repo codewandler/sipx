@@ -16,8 +16,9 @@ red on the commit that adds it, whether or not anybody remembered this file exis
 **What cannot be derived is written down once, next to the check.** Some fields genuinely belong
 to one outcome — a registrar's lease exists only where a registrar answered, and an error string
 only where something failed. Those are judgement, not data, so they live in `OUTCOME_SPECIFIC`
-below, each with the sentence that justifies it, and a record that exists before its command has
-a subject at all is named in `WITHOUT_A_CALL`. That is the arrangement `AGENTS.md` gives for
+below, each with the sentence that justifies it, a record that exists before its command has
+a subject at all is named in `WITHOUT_A_CALL`, and a record that is one item of an inventory rather
+than one ending of a run is named in `LISTING_ELEMENTS`. That is the arrangement `AGENTS.md` gives for
 `COMPARISON_SCOPE`: widening the exemption is a reviewable diff rather than a re-reading of a
 paragraph. A field not named there must appear on every outcome of its command or this is red.
 An exemption nothing needs any more is red too, so the table cannot outlive its reasons.
@@ -150,6 +151,25 @@ WITHOUT_A_CALL: dict[tuple[str, str], str] = {
     ("answer", "interrupted"): "reached only from the select that waits for the first INVITE, so "
     "the command was stopped before a caller existed. An interrupt *during* a call is reported by "
     "the terminal record instead, which carries `caller` like every other ending",
+}
+
+#: Records that are one item of an inventory rather than one ending of a run, keyed by
+#: `(command, status)`.
+#:
+#: A command that lists things emits one of these per thing found, and none when it finds nothing.
+#: That is not an outcome in this file's sense: comparing it against the run's result asks a failure
+#: to describe an item it never saw. `peers` prints one `peer` line per entry in the book, then
+#: exits; the failure record is the run's ending, and `name`, `uri` and `source` describe an entry.
+#:
+#: This category exists because `P-31` created it. Before it, `peers` had a single record and the
+#: checker said so — "one outcome is not evidence of parity". Giving `peers` a candidate walk gave
+#: it a failure record too, and the comparison that followed was the checker asking a correct
+#: question about the wrong pair. The narrower exemption is the honest one: the whole *record* is
+#: out, and the fields it carries stay compared everywhere else they appear.
+LISTING_ELEMENTS: dict[tuple[str, str], str] = {
+    ("peers", "peer"): "one line per entry in the peer book, emitted inside the listing loop and "
+    "not at all when the book is empty. `name`, `uri` and `source` identify the entry; a run that "
+    "reached no registrar has no entry to identify",
 }
 
 
@@ -382,7 +402,9 @@ def outcomes(records: list[Record]) -> list[Record]:
     return [
         record
         for record in records
-        if record.is_outcome and (record.command, record.status) not in WITHOUT_A_CALL
+        if record.is_outcome
+        and (record.command, record.status) not in WITHOUT_A_CALL
+        and (record.command, record.status) not in LISTING_ELEMENTS
     ]
 
 
@@ -524,6 +546,9 @@ def unused_exemptions(by_command: dict[str, list[Record]]) -> list[str]:
     ] + [
         f"WITHOUT_A_CALL declares `{command}`'s `{status}` record, which no longer exists"
         for command, status in sorted(set(WITHOUT_A_CALL) - pairs)
+    ] + [
+        f"LISTING_ELEMENTS declares `{command}`'s `{status}` record, which no longer exists"
+        for command, status in sorted(set(LISTING_ELEMENTS) - pairs)
     ]
 
 
@@ -541,6 +566,8 @@ def explain(by_command: dict[str, list[Record]], unattributed: list[Unattributed
                 kind = "fragment"
             elif (record.command, record.status) in WITHOUT_A_CALL:
                 kind = "no call yet"
+            elif (record.command, record.status) in LISTING_ELEMENTS:
+                kind = "listing item"
             else:
                 kind = "outcome"
             names = " ".join(field.name for field in record.fields) or "(none)"

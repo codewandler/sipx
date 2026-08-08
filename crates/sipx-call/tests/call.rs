@@ -931,14 +931,31 @@ async fn the_dtmf_payload_type_is_taken_from_the_negotiation() {
     let (caller_endpoint, _rx) = endpoint().await;
     let callee_addr = callee_endpoint.local_addr();
 
+    // A raw socket standing in for the far end's media port, so the payload type is visible.
+    //
+    // Bound *before* the answer is written, and the answer names the port the kernel gave it. It
+    // used to be the literal 41234 in both places, which is a bet that nothing else on the machine
+    // wants that number — and under the full workspace suite something did: `Address already in
+    // use`, reported as a failure of the payload-type negotiation this test is actually about.
+    // `X-118` removed the same shape from the command-line suite; this is its `sipx-call` twin.
+    let far_media = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("binds a media port for the far end");
+    let far_media_port = far_media
+        .local_addr()
+        .expect("the far end's media port is known")
+        .port();
+
     // The callee answers with telephone-event on 96 rather than 101.
     tokio::spawn(async move {
         let incoming = callee_incoming.recv().await.expect("an INVITE");
-        let sdp = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n\
-             m=audio 41234 RTP/AVP 0 96\r\n\
+        let sdp = format!(
+            "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n\
+             m=audio {far_media_port} RTP/AVP 0 96\r\n\
              a=rtpmap:0 PCMU/8000\r\n\
              a=rtpmap:96 telephone-event/8000\r\n\
-             a=sendrecv\r\n";
+             a=sendrecv\r\n"
+        );
         let response = sipx_sip::build::ResponseBuilder::to_request(
             &incoming.request,
             sipx_sip::StatusCode::new(200).expect("valid"),
@@ -964,11 +981,6 @@ async fn the_dtmf_payload_type_is_taken_from_the_negotiation() {
         .build();
         let _ = callee_endpoint.respond(&incoming.key, response).await;
     });
-
-    // A raw socket standing in for the far end's media port, so the payload type is visible.
-    let far_media = tokio::net::UdpSocket::bind("127.0.0.1:41234")
-        .await
-        .expect("binds the port the answer names");
 
     let to = Uri::sip(Host::Name(HostName::new("callee.example").expect("valid")));
     let caller = dial(

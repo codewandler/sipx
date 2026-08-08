@@ -496,5 +496,41 @@ class TheEntryPoint(unittest.TestCase):
             guard.main([])
 
 
+class TheListingElementCategory(unittest.TestCase):
+    """`P-31` gave `peers` a second record, and the pair it created is not a pair of endings."""
+
+    def setUp(self):
+        self.by_command, _ = guard.read_commands(ROOT)
+
+    def test_a_listing_element_is_not_compared_against_a_run_ending(self):
+        """The failure record must not be asked to name an entry it never found."""
+        self.assertIn(("peers", "peer"), guard.LISTING_ELEMENTS)
+        self.assertEqual(
+            [], [p for p in guard.parity_problems(self.by_command) if "peers" in p]
+        )
+
+    def test_without_the_exemption_peers_is_reported(self):
+        """Failing-first: the rule is what makes it quiet, not an accident of the reader."""
+        original = guard.LISTING_ELEMENTS
+        try:
+            guard.LISTING_ELEMENTS = {}
+            problems = guard.parity_problems(guard.read_commands(ROOT)[0])
+        finally:
+            guard.LISTING_ELEMENTS = original
+        self.assertTrue(
+            any("peers" in problem and "`name`" in problem for problem in problems), problems
+        )
+
+    def test_an_exemption_nothing_needs_is_itself_reported(self):
+        """The table cannot outlive its reason, the same way the other two cannot."""
+        original = guard.LISTING_ELEMENTS
+        try:
+            guard.LISTING_ELEMENTS = {**original, ("peers", "a-record-nobody-writes"): "stale"}
+            problems = guard.unused_exemptions(guard.read_commands(ROOT)[0])
+        finally:
+            guard.LISTING_ELEMENTS = original
+        self.assertTrue(any("no longer exists" in problem for problem in problems), problems)
+
+
 if __name__ == "__main__":
     sys.exit(0 if unittest.main(exit=False, verbosity=2).result.wasSuccessful() else 1)
