@@ -16,7 +16,7 @@
 //! a delivered `VoiceEnded` would tell an application the opposite of what happened. A report is a
 //! fact about a stretch of audio that has already gone by; a consumer that misses one has lost
 //! history, not correctness, and the next report is not a correction of it. So reports are emitted
-//! through the ordinary [`Emitter`] and a slow consumer's losses are counted by
+//! through the ordinary `Emitter` and a slow consumer's losses are counted by
 //! [`CallEvents::dropped`](crate::CallEvents::dropped), with no reserved slot and no terminal
 //! event.
 //!

@@ -1,4 +1,4 @@
-//! Level, energy, clipping and silence reporting, shaped out of [`analysis`](crate::analysis)'s
+//! Level, energy, clipping and silence reporting, shaped out of [`crate::analysis`]'s
 //! per-window facts (`M-59`).
 //!
 //! [`docs/specs/call-audio-processing.md`](../../../../docs/specs/call-audio-processing.md) §10
@@ -6,7 +6,7 @@
 //! `Window` facts. Neither may add an observation source outside this contract."* So this module
 //! computes **nothing** from samples. It owns no accumulator over audio, no window, no threshold
 //! and no predicate. It is a pure reducer over the observations
-//! [`AudioAnalyzer`](crate::analysis::AudioAnalyzer) already produced, and every number it reports
+//! [`crate::analysis::AudioAnalyzer`] already produced, and every number it reports
 //! is either one of that analyser's own accumulators or an exactly-stated integer function of
 //! them.
 //!
@@ -31,7 +31,7 @@
 //!
 //! # What it is not
 //!
-//! Not [`sipx_media::MediaSession::quality`]'s RTP/RTCP snapshot. Loss, jitter, round-trip time and
+//! Not `sipx_media::MediaSession::quality`'s RTP/RTCP snapshot. Loss, jitter, round-trip time and
 //! the MOS estimate are `M-10`'s surface and describe *delivery*; these describe *content*. A call
 //! with no packet loss at all can be clipping, and a call losing a quarter of its packets can carry
 //! a clean level in the audio that arrived. No field of either changes meaning because the other
@@ -44,7 +44,7 @@
 //! Not voice activity. [`SignalReport::active_windows`] counts §5.3's per-window `active` fact
 //! because it is one of the five facts measured over the same accumulators; the start, end and
 //! hangover *transitions* derived from it are `M-58`'s
-//! ([`Observation::VoiceStarted`](crate::analysis::Observation::VoiceStarted)) and this module
+//! ([`crate::analysis::Observation`]) and this module
 //! derives none of them.
 //!
 //! # Example
@@ -339,7 +339,7 @@ impl SignalReporter {
     /// Fold one observation, yielding whatever it completed.
     ///
     /// `window_samples` is the analyser's derived window length
-    /// ([`AudioAnalyzer::window_samples`](crate::analysis::AudioAnalyzer::window_samples)), passed
+    /// ([`crate::analysis::AudioAnalyzer::window_samples`]), passed
     /// in rather than re-derived here. Two derivations of one number is how they start disagreeing,
     /// and this module deliberately owns no copy of §4's conversion.
     ///

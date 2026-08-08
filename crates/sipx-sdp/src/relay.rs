@@ -7,7 +7,7 @@
 //! payload types, keying and direction are the endpoints' own and pass through untouched, which
 //! is what keeps the element that relays them off the media path.
 //!
-//! The rewrite is performed on the text rather than on a re-serialized [`SessionDescription`].
+//! The rewrite is performed on the text rather than on a re-serialized [`crate::SessionDescription`].
 //! Parsing is a *view* over the lines here, and rendering that view back normalizes line order,
 //! multicast TTLs, `m=` port counts and whitespace — differences that are harmless in a
 //! description this crate authored and are not ours to introduce into one it did not.

@@ -234,7 +234,10 @@ class TheModuleReader(unittest.TestCase):
 
     def test_it_reads_the_modules_the_crate_declares(self):
         self.assertEqual(
-            ["g711", "g722", "l16", "mix", "opus", "pcm", "wav"],
+            # `analysis` (voice activity) and `signal` (level, clipping, silence) are
+            # deterministic signal analysis, not codecs — they carry no audio claim and
+            # load no model. They are listed because this asserts what the crate declares.
+            ["analysis", "g711", "g722", "l16", "mix", "opus", "pcm", "signal", "wav"],
             sorted(m.name for m in self.modules),
         )
 
