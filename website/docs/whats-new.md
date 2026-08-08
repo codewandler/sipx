@@ -17,12 +17,12 @@ refusal signalling, automation contracts and published onboarding are fixed. It 
 prerelease and does not move or overwrite an existing tag, package or asset.
 
 - **Every outbound command takes a named SIP target.** Calling, registration, bounded load,
-  registrar-backed peer listing and scenario automation share one bounded resolver: NAPTR selects the
-  transport, SRV the host and port, A/AAAA the addresses, and literal addresses bypass resolver setup
-  entirely. Deadlines, lookup and candidate limits and the connection budget are finite, a `sips:`
-  URI never falls back to a cleartext candidate, and the original hostname stays the TLS verification
-  identity. The CLI reference still shows literal addresses; the behaviour is specified but not yet
-  described there.
+  registrar-backed peer listing and scenario automation share one bounded resolver: NAPTR selects
+  the transport, SRV the host and port, A/AAAA the addresses, and literal addresses bypass resolver
+  setup entirely. Deadlines, lookup and candidate limits and the connection budget are finite, a
+  `sips:` URI never falls back to a cleartext candidate, and the original hostname stays the TLS
+  verification identity. The CLI reference still shows literal addresses; the behaviour is specified
+  but not yet described there.
 - **Calls negotiate and carry G.722.** The codec is native fixed-point sub-band ADPCM, built into
   every configuration with no feature gate and verified bit-exactly against the ITU-T Appendix II
   digital test sequences. Following RFC 3551, 16 kHz audio drives packet sizing, PCM conversion,
@@ -39,11 +39,11 @@ prerelease and does not move or overwrite an existing tag, package or asset.
   configured bound, and exactly one terminal record follows any earlier readiness record. A clean
   stop exits 0, and platform support is typed rather than silently promised.
 - **A confirmed call follows the dialog it owns and returns near its configured budget.** A queued
-  remote BYE now outranks interrupt and local completion, teardown joins transport, dialog, media and
-  device work to zero before one terminal result, and invitation expiry reaches a finite join barrier
-  even when neither CANCEL nor INVITE is answered. Previously a peer's BYE was ignored, an
-  interrupted process emitted no terminal record, and an unreported cancellation tail overshot short
-  budgets.
+  remote BYE now outranks interrupt and local completion, teardown joins transport, dialog, media
+  and device work to zero before one terminal result, and invitation expiry reaches a finite join
+  barrier even when neither CANCEL nor INVITE is answered. Previously a peer's BYE was ignored, an
+  interrupted process emitted no terminal record, and an unreported cancellation tail overshot
+  short budgets.
 - **Refusals reach the wire and name their real cause.** An initial offer outside the selected codec
   policy receives a transaction-owned 488 and malformed SDP a 400, so the caller reports a rejection
   promptly instead of waiting out its whole invitation timeout. A refused connection is a typed
@@ -61,8 +61,8 @@ prerelease and does not move or overwrite an existing tag, package or asset.
   cannot omit a package the example imports.
 - **Two contracts are specified ahead of the code that will implement them.** Interchangeable local
   speech providers and deterministic real-time call-audio analysis now have normative session,
-  discovery, precedence, lifecycle and refusal contracts with conformance vectors. Neither ships code
-  in this candidate, and neither should be read as an available capability.
+  discovery, precedence, lifecycle and refusal contracts with conformance vectors. Neither ships
+  code in this candidate, and neither should be read as an available capability.
 
 Install the exact CLI release with:
 
@@ -72,8 +72,8 @@ cargo install --locked --version =1.0.0-rc.3 sipx-cli
 
 The [getting-started guide](getting-started.md#prebuilt-release-binaries) also shows the exact binary
 archive, checksum and SPDX path. Those portable executables deliberately omit optional native
-features; use Cargo when `device-audio`, `opus` or `dtls` is required. G.722 is not among them and is
-present in every build.
+features; use Cargo when `device-audio`, `opus` or `dtls` is required. G.722 is not among them
+and is present in every build.
 
 Five changes need an edit in existing scripts and automation:
 
@@ -88,20 +88,20 @@ Five changes need an edit in existing scripts and automation:
 - **Bounded load defaults to signalling on both sides.** Generated media must be selected explicitly
   and symmetrically on both commands with `--mode generated-media`; an incompatible explicit pair is
   refused before dialog admission, and an invalid local mode before any I/O.
-- **Scenario streams use the flat frame shape and report failure through exit status.** The canonical
-  `{"id":…,"command":…,…}` form is accepted and the nested one-key-per-command shape the older help
-  implied is not; `do` remains a compatibility alias only when `command` is absent. Any refused
-  command or failed operation exits 1, so a later success cannot hide it.
+- **Scenario streams use the flat frame shape and report failure through exit status.** The
+  canonical `{"id":…,"command":…,…}` form is accepted and the nested one-key-per-command shape the
+  older help implied is not; `do` remains a compatibility alias only when `command` is absent. Any
+  refused command or failed operation exits 1, so a later success cannot hide it.
 - **`version --json` emits an object.** A consumer that parsed the previous plain-text output must
   read the stable object instead; neither output form accepts a positional argument.
 
 The call-module split moves nothing public, so it needs no action. Supported APIs are still not
 frozen before stable 1.0 and receive migration guidance when they change; Experimental APIs may
 change or disappear without that guide. `register` still accepts no completion deadline, so a check
-against a black-holing registrar blocks for the SIP transaction timeout rather than a stated one. The
-project still has no recorded independent production application or third-party security audit, and
-both sweeps excluded security by declaration, so this candidate remains an invitation to review, not
-a claim that repository evidence can substitute for outside use.
+against a black-holing registrar blocks for the SIP transaction timeout rather than a stated one.
+The project still has no recorded independent production application or third-party security audit,
+and both sweeps excluded security by declaration, so this candidate remains an invitation to review,
+not a claim that repository evidence can substitute for outside use.
 
 ## 1.0.0-rc.2 — 2026-08-05
 
@@ -322,7 +322,7 @@ installed diagnostic CLI, independent transport peers and release-commit documen
 cargo install --locked --version =1.0.0-beta.2 sipx-cli
 ```
 
-Use RC.1 for new installations; beta.2 through beta.7 remain immutable for reproducible
+Use RC.3 for new installations; beta.2 through beta.7 remain immutable for reproducible
 existing consumers.
 
 ## 1.0.0-alpha.5 — 2026-08-03
@@ -414,5 +414,5 @@ answer calls, but application callback bindings are not implemented.
 This website is built from `main`, so a page or API link may describe work newer than the tagged
 release. Use the exact crates.io version when reproducibility matters, and consult the
 [complete changelog](https://github.com/codewandler/sipx/blob/main/CHANGELOG.md) before updating a
-Git revision. Unreleased behavior is not part of `1.0.0-rc.2` merely because it appears on this
+Git revision. Unreleased behavior is not part of `1.0.0-rc.3` merely because it appears on this
 site.
