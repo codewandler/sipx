@@ -149,9 +149,10 @@ which a parse failure always does and a parsed message that had nothing to say s
 a healthy connection pays for the read rarely.
 
 The consequence, stated because it is a real limit and not a rounding error: **the binding refuses
-exactly what the kernel refuses.** A frame the kernel accepts is accepted here. `S-53` covers the
-case where the kernel accepts a coalesced frame and discards its trailing bytes without counting
-them.
+exactly what the kernel refuses.** A frame the kernel accepts is accepted here. Both halves of the
+RFC 7118 §5 rule are the kernel's to reach — parent [browser-sdk.md](browser-sdk.md) §4.3.1 makes a
+coalesced frame, and a frame with any trailing octets, count into `parse_errors` exactly as a
+fragment does, with nothing acted on from the part that parsed.
 
 A frame whose bytes are not available synchronously — a `Blob` — is refused rather than read.
 Awaiting one read per message lets a peer that sends two in the same turn have them delivered in

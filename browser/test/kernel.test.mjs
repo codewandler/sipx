@@ -195,16 +195,49 @@ export async function register(modulePath) {
     equal(kernel.snapshot(), null, "and the handle is gone");
   });
 
-  test("a coalesced frame is neither split nor answered by the binding", async () => {
-    const { clock, network } = await harness();
+  /** Two complete responses, differing only where they must, for one frame to hold both. */
+  function response(tag) {
+    return (
+      "SIP/2.0 200 OK\r\n" +
+      `Via: SIP/2.0/WSS df7jal23ls0d.invalid;branch=z9hG4bK${tag}\r\n` +
+      "To: <sip:alice@example.net>;tag=remote\r\n" +
+      `From: <sip:alice@example.net>;tag=${tag}\r\n` +
+      `Call-ID: ${tag}@example.net\r\n` +
+      "CSeq: 1 REGISTER\r\n" +
+      "Content-Length: 0\r\n\r\n"
+    );
+  }
+
+  test("the compiled parser's verdict on a coalesced frame closes the connection", async () => {
+    const { clock, network, recorder, kernel } = await harness();
+    equal(kernel.snapshot().counters.parse_errors, 0, "nothing has failed to parse yet");
+    // The other half of RFC 7118 §5, and the half that used to be silent: the kernel parsed the
+    // first message, acted on it, and dropped the rest without counting it. The binding offers the
+    // frame whole and once — it holds no boundary search to split one with — so reaching `framing`
+    // is again the compiled parser's verdict rather than this test's.
+    network.latest.deliver(response("first") + response("second"));
+    clock.flush();
+    equal(
+      recorder.ofType("closed")[0]?.reason,
+      Reason.Framing,
+      "the compiled kernel refused the coalesced frame and the binding closed (docs/specs/sip-tls.md §4)",
+    );
+    equal(network.latest.sent.length, 0, "no message was invented in response");
+    equal(kernel.snapshot(), null, "and the handle is gone");
+  });
+
+  test("a frame that omits Content-Length is one message, body and all", async () => {
+    const { clock, network, recorder, kernel } = await harness();
+    // This frame reads as two messages and is one. With no `Content-Length` on the `100 Trying`,
+    // `docs/specs/sip-tls.md` §4 runs its body to the end of the frame (RFC 3261 §20.14), so those
+    // octets are already spent — refusing it would reject traffic this transport frames perfectly
+    // well. Pinned because the boundary between this and the case above is the whole of what
+    // `docs/specs/browser-sdk.md` §4.3.1 has to get right.
     network.latest.deliver("SIP/2.0 100 Trying\r\n\r\nSIP/2.0 200 OK\r\n\r\n");
     clock.flush();
-    // The binding offers the frame whole and once; what the compiled kernel makes of the trailing
-    // bytes is its own verdict. Today it parses the first message and discards the rest without
-    // counting it, so no framing close follows — `docs/specs/sip-tls.md` §4 says it should, and
-    // `S-53` owns closing that gap in the kernel. Asserted here only as far as `T-33` is
-    // responsible: the binding invents nothing in response.
-    equal(network.latest.sent.length, 0, "no message was invented in response");
+    equal(kernel.snapshot().counters.parse_errors, 0, "the frame said where the message ended");
+    equal(recorder.ofType("closed").length, 0, "so the connection is still up");
+    equal(network.latest.sent.length, 0, "and nothing was invented in response");
   });
 
   test("cancellation frees the compiled kernel's handle", async () => {
