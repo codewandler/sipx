@@ -66,7 +66,10 @@ job is accounted for, and runs the feature matrix as well as the all-features bu
 toolchain is a failure, not a skip.
 
 A full run requires the MSRV toolchain, Node.js 20 or newer, network access, and enough free disk for
-the build artifacts. The script checks disk space before starting. Some checks recover RFC fixtures
+the build artifacts. It also cross-checks one non-Linux configuration, which needs the
+`x86_64-pc-windows-gnu` rustup target and a mingw-w64 C toolchain — `X-125` measured that as the only
+non-Linux target this workspace builds from a Linux host, and `gate.py` records beside
+`device-portable` why the macOS half still cannot. The script checks disk space before starting. Some checks recover RFC fixtures
 from the RFC editor; if those sources cannot be reached, the gate exits `2` to report that the run is
 incomplete rather than claiming the tree passed or failed. Exit `1` means the tree has a real
 finding.
