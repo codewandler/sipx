@@ -16,6 +16,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   claim that over-budget work cannot stall RTP, and a conformance harness that reports what it
   cannot prove instead of passing it.
 
+- **A browser WebSocket signalling binding** drives the WebAssembly session kernel over WSS, with
+  bounded connect, send and receive queues, a reconnect budget that ends in a typed event rather
+  than a retry loop, and host timers that re-enter the kernel only as fired-timer inputs. Cleartext
+  `ws:` needs an explicit development policy *and* a loopback host, and no typed event or log
+  carries a configured credential.
+
 - **Voice-activity thresholds calibrate against a call's own background noise**, under bounds
   declared entirely in sample counts — a floor, a ceiling, a maximum movement per update period, a
   warm-up and a bounded freeze while voice is open — with every move announced as a typed

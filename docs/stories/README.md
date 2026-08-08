@@ -79,6 +79,7 @@ appeared twice before anyone named it.
 - [M-70 — Accept multiplexed browser offers with unused component candidates](M-70-accept-multiplexed-browser-offers-with-unused-component-candidates.md) · Media · external review finding 9 · a second browser engine reaches SDP then fails the multiplexed profile
 - [M-72 — Prove the AEAD SRTP key derivation against an independent peer](M-72-prove-the-aead-srtp-key-derivation-against-a-peer.md) · Media · RFC 7714 publishes no KDF vector · a wrong salt placement makes two sipx endpoints interoperate with each other and nobody else, and every round-trip test still passes
 - [M-81 — Make the SRTP protect-error discard tell the truth](M-81-count-the-srtp-protect-discard.md) · Media · a spec sentence says the branch is unreachable · M-79 made it reachable, and it increments nothing
+- [T-33 — Bind browser WebSocket signalling](T-33-bind-browser-websocket-signalling.md) · Transport · after A-16 and S-41 · browser owns I/O, WASM core consumes bytes
 - [X-93 — Make protected release evidence faster without weakening it](X-93-make-protected-release-evidence-faster.md) · Build · measure cache and preflight changes against the 12m37 cold beta gate · follow-up
 
 ## Next (ready — take the top one unless the user named a story)
@@ -116,7 +117,8 @@ _Beta.4 proves that sipx can interoperate with a browser audio endpoint, but it 
 - [A-17 — Generate and package the browser SDK](A-17-generate-and-package-the-browser-sdk.md) · Application · after S-41, T-33 and M-52 · generated ABI types plus small handwritten ergonomic layer
 - [A-18 — Publish a runnable browser-audio demo](A-18-publish-a-runnable-browser-audio-demo.md) · Application · after A-17 · static public demo for register, dial, answer and non-silent audio
 - [M-52 — Adapt browser-native WebRTC audio](M-52-adapt-browser-native-webrtc-audio.md) · Media · after A-16 · reuse beta.4 profile through RTCPeerConnection, do not implement WebRTC in WASM
-- [T-33 — Bind browser WebSocket signalling](T-33-bind-browser-websocket-signalling.md) · Transport · after A-16 and S-41 · browser owns I/O, WASM core consumes bytes
+- [S-53 — Refuse coalesced SIP at the browser kernel's byte input](S-53-refuse-coalesced-sip-at-the-browser-kernel-byte-input.md) · Session · found by T-33 · sip-tls.md §4 says close, the kernel silently truncates
+- [T-43 — Reach a real WSS endpoint from a browser fixture](T-43-reach-a-real-wss-endpoint-from-a-browser-fixture.md) · Transport · T-33's last acceptance row · needs a hosted runner's browser and WebDriver
 - [X-100 — Prove the packaged browser SDK](X-100-prove-the-packaged-browser-sdk.md) · Build · M15 exit · clean consumer, supported browser matrix, both SIP roles and fail-closed negatives
 
 ### real-time call-audio analysis
