@@ -14,9 +14,12 @@
 //! drop-oldest queue at §8's input bound *is* this contract's input-bound obligation — there is no
 //! second queue here and no second tap.
 
+use std::fmt;
+
 use sipx_audio::Pcm;
 
 use super::lifecycle::{CancelReason, DeadlineKind, FailureCause, LossCause};
+use super::privacy::{DataClass, Redacted};
 use crate::processing::{AudioDirection, DiscontinuityKind, PcmFrame};
 
 /// One utterance's identity within one session.
@@ -86,7 +89,11 @@ impl SampleSpan {
 }
 
 /// One revision of one utterance (§5).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Its `Debug` redacts the transcript (§11.4): a revision is exactly the value a driver, a host or
+/// a bug report is most likely to print, and printing it is how a transcript ends up somewhere it
+/// was never retained on purpose.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Utterance {
     id: UtteranceId,
     revision: u32,
@@ -149,12 +156,30 @@ impl Utterance {
     }
 }
 
+impl fmt::Debug for Utterance {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Utterance")
+            .field("id", &self.id)
+            .field("revision", &self.revision)
+            .field(
+                "text",
+                &Redacted::octets(DataClass::Transcript, self.text.len()),
+            )
+            .field("span", &self.span)
+            .field("discontinuities", &self.discontinuities)
+            .finish()
+    }
+}
+
 /// One frame of call audio, as a recognition session receives it (§5 `Frame`).
 ///
 /// The PCM boundary is `docs/specs/linear-pcm.md`'s and this contract adds no second audio
 /// representation. The seam's break flag is deliberately *not* here: a discontinuity is its own
 /// ordered input, so a gap is one fact in one place.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Its `Debug` redacts the samples (§11.4). Call audio is user data, and a frame's derived `Debug`
+/// would put a hundred and sixty of them in one log line.
+#[derive(Clone, PartialEq, Eq)]
 pub struct RecognitionFrame {
     direction: AudioDirection,
     pcm: Pcm,
@@ -202,6 +227,20 @@ impl RecognitionFrame {
     #[must_use]
     pub fn into_pcm(self) -> Pcm {
         self.pcm
+    }
+}
+
+impl fmt::Debug for RecognitionFrame {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RecognitionFrame")
+            .field("direction", &self.direction)
+            .field(
+                "pcm",
+                &Redacted::samples(DataClass::CallAudio, self.pcm.samples().len()),
+            )
+            .field("sample_time", &self.sample_time)
+            .field("sequence", &self.sequence)
+            .finish()
     }
 }
 
