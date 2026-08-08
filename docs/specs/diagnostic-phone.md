@@ -202,26 +202,41 @@ device relay task it started is still live.
 
 ### 3.2 Invitation deadline and cancellation
 
-`dial --timeout <S>` is the invitation-answer budget. A positive value starts when the initial
-INVITE is handed to the endpoint and ends before cancellation begins; zero delegates answer
-expiry to the SIP client transaction. `--cancel-timeout <S>` is a separate cancellation-cleanup
-allowance and defaults to two seconds. It starts only when the answer budget or an operator
-interrupt wins. The documented process bound for a positive answer budget is therefore the sum of
-these two values followed by the endpoint's causal task-join barrier; the error MUST NOT describe
-the answer budget alone as total elapsed time.
+`dial --timeout <S>` is the budget for placing the call, not for one phase of it. A positive value
+starts at the first phase that can wait — target resolution — and ends when the invitation is
+answered, refused, or given up on; zero delegates answer expiry to the SIP client transaction.
+Every phase inside it **MUST** be funded from what the phase before it left: the lookup, the
+invitation, and each further RFC 3263 candidate a serial pass reaches. `--cancel-timeout <S>` is a
+separate cancellation-cleanup allowance and defaults to two seconds. It starts only when the answer
+budget or an operator interrupt wins. The documented process bound for a positive answer budget is
+therefore `--timeout <S>` — resolution and invitation together, never one apiece — plus
+`--cancel-timeout <S>`, followed by the endpoint's causal task-join barrier; the error MUST NOT
+describe the answer budget alone as total elapsed time.
 
-The same value is also the ceiling over target resolution.
-[`sip-target-resolution.md`](sip-target-resolution.md) already bounds a lookup twice — one deadline
-per question and one over the whole resolution — and a positive `--timeout <S>` **MUST** lower both
-under itself rather than run a second clock beside them, so a name nothing answers for cannot spend
-the resolver's own whole-resolution bound before the command's clock is consulted at all. Zero
-states no deadline and leaves those bounds where §3.5's zero leaves transaction expiry. Every
-command carrying a deadline follows this rule: `load --timeout <S>` over the one resolution its
-calls share, a `scenario` dial frame's `timeout_ms` — or `--timeout <S>` when the frame omits it —
-over that command's own, `register --timeout <S>` over whatever the attempt has left (§3.5), and
-`peers --expires <S>`, which states no attempt deadline, over the subscription lifetime it asks
-for. The invitation budget itself still starts at the INVITE: resolution is bounded *by* the stated
-deadline, not subtracted *from* it, so the documented process bound above is unchanged.
+This restates `P-26`'s rule rather than extending it, and the earlier sentence — *the budget starts
+when the initial INVITE is handed to the endpoint* — is withdrawn deliberately (`P-29`). `P-26`
+bounded resolution *by* the stated deadline instead of subtracting it *from* it, so the worst case
+was two phases of the number the caller typed: five seconds finding a name and five more waiting
+for an answer under `--timeout 5`. Keeping the INVITE as the start under one budget can be held
+only two ways, and both are worse than restating one sentence. Publishing `invitation_limit_ms` as
+the slice the invitation was actually funded from makes a value that is asserted at exact figures
+depend on how long a lookup happened to take. Publishing the stated deadline beside an
+INVITE-scoped elapsed reports *you gave me 2s* next to *I waited 0.8s*, and names the missing
+1.2 s nowhere.
+
+Target resolution is one of the phases the budget funds, and it is bounded rather than merely
+started. [`sip-target-resolution.md`](sip-target-resolution.md) already bounds a lookup twice — one
+deadline per question and one over the whole resolution — and a command's remaining budget **MUST**
+lower both under itself rather than run a second clock beside them, so a name nothing answers for
+cannot spend the resolver's own whole-resolution bound before the command's clock is consulted at
+all. Zero states no deadline and leaves those bounds where §3.5's zero leaves transaction expiry.
+Every command carrying a deadline follows this rule: `load` over the one resolution its calls
+share, under the lower of `--timeout <S>`, which bounds a call, and `--duration <S>`, which bounds
+the run; a `scenario` dial frame's `timeout_ms` — or `--timeout <S>` when the frame omits it — over
+that frame's own, and over each candidate the frame then tries; `register --timeout <S>` over
+whatever the attempt has left (§3.5); and `peers --expires <S>`, which states no attempt deadline,
+over the subscription lifetime it asks for. A budget spent before an invitation could be placed is
+the deadline's own exit, reported without sending one.
 
 Cancellation is one owned operation with this state table:
 
@@ -245,7 +260,12 @@ shutdown joins every owned task. It does not mean an unbounded fallback.
 Timeout text and JSON contain the same fields: `status=timeout`, `invitation_limit_ms`, measured
 `invitation_elapsed_ms`, `cancel_limit_ms`, measured `cancel_elapsed_ms`, `cancel_sent`,
 `cancel_final_observed`, `cancel_cleanup_completed`, `cancel_cleanup_exhausted` and an actionable
-`error`. Interrupted setup uses the same cleanup facts with `status=interrupted`; a pre-deadline SIP
+`error`. `invitation_limit_ms` is the deadline the caller stated and never the slice one phase was
+funded from: an operator who asked for two seconds is not told the answer budget was 800 ms because
+the lookup took the rest, which is an accounting detail rather than the deadline they set.
+`invitation_elapsed_ms` is measured on that same clock, so it covers every phase the budget paid
+for, and it stops where `cancel_elapsed_ms` begins — the two never count the same milliseconds
+twice. Interrupted setup uses the same cleanup facts with `status=interrupted`; a pre-deadline SIP
 rejection retains its SIP status and does not invent cancellation fields. Durations use the
 monotonic clock. A fixed duration may bound failed cleanup, but transaction events and the endpoint
 join barrier are the successful happens-before relations.

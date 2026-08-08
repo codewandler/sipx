@@ -31,6 +31,7 @@
 
 mod advertise;
 mod answer;
+mod budget;
 mod cli;
 mod counters;
 mod destination;
@@ -111,7 +112,9 @@ async fn main() -> ExitCode {
         Some(Command::Load(options)) => load::run(options, format).await,
         Some(Command::LoadResponder(options)) => load_responder::run(options, format).await,
         Some(Command::Peers(options)) => peers::run(options, format).await,
-        Some(Command::Scenario(options)) => scenario::run(options).await,
+        // Boxed like `dial` and `answer`, and for the same reason: the actor's own dial carries a
+        // budget now, and the state machine around it crossed `clippy::large_futures`' bound.
+        Some(Command::Scenario(options)) => Box::pin(scenario::run(options)).await,
         Some(Command::Version(_)) => {
             // The compiled feature set is reported to `--json` and not to the text form, which is
             // the one place this crate departs from `output`'s "both formats carry the same facts"

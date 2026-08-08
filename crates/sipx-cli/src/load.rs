@@ -104,6 +104,21 @@ impl Limits {
             mode: options.mode,
         })
     }
+
+    /// The ceiling over the one lookup this run's calls share: the lower of the two bounds the
+    /// run actually stated, or neither when it stated neither.
+    ///
+    /// `P-29`: `--timeout` alone is the wrong ceiling, because it bounds a *call* and `--duration`
+    /// bounds the *run*. A run given `--duration 2 --timeout 20` could spend `T-38`'s whole eight
+    /// seconds resolving — four times its own bound — before placing the first call, and the flag
+    /// that could have seen it was the one nobody consults.
+    fn resolution_bound(&self) -> Option<Duration> {
+        let setup = (!self.setup_timeout.is_zero()).then_some(self.setup_timeout);
+        match (setup, self.duration) {
+            (Some(setup), Some(duration)) => Some(setup.min(duration)),
+            (stated, None) | (None, stated) => stated,
+        }
+    }
 }
 
 fn positive_f64(value: f64, flag: &str) -> Result<f64, String> {
@@ -149,12 +164,10 @@ pub(crate) async fn run(command: LoadOptions, format: Format) -> Exit {
         Ok(transport) => transport,
         Err(message) => return fail(format, Exit::Usage, &message),
     };
-    // The setup bound the run states for each of its calls is the ceiling over the one lookup they
-    // all share: a run whose calls may take one second to set up must not spend `T-38`'s eight
-    // resolving before the first of them is even placed.
-    let resolver = crate::destination::Resolver::within(
-        (!limits.setup_timeout.is_zero()).then_some(limits.setup_timeout),
-    );
+    // Every bound the run stated is a ceiling over the one lookup its calls all share: a run whose
+    // calls may take one second to set up must not spend `T-38`'s eight resolving before the first
+    // of them is placed, and neither must one that may only last one second at all.
+    let resolver = crate::destination::Resolver::within(limits.resolution_bound());
     let candidates = match resolver
         .resolve(&to, None, transport, &command.signalling)
         .await

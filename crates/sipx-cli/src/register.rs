@@ -7,6 +7,7 @@ use sipx_sip::{Host, HostName, Uri};
 use sipx_transport::{Config as TransportConfig, bind};
 use sipx_ua::{Config, Credentials, Flow, InstanceId, RegId, UserAgent};
 
+use crate::budget::Attempt;
 use crate::cli::RegisterOptions;
 use crate::output::{Exit, Format, Report, fail};
 
@@ -188,7 +189,7 @@ pub(crate) async fn run(options: RegisterOptions, format: Format) -> Exit {
             // as though the other case were possible. It continues from the lease already granted
             // rather than through `keep_registered`, which would register a second time for the
             // binding this invocation has just recorded.
-            let Err(error) = agent.keep_registered_from(lease, attempt.limit).await;
+            let Err(error) = agent.keep_registered_from(lease, attempt.stated()).await;
             report_failure(format, export, &handle, &error, &options.aor).await
         }
         Err(error @ sipx_ua::Error::AttemptTimeout { .. }) => {
@@ -198,47 +199,13 @@ pub(crate) async fn run(options: RegisterOptions, format: Format) -> Exit {
     }
 }
 
-/// The caller's bound over one registration attempt, and the single clock it is measured on.
+/// The failure for a budget with nothing left in it.
 ///
-/// `--timeout 0` keeps the pre-`P-25` behaviour and is `limit: None` here: the clock still runs,
-/// so the report can say how long the attempt took, but nothing expires. Everything that can wait
-/// — resolution, the transaction, the authenticated retry, each further candidate — is funded
-/// from this one budget rather than given a schedule of its own, which is what makes the number
-/// the caller typed the number the command obeys.
-#[derive(Debug)]
-struct Attempt {
-    started: tokio::time::Instant,
-    limit: Option<Duration>,
-}
-
-impl Attempt {
-    fn new(limit: Duration) -> Self {
-        Self {
-            started: tokio::time::Instant::now(),
-            limit: (!limit.is_zero()).then_some(limit),
-        }
-    }
-
-    /// How long the attempt has been running.
-    fn elapsed(&self) -> Duration {
-        self.started.elapsed()
-    }
-
-    /// What is left of the budget, or `None` when the caller asked for no deadline.
-    fn remaining(&self) -> Option<Duration> {
-        self.limit.map(|limit| limit.saturating_sub(self.elapsed()))
-    }
-
-    /// The deadline as it is reported and as the expiry names it.
-    fn limit(&self) -> Duration {
-        self.limit.unwrap_or_default()
-    }
-
-    /// The failure for a budget with nothing left in it.
-    fn expired(&self) -> sipx_ua::Error {
-        sipx_ua::Error::AttemptTimeout {
-            limit: self.limit(),
-        }
+/// The deadline is restated with the number the caller typed rather than the slice of it a phase
+/// was funded from — [`crate::budget`] carries the reasoning, and every command reports this way.
+fn expired(attempt: &Attempt) -> sipx_ua::Error {
+    sipx_ua::Error::AttemptTimeout {
+        limit: attempt.limit(),
     }
 }
 
@@ -266,7 +233,7 @@ async fn register_candidates(
             let negotiated = agent.target().transport;
             Ok((agent, lease, negotiated))
         }
-        Err(sipx_ua::Error::AttemptTimeout { .. }) => Err(attempt.expired()),
+        Err(sipx_ua::Error::AttemptTimeout { .. }) => Err(expired(attempt)),
         Err(error) => Err(error),
     }
 }
@@ -439,7 +406,7 @@ async fn wake_report(
     aor: &str,
     attempt: &Attempt,
 ) -> Result<Report, sipx_ua::Error> {
-    let pending = match attempt.limit {
+    let pending = match attempt.stated() {
         Some(limit) => agent.woken_within(limit).await,
         None => agent.woken().await,
     }?;

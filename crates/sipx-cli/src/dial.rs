@@ -56,13 +56,15 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
 
     let password = options.password.clone();
 
-    // The invitation budget is read here, before the first thing that can wait, because it is the
-    // ceiling over resolution too: `dial --timeout 5` against a name nothing answers for must give
-    // up in five seconds, not spend `T-38`'s own eight looking it up first. Zero states no
-    // deadline and leaves those bounds to the resolver, exactly as it leaves expiry to the
-    // transaction layer.
-    let attempt = Duration::from_secs(options.timeout);
-    let resolver = crate::destination::Resolver::within((!attempt.is_zero()).then_some(attempt));
+    // The command's clock starts here, before the first thing that can wait, and every phase that
+    // can wait is funded from it. `P-26` made the stated deadline the *ceiling* over resolution
+    // rather than something resolution spends, which left `dial --timeout 5` free to take five
+    // seconds finding the name and five more waiting for an answer: two phases of the number the
+    // caller typed. `crate::budget` carries the accounting and the rule for reporting it. Zero
+    // states no deadline and leaves those bounds to the resolver, exactly as it leaves expiry to
+    // the transaction layer.
+    let attempt = crate::budget::Attempt::new(Duration::from_secs(options.timeout));
+    let resolver = crate::destination::Resolver::within(attempt.remaining());
     let candidates = match resolver
         .resolve(&to, None, transport, &options.signalling)
         .await
@@ -78,6 +80,19 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
             return fail(format, crate::destination::exit(&error), &error.to_string());
         }
     };
+    // A lookup that succeeded on the last millisecond of the budget leaves nothing to invite with,
+    // and an invitation funded from nothing must not become an unbounded one. Reported before any
+    // socket is opened, because nothing was placed and there is nothing to join.
+    if attempt.spent() {
+        return fail(
+            format,
+            Exit::Timeout,
+            &format!(
+                "the {:?} deadline was spent finding the target; no invitation was placed",
+                attempt.limit()
+            ),
+        );
+    }
     let target_addr = target.addr;
     transport = transport.negotiated(target.transport);
     let media = match crate::media::Selection::from_options(
@@ -157,9 +172,9 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
     for header in headers {
         call_options = call_options.with_header(header);
     }
-    if !attempt.is_zero() {
-        call_options = call_options.with_timeout(attempt);
-    }
+    // No answer budget is set here: `Attempt::fund` gives each candidate what the budget has left
+    // at the moment it is tried, which is the same value for the only candidate a single-address
+    // name has and the whole of the difference for one with several.
     if let Some(credentials) = credentials {
         call_options = call_options.with_credentials(credentials);
     }
@@ -180,6 +195,7 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
             &candidates,
             &to,
             &call_options,
+            &attempt,
             interrupted.as_mut(),
         )
         .await
@@ -195,6 +211,7 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
                     &handle,
                     &process_stop,
                     cancellation,
+                    &attempt,
                     &mut progress,
                 )
                 .await;
@@ -206,6 +223,7 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
                     &handle,
                     &failure.error,
                     failure.attempts(),
+                    &attempt,
                     &mut progress,
                 )
                 .await;
@@ -221,6 +239,7 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
                     &handle,
                     &process_stop,
                     cancellation,
+                    &attempt,
                     &mut progress,
                 )
                 .await;
@@ -229,7 +248,16 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
         } {
             Ok(available) => available,
             Err(error) => {
-                return report_failure(format, export, &handle, &error, None, &mut progress).await;
+                return report_failure(
+                    format,
+                    export,
+                    &handle,
+                    &error,
+                    None,
+                    &attempt,
+                    &mut progress,
+                )
+                .await;
             }
         };
         let early_recorded = if early_media {
@@ -252,6 +280,7 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
                         &handle,
                         &process_stop,
                         cancellation,
+                        &attempt,
                         &mut progress,
                     )
                     .await;
@@ -270,12 +299,22 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
                     &handle,
                     &process_stop,
                     cancellation,
+                    &attempt,
                     &mut progress,
                 )
                 .await;
             }
             Err(error) => {
-                return report_failure(format, export, &handle, &error, None, &mut progress).await;
+                return report_failure(
+                    format,
+                    export,
+                    &handle,
+                    &error,
+                    None,
+                    &attempt,
+                    &mut progress,
+                )
+                .await;
             }
         };
         (call, selected, early_recorded, early_media)
@@ -285,6 +324,7 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
             &candidates,
             &to,
             &call_options,
+            &attempt,
             interrupted.as_mut(),
         )
         .await
@@ -300,6 +340,7 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
                     &handle,
                     &process_stop,
                     cancellation,
+                    &attempt,
                     &mut progress,
                 )
                 .await;
@@ -311,6 +352,7 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
                     &handle,
                     &failure.error,
                     failure.attempts(),
+                    &attempt,
                     &mut progress,
                 )
                 .await;
@@ -490,13 +532,21 @@ async fn dial_candidates(
     candidates: &[sipx_transport::Target],
     to: &Uri,
     options: &sipx_call::DialOptions,
+    attempt: &crate::budget::Attempt,
     mut interrupted: Pin<&mut (dyn Future<Output = ()> + Send)>,
 ) -> Result<(Call, sipx_transport::Target), Unreachable> {
     let mut attempts = crate::destination::Attempts::over(candidates.len());
     let mut last_transport = None;
     for target in candidates.iter().take(crate::destination::MAX_ATTEMPTS) {
+        let Some(funded) = attempt.fund(options) else {
+            break;
+        };
+        // Counted after the budget check, so `candidates_attempted` stays what it promises: how
+        // many were tried, never how many there were. A pass a deadline ended early leaves
+        // candidates it never reached, and counting those would rule out addresses nothing ruled
+        // out.
         attempts.attempt();
-        match sipx_call::dial_until(handle, target.clone(), to, options, interrupted.as_mut()).await
+        match sipx_call::dial_until(handle, target.clone(), to, &funded, interrupted.as_mut()).await
         {
             Ok(call) => return Ok((call, target.clone())),
             Err(error @ sipx_call::Error::Transport(_)) => last_transport = Some(error),
@@ -514,13 +564,17 @@ async fn dial_early_candidates(
     candidates: &[sipx_transport::Target],
     to: &Uri,
     options: &sipx_call::DialOptions,
+    attempt: &crate::budget::Attempt,
     mut interrupted: Pin<&mut (dyn Future<Output = ()> + Send)>,
 ) -> Result<(sipx_call::Dialing, sipx_transport::Target), Unreachable> {
     let mut attempts = crate::destination::Attempts::over(candidates.len());
     let mut last_transport = None;
     for target in candidates.iter().take(crate::destination::MAX_ATTEMPTS) {
+        let Some(funded) = attempt.fund(options) else {
+            break;
+        };
         attempts.attempt();
-        match sipx_call::dial_early_until(handle, target.clone(), to, options, interrupted.as_mut())
+        match sipx_call::dial_early_until(handle, target.clone(), to, &funded, interrupted.as_mut())
             .await
         {
             Ok(dialing) => return Ok((dialing, target.clone())),
@@ -610,8 +664,12 @@ async fn report_pending_interrupt(
     handle: &sipx_transport::Handle,
     process_stop: &crate::stop::Stop,
     cancellation: sipx_call::InvitationCancellation,
+    attempt: &crate::budget::Attempt,
     progress: &mut crate::progress::Call,
 ) -> Exit {
+    // Read before the join, or the barrier's own duration would be counted as time the invitation
+    // spent.
+    let spent = attempt.elapsed();
     handle.shutdown().await;
     if let Some(message) = process_stop.failure() {
         return fail(format, Exit::Failed, &message);
@@ -621,6 +679,8 @@ async fn report_pending_interrupt(
             .text("status", "interrupted")
             .text("ended_by", "interrupt"),
         &cancellation,
+        attempt,
+        spent,
     );
     if let Some(signal) = process_stop.signal() {
         report = report.text("stop_signal", signal);
@@ -644,8 +704,11 @@ async fn report_failure(
     handle: &sipx_transport::Handle,
     error: &sipx_call::Error,
     attempts: Option<crate::destination::Attempts>,
+    attempt: &crate::budget::Attempt,
     progress: &mut crate::progress::Call,
 ) -> Exit {
+    // Read before the join, for the same reason `report_pending_interrupt` reads it there.
+    let spent = attempt.elapsed();
     let (exit, end) = match error {
         sipx_call::Error::Rejected { status, .. } => {
             let exit = Exit::for_status(*status);
@@ -664,7 +727,9 @@ async fn report_failure(
         attempts,
     );
     let report = match error {
-        sipx_call::Error::Cancelled(cancellation) => with_cancellation(report, cancellation),
+        sipx_call::Error::Cancelled(cancellation) => {
+            with_cancellation(report, cancellation, attempt, spent)
+        }
         _ => report,
     };
     match export.into_report(report) {
@@ -680,15 +745,31 @@ async fn report_failure(
     }
 }
 
+/// The cancellation facts, with both published invitation durations read on the caller's clock.
+///
+/// `P-29`: the limit is the number the caller typed and not the slice the invitation was funded
+/// from — an operator who asked for two seconds is not told the answer budget was 800 ms because
+/// the lookup took the rest, which is an accounting detail and not the deadline they set. The
+/// elapsed is then read on that same clock, so it covers everything the budget paid for, and it
+/// stops where the separately published cancellation allowance begins: `spent` is the whole
+/// process at the moment the failure was returned, and the cleanup is the only phase that ran
+/// after the invitation gave up. Reporting the library's INVITE-scoped measure beside a
+/// process-scoped limit would put "you gave me 2s" next to "I waited 0.8s" and leave the missing
+/// 1.2 s named nowhere.
 fn with_cancellation(
     mut report: Report,
     cancellation: &sipx_call::InvitationCancellation,
+    attempt: &crate::budget::Attempt,
+    spent: Duration,
 ) -> Report {
-    if let Some(limit) = cancellation.invitation_limit {
+    if let Some(limit) = attempt.stated() {
         report = report.millis("invitation_limit_ms", limit);
     }
     report
-        .millis("invitation_elapsed_ms", cancellation.invitation_elapsed)
+        .millis(
+            "invitation_elapsed_ms",
+            spent.saturating_sub(cancellation.cleanup.elapsed),
+        )
         .millis("cancel_limit_ms", cancellation.cleanup.limit)
         .millis("cancel_elapsed_ms", cancellation.cleanup.elapsed)
         .boolean("cancel_sent", cancellation.cleanup.cancel_sent())

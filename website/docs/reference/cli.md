@@ -107,13 +107,15 @@ all, and is unchanged in every way, including its timing.
 The lookup is bounded twice: **two seconds** for any one question, and **eight seconds** for the
 whole resolution including the ordering that follows it. Both are ceilings rather than waits.
 
-Every command that states a deadline is the ceiling over its own lookup rather than something the
-lookup is added to. `dial --timeout`, `load --timeout` and `scenario --timeout` — or a `dial`
-frame's `timeout_ms` — lower both bounds under themselves; `register --timeout` lowers them under
-whatever the attempt has left; and `peers`, which states no attempt deadline, lowers them under the
-subscription lifetime `--expires` asks for. A command given two seconds spends at most two on the
-lookup rather than eight before its own clock starts. A generous deadline changes nothing: these
-are minimums against the two figures above, never extensions of them, and `--timeout 0` leaves the
+A command's deadline pays for its own lookup rather than starting again afterwards. `dial
+--timeout` and `scenario --timeout` — or a `dial` frame's `timeout_ms` — fund resolution and then
+the invitation from one budget; `load` bounds the one lookup its calls share under the lower of
+`--timeout`, which bounds a call, and `--duration`, which bounds the run; `register --timeout`
+funds resolution, the transaction and any retry from whatever the attempt has left; and `peers`,
+which states no attempt deadline, resolves under the subscription lifetime `--expires` asks for. A
+command given two seconds spends at most two seconds in total, of which the lookup takes what it
+takes — not two on the lookup and then two more. A generous deadline changes nothing: these are
+minimums against the two figures above, never extensions of them, and `--timeout 0` leaves the
 resolver's own bounds in place along with transaction expiry.
 
 Resolution keeps the identity you asked for. TLS and WSS connect to the selected address and verify
@@ -170,7 +172,7 @@ Place a call: `sipx dial sip:bob@pbx.example`
 | `--dtmf <DIGITS>` | Send these digits once the call is up |
 | `--early-media` | Receive a reliable provisional media session before the final answer; incompatible with `--profile browser-audio` |
 | `--duration <S>` | Hang up after this many seconds once connected (default 30); a supported process stop hangs up early and reports `interrupted` |
-| `--timeout <S>` | Give up if not answered in this many seconds (default 20). It is also the ceiling on target resolution, so a name that will not resolve cannot spend the resolver's own eight seconds first. `0` waits as long as the transaction layer does — 32 seconds |
+| `--timeout <S>` | Give up if the call has not been answered this many seconds after the command started (default 20). It is the budget for the whole attempt, not for one phase of it: target resolution, the invitation, and each further candidate a name resolves to are funded from what the phase before them left, so a slow lookup shortens the wait for an answer instead of adding to it. `0` waits as long as the transaction layer does — 32 seconds |
 | `--cancel-timeout <S>` | Additional invitation-cancellation allowance after timeout or Ctrl-C (default 2). `0` performs no timed cancellation wait |
 | `--from <URI>` | Our own address (default `sip:sipx@<local>`) |
 | `--password <P>` | Digest password; prefer `SIPX_PASSWORD` because argv is world-readable |
@@ -205,9 +207,15 @@ its final response was observed. A supported process stop emits one `status: int
 result with `stop_signal` after BYE and owned-work cleanup, and exits 0.
 An invitation timeout reports `invitation_limit_ms`, measured `invitation_elapsed_ms`,
 `cancel_limit_ms`, measured `cancel_elapsed_ms`, `cancel_sent`, `cancel_final_observed`,
-`cancel_cleanup_completed`, and `cancel_cleanup_exhausted`. These make the maximum setup time the
-sum of two named phases rather than hiding cancellation behind `--timeout`; Ctrl-C during setup
-reports the same cancellation facts with `status: interrupted`.
+`cancel_cleanup_completed`, and `cancel_cleanup_exhausted`. They name the three phases the worst
+case is made of, and which budget pays for each: resolving the target and waiting for an answer
+both come out of `--timeout`, cancellation cleanup has `--cancel-timeout` to itself, and the
+endpoint's causal join follows. So the maximum setup time is those two flags added together —
+never `--timeout` twice, and never cancellation hidden behind it. `invitation_limit_ms` is the
+number you typed rather than the slice the invitation was funded from, and
+`invitation_elapsed_ms` is measured on the same clock, so it covers the lookup and stops where
+`cancel_elapsed_ms` begins. Ctrl-C during setup reports the same cancellation facts with
+`status: interrupted`.
 Any explicit media selector adds `media_profile`, `requested_codecs`, `requested_media_security`, `requested_ice`,
 `negotiated_codec`, `negotiated_media_security`, and `negotiated_ice`. Negotiated ICE is read from
 the selected candidate pair and may be `checking`, `host`, `server-reflexive`, `peer-reflexive`, or
@@ -293,9 +301,9 @@ sipx load sip:load@192.0.2.1:5060 --rate 10 --concurrency 32 --calls 100 --seed 
 | `--rate <CALLS/S>` | Positive finite arrival rate; required |
 | `--concurrency <N>` | Positive ceiling on simultaneously active calls; required |
 | `--calls <N>` | Stop after admitting this many calls |
-| `--duration <S>` | Stop admission after this many seconds |
+| `--duration <S>` | Stop admission after this many seconds. It also bounds the run's one target resolution, so a run allowed two seconds cannot spend eight finding where to send its calls |
 | `--call-duration <S>` | End each answered call after this many seconds (default 0) |
-| `--timeout <S>` | Bound each call setup (default 20), and with it the one target resolution the run's calls share |
+| `--timeout <S>` | Bound each call setup (default 20), and with it the one target resolution the run's calls share — under `--duration` too, when that is the lower of the two |
 | `--mode <M>` | `signalling` (default) or the separately explicit `generated-media` workload |
 | `--seed <N>` | Reproduce arrival jitter and deterministic workload data (default 0) |
 | `--from <URI>` | Address used by the generated callers |
@@ -536,7 +544,7 @@ string `id` in its completion or refusal event.
 | `--ice <P>` | Select `disabled`, `host`, or `stun` |
 | `--stun-server <ADDR>` | STUN server as `host:port` for `--ice stun` |
 | `--header <H>` | Add an application-owned field to originated INVITEs; repeat |
-| `--timeout <S>` | Default outbound answer timeout (default 20), covering each `dial` command's target resolution; a frame's own `timeout_ms` replaces it and bounds that command's resolution instead |
+| `--timeout <S>` | Default budget for one outbound `dial` frame (default 20), funding that frame's target resolution and then its invitation; a frame's own `timeout_ms` replaces it and is spent the same way |
 
 The v1 commands are `dial`, `accept`, `reject`, `play`, `stop_playback`, `start_recording`,
 `stop_recording`, `send_dtmf`, `hold`, `resume`, `transfer`, `hangup`, `wait_for`, and `shutdown`.
