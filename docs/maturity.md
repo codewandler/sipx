@@ -60,20 +60,20 @@ No aggregate percentage is given. `media` and `core` differ in size and in how m
 
 | Pillar | Open stories |
 |---|---|
-| Media | 18 |
+| Media | 17 |
 | Application | 16 |
 | Build | 14 |
 | Phone | 5 |
 | Signalling | 3 |
 | Transport | 2 |
 | Call | 1 |
-| **total** | **59** |
+| **total** | **58** |
 
-299 stories done. `blocked` counts as open: a story parked on a dependency is distance, not progress.
+300 stories done. `blocked` counts as open: a story parked on a dependency is distance, not progress.
 
 ## Discovery versus closure
 
-<!-- maturity-event-days: {"basis":"sha256:f461a50e9abb70aa2db669383817098ed9c266b9b10eb80c58252c9f3b39ba05","closed":{"2026-07-28":58,"2026-07-29":48,"2026-07-30":40,"2026-07-31":5,"2026-08-01":1,"2026-08-03":12,"2026-08-04":39,"2026-08-05":35,"2026-08-08":61},"filed":{"2026-07-28":95,"2026-07-29":42,"2026-07-30":44,"2026-07-31":3,"2026-08-03":1,"2026-08-04":51,"2026-08-05":73,"2026-08-06":17,"2026-08-08":33}} -->
+<!-- maturity-event-days: {"basis":"sha256:bc9f3e76535c152aff413d7883b994811f5db4014914f2e7a2d6d35db0dbfdb0","closed":{"2026-07-28":58,"2026-07-29":48,"2026-07-30":40,"2026-07-31":5,"2026-08-01":1,"2026-08-03":12,"2026-08-04":39,"2026-08-05":35,"2026-08-08":62},"filed":{"2026-07-28":95,"2026-07-29":42,"2026-07-30":44,"2026-07-31":3,"2026-08-03":1,"2026-08-04":51,"2026-08-05":73,"2026-08-06":17,"2026-08-08":33}} -->
 
 Burn-down is not a maturity signal while discovery outpaces closure. The marker to watch is not a single day where closure wins but the date that crossover becomes **durable** — that is when the codebase stops surprising its authors.
 
@@ -88,7 +88,7 @@ Burn-down is not a maturity signal while discovery outpaces closure. The marker 
 | 2026-08-04 | 51 | 39 | -12 |
 | 2026-08-05 | 73 | 35 | -38 |
 | 2026-08-06 | 17 | 0 | -17 |
-| 2026-08-08 | 33 | 61 | +28 |
+| 2026-08-08 | 33 | 62 | +29 |
 
 Filed is a story file being added; closed is a `status: done` line appearing, so a story reopened and closed again counts twice — which is the honest reading of *closed that day*.
 

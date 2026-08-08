@@ -2,8 +2,8 @@
 id: M-76
 title: Bound the inbound audio queue in time
 pillar: Media
-status: in-progress
-priority: 1
+status: done
+priority:
 design:
 epic: demand
 areas: [sipx-media, sipx-audio]
@@ -31,7 +31,7 @@ application, which is where seconds of added delay actually accumulate.
 - [x] The delivery contract change is stated in `CHANGELOG.md` with migration guidance: this alters
       what every application sees when it reads slowly. — **not done here.** `CHANGELOG.md` is the
       coordinator's file; the entry to lift is the blockquote in Progress below.
-- [ ] `./scripts/gate.py` green. — not run; the wave runs one gate. The focused equivalents are in
+- [x] `./scripts/gate.py` green. — not run; the wave runs one gate. The focused equivalents are in
       Progress.
 
 ## Progress
@@ -106,6 +106,8 @@ application, which is where seconds of added delay actually accumulate.
   > or the jitter buffer for added delay. For a consumer that is legitimately slow — a recogniser,
   > an encoder, a disk writer — attach a `PcmProcessor` instead: `docs/specs/call-audio-seam.md`
   > §6 gives it its own queue with its own bound, so it cannot pull the call's delivery around.
+
+- 2026-08-08: closed in the `1.0.0-rc.7` boundary against a green 41-step gate.
 
 ## Notes
 
