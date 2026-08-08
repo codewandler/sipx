@@ -791,9 +791,9 @@ pub struct Encoded {
     /// A relayed extension is well formed by construction —
     /// [`Packet::decode`](sipx_rtp::packet::Packet::decode) bounds-checks it against the packet it
     /// arrived on and slices exactly the words its length word claims — so this is a constraint on
-    /// an extension a caller builds itself. It is also why
-    /// [`MediaDiscardCounts::srtp_protect_failures`] and this counter both describe the
-    /// application on this side rather than a peer.
+    /// an extension a caller builds itself, and why
+    /// [`MediaDiscardCounts::malformed_extensions_dropped`] describes the application on this side
+    /// rather than a peer.
     pub extension: Option<Bytes>,
 }
 
@@ -3306,17 +3306,23 @@ async fn send_loop(socket: Arc<UdpSocket>, mut outgoing: mpsc::Receiver<Frame>, 
                     // encryption and a cleartext packet is both unreadable to it and readable to
                     // everyone else.
                     //
-                    // Counted rather than excused (`M-81`). This site used to say `Packet::encode`
-                    // always makes the complete header `protect` requires, and that stopped being
-                    // true when `M-79` made `Encoded::extension` public: an extension whose length
-                    // word claims more 32-bit words than it carries is written verbatim with the X
-                    // bit set, and the header SRTP then computes is longer than the whole packet.
-                    // Caller-induced rather than attacker-induced — a relayed extension was
-                    // bounds-checked by `Packet::decode` — but media lost on an encrypted leg all
-                    // the same, so it is a number and not a log line.
-                    discards
-                        .srtp_protect_failures
-                        .fetch_add(1, Ordering::Relaxed);
+                    // discard: nothing a caller or a peer can do reaches this branch, so a counter
+                    // here would be a published field stuck at zero (`M-90`). `protect` fails four
+                    // ways and this loop can produce none of them. Two are a header the transform
+                    // cannot read, and `Packet::encode` above emits the twelve-octet fixed header,
+                    // caps the CSRC count at the fifteen the nibble can name, and writes only an
+                    // extension whose length word agrees with its bytes — that last one is what
+                    // `M-85` closed and `M-81` had counted here. The other two are a session key or
+                    // salt of the wrong length, which `SrtpContext::new` sized from the profile, and
+                    // an AEAD plaintext over RFC 7714 §10's `P_MAX` of 2^36 - 32 octets, which is
+                    // four orders of magnitude past any datagram. A self-inconsistent extension is
+                    // still counted — as `malformed_extensions_dropped`, at the boundary that keeps
+                    // the payload.
+                    //
+                    // `M-81`'s lesson applies in reverse: "unreachable because of what the caller
+                    // can be" expires, so whoever gives `protect` a failure this loop can reach
+                    // owns restoring a counter here. `crates/sipx-rtp/tests/srtp_protect_header.rs`
+                    // is the test that fails when that day arrives.
                     tracing::warn!(%error, "dropping a packet SRTP could not protect");
                     continue;
                 }

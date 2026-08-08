@@ -367,11 +367,12 @@ async fn counters_after_the_frame(
 /// `srtp_protect_failures` instead of vanishing. Correct, and still a lost packet on a live call.
 ///
 /// `M-85` refuses the extension one boundary earlier, at `Packet::encode`, which is why the
-/// assertions here are the other way round: the media arrives, the extension does not, and
-/// `srtp_protect_failures` stays where it now belongs — at zero, on a branch no caller can reach
-/// again. Kept over both fixtures because the far-past and just-inside cases are one defect and
-/// one rule, and a fix that only covered the case it was written against would leave the other
-/// half of it live.
+/// assertions here are the other way round: the media arrives, and the extension does not. `M-90`
+/// then removed `srtp_protect_failures` rather than publish a field no caller could move, so what
+/// pins the outcome now is the whole snapshot — one field up by one, and every other field of the
+/// published set still at zero. Kept over both fixtures because the far-past and just-inside cases
+/// are one defect and one rule, and a fix that only covered the case it was written against would
+/// leave the other half of it live.
 #[tokio::test]
 async fn an_extension_overstating_past_the_packet_costs_no_packet() {
     for profile in EVERY_PROFILE {
@@ -395,13 +396,13 @@ async fn an_extension_overstating_past_the_packet_costs_no_packet() {
 
         let counted = counters_after_the_frame(&session, profile).await;
         assert_eq!(
-            counted.malformed_extensions_dropped, 1,
-            "{profile:?}: the extension that could not be written is counted where §4 says it is"
-        );
-        assert_eq!(
-            counted.srtp_protect_failures, 0,
-            "{profile:?}: the transform was handed a packet it could not read, which `M-85` is \
-             supposed to have made impossible from public API"
+            counted,
+            sipx_media::MediaDiscardCounts {
+                malformed_extensions_dropped: 1,
+                ..Default::default()
+            },
+            "{profile:?}: a dropped extension moved something other than the one counter §4 \
+             names for it"
         );
         assert_eq!(
             counted.total(),
