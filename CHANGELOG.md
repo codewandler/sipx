@@ -7,6 +7,189 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0-rc.4] — 2026-08-08
+
+This boundary is a wave of independent implementation rather than an answer to an external sweep. It
+bounds the last unbounded command, adds the RFC 7714 AEAD protection profiles that AEAD-only peers
+require, opens one bounded seam into live call audio and builds the speech provider contract on top
+of it without shipping any speech, completes the negative half of named-target resolution, publishes
+a generated coverage figure that gates nothing, and fixes two audio defects found by measuring the
+jitter buffer instead of rewriting it. Two Supported APIs change with migration guidance: `register`
+now has a default completion deadline, and the SRTP protection profile becomes an explicit argument
+in `sipx-rtp` and `sipx-media`. It remains a prerelease on the same terms as `rc.3`: Supported APIs
+still receive migration guidance when they change, Experimental APIs may change without it, and
+stable promotion still requires independent application use.
+
+### Added
+
+- **An application can observe and process a live call's audio through one bounded seam.**
+  `MediaSession::attach_processor` hands out direction-aware PCM frames carrying sample format,
+  sample time, sequence and discontinuity metadata, against the contract in
+  `docs/specs/call-audio-seam.md`. There are two taps and deliberately no third: received audio is
+  tapped at the jitter buffer's output, so a processor observes the played order, and transmitted
+  audio after the mute gate and before encoding, so a muted call is never reported as transmitting.
+  A processor asks for one sample format and rate and the conversion happens in its own `recv`, so
+  the media loops' per-frame cost does not depend on how many consumers want how many formats, and
+  an unsupported conversion is a typed refusal rather than distorted or dropped audio. Per-call
+  queues are finite — 2 to 4096 frames, 32 by default — and a slow consumer loses the oldest frames
+  and receives one discontinuity naming the accumulated loss rather than blocking RTP decode,
+  encode, playback or capture. The seam owns no task: attach, detach, drop, stop, shutdown and
+  reconfigure are synchronous registry transitions, and attachments are carried to the replacement
+  generation and re-anchored across a re-INVITE, so an application does not re-attach after
+  renegotiation. Two simultaneous consumers receive the declared fan-out without sharing mutable
+  state across calls.
+
+- **Media negotiates the RFC 7714 AEAD-GCM protection profiles.** `AEAD_AES_128_GCM` and
+  `AEAD_AES_256_GCM` are implemented for RTP and RTCP — both, because RFC 7714 §12 requires both of
+  any implementation — and offered on both keying paths: RFC 4568 SDES crypto-suites and the RFC
+  5764 `use_srtp` profile list, each ordered strongest-first. Selection is by strength over the
+  intersection of what the peer offered and what this side keyed, never by peer order, so a weaker
+  profile offered first does not win. `AES_CM_128_HMAC_SHA1_80` remains supported and remains RFC
+  5764's interoperability floor, and SDES is still offered only over secure signalling. All ten of
+  the RFC's published vectors reproduce, including §17.3's tagging-only form; they are recovered
+  from the RFC editor's text by `scripts/import-rfc7714-corpus.sh` rather than transcribed, and
+  `--check` re-slices and diffs them as a gate step. Replay window, ROC inference and
+  authenticate-before-decrypt ordering are shown to hold for the new profiles through the existing
+  tests extended to them, not through parallel new ones. **What is proven here is negotiation and
+  transform correctness against the RFC's own vectors — not interoperation.** RFC 7714 publishes no
+  key-derivation vector, so the 96-bit master salt's alignment in the PRF input block rests on a
+  reading of the RFC, recorded with an owner in `docs/specs/srtp.md` §12.10; if that reading is
+  wrong, two sipx endpoints interoperate with each other and with nothing else, and every round-trip
+  test still passes. Evidence for AEAD interoperation has to be a run against an independent
+  implementation and does not exist yet.
+
+- **A named destination's three ways of failing are three answers.** Resolution refusal, resolution
+  timeout and connection failure are now told apart at the process level, in text and JSON, by
+  `dial` and `register`. Anything resolution refused reports an `error` beginning `target
+  resolution failed:`; a deadline exits `timeout` (5) while the other two exit `failed` (1), and
+  those two are separated without waiting by whether that prefix is present at all, since a
+  connection failure names the transport cause and no resolution. `register` adds
+  `registration_limit_ms` only when its own deadline expired, so a name that will not resolve is
+  never presented as a registrar that did not answer. The proof is a loopback fixture nameserver
+  with a zone of its own that answers "no such name" for one host, never answers for a second, and
+  gives a third an address on a port nothing accepts. `SIPX_NAMESERVER` asks a specific resolver
+  instead of the host's configured ones — an address, optionally with a port, defaulting to 53 — and
+  is refused rather than ignored when it cannot be read, because a wrong zone and an unreachable
+  resolver are different problems with different owners. The public CLI reference gained a *Named
+  destinations* section stating what is looked up and when, the two-second per-question and
+  eight-second whole-resolution ceilings, the retained TLS verification identity, the table of the
+  three failures against their exit codes, and the new variable; its dial synopsis and registrar
+  example name hosts rather than literals.
+
+- **The speech provider contract exists as compiling, testable types, and nothing behind it hears or
+  says anything.** `sipx_media::speech` implements the specification's discovery descriptor —
+  identity, offline status, languages, voices, formats and devices — the provider registry, the
+  endpoint-default versus per-call selection state machine with its typed refusal order, the
+  recognition and synthesis session contracts, the lifecycle events kept disjoint from SIP failure
+  types, and the declared bounds. Selection is the only producer of a seam request, so an unknown,
+  off-host or incompatible provider is refused before any queue is allocated on the call, and the
+  contract consumes the call-audio seam above rather than opening a second tap: its input bound and
+  the seam's default queue depth are asserted to be the same number. Thirty-one of the
+  specification's thirty-four conformance vectors run from outside the crate against a deliberately
+  inert in-repo provider that recognizes nothing; the three that do not are obligations of the
+  asynchronous driver this does not build, and the test file records the exclusion rather than
+  leaving it to be found. **No speech recognition or synthesis implementation, model, accelerator
+  dependency or audio retention ships, no command or application surface reaches any of it, and
+  sipx cannot transcribe or speak.** The module is marked Experimental; this is the contract
+  `M-55`/`M-56` and the SDK lifecycle stories will be written against.
+
+- **What the test suite reaches is a generated number, and nothing gates on it.**
+  `scripts/coverage-report.py --measure` runs `cargo llvm-cov` and records counts in
+  `docs/coverage/measurement.json`; the default mode renders `docs/coverage.md` from them and
+  `--check` byte-compares the page against that rendering. No percentage is ever stored — the schema
+  rejects a `percent` key — so every figure on the page is arithmetic performed at render time, and
+  a hand-edited one fails the gate. A CI job measures line, branch and function coverage on nightly,
+  appends the figure to the run summary, and uploads the JSON, lcov and browsable HTML as a build
+  artifact; the gate carries the two cheap halves locally and names the measurement itself in
+  `NOT_RUN_LOCALLY` with its reason, so the gate's self-check cannot silently omit it. **No
+  threshold, ratchet or `--fail-under` exists anywhere, and their absence is asserted** — a
+  measurement covering nothing checks green, and the suite is what holds that. The page states its
+  own limits on the same surface as the number: the measurement excludes tests, examples, benches,
+  fuzz targets and generated code by path, but this project keeps unit tests beside the code they
+  test, so an inline `#[cfg(test)] mod tests` lives in `src/` and is counted and the headline line
+  figure is flattered by however much of it there is; doctests are not instrumented and read as
+  unreached; a reached line is not a checked line; branch coverage needs a nightly compiler and is a
+  less settled number than the line count beside it; and every figure is measured with all features
+  on. The count that actually answers "what does this suite not reach" is the per-crate lines
+  unreached, and the page says which commit it describes, because it is taken deliberately rather
+  than on every push.
+
+### Changed
+
+- **`register` completes on a stated deadline instead of on the transaction layer's schedule.**
+  `--timeout <S>` — `dial`'s flag name and units — defaults to 20 seconds and is one budget over the
+  whole attempt: resolution, connection, the initial REGISTER, an authentication retry and a
+  stale-nonce retry after it. The resolver is built under whatever the attempt has left rather than
+  running a second clock beside it, and each resolved candidate gets the remainder rather than a
+  fresh copy of the budget. Expiry joins what the attempt owned through endpoint shutdown before
+  reporting `status`, `aor`, `error`, `registration_limit_ms`, measured `registration_elapsed_ms`
+  and measured `cleanup_ms` in both output formats at exit 5, so the stated deadline is never
+  presented as the whole of the elapsed process time; an abandoned attempt discards the GRUUs and
+  push support it learned, so nothing claims a binding it does not have. `--wake`'s binding-refresh
+  REGISTER is bounded the same way. **Nothing previously bounded the attempt, so a check against a
+  black-holing registrar ran to the SIP transaction timeout — roughly 32 seconds, and an
+  authentication retry made it two of those.** A registrar that legitimately takes longer than 20
+  seconds to complete now fails where it previously succeeded: pass a larger `--timeout`, or
+  `--timeout 0` to wait as long as the transaction layer does and restore the old behaviour. Two
+  bounds are deliberately unchanged: `--keep-alive`'s refreshes after a successful first attempt are
+  still governed by the granted lease alone, and the deadline bounds an attempt rather than the
+  lifetime of a registration being kept. **`UserAgent::attempt` now preserves a concrete transport
+  cause instead of collapsing it to a no-response**, without which a refused TCP connection exited 5
+  exactly like a deadline; a refusal still exits `rejected` (3) or `unauthorized` (4) with its SIP
+  status and a connection nothing accepted exits `failed` (1) with the transport cause, neither of
+  them waiting for the deadline.
+
+- **The SRTP protection profile is a negotiated value carried end to end rather than a per-profile
+  constant.** `sipx_rtp::srtp::Profile` is now what the keying path hands to the SRTP context, and
+  key and salt lengths derive from it, so the wrong lengths cannot be paired with a profile.
+  **Migration**, all in Supported surface: `srtp::Context::new` takes the profile as a new first
+  argument — pass `Profile::AesCm128HmacSha1_80` to keep today's behaviour;
+  `sipx_media::session::SrtpKeys` gained a `profile` field that must be set from what was actually
+  agreed, since a session inferring it back from key length would install whichever cipher shared
+  that length; and `sipx_sdp::answer::Capabilities::crypto` is a strongest-first `Vec<Crypto>` with
+  one key per suite instead of a single optional value — wrap an existing value in a one-element
+  vector for identical behaviour. `MediaDescription::crypto()` still returns the single chosen suite
+  and is now a max-by-strength fold, with `crypto_offers()` beside it for the whole list. A crypto
+  attribute is also refused on a suite mismatch and not only a length mismatch, which is necessary
+  rather than cosmetic: `AES_CM_128_HMAC_SHA1_80` at 30 octets and `AEAD_AES_128_GCM` at 28 encode
+  to `inline` parameters of the same base64 length, so length is not identity. Two internal
+  fallbacks that survived the array-to-slice change are gone with them — key derivation and
+  keystream generation return a typed error naming the wrong input instead of leaving output zeroed
+  or substituting a zero key. Neither was reachable, because the context measures both inputs
+  against the profile first, but a silent degradation to a zero keystream is the one failure this
+  module must not be able to have.
+
+### Fixed
+
+- **Lost audio is concealed instead of spliced over.** The jitter buffer counted a gap and played
+  straight through it, so the two packets either side of a lost one were handed to the application
+  back to back: a step in the waveform at the splice and a permanent 20 ms of drift for every lost
+  packet, which at nine per cent loss removed 136 packets' worth of timeline from a thirty-second
+  trace. The receive loop now fills each missing slot with one packetisation interval of silence,
+  bounded at 200 ms of consecutive loss — in time rather than in packets, because a packet is 10 ms
+  in one codec and 60 in another — since a longer run is a partitioned far end and filling it would
+  inject the whole outage as silence. The strategy is written down in the media runtime
+  specification rather than left as an undocumented gap.
+
+- **A call losing audio to a too-shallow buffer no longer looks exactly like a healthy one.** The
+  receive loop dropped the jitter buffer's answer on the floor, so every late and duplicate packet
+  it refused was invisible — the shedding that the counter specification exists to prevent. The push
+  is now `#[must_use]` and the refusals land in the existing media discard counters as `jitter_late`
+  and `jitter_duplicates`, with concealed slots as `jitter_concealed`. The buffer itself was
+  measured before anything was changed, on the arrival-driven drain a media session actually uses
+  rather than on a metronome consumer that hides held time, and it was not the reported defect: over
+  ten traces — constant delay, uniform jitter, a 300 ms spike on every third packet, nine per cent
+  loss, swapped pairs, twenty per cent duplication, a three-second straggler, a one-second stall
+  releasing fifty packets at once, and 600 packets across the 16-bit sequence wrap — depth never
+  passed its ceiling, returned to its floor after both the straggler and the stall, play-out order
+  was strictly ascending including across the wrap, and the worst hold in any trace was 515 ms on a
+  network delivering a third of its packets 300 ms late. The two field reports of *seconds* of added
+  delay are therefore not this buffer; the inbound application queue that can hold several seconds
+  of audio with no time bound and no counter is filed as its own story with its own measurement,
+  because changing its depth or policy changes the delivery contract for every application.
+
+---
+
 ## [1.0.0-rc.3] — 2026-08-08
 
 This boundary answers two independent external sweeps of the published `1.0.0-rc.2` artifacts —
@@ -3371,7 +3554,8 @@ Stated so nobody has to discover it from a stack trace:
 - **Interop is verified against Kamailio only.** A second implementation with different
   opinions — Asterisk, as a B2BUA rather than a proxy — has not been tried.
 
-[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.3...HEAD
+[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.4...HEAD
+[1.0.0-rc.4]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.3...v1.0.0-rc.4
 [1.0.0-rc.3]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.2...v1.0.0-rc.3
 [1.0.0-rc.2]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.1...v1.0.0-rc.2
 [1.0.0-rc.1]: https://github.com/codewandler/sipx/compare/v1.0.0-beta.7...v1.0.0-rc.1

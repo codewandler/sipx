@@ -14,9 +14,9 @@ pinned to the same exact prerelease:
 <!-- BEGIN generated:answer-consumer-dependencies -->
 ```toml
 [dependencies]
-sipx-call = "=1.0.0-rc.3"
-sipx-sip = "=1.0.0-rc.3"
-sipx-transport = "=1.0.0-rc.3"
+sipx-call = "=1.0.0-rc.4"
+sipx-sip = "=1.0.0-rc.4"
+sipx-transport = "=1.0.0-rc.4"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 <!-- END generated:answer-consumer-dependencies -->

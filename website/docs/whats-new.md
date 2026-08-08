@@ -1,13 +1,64 @@
 ---
 title: What's new
-description: Release highlights and adoption notes for the sipx 1.0.0-rc.3 release candidate.
+description: Release highlights and adoption notes for the sipx 1.0.0-rc.4 release candidate.
 ---
 
 # What's new
 
 <!-- BEGIN generated:release-heading -->
-## 1.0.0-rc.3 — 2026-08-08
+## 1.0.0-rc.4 — 2026-08-08
 <!-- END generated:release-heading -->
+
+RC.4 continues the release-candidate line. It attaches application audio processing to a live call
+through one bounded seam, negotiates the RFC 7714 AEAD-GCM protection profiles, gives registration a
+deadline it previously lacked, completes named-target resolution with the proofs that tell its three
+failures apart, and publishes a generated coverage figure that nothing gates on. It remains a
+prerelease on the same terms as RC.3.
+
+Install the exact CLI release with:
+
+```bash
+cargo install --locked --version =1.0.0-rc.4 sipx-cli
+```
+
+- **Applications can observe live call audio through one bounded seam.** A processor attaches to a
+  direction of a call, receives PCM in a format it asks for, and converts through the same linear
+  boundary WAV and device audio already use. Its queue is finite with a documented loss policy: a
+  processor that stops reading loses its own oldest frames and is told so by a discontinuity, and it
+  can never delay RTP decode, encode, playback or capture. Attachments survive a re-INVITE.
+- **Media negotiates the AEAD-GCM protection profiles.** Both the 128- and 256-bit profiles are
+  offered strongest-first over SDES and DTLS, selection is by strength rather than by the order a
+  peer listed them, and the counter-mode profile remains the floor. The transform is verified
+  bit-exactly against RFC 7714's own published vectors. That RFC publishes no key-derivation vector,
+  so interoperation with an independent implementation is not yet claimed.
+- **Registration can be bounded.** `register` now takes a deadline covering resolution, the initial
+  transaction and any authentication retry, and a refused connection is reported as a transport
+  failure rather than as a timeout.
+- **Named targets are documented and their failures are distinguishable.** Resolution failure,
+  resolution timeout and connection failure are told apart in text, JSON and exit status, and the
+  CLI reference describes the resolution contract instead of showing literal addresses. A new
+  `SIPX_NAMESERVER` names a specific resolver when the host's own is not the one to ask.
+- **Interchangeable local speech providers have an executable contract.** Registry, discovery
+  descriptor, selection precedence with typed refusals, session lifecycle and per-call privacy
+  admission all exist and are exercised by conformance vectors against a deliberately inert
+  provider. **No speech recognition or synthesis implementation ships, and none should be inferred
+  from this** — the contract is what shipped.
+- **Lost audio is concealed rather than spliced.** Packets either side of a gap are no longer handed
+  over back to back, which previously produced an audible step and permanent drift; discards and
+  concealment are counted where every other media discard already is.
+- **The test suite's reach is measured and published.** The figure is generated, never transcribed,
+  and nothing gates on it — see the coverage page for what the measurement deliberately excludes and
+  why the headline number reads high.
+
+### Upgrade edits
+
+- `register` previously had no completion deadline; it now defaults to 20 seconds. A registrar that
+  legitimately takes longer than that will now fail where it previously succeeded — pass
+  `--timeout 0` to restore the old behaviour.
+- Constructing an SRTP context now takes the negotiated protection profile, and the keying type
+  carries it. Code that built either directly needs the profile threaded through.
+
+## 1.0.0-rc.3 — 2026-08-08
 
 RC.3 is the second published release candidate. It answers two independent external sweeps of the
 published RC.2 artifacts — each run from a fresh clone against the released archive and a pinned
@@ -414,5 +465,5 @@ answer calls, but application callback bindings are not implemented.
 This website is built from `main`, so a page or API link may describe work newer than the tagged
 release. Use the exact crates.io version when reproducibility matters, and consult the
 [complete changelog](https://github.com/codewandler/sipx/blob/main/CHANGELOG.md) before updating a
-Git revision. Unreleased behavior is not part of `1.0.0-rc.3` merely because it appears on this
+Git revision. Unreleased behavior is not part of `1.0.0-rc.4` merely because it appears on this
 site.
