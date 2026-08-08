@@ -135,10 +135,23 @@ fn level(verbosity: usize) -> tracing::Level {
     }
 }
 
+/// Install the stderr log subscriber.
+///
+/// **ANSI is off unless stderr is a terminal, and off whenever `NO_COLOR` is set.** Progress records
+/// are part of the scriptable surface this crate promises: a caller greps them for `event="call.ended"`
+/// and counts the matches. Colour codes sit *between* the field name and its value, so an escape
+/// sequence does not merely look wrong in a log file — it breaks that match, and the automation reads
+/// a completed call as a missing one. `is_terminal` is the same test every other well-behaved CLI
+/// applies, and `NO_COLOR` is honoured because a terminal is not a promise that the reader wants
+/// colour.
 fn init_logging(verbosity: usize) {
+    use std::io::IsTerminal;
+
+    let ansi = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
     let _ = tracing_subscriber::fmt()
         .with_max_level(level(verbosity))
         .with_writer(std::io::stderr)
+        .with_ansi(ansi)
         .try_init();
 }
 
