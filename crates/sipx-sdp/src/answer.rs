@@ -131,6 +131,9 @@ impl Capabilities {
     /// **its own** key: RFC 4568 §6.1's `inline` parameter is per attribute, and reusing one
     /// key across two transforms would mean a peer that accepted the weaker one had also been
     /// handed the master secret of the stronger.
+    ///
+    /// Requires the default-on `sdes-keys` feature; see [`crate::crypto::Crypto::offer`].
+    #[cfg(feature = "sdes-keys")]
     #[must_use]
     pub fn with_srtp(mut self, secure_signalling: bool) -> Self {
         self.crypto = crate::crypto::Suite::STRONGEST_FIRST
@@ -149,6 +152,9 @@ impl Capabilities {
     /// For a deployment that has to narrow the list — a peer that mis-parses an unknown suite
     /// token, or a policy that will not carry counter mode. Narrowing it to nothing offers plain
     /// RTP, which is what an empty list means everywhere else.
+    ///
+    /// Requires the default-on `sdes-keys` feature; see [`crate::crypto::Crypto::offer`].
+    #[cfg(feature = "sdes-keys")]
     #[must_use]
     pub fn with_srtp_suites(
         mut self,
