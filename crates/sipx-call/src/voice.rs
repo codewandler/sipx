@@ -39,6 +39,7 @@ use std::time::Duration;
 
 use sipx_audio::analysis::{AudioAnalyzer, Observation};
 use sipx_media::{PcmFrame, PcmProcessor};
+use tokio::sync::watch;
 
 use crate::audio_feed::AudioFeed;
 use crate::event::{CallEvent, ReservedEmitter};
@@ -48,7 +49,10 @@ use crate::event::{CallEvent, ReservedEmitter};
 ///
 /// Re-exported rather than restated: a second spelling of "inbound" or of "the hangover elapsed" is
 /// how two layers of one stack start disagreeing about what happened.
-pub use sipx_audio::analysis::{AnalysisError, AnalysisProfile, AudioDirection, VoiceEndCause};
+pub use sipx_audio::analysis::{
+    AnalysisError, AnalysisProfile, AudioDirection, CalibrationOutcome, CalibrationProfile,
+    EffectiveThresholds, VoiceEndCause,
+};
 
 /// One voice-activity transition, placed on one call's audio timeline.
 ///
@@ -149,6 +153,14 @@ pub(crate) struct VoiceReporter {
     delivered: bool,
     /// The latest transition, delivered or not.
     latest: Option<Transition>,
+    /// Where the call reads this analyser's effective thresholds from (`M-60`).
+    ///
+    /// A latest-value channel rather than a queue: what an application asking "what is this call
+    /// measuring against?" wants is the answer now, not a history of answers. Publishing costs
+    /// nothing when nothing moved, because a settled threshold is an unchanged snapshot.
+    thresholds: watch::Sender<EffectiveThresholds>,
+    /// The last snapshot published, so an unchanged one is not published again.
+    published: EffectiveThresholds,
 }
 
 impl VoiceReporter {
@@ -157,7 +169,9 @@ impl VoiceReporter {
         call_id: Arc<str>,
         sequence: Arc<AtomicU64>,
         emitter: ReservedEmitter,
+        thresholds: watch::Sender<EffectiveThresholds>,
     ) -> Self {
+        let published = analyzer.thresholds();
         Self {
             feed: AudioFeed::new(analyzer),
             call_id,
@@ -165,6 +179,8 @@ impl VoiceReporter {
             emitter,
             delivered: false,
             latest: None,
+            thresholds,
+            published,
         }
     }
 
@@ -176,6 +192,22 @@ impl VoiceReporter {
         if self.feed.offer(frame) {
             self.collect();
             self.deliver();
+            self.publish();
+        }
+    }
+
+    /// Republish the analyser's thresholds, if this frame moved any of them.
+    ///
+    /// Reading them cannot change them — [`AudioAnalyzer::thresholds`] takes `&self` and carries no
+    /// audio (the processing contract's §12.9) — so this is a copy of a handful of scalars onto a
+    /// channel whose reader sees the latest value and never blocks the audio path.
+    fn publish(&mut self) {
+        let snapshot = self.feed.thresholds();
+        if snapshot != self.published {
+            self.published = snapshot;
+            // discard: `send_replace` returns the value it displaced and cannot fail, and a
+            // snapshot nobody is reading is simply the latest one whenever somebody starts.
+            let _ = self.thresholds.send_replace(snapshot);
         }
     }
 
@@ -244,6 +276,9 @@ impl VoiceReporter {
     pub(crate) fn finish(mut self) {
         self.feed.reset();
         self.collect();
+        // The reset cleared the in-progress calibration measurement and re-armed the warm-up
+        // (§12.8); an application reading after teardown sees that rather than a stale period.
+        self.publish();
         if !self.delivered {
             return;
         }
@@ -332,17 +367,34 @@ mod tests {
 
     /// A reporter with its own event stream, standing in for one call.
     fn reporter(call_id: &str) -> (VoiceReporter, EventSink, CallEvents) {
-        let (sink, events) = EventSink::new();
-        let reporter = VoiceReporter::new(
-            AudioAnalyzer::new(profile()).unwrap(),
-            Arc::from(call_id),
-            Arc::new(AtomicU64::new(0)),
-            sink.reserved_emitter(),
-        );
+        let (reporter, sink, events, _) = reporter_with(call_id, profile());
         (reporter, sink, events)
     }
 
-    /// [`VoiceReporter::observe`] without a live media session: the same two steps on the same
+    /// The same, keeping the thresholds channel a call would hold (`M-60`).
+    fn reporter_with(
+        call_id: &str,
+        profile: AnalysisProfile,
+    ) -> (
+        VoiceReporter,
+        EventSink,
+        CallEvents,
+        watch::Receiver<EffectiveThresholds>,
+    ) {
+        let (sink, events) = EventSink::new();
+        let analyzer = AudioAnalyzer::new(profile).unwrap();
+        let (publisher, thresholds) = watch::channel(analyzer.thresholds());
+        let reporter = VoiceReporter::new(
+            analyzer,
+            Arc::from(call_id),
+            Arc::new(AtomicU64::new(0)),
+            sink.reserved_emitter(),
+            publisher,
+        );
+        (reporter, sink, events, thresholds)
+    }
+
+    /// [`VoiceReporter::observe`] without a live media session: the same three steps on the same
     /// feed, entered at the samples rather than at a [`PcmFrame`].
     fn observe_samples(
         reporter: &mut VoiceReporter,
@@ -357,6 +409,7 @@ mod tests {
         {
             reporter.collect();
             reporter.deliver();
+            reporter.publish();
         }
     }
 
@@ -610,6 +663,93 @@ mod tests {
         assert!(
             matches!(seen.first(), Some(CallEvent::VoiceStarted(_))),
             "the frame after the unflagged gap is still measured: {seen:?}"
+        );
+    }
+
+    /// Two simultaneous calls calibrate independently: one call's noise never moves the other's
+    /// threshold, and each reports its own (`M-60`).
+    ///
+    /// Calibration state is per analyser and an analyser is per call and per direction, so this is
+    /// a property of the shape rather than of a lock — but the shape is what a second detection
+    /// path would quietly change, and that is what this pins.
+    #[test]
+    fn two_simultaneous_calls_calibrate_independently() {
+        let calibrated = profile().with_calibration(Some(CalibrationProfile::new()));
+        let (mut quiet, _sink_one, _events_one, quiet_thresholds) =
+            reporter_with("call-one", calibrated);
+        let (mut noisy, _sink_two, _events_two, noisy_thresholds) =
+            reporter_with("call-two", calibrated);
+
+        // Deviation 1,000: below the 2,048 activation amplitude, so it is background rather than
+        // voice, and it is exactly what the noisy call's floor should learn.
+        let background: Vec<i16> = (0..160)
+            .map(|index| if index % 2 == 0 { 1_000 } else { -1_000 })
+            .collect();
+        for sequence in 0..30u64 {
+            feed(&mut quiet, sequence, &silence());
+            feed(&mut noisy, sequence, &background);
+        }
+
+        assert_eq!(quiet_thresholds.borrow().activation_amplitude(), 1_408);
+        assert_eq!(quiet_thresholds.borrow().observed_floor(), Some(0));
+        assert_eq!(noisy_thresholds.borrow().activation_amplitude(), 1_512);
+        assert_eq!(
+            noisy_thresholds.borrow().observed_floor(),
+            Some(1_000),
+            "each call's floor is measured from its own audio"
+        );
+    }
+
+    /// Reading the thresholds is a read: the events a call reports do not depend on whether anyone
+    /// asked what it was measuring against (`M-60`).
+    #[test]
+    fn inspecting_thresholds_changes_no_event() {
+        let calibrated = profile().with_calibration(Some(CalibrationProfile::new()));
+        let (mut watched, _sink_one, mut watched_events, thresholds) =
+            reporter_with("call-one", calibrated);
+        let (mut unwatched, _sink_two, mut unwatched_events, _) =
+            reporter_with("call-two", calibrated);
+
+        for sequence in 0..30u64 {
+            feed(&mut watched, sequence, &modulated());
+            feed(&mut unwatched, sequence, &modulated());
+            for _ in 0..8 {
+                let _ = thresholds.borrow().activation_amplitude();
+            }
+        }
+
+        let watched_seen = drained(&mut watched_events);
+        let unwatched_seen = drained(&mut unwatched_events);
+        assert_eq!(watched_seen.len(), unwatched_seen.len(), "{watched_seen:?}");
+        assert!(
+            !watched_seen.is_empty(),
+            "the comparison is only worth anything if something happened"
+        );
+    }
+
+    /// Teardown leaves no calibration behind: the analyser is dropped with the reporter, and the
+    /// last thing an application can read is the state the terminal reset left (`M-60`).
+    #[test]
+    fn teardown_leaves_the_reset_calibration_state() {
+        let calibrated = profile().with_calibration(Some(CalibrationProfile::new()));
+        let (mut reporter, _sink, _events, thresholds) = reporter_with("call-a", calibrated);
+        for sequence in 0..25u64 {
+            feed(&mut reporter, sequence, &silence());
+        }
+        assert_eq!(
+            thresholds.borrow().outcome(),
+            Some(CalibrationOutcome::Applied)
+        );
+
+        reporter.finish();
+
+        let after = *thresholds.borrow();
+        assert_eq!(after.outcome(), None, "the warm-up is re-armed");
+        assert_eq!(after.observed_floor(), None, "the period is discarded");
+        assert_eq!(
+            after.activation_amplitude(),
+            1_536,
+            "the threshold the call learned is what it last measured against"
         );
     }
 

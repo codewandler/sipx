@@ -25,7 +25,8 @@
 
 use sipx_audio::PcmSamples;
 use sipx_audio::analysis::{
-    AnalysisFrame, AudioAnalyzer, AudioDirection, DiscontinuityKind, Observation,
+    AnalysisFrame, AudioAnalyzer, AudioDirection, DiscontinuityKind, EffectiveThresholds,
+    Observation,
 };
 use sipx_media::PcmFrame;
 
@@ -161,5 +162,10 @@ impl AudioFeed {
     /// How many samples one window covers.
     pub(crate) const fn window_samples(&self) -> u32 {
         self.analyzer.window_samples()
+    }
+
+    /// What this analyser is measuring against right now, as a value (§12.9).
+    pub(crate) const fn thresholds(&self) -> EffectiveThresholds {
+        self.analyzer.thresholds()
     }
 }
