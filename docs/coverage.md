@@ -23,11 +23,11 @@ bounds it, by naming the code no test reaches at all.
 
 | Counter | Covered | Total | Reached |
 |---|---|---|---|
-| Lines | 67432 | 74818 | 90.13% |
-| Branches | 5836 | 8365 | 69.77% |
-| Functions | 7453 | 8126 | 91.72% |
+| Lines | 53341 | 61480 | 86.76% |
+| Branches | 6217 | 8827 | 70.43% |
+| Functions | 6201 | 6965 | 89.03% |
 
-Measured on 2026-08-08 at commit `fc4fe499b39b70381c2b97246b937e4ad574ff4d`, with
+Measured on 2026-08-08 at commit `6f10b909a5dbd1424d67bb8c90fcf1db8594ef85`, with
 `cargo-llvm-cov 0.8.7` on `rustc 1.99.0-nightly (26ae60a9e 2026-07-28)`.
 **The figure describes that commit and not necessarily `HEAD`**: measuring costs an
 instrumented rebuild of the workspace and a full run of the suite, so it is taken
@@ -48,18 +48,19 @@ column is the count that actually answers *what does this suite not reach*.
 
 | Crate | Lines | Branches | Functions | Lines unreached |
 |---|---|---|---|---|
-| `sipx-app` | 82.66% | 62.47% | 86.94% | 1254 |
-| `sipx-app-protocol` | 88.08% | 74.34% | 92.38% | 299 |
-| `sipx-audio` | 94.14% | 82.79% | 90.38% | 66 |
-| `sipx-call` | 87.35% | 63.37% | 91.93% | 1657 |
-| `sipx-cli` | 80.96% | 63.99% | 77.38% | 1460 |
-| `sipx-media` | 94.70% | 71.85% | 96.32% | 519 |
-| `sipx-rtp` | 98.65% | 91.18% | 97.83% | 31 |
-| `sipx-sdp` | 97.48% | 81.40% | 94.91% | 72 |
-| `sipx-sip` | 95.42% | 80.21% | 95.45% | 395 |
-| `sipx-testkit` | 91.55% | 72.54% | 92.38% | 252 |
-| `sipx-transport` | 92.80% | 72.59% | 93.43% | 754 |
-| `sipx-ua` | 89.83% | 63.76% | 93.50% | 627 |
+| `sipx-app` | 79.30% | 63.20% | 84.38% | 1237 |
+| `sipx-app-protocol` | 86.32% | 74.34% | 90.77% | 322 |
+| `sipx-audio` | 87.89% | 91.76% | 76.43% | 147 |
+| `sipx-call` | 84.91% | 62.96% | 90.93% | 1804 |
+| `sipx-cli` | 77.76% | 64.87% | 73.77% | 1408 |
+| `sipx-media` | 90.69% | 73.72% | 92.21% | 788 |
+| `sipx-rtp` | 94.71% | 91.75% | 87.40% | 73 |
+| `sipx-sdp` | 95.29% | 82.58% | 93.33% | 90 |
+| `sipx-sip` | 93.84% | 80.85% | 94.47% | 371 |
+| `sipx-testkit` | 90.83% | 72.92% | 91.04% | 241 |
+| `sipx-transport` | 89.82% | 73.97% | 90.97% | 708 |
+| `sipx-ua` | 86.45% | 64.64% | 91.11% | 575 |
+| `sipx-wasm` | 81.68% | 59.86% | 89.24% | 375 |
 
 ## What the measurement excludes
 
@@ -75,12 +76,43 @@ claim an exclusion the tool never made.
 | `/fuzz/` | the fuzz targets are a separate cargo workspace with its own nightly campaign; a target the suite never invokes would read as unreached code that is in fact exercised elsewhere |
 | `/target/` | generated code — build-script output is compiled from the build directory, and it is written rather than authored, so its reached fraction is not a fact about this repository |
 
+### The tests inside the source files
+
+A path pattern removes a *file*, and this project keeps its unit tests in the middle of the
+file they test — so the exclusions above reach `tests/` and cannot reach a
+`#[cfg(test)] mod tests` in `src/`. `X-66` published a figure that partly measured the
+tests themselves and said so; this is what closed it (`X-116`):
+
+| Attribute | Why |
+|---|---|
+| `#[cfg_attr(coverage_nightly, coverage(off))]` | an inline `#[cfg(test)] mod` is test code in the middle of a source file, which no filename pattern can reach; this removes it from the instrumentation instead, so it leaves the figure for the same reason `/tests/` does |
+
+Every `#[cfg(test)] mod` under `crates/*/src/` carries it — 161 of them at the commit above — and **no file is named**
+anywhere. The rule is one syntactic scan, applied by
+`./scripts/coverage-report.py --annotate` and verified by `--check`, so a test module added tomorrow either
+carries the exclusion or fails an implementor's gate. A list of annotated files would rot
+on the first new module, and rot invisibly: the number would simply go back up.
+
+**What it cost.** `#[coverage(off)]` is the unstable `coverage_attribute` feature, so the
+crate root of every crate holding one declares
+`#![cfg_attr(coverage_nightly, feature(coverage_attribute))]` and every
+annotation is a `cfg_attr` on `coverage_nightly` — the cfg `cargo llvm-cov` sets on what it
+instruments. It is therefore **inert in every build that is not a coverage run**: the
+stable build, the MSRV build and every release artifact parse the attribute and discard it,
+and the workspace declares the cfg under `[workspace.lints.rust]` so that the builds which
+never set it do not warn about it either. No toolchain was added — `--branch` already
+required nightly — and nothing that ships changed. What it buys is that the figure below
+no longer rises for writing a unit test.
+
 ## What the number still cannot see
 
-- **An inline `#[cfg(test)] mod tests` lives in `src/` and is counted.** The exclusions
-  above are paths, and this project keeps unit tests beside the code they test, so the
-  figure is flattered by however much test code sits inside a source file. Integration
-  tests under `/tests/` are excluded; their inline siblings cannot be, by path.
+- **`#[cfg(test)]` on anything that is not a module is still counted.** The rule reaches a
+  `#[cfg(test)] mod`, which is where this workspace puts its unit tests and their fixtures.
+  A bare `#[cfg(test)] fn` or `#[cfg(test)] impl` beside the code it helps is not a module,
+  and stays in the figure.
+- **The exclusion holds only while the cfg is set.** Measuring with `--no-cfg-coverage`, or
+  with a tool that does not set it, silently restores the flattered number rather than
+  failing — which is why `./scripts/coverage-report.py --measure` is the only recorded way to take one.
 - **Doctests are not instrumented, and the gate runs them.** The tool measures the `--tests`
   targets, so a line whose only caller is an example in a doc comment reads here as
   unreached while `cargo test --workspace --all-features` executes it. The gap is in this
