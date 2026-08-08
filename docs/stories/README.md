@@ -62,6 +62,7 @@ unmet.
 - [A-10 — Publish the stable crate set and diagnostic CLI artifacts](A-10-publish-the-stable-crates-and-cli.md) · Application · promote the public beta only after every v1 predicate; stable archives and SBOM live here
 - [A-38 — Publish and verify the second release candidate](A-38-publish-and-verify-rc3.md) · Application · after X-113 · the post-rc.2 wave as one immutable prerelease · no stable-1.0 claim widens
 - [A-39 — Build the speech provider contract skeleton](A-39-build-the-speech-provider-contract-skeleton.md) · Application · A-25 specified it and nothing implements it · the registry, session types and selection order every later speech story needs
+- [M-41 — Negotiate AEAD SRTP protection profiles](M-41-negotiate-aead-srtp-protection-profiles.md) · Media · RFC 7714 · one profile shipped today · AEAD-only peers cannot negotiate media with sipx at all · follow-up
 - [M-54 — Expose bounded call PCM processing and resampling](M-54-expose-bounded-call-pcm-processing.md) · Media · after A-25 and M-43 · shared seam for local speech and deterministic analysis
 - [M-57 — Specify deterministic real-time call-audio processing](M-57-specify-real-time-call-audio-processor.md) · Media · M16 spec gate · sans-I/O bounded frame processor using M-54's shared seam
 - [M-70 — Accept multiplexed browser offers with unused component candidates](M-70-accept-multiplexed-browser-offers-with-unused-component-candidates.md) · Media · external review finding 9 · a second browser engine reaches SDP then fails the multiplexed profile
@@ -76,7 +77,7 @@ _The measure of this stack's reach is what can be built on it **without writing 
 
 ### browser audio SDK
 _Beta.4 proves that sipx can interoperate with a browser audio endpoint, but it does not let a web_
-- [A-16 — Specify the browser SDK contract](A-16-specify-the-browser-sdk-contract.md) · Application · M15 admission and spec gate · audio-only WASM SIP with browser-owned WebRTC
+- [S-41 — Export the sans-I/O session kernel to WebAssembly](S-41-export-the-sans-io-session-kernel-to-wasm.md) · Signalling · after A-16 · deterministic Rust state machine with host bytes, timers and entropy
 
 ### real-time call-audio analysis
 _Applications need small, predictable facts about live audio even when no speech model is enabled:_
@@ -85,6 +86,7 @@ _Applications need small, predictable facts about live audio even when no speech
 
 ### Conformance
 - [X-114 — Instrument gate step timings](X-114-instrument-gate-step-timings.md) · Build · X-93's baseline exists only as prose in its own story · gate.py has no clock at all, so nothing can be shown to have got faster
+- [X-115 — Catch implemented but unclosed stories](X-115-catch-implemented-but-unclosed-stories.md) · Build · A-16 was fully delivered, left at status backlog, then re-selected into a wave and dispatched to an implementor
 
 ### demand-led capability work
 _sipx's backlog has been derived from RFCs, from our own review findings, and from what the design_
@@ -104,7 +106,7 @@ _A live call on a machine with a local accelerator should be able to transcribe 
 
 ### media security profiles
 _sipx implements exactly one SRTP protection profile:_
-- [M-41 — Negotiate AEAD SRTP protection profiles](M-41-negotiate-aead-srtp-protection-profiles.md) · Media · RFC 7714 · one profile shipped today · AEAD-only peers cannot negotiate media with sipx at all · follow-up
+- [M-72 — Prove the AEAD SRTP key derivation against an independent peer](M-72-prove-the-aead-srtp-key-derivation-against-a-peer.md) · Media · RFC 7714 publishes no KDF vector · a wrong salt placement makes two sipx endpoints interoperate with each other and nobody else, and every round-trip test still passes
 
 ### Video
 - [M-40 — Decide whether video belongs in sipx](M-40-decide-whether-video-belongs-in-sipx.md) · Media · post-beta admission gate; the current vision says video is a non-goal, so no implementation precedes this decision
@@ -126,7 +128,6 @@ _Beta.4 proves that sipx can interoperate with a browser audio endpoint, but it 
 - [A-17 — Generate and package the browser SDK](A-17-generate-and-package-the-browser-sdk.md) · Application · after S-41, T-33 and M-52 · generated ABI types plus small handwritten ergonomic layer
 - [A-18 — Publish a runnable browser-audio demo](A-18-publish-a-runnable-browser-audio-demo.md) · Application · after A-17 · static public demo for register, dial, answer and non-silent audio
 - [M-52 — Adapt browser-native WebRTC audio](M-52-adapt-browser-native-webrtc-audio.md) · Media · after A-16 · reuse beta.4 profile through RTCPeerConnection, do not implement WebRTC in WASM
-- [S-41 — Export the sans-I/O session kernel to WebAssembly](S-41-export-the-sans-io-session-kernel-to-wasm.md) · Signalling · after A-16 · deterministic Rust state machine with host bytes, timers and entropy
 - [T-33 — Bind browser WebSocket signalling](T-33-bind-browser-websocket-signalling.md) · Transport · after A-16 and S-41 · browser owns I/O, WASM core consumes bytes
 - [X-100 — Prove the packaged browser SDK](X-100-prove-the-packaged-browser-sdk.md) · Build · M15 exit · clean consumer, supported browser matrix, both SIP roles and fail-closed negatives
 
@@ -195,6 +196,7 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [A-13 — Explain how sipx was built on the public documentation site](A-13-explain-how-sipx-was-built.md) · Application · before A-12; evidence-led development narrative, not an internal story dump
 - [A-14 — Publish 1.0.0-beta.3 from latest main](A-14-publish-beta3-from-latest-main.md) · Application · new immutable prerelease from latest main; beta.2 remains untouched
 - [A-15 — Publish and verify 1.0.0-beta.4](A-15-publish-beta4.md) · Application · beta.4 capstone · immutable tag, exact registry consumer, installed Opus CLI, Pages and GitHub prerelease
+- [A-16 — Specify the browser SDK contract](A-16-specify-the-browser-sdk-contract.md) · Application · M15 admission and spec gate · audio-only WASM SIP with browser-owned WebRTC
 - [A-19 — Specify the OpenAI realtime bridge](A-19-specify-the-openai-realtime-bridge.md) · Application · spec before code — every later story in the epic derives its tests from this document's vectors
 - [A-20 — A WSS client for non-SIP peers](A-20-a-wss-client-for-non-sip-peers.md) · Application · independent of A-19 — a general RFC 6455 client over the existing TLS policy, no vendor knowledge
 - [A-21 — Build a deterministic realtime peer](A-21-build-a-deterministic-realtime-peer.md) · Application · starts when A-19's spec lands — the peer implements the spec's other side, vector by vector
