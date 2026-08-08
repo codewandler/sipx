@@ -93,6 +93,9 @@ NOT_RUN_LOCALLY = {
     "device-linux": "the local all-feature suite runs the x86 vector; CI adds the arm64 release architecture",
     "device-portable": "requires the macOS and Windows platform audio SDKs unavailable on a Linux gate host",
     "browser-audio": "requires the hosted runner's matched native browser/WebDriver; the local gate runs its adversarial harness suite",
+    "coverage": "an instrumented rebuild of the workspace and a second full run of the suite, for a "
+    "number nothing gates on; the cheap half — rendering the page from the recorded counts and "
+    "comparing it — is the `coverage report` step above",
 }
 
 #: Run commands that are runner provisioning rather than checks. Kept deliberately short: every
@@ -179,6 +182,11 @@ def gate_steps(msrv: str) -> list[Step]:
         # the confidence ladder, the staleness limit and the rule that this repository's own column
         # is substituted rather than typed are all it. A guard that elaborate needs its own suite.
         Step("comparison tests", "gate", ("python3", "scripts/test-comparison-report.py")),
+        # X-66: the coverage figure is the one published number this repository deliberately refuses
+        # to act on, and a measurement nothing acts on is the easiest kind to let become a lie. The
+        # suite reverses all three ways it could: a typed percentage, a threshold quietly appearing,
+        # and an exclusion listed on the page that the tool never applied.
+        Step("coverage report tests", "gate", ("python3", "scripts/test-coverage-report.py")),
         Step(
             "provenance",
             "provenance",
@@ -244,6 +252,10 @@ def gate_steps(msrv: str) -> list[Step]:
         # radius, so it is generated and checked like every other published table, and an
         # observation that has aged past its limit fails the build rather than shipping with a note.
         Step("comparison", "docs", ("./scripts/comparison-report.py", "--check")),
+        # X-66: the measurement itself runs in CI — see `coverage` in NOT_RUN_LOCALLY — but the page
+        # is rendered from recorded counts, and rendering costs a JSON read. So the half that catches
+        # a hand-edited percentage is here, where an implementor meets it before CI does.
+        Step("coverage report", "docs", ("./scripts/coverage-report.py", "--check")),
         Step("fmt", "fmt", ("cargo", "fmt", "--all", "--check")),
         Step(
             "clippy",

@@ -204,6 +204,53 @@ jobs:
       # rule that this repository's own column is substituted rather than typed. A guard that
       # elaborate needs its own suite, and every rule in it has a reversed fixture.
       - run: python3 scripts/test-comparison-report.py
+      # X-66: the coverage figure is published and acted on by nothing, which makes it the easiest
+      # measurement in the tree to let rot into a lie. Every rule has a reversed fixture: a typed
+      # percentage, a threshold appearing in either the checker or the job below, and an exclusion
+      # the page claims that the tool never applied.
+      - run: python3 scripts/test-coverage-report.py
+
+  # X-66. A number, and deliberately nothing else built on it: no threshold, no ratchet, and no
+  # failure when it drops. `docs/roadmap.md` rules out a v1 gate built on coverage — a percentage
+  # would contradict the document it is supposed to serve — and `docs/maturity.md` already states
+  # the limit this sits inside: nothing there measures whether the tests are good, only that they
+  # pass. What this adds is the half that *is* mechanical: which lines the suite never executes.
+  #
+  # Here rather than in the local gate because measuring means an instrumented rebuild of the
+  # workspace and a second full run of the suite. The cheap half — rendering the page from the
+  # recorded counts and byte-comparing it — is a step in the `docs` job below, so a hand-edited
+  # figure fails an implementor's gate rather than waiting for a runner. `gate.py` names this job
+  # in NOT_RUN_LOCALLY with that reason.
+  #
+  # Nightly because `--branch` is unstable in the tool, which is the same argument the `fuzz` job
+  # makes: the result is read, not shipped, and nothing built here reaches a release artifact.
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    # An instrumented build is slower than the `test` job it mirrors, and a measurement nothing
+    # gates on must never hold a runner for the GitHub default of six hours before anyone is told.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libopus-dev libssl-dev pkg-config
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      # Pinned the way every other tool in this workflow is pinned: `--locked`, and no version.
+      - run: cargo install cargo-llvm-cov --locked
+      # Measures, records the counts, and re-renders the page from them. No `--fail-under` of any
+      # kind: this step is red only when the measurement could not be taken.
+      - run: ./scripts/coverage-report.py --measure --out "$RUNNER_TEMP/coverage"
+      # Publish the number where whoever reads the run will actually meet it, rather than only
+      # inside a downloadable archive.
+      - run: cat "$RUNNER_TEMP/coverage/summary.md" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: ${{ runner.temp }}/coverage
+          if-no-files-found: error
+          retention-days: 14
 
   # The peer list is read from the repository rather than written here, so that adding an interop
   # peer stays what `tests/interop/README.md` promises it is: adding a profile. A matrix spelled
@@ -296,6 +343,10 @@ jobs:
       # unevidenced claim, or an observation that has aged past its limit, fails the build rather
       # than shipping with a note — half of what it states is about software we cannot test.
       - run: ./scripts/comparison-report.py --check
+      # X-66: the coverage page is generated from recorded counts like every other published table
+      # here, so a percentage edited by hand fails rather than shipping. This checks the rendering
+      # and never the number — a measurement covering nothing at all passes.
+      - run: ./scripts/coverage-report.py --check
 
   # The documentation site. Built on every push and pull request so a broken link fails review
   # rather than the deployed page; published only from `main`.
