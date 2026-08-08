@@ -1,13 +1,30 @@
 ---
 title: What's new
-description: Release highlights and adoption notes for the sipx 1.0.0-rc.7 release candidate.
+description: Release highlights and adoption notes for the sipx 1.0.0-rc.8 release candidate.
 ---
 
 # What's new
 
 <!-- BEGIN generated:release-heading -->
-## 1.0.0-rc.7 — 2026-08-08
+## 1.0.0-rc.8 — 2026-08-08
 <!-- END generated:release-heading -->
+
+RC.8 repairs five checks and contracts that were quieter than they claimed.
+
+```bash
+cargo install --locked --version =1.0.0-rc.8 sipx-cli
+```
+
+- **The discard guard covers the whole tree.** It had been listing one directory, so the largest
+  module in the workspace went unscanned; the widened scan found seven unexplained discards.
+- **A re-encoded RTP packet keeps its header extension**, which a forwarding path used to strip.
+- **`MediaProfile`, `IcePolicy` and `Keying` are `#[non_exhaustive]`** — matching them exhaustively
+  now needs a fallback arm.
+- **The CLI reference no longer leaves a wrong-featured binary** for the next test run to spawn.
+- **`to_string_sdp` says what it does not preserve**, so a forwarder learns it from the docs rather
+  than from a peer.
+
+## 1.0.0-rc.7 — 2026-08-08
 
 RC.7 fixes the added-delay reports at their real source and repairs three checks that were measuring
 less than they claimed.
@@ -564,5 +581,5 @@ answer calls, but application callback bindings are not implemented.
 This website is built from `main`, so a page or API link may describe work newer than the tagged
 release. Use the exact crates.io version when reproducibility matters, and consult the
 [complete changelog](https://github.com/codewandler/sipx/blob/main/CHANGELOG.md) before updating a
-Git revision. Unreleased behavior is not part of `1.0.0-rc.7` merely because it appears on this
+Git revision. Unreleased behavior is not part of `1.0.0-rc.8` merely because it appears on this
 site.

@@ -7,6 +7,41 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0-rc.8] — 2026-08-08
+
+Five repairs to checks and contracts that were quieter than they claimed.
+
+### Changed
+
+- **The discard guard walks the whole tree.** It listed one directory, so the nine files moved into
+  `call/` and `coupling/` had never been scanned — the largest module in the workspace, unguarded
+  from the moment it became worth guarding. The widened scan found seven unexplained discards, each
+  now carrying its reason, and an assertion fails if the scan ever covers no nested module again.
+
+- **`MediaProfile`, `IcePolicy` and `Keying` are `#[non_exhaustive]`.** Code matching them
+  exhaustively needs a fallback arm; adding a variant is no longer a breaking change. Marking them
+  broke three in-tree matches, which is the breakage a downstream consumer would have hit when L16
+  and G.722 were added.
+
+- **The CLI reference builds somewhere the tests do not spawn from.** It built into the shared
+  target directory with default features, after the all-features test step, so every gate run ended
+  by leaving a binary the next run's process tests would spawn — failing as though audio were
+  broken. The reference still documents the default-feature surface; only its output moved.
+
+### Fixed
+
+- **A re-encoded RTP packet keeps the header extension it arrived with.** Parsing skipped past it
+  and encoding never wrote one, so a forwarding path silently stripped what the far end had
+  negotiated. The extension bit is set only when bytes are carried, and an over-long extension
+  length is a refusal rather than a panic.
+
+### Added
+
+- **`to_string_sdp` states what it does not preserve** — the reissued `v=`, nettype and addrtype,
+  multicast TTL and address count, `m=` port count, line order and whitespace — and says plainly
+  that this is safe for a description this stack authored and unsafe for one it received. Three of
+  those losses are pinned by tests.
+
 ## [1.0.0-rc.7] — 2026-08-08
 
 This candidate fixes the delay two field reports described, and repairs three checks that were
@@ -3901,7 +3936,8 @@ Stated so nobody has to discover it from a stack trace:
 - **Interop is verified against Kamailio only.** A second implementation with different
   opinions — Asterisk, as a B2BUA rather than a proxy — has not been tried.
 
-[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.7...HEAD
+[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.8...HEAD
+[1.0.0-rc.8]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.7...v1.0.0-rc.8
 [1.0.0-rc.7]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.6...v1.0.0-rc.7
 [1.0.0-rc.6]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.5...v1.0.0-rc.6
 [1.0.0-rc.5]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.4...v1.0.0-rc.5

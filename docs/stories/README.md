@@ -109,10 +109,6 @@ _Signalling that cannot carry audio is a curiosity. The media layer is also wher
 - [M-74 — Guard public data enums against exhaustive matching](M-74-guard-public-data-enums-against-exhaustive-matching.md) · Media · the non_exhaustive check only matches enums whose name ends in Error, so MediaProfile, IcePolicy, Keying and RtcpMode are unguarded
 - [M-75 — Preserve RTP header extensions on re-encode](M-75-preserve-rtp-header-extensions-on-re-encode.md) · Media · extensions are parsed on receive and silently dropped when a packet is re-encoded · harmless for audio today, a correctness trap for any relay
 
-### SIP core (sans-IO)
-_Everything above this layer inherits its correctness properties. SIP's genuinely hard parts —_
-- [S-52 — Document what an SDP round trip loses](S-52-document-what-an-sdp-round-trip-loses.md) · Signalling · parse plus to_string_sdp is lossy in ways nothing states · harmless for a description sipx authors, fatal for one it relays
-
 ### supported test surfaces
 _The workspace has seeded links, virtual time and call fixtures, but downstream applications have no_
 - [X-118 — Make bounded-timeout tests robust under load](X-118-make-bounded-timeout-tests-robust-under-load.md) · Build · a CANCEL test that passes in isolation timed out under three concurrent gate runs · a flaky red is worse than a slow one
@@ -354,6 +350,7 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [S-49 — Expose parsed TEL URI parameters](S-49-expose-parsed-tel-uri-parameters.md) · Signalling · requested by sipx-clstr CX-18 — routing consumers must not split the raw RFC 3966 parameter tail
 - [S-50 — Expose lossless address-presentation editing](S-50-expose-lossless-address-presentation-editing.md) · Signalling · requested by sipx-clstr CX-17 — one atomic display-name and URI splice retaining all header parameters
 - [S-51 — Expose lossless Warning-agent editing](S-51-expose-lossless-warning-agent-editing.md) · Signalling · requested by sipx-clstr CX-17 — parser-owned warn-agent replacement retaining code and text
+- [S-52 — Document what an SDP round trip loses](S-52-document-what-an-sdp-round-trip-loses.md) · Signalling · parse plus to_string_sdp is lossy in ways nothing states · harmless for a description sipx authors, fatal for one it relays
 - [T-1 — Specify the transport layer and the sans-IO driver contract](T-1-transport-spec.md) · Signalling · gates every other transport story
 - [T-2 — Implement the UDP transport and the loopback harness](T-2-udp-transport.md) · Signalling
 - [T-3 — Implement the TCP transport with connection pooling and reuse](T-3-tcp-transport-and-pool.md) · Signalling

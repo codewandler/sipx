@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-sipx-call = "=1.0.0-rc.7"
-sipx-sip = "=1.0.0-rc.7"
-sipx-transport = "=1.0.0-rc.7"
+sipx-call = "=1.0.0-rc.8"
+sipx-sip = "=1.0.0-rc.8"
+sipx-transport = "=1.0.0-rc.8"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
