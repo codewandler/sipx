@@ -115,7 +115,14 @@ pub(crate) fn versioned(producer: &str, text: &str) -> serde_json::Value {
     parse(text).unwrap_or_else(|error| panic!("strict {producer} JSON result: {error}: {text}"))
 }
 
-#[cfg(feature = "device-audio")]
+// The cfg matches its **only** caller exactly, `target_os` included. The caller is the Linux
+// virtual-device test, `dph_12_wav_and_virtual_device_carry_the_same_clip`, which is gated on both
+// the feature and the platform; gating this on the feature alone left it dead on macOS and Windows,
+// where `-D warnings` makes dead code an error. That is why the two `device audio compiles` jobs
+// have been red — a platform failure in appearance and a `cfg` that disagreed with its caller in
+// fact. The Linux gate cannot see it: on a Linux host the caller compiles and the function is used.
+// `X-125` is filed for closing that blind spot rather than relying on the next reader noticing.
+#[cfg(all(feature = "device-audio", target_os = "linux"))]
 pub(crate) fn versioned_bytes(producer: &str, bytes: &[u8]) -> serde_json::Value {
     versioned(
         producer,

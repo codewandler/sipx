@@ -83,6 +83,7 @@ _The measure of this stack's reach is what can be built on it **without writing 
 - [C-6 — Reach the bridge and the conference from a call](C-6-reach-the-bridge-from-a-call.md) · Signalling · app-sdk · last; not v1-blocking · C-1 (M9) later upgrades the signalling half · size M
 
 ### Conformance
+- [X-125 — See what only the non-Linux jobs compile](X-125-see-what-only-the-non-linux-jobs-compile.md) · Build · two CI jobs were red for a day over a cfg that disagreed with its only caller · the Linux gate compiles the caller, so it cannot see it
 - [X-119 — Pace registry publication within its rate limit](X-119-pace-registry-publication-within-its-rate-limit.md) · Build · split out of X-93 · the 429 pacing row shares nothing with the rest of that story
 - [X-93 — Make protected release evidence faster without weakening it](X-93-make-protected-release-evidence-faster.md) · Build · measure cache and preflight changes against the 12m37 cold beta gate · follow-up
 
