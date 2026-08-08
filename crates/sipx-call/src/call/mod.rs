@@ -32,6 +32,7 @@ use crate::event::{CallEvent, CallEvents, EndCause, EventSink};
 use crate::extension::{self, ApplicationRequest};
 use crate::identity::OutboundIdentityPolicy;
 use crate::media_policy::{Codecs, IcePolicy, Keying, MediaPolicy, MediaProfile, NegotiatedKeying};
+use crate::signal_metrics::{SignalMetrics, SignalMetricsError};
 use crate::snapshot::{
     DialogNotQuiescent, DialogPersistenceError, DialogRestoreContext, DialogSnapshot,
     SessionSnapshot, SnapshotParts,
@@ -500,6 +501,38 @@ impl Call {
     #[must_use]
     pub fn rtcp_quality_hook(&self) -> Option<sipx_media::RtcpQualityHook> {
         self.media.rtcp_quality_hook()
+    }
+
+    /// Start reporting deterministic signal metrics for one direction of this call's audio
+    /// (`M-59`).
+    ///
+    /// Level, energy, clipping and silence over the exact sample windows
+    /// [`docs/specs/call-audio-processing.md`](../../../../docs/specs/call-audio-processing.md)
+    /// §5 defines, delivered as [`CallEvent::SignalMetrics`] on this call's event stream until
+    /// the returned [`SignalMetrics`] is stopped or dropped. The audio reaches the analyser
+    /// through `M-54`'s one call-media seam; this opens no second tap and changes nothing about
+    /// the call.
+    ///
+    /// **Not a quality report.** Loss, jitter, round-trip time and the MOS estimate remain
+    /// [`MediaSession::quality`](sipx_media::MediaSession::quality)'s (`M-10`); this measures what
+    /// the audio contained, not how it was delivered. The two are complementary and neither
+    /// substitutes for the other.
+    ///
+    /// Several observers may run at once — one per direction is the ordinary case — within the
+    /// seam's per-session attachment bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SignalMetricsError::Profile`] when a threshold, window, cadence or queue depth is
+    /// outside the domain the specification declares, and [`SignalMetricsError::Attachment`] when
+    /// the seam refuses: an unconvertible format, a queue depth outside its own domain, a call
+    /// already carrying as many processors as the seam bounds it to, or a stopped session. The
+    /// call is unchanged either way.
+    pub fn observe_signal_metrics(
+        &self,
+        profile: sipx_audio::signal::SignalProfile,
+    ) -> std::result::Result<SignalMetrics, SignalMetricsError> {
+        crate::signal_metrics::observe(&self.media, profile, self.events.emitter())
     }
 
     /// A response handle for a coupling that must answer glare while an outgoing request borrows

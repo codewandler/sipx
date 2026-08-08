@@ -132,6 +132,29 @@ pub enum CallEvent {
     Muted,
     /// This side let its outbound audio through again ([`Call::unmute`](crate::Call::unmute)).
     Unmuted,
+    /// A deterministic signal-metric observation for one direction of this call's audio (`M-59`).
+    ///
+    /// Level, energy, clipping and silence, measured over the exact sample windows
+    /// [`docs/specs/call-audio-processing.md`](../../../docs/specs/call-audio-processing.md) §5
+    /// defines and carried here through `M-54`'s one call-media seam. Emitted only while an
+    /// observer started by
+    /// [`Call::observe_signal_metrics`](crate::Call::observe_signal_metrics) is alive, at the
+    /// cadence its profile declares.
+    ///
+    /// **This is signal content, not network quality.** Loss, jitter, round-trip time and the
+    /// MOS estimate are `M-10`'s RTP/RTCP snapshot
+    /// ([`sipx_media::MediaSession::quality`]) and are unchanged and unduplicated by this
+    /// variant; nothing here describes packet delivery. The call the observation belongs to is
+    /// this stream's call — a `CallEvent` never names a call it is not about — while direction,
+    /// epoch, report sequence, sample position and window coverage all ride the observation
+    /// itself.
+    SignalMetrics {
+        /// Which side of the call was measured.
+        direction: sipx_audio::signal::SignalDirection,
+        /// The observation: a completed report, a silence transition, a reset that opened a new
+        /// measurement epoch, or the counted marker for observations an overrun queue lost.
+        observation: sipx_audio::signal::SignalObservation,
+    },
     /// An application-owned method arrived inside this dialog.
     ///
     /// INFO and MESSAGE are admitted directly. A private extension token appears here only after

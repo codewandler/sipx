@@ -2,7 +2,7 @@
 id: M-59
 title: Report call signal level clipping and silence metrics
 pillar: Media
-status: ready
+status: in-progress
 priority: 14
 design: docs/designs/call-audio-analysis.md
 epic: call-audio-analysis
