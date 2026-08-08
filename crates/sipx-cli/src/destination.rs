@@ -13,7 +13,9 @@ use sipx_transport::Target;
 
 use crate::output::{Exit, Report};
 
-pub(crate) use sipx_transport::destination::{Attempts, Error, MAX_ATTEMPTS, first};
+pub(crate) use sipx_transport::destination::{
+    Attempted, Attempts, Error, MAX_ATTEMPTS, Unreached, first, walk,
+};
 
 /// A resolver that also applies this command's verification and transport policy.
 #[derive(Debug)]

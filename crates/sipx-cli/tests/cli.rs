@@ -3466,6 +3466,236 @@ async fn a_connection_failure_reports_how_many_candidates_it_attempted() {
     );
 }
 
+/// Take one complete SIP message off the front of `buffer`, if there is a whole one there yet.
+///
+/// TCP is a stream and not a sequence of messages, so the boundary is the blank line plus whatever
+/// `Content-Length` announces (RFC 3261 §7.5). Treating "whatever this read returned" as a message
+/// frames a NOTIFY's body as a second message on a machine that splits the write.
+fn take_message(buffer: &mut Vec<u8>) -> Option<String> {
+    let head = buffer.windows(4).position(|window| window == b"\r\n\r\n")? + 4;
+    let headers = String::from_utf8_lossy(&buffer[..head]).into_owned();
+    let length = headers
+        .split("\r\n")
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case("Content-Length")
+                .then(|| value.trim().parse::<usize>().ok())?
+        })
+        .unwrap_or(0);
+    if buffer.len() < head + length {
+        return None;
+    }
+    let message = String::from_utf8_lossy(&buffer[..head + length]).into_owned();
+    buffer.drain(..head + length);
+    Some(message)
+}
+
+/// The value of a header line, without its name.
+fn header_value<'a>(message: &'a str, name: &str) -> &'a str {
+    header_line(message, name)
+        .split_once(':')
+        .map_or("", |(_, value)| value.trim())
+}
+
+/// A registrar that answers SUBSCRIBE over TCP and notifies once, for as long as it is asked.
+///
+/// TCP because the pass this fixture exists to prove needs a first candidate that *refuses*, and a
+/// datagram sent at a closed UDP port is not refused — it is merely unanswered, which is
+/// indistinguishable from a registrar still thinking about it. A closed TCP port answers at once
+/// and says no, which is what makes "walk to the next address" observable in a bounded test.
+///
+/// It stays in a loop rather than answering once and closing: the command unsubscribes when it has
+/// what it came for, and a fixture that has already hung up turns that tidy exit into a wait for a
+/// response nothing will send.
+async fn notifying_registrar(listener: tokio::net::TcpListener, address: std::net::SocketAddr) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    // The Via sent-by is a host and a port and nothing else (RFC 3261 §20.42); the Contact is a
+    // URI. Deriving both from one string is how the first attempt at this fixture put a userinfo
+    // into a Via and had every NOTIFY discarded as malformed.
+    let contact = format!("sip:registrar@{address};transport=tcp");
+
+    let Ok((mut stream, _)) = listener.accept().await else {
+        return;
+    };
+    let mut buffer: Vec<u8> = Vec::new();
+    let mut chunk = [0_u8; 2048];
+    let mut cseq = 0_u32;
+
+    loop {
+        let Ok(read) = stream.read(&mut chunk).await else {
+            return;
+        };
+        if read == 0 {
+            return;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+
+        while let Some(message) = take_message(&mut buffer) {
+            // The client's own 200 to a NOTIFY. Nothing to do with it; the fixture reads it so the
+            // stream stays framed for whatever follows.
+            if !message.starts_with("SUBSCRIBE ") {
+                continue;
+            }
+            // A 200 to SUBSCRIBE establishes a dialog, so it needs a To tag and a Contact; without
+            // them the subscription refuses the response as malformed and never gets as far as the
+            // notification this test is about.
+            let to = header_value(&message, "To");
+            let tagged = if to.contains(";tag=") {
+                to.to_owned()
+            } else {
+                format!("{to};tag=fixture0001")
+            };
+            let from = header_value(&message, "From").to_owned();
+            let call_id = header_value(&message, "Call-ID").to_owned();
+            let accepted = format!(
+                "SIP/2.0 200 OK\r\nVia: {}\r\nTo: {tagged}\r\nFrom: {from}\r\nCall-ID: {call_id}\r\n\
+                 CSeq: {}\r\nContact: <{contact}>\r\nExpires: 60\r\nContent-Length: 0\r\n\r\n",
+                header_value(&message, "Via"),
+                header_value(&message, "CSeq"),
+            );
+            if stream.write_all(accepted.as_bytes()).await.is_err() {
+                return;
+            }
+
+            // RFC 3680's document for the resource the command subscribed to. `state="full"` is a
+            // complete list, which is what a first notification has to be.
+            let document = "<reginfo xmlns=\"urn:ietf:params:xml:ns:reginfo\" version=\"0\" \
+                            state=\"full\"><registration aor=\"sip:alice@example.test\" id=\"r1\" \
+                            state=\"active\"><contact id=\"c1\" state=\"active\" \
+                            event=\"registered\"><uri>sip:alice@192.0.2.10</uri></contact>\
+                            </registration></reginfo>";
+            // The dialog is the one the 200 just established, so the NOTIFY's From and To are the
+            // response's the other way round (RFC 3261 §12.2.1.1).
+            cseq += 1;
+            let notify = format!(
+                "NOTIFY {} SIP/2.0\r\nVia: SIP/2.0/TCP {};branch=z9hG4bK-p31-{cseq}\r\n\
+                 Max-Forwards: 70\r\nFrom: {tagged}\r\nTo: {from}\r\nCall-ID: {call_id}\r\n\
+                 CSeq: {cseq} NOTIFY\r\nContact: <{contact}>\r\nEvent: reg\r\n\
+                 Subscription-State: active;expires=60\r\n\
+                 Content-Type: application/reginfo+xml\r\nContent-Length: {}\r\n\r\n{document}",
+                header_value(&message, "Contact").trim_matches(['<', '>']),
+                address,
+                document.len(),
+            );
+            if stream.write_all(notify.as_bytes()).await.is_err() {
+                return;
+            }
+        }
+    }
+}
+
+/// `P-31`: a registrar whose first address is dead is still reached from `peers`.
+///
+/// `register`, `dial` and `load` walk the ordered candidate list under one shared deadline; `peers`
+/// resolved the same list and then took `first()` only, so a registrar with one dead address was
+/// unreachable from this command and reachable from every other one — against the same registrar,
+/// on the same machine, in the same minute. That is the shape an operator cannot diagnose, because
+/// the evidence they would gather to prove the registrar is up is the command that works.
+///
+/// The name resolves to three loopback addresses and only the second one accepts, so a pass that
+/// stops at the head of the list reports the first address's refusal and lists nobody.
+#[tokio::test]
+async fn peers_reaches_a_registrar_whose_first_address_is_dead() {
+    let _scenario = process_scenario().await;
+    let dns = fixture_nameserver().await;
+
+    // Reserved on the first `SPREAD` address and released, so the port is free on the second and
+    // refuses on the first — the dead head of the list this pass has to walk past.
+    let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("reserves a loopback port");
+    let port = probe.local_addr().expect("reserved address").port();
+    drop(probe);
+    let listener = tokio::net::TcpListener::bind(("127.0.0.2", port))
+        .await
+        .expect("the fixture registrar binds the second address");
+    let address = listener.local_addr().expect("the fixture has an address");
+    let serving = tokio::spawn(notifying_registrar(listener, address));
+
+    let listed = through_nameserver(
+        &dns,
+        &[
+            "peers",
+            "--registrar",
+            "sip:all@example.test",
+            "--target",
+            &format!("{SPREAD}:{port}"),
+            "--transport",
+            "tcp",
+            "--expires",
+            "60",
+        ],
+        true,
+    )
+    .await;
+    serving.abort();
+
+    let stdout = String::from_utf8_lossy(&listed.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&listed.stderr).into_owned();
+    assert_eq!(
+        listed.status.code(),
+        Some(0),
+        "the registrar answered at its second address: {stderr}"
+    );
+    assert!(
+        stdout.contains("\"source\":\"registrar\""),
+        "the subscription's peers are what this lists: {stdout} / {stderr}"
+    );
+    assert!(
+        stdout.contains("alice"),
+        "the notified registration is the peer: {stdout} / {stderr}"
+    );
+}
+
+/// `P-31`: and when no address answers, `peers` says how far the pass got — in `T-41`'s two fields.
+///
+/// A script that learned `candidates_attempted`/`candidates_resolved` from `register` reads them
+/// unchanged here, which is the entire reason the pair is one shape rather than one per command:
+/// "this registrar has a dead address" and "every address behind this registrar is unreachable" are
+/// different findings with different owners, and the last transport error reads identically for
+/// both.
+#[tokio::test]
+async fn a_registrar_that_answers_at_no_address_reports_what_it_attempted() {
+    let _scenario = process_scenario().await;
+    let dns = fixture_nameserver().await;
+
+    // Reserved and released, so every address behind the name is a port nothing accepts on.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").expect("reserves a loopback port");
+    let refused = closed.local_addr().expect("reserved address").port();
+    drop(closed);
+
+    let unreachable = through_nameserver(
+        &dns,
+        &[
+            "peers",
+            "--registrar",
+            "sip:all@example.test",
+            "--target",
+            &format!("{SPREAD}:{refused}"),
+            "--transport",
+            "tcp",
+            "--expires",
+            "60",
+        ],
+        true,
+    )
+    .await;
+
+    let stderr = String::from_utf8_lossy(&unreachable.stderr).into_owned();
+    assert_eq!(unreachable.status.code(), Some(1), "{stderr}");
+    assert_eq!(
+        reported_number(&stderr, "candidates_attempted", true),
+        Some(3),
+        "every address behind the name was attempted: {stderr}"
+    );
+    assert_eq!(
+        reported_number(&stderr, "candidates_resolved", true),
+        Some(3),
+        "a spent budget is attempted == resolved, which is what says the name is exhausted \
+         rather than cut short: {stderr}"
+    );
+}
+
 /// `T-39`: a named target is what an operator actually has, and the page a script author reads is
 /// where that has to be stated. Without it the advice that survives is the one this story exists
 /// to retire — look the address up yourself and pass a literal.

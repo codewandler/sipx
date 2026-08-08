@@ -578,38 +578,40 @@ impl UserAgent {
         candidates: &[Target],
         budget: Option<Duration>,
     ) -> Result<(Self, Lease)> {
-        let mut attempts = destination::Attempts::over(candidates.len());
-        let started = tokio::time::Instant::now();
-        let mut last = None;
-        for target in candidates.iter().take(destination::MAX_ATTEMPTS) {
-            attempts.attempt();
+        let outcome = destination::walk(candidates, budget, |target, remaining| {
             let mut candidate = config.clone();
             candidate.target = target.clone();
             let mut agent = Self::new(endpoint.clone(), candidate);
-            let outcome = match budget {
-                Some(budget) => {
-                    let remaining = budget.saturating_sub(started.elapsed());
-                    if remaining.is_zero() {
-                        return Err(Error::AttemptTimeout { limit: budget });
-                    }
-                    agent.register_within(remaining).await
+            async move {
+                let outcome = match remaining {
+                    Some(remaining) => agent.register_within(remaining).await,
+                    None => agent.register().await,
+                };
+                match outcome {
+                    Ok(lease) => destination::Attempted::Reached((agent, lease)),
+                    Err(error @ Error::Transport(_)) => destination::Attempted::Unreachable(error),
+                    Err(error) => destination::Attempted::Answered(error),
                 }
-                None => agent.register().await,
-            };
-            match outcome {
-                Ok(lease) => return Ok((agent, lease)),
-                Err(Error::Transport(error)) => last = Some(error),
-                Err(error) => return Err(error),
             }
-        }
-        // Nothing is attempted at all only when the list was empty, which is a caller that
-        // resolved nothing; there is no transport failure to report for that.
-        Err(
-            last.map_or(Error::NoResponse, |source| Error::ConnectionFailed {
-                attempts,
-                source,
+        })
+        .await;
+
+        match outcome {
+            Ok(reached) => Ok(reached),
+            // Nothing is attempted at all only when the list was empty, which is a caller that
+            // resolved nothing; there is no transport failure to report for that.
+            Err(destination::Unreached::Nothing) => Err(Error::NoResponse),
+            Err(destination::Unreached::Expired { .. }) => Err(Error::AttemptTimeout {
+                limit: budget.unwrap_or_default(),
             }),
-        )
+            Err(destination::Unreached::Answered(error)) => Err(error),
+            // The pass classifies; the variant it hands back is the one this crate promises, and
+            // only a transport failure ever reaches here as unreachable.
+            Err(destination::Unreached::Unreachable { attempts, last }) => Err(match last {
+                Error::Transport(source) => Error::ConnectionFailed { attempts, source },
+                other => other,
+            }),
+        }
     }
 
     /// Where this agent sends its registrations.

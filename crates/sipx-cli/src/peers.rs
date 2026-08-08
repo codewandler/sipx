@@ -181,7 +181,7 @@ pub(crate) async fn run(options: PeersOptions, format: Format) -> Exit {
     if let Some(registrar) = registrar {
         match discover(&options, registrar).await {
             Ok(discovered) => peers.extend(discovered),
-            Err((exit, message)) => return fail(format, exit, &message),
+            Err(failure) => return failure.report(format),
         }
     }
 
@@ -197,19 +197,69 @@ pub(crate) async fn run(options: PeersOptions, format: Format) -> Exit {
     Exit::Success
 }
 
+/// Why the registrar could not be consulted, and how far the pass over its addresses got.
+///
+/// The counts travel with the failure rather than being formatted where one is raised: `T-41`
+/// established `candidates_attempted`/`candidates_resolved` as one shape across commands, and a
+/// script that learned them from `register` has to read the same pair here.
+#[derive(Debug)]
+pub(crate) struct Unreachable {
+    /// The exit a script branches on.
+    exit: Exit,
+    /// What to tell the person reading it.
+    message: String,
+    /// How far the serial pass got, when the failure came from one.
+    attempts: Option<crate::destination::Attempts>,
+}
+
+impl Unreachable {
+    /// A failure that no candidate pass produced — validation, or the lookup that precedes one.
+    fn stated(exit: Exit, message: impl Into<String>) -> Self {
+        Self {
+            exit,
+            message: message.into(),
+            attempts: None,
+        }
+    }
+
+    /// Emit the record, on stderr like every other failure: nothing that is not a peer listing may
+    /// land where the next stage of a pipeline will parse it as one.
+    fn report(self, format: Format) -> Exit {
+        let report = crate::destination::with_attempts(
+            Report::new()
+                .text("status", self.exit.as_str())
+                .text("error", self.message),
+            self.attempts,
+        );
+        eprintln!("{}", report.render(format));
+        self.exit
+    }
+}
+
+/// One candidate's subscription attempt that produced no snapshot.
+#[derive(Debug)]
+struct Failed {
+    /// The exit this outcome leaves.
+    exit: Exit,
+    /// What went wrong, in the words the caller sees.
+    message: String,
+    /// Whether another address could answer differently.
+    unreachable: bool,
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "validation, endpoint ownership and terminal cleanup remain visible in protocol order"
 )]
-async fn discover(options: &PeersOptions, registrar: &str) -> Result<Vec<Peer>, (Exit, String)> {
+async fn discover(options: &PeersOptions, registrar: &str) -> Result<Vec<Peer>, Unreachable> {
     let parsed = Uri::parse(Bytes::copy_from_slice(registrar.as_bytes())).map_err(|_| {
-        (
+        Unreachable::stated(
             Exit::Usage,
             format!("not a SIP registrar address of record: {registrar}"),
         )
     })?;
     let Some((user, domain)) = crate::register::parse_aor(registrar) else {
-        return Err((
+        return Err(Unreachable::stated(
             Exit::Usage,
             format!("not a SIP registrar address of record: {registrar}"),
         ));
@@ -218,14 +268,14 @@ async fn discover(options: &PeersOptions, registrar: &str) -> Result<Vec<Peer>, 
         &options.signalling,
         parsed.scheme().is_secure(),
     )
-    .map_err(|message| (Exit::Usage, message))?;
+    .map_err(|message| Unreachable::stated(Exit::Usage, message))?;
     // Refused before the lookup rather than after it: an interval that cannot subscribe is
     // knowable without asking anyone, and it is also the bound the lookup is held under.
     let expires = Duration::from_secs(options.expires);
     if expires.is_zero() {
-        return Err((
+        return Err(Unreachable::stated(
             Exit::Usage,
-            "--expires must be positive for a registrar subscription".to_owned(),
+            "--expires must be positive for a registrar subscription",
         ));
     }
     // This command states no attempt deadline, so the lifetime it asks the registrar for is the
@@ -241,9 +291,14 @@ async fn discover(options: &PeersOptions, registrar: &str) -> Result<Vec<Peer>, 
             &options.signalling,
         )
         .await
-        .map_err(|error| (crate::destination::exit(&error), error.to_string()))?;
+        .map_err(|error| {
+            Unreachable::stated(crate::destination::exit(&error), error.to_string())
+        })?;
+    // The head of the list still decides what is bound: the endpoint is opened once and every
+    // candidate is attempted over it, exactly as `register` does. What changes with `P-31` is that
+    // the tail is no longer discarded.
     let selected = crate::destination::first(&candidates)
-        .map_err(|error| (crate::destination::exit(&error), error.to_string()))?
+        .map_err(|error| Unreachable::stated(crate::destination::exit(&error), error.to_string()))?
         .clone();
     selection = selection.negotiated(selected.transport);
     let local = options.local;
@@ -252,55 +307,124 @@ async fn discover(options: &PeersOptions, registrar: &str) -> Result<Vec<Peer>, 
         crate::advertise::reachable_ip(local, selected.addr.ip()).to_string();
     selection
         .configure_client(&options.signalling, &mut transport_config)
-        .map_err(|message| (Exit::Usage, message))?;
+        .map_err(|message| Unreachable::stated(Exit::Usage, message))?;
     let (endpoint, incoming) = bind(transport_config)
         .await
-        .map_err(|error| (Exit::Failed, format!("bind: {error}")))?;
+        .map_err(|error| Unreachable::stated(Exit::Failed, format!("bind: {error}")))?;
     let runtime = EventSubscriptions::new(EventConfig::default())
-        .map_err(|error| (Exit::Failed, error.to_string()))?;
+        .map_err(|error| Unreachable::stated(Exit::Failed, error.to_string()))?;
     let subscriptions = runtime.handle();
     let mut dispatcher =
         Dispatcher::new(endpoint.clone(), incoming).with_event_subscriptions(runtime);
     let dispatch = tokio::spawn(async move { while dispatcher.next().await.is_some() {} });
 
-    let nonce: u64 = rand::rng().random();
-    let credentials = options
-        .password
-        .clone()
-        .map(|password| Credentials::new(user.clone(), password));
+    let watch = Duration::from_secs(options.watch);
+    let local_identity = format!("<sip:{user}@{domain}>");
     let contact = format!("<sip:{user}@{}>", endpoint.advertised());
-    let consumer = RegistrationConsumer::new(registrar, 4_096).map_err(|_| {
-        (
-            Exit::Usage,
-            "invalid registrar resource for the registration package".to_owned(),
-        )
-    })?;
-    let start = EventStart {
-        resource: parsed,
-        local_identity: format!("<sip:{user}@{domain}>"),
-        contact,
-        target: event_peer(&selected),
-        expires,
-        body: Bytes::new(),
-        content_type: None,
-        credentials,
-        call_id: format!("peers-{nonce:016x}@sipx"),
-        from_tag: format!("{nonce:016x}"),
-        initial_cseq: 1,
-        consumer,
-        trust: std::sync::Arc::new(SamePeer),
-    };
-    let result = match subscriptions.subscribe(start) {
-        Ok(mut subscription) => {
-            let result = observe(&mut subscription, Duration::from_secs(options.watch)).await;
-            let _ = subscription.unsubscribe().await;
-            result.map(registrar_peers)
+
+    // `P-31`: the serial pass, taken from the library rather than written a fifth time. What is
+    // this command's and not the pass's is the classification below and the budget it is funded
+    // from — one deadline over every candidate together, never a copy of it each.
+    let outcome = crate::destination::walk(&candidates, Some(FIRST_NOTIFY), |target, remaining| {
+        let resource = parsed.clone();
+        let local_identity = local_identity.clone();
+        let contact = contact.clone();
+        let credentials = options
+            .password
+            .clone()
+            .map(|password| Credentials::new(user.clone(), password));
+        let consumer = RegistrationConsumer::new(registrar, CONTACT_LIMIT);
+        let target = event_peer(target);
+        // A fresh dialog identity per candidate. A subscription attempted at another address is a
+        // new usage (RFC 6665 §4.1.2.1), and reusing the Call-ID and tag of the attempt that just
+        // failed would present it to the registrar as the first one arriving twice.
+        let nonce: u64 = rand::rng().random();
+        let subscriptions = &subscriptions;
+        async move {
+            let Ok(consumer) = consumer else {
+                return crate::destination::Attempted::Answered(Failed::stated(
+                    Exit::Usage,
+                    "invalid registrar resource for the registration package",
+                ));
+            };
+            let start = EventStart {
+                resource,
+                local_identity,
+                contact,
+                target,
+                expires,
+                body: Bytes::new(),
+                content_type: None,
+                credentials,
+                call_id: format!("peers-{nonce:016x}@sipx"),
+                from_tag: format!("{nonce:016x}"),
+                initial_cseq: 1,
+                consumer,
+                trust: std::sync::Arc::new(SamePeer),
+            };
+            match subscriptions.subscribe(start) {
+                Ok(mut subscription) => {
+                    let observed = observe(&mut subscription, watch, remaining).await;
+                    let _ = subscription.unsubscribe().await;
+                    match observed {
+                        Ok(delivery) => {
+                            crate::destination::Attempted::Reached(registrar_peers(delivery))
+                        }
+                        Err(failed) if failed.unreachable => {
+                            crate::destination::Attempted::Unreachable(failed)
+                        }
+                        Err(failed) => crate::destination::Attempted::Answered(failed),
+                    }
+                }
+                Err(error) => crate::destination::Attempted::Answered(Failed::stated(
+                    Exit::Failed,
+                    error.to_string(),
+                )),
+            }
         }
-        Err(error) => Err((Exit::Failed, error.to_string())),
-    };
+    })
+    .await;
+
+    // Terminal cleanup is the command's on every path: nothing this invocation started may still
+    // be running when a script reads the result (`P-27`).
     endpoint.shutdown().await;
     let _ = dispatch.await;
-    result
+    outcome.map_err(unreached)
+}
+
+/// How many contacts one registration snapshot may carry before it is refused.
+const CONTACT_LIMIT: usize = 4_096;
+
+/// Turn the pass's outcome into the record the command emits.
+fn unreached(outcome: crate::destination::Unreached<Failed>) -> Unreachable {
+    let attempts = outcome.attempts();
+    match outcome {
+        // `first` above already refused an empty list, so nothing reaches this today. It is
+        // answered rather than swept into a catch-all because a pass that silently reported
+        // "resolution returned nothing" as some other failure would be a regression nobody sees.
+        crate::destination::Unreached::Nothing => {
+            Unreachable::stated(Exit::Failed, "target resolution returned no candidates")
+        }
+        // Distinguished from a registrar that accepted and stayed silent by naming the pass rather
+        // than the subscription. Both exit `Timeout`, because a script branching on the exit code
+        // must not have to know which clock ran out.
+        crate::destination::Unreached::Expired { .. } => Unreachable {
+            exit: Exit::Timeout,
+            message: format!(
+                "no address of the registrar answered within {}s",
+                FIRST_NOTIFY.as_secs()
+            ),
+            attempts,
+        },
+        crate::destination::Unreached::Unreachable { last, .. } => Unreachable {
+            exit: last.exit,
+            message: last.message,
+            attempts,
+        },
+        crate::destination::Unreached::Answered(failed) => {
+            Unreachable::stated(failed.exit, failed.message)
+        }
+    }
 }
 
 /// How long to wait for the registrar's first NOTIFY before giving up (`P-30`).
@@ -309,28 +433,40 @@ async fn discover(options: &PeersOptions, registrar: &str) -> Result<Vec<Peer>, 
 /// command states nowhere and the caller cannot change. Once `P-26` bounded resolution, that
 /// inherited schedule became the longest thing `peers` could do without saying so. Twenty seconds
 /// matches `register`'s default attempt deadline, so the two commands answer on the same clock.
+///
+/// `P-31` makes it the bound over the *whole* serial pass rather than over one address's wait: it
+/// funds every candidate together, because sixteen candidates with a copy of it each would multiply
+/// the only duration this command states by sixteen (`P-26`). `--watch` is not spent from it — that
+/// is an observation window opened after a registrar has been reached, not part of reaching one.
 const FIRST_NOTIFY: Duration = Duration::from_secs(20);
 
 async fn observe(
     subscription: &mut EventSubscription<RegistrationSnapshot>,
     watch: Duration,
-) -> Result<EventNotification<RegistrationSnapshot>, (Exit, String)> {
-    let first = match tokio::time::timeout(FIRST_NOTIFY, next_snapshot(subscription)).await {
-        Ok(result) => result?,
-        // Distinguished from `Termination::NoInitialNotify` — which is the *registrar* saying it
-        // will not notify — by naming the bound that expired. Both exit `Timeout`, because a
-        // script branching on the exit code must not have to know which clock ran out; the
-        // message is what tells them apart, exactly as `register`'s does.
-        Err(_) => {
-            return Err((
-                Exit::Timeout,
-                format!(
-                    "the registrar accepted the subscription but sent no notification within {}s",
-                    FIRST_NOTIFY.as_secs()
-                ),
-            ));
-        }
-    };
+    within: Option<Duration>,
+) -> Result<EventNotification<RegistrationSnapshot>, Failed> {
+    let first =
+        match tokio::time::timeout(within.unwrap_or(FIRST_NOTIFY), next_snapshot(subscription))
+            .await
+        {
+            Ok(result) => result?,
+            // Distinguished from `Termination::NoInitialNotify` — which is the *registrar* saying
+            // it will not notify — by naming the bound that expired. Both exit `Timeout`, because a
+            // script branching on the exit code must not have to know which clock ran out; the
+            // message is what tells them apart, exactly as `register`'s does. The stated bound is
+            // reported rather than the slice of it this candidate was funded from: "no notification
+            // within 4s" describes an accounting detail, and the caller asked for twenty.
+            Err(_) => {
+                return Err(Failed::stated(
+                    Exit::Timeout,
+                    format!(
+                        "the registrar accepted the subscription but sent no notification \
+                         within {}s",
+                        FIRST_NOTIFY.as_secs()
+                    ),
+                ));
+            }
+        };
     if watch.is_zero() {
         return Ok(first);
     }
@@ -347,7 +483,9 @@ async fn observe(
                     return Err(termination(&reason));
                 }
                 Some(EventSubscriptionEvent::State(_)) => {}
-                None => return Err((Exit::Failed, "registrar subscription ended".to_owned())),
+                None => {
+                    return Err(Failed::stated(Exit::Failed, "registrar subscription ended"));
+                }
             },
         }
     }
@@ -355,7 +493,7 @@ async fn observe(
 
 async fn next_snapshot(
     subscription: &mut EventSubscription<RegistrationSnapshot>,
-) -> Result<EventNotification<RegistrationSnapshot>, (Exit, String)> {
+) -> Result<EventNotification<RegistrationSnapshot>, Failed> {
     loop {
         match subscription.next_event().await {
             Some(EventSubscriptionEvent::Notification(delivery)) => return Ok(delivery),
@@ -364,23 +502,44 @@ async fn next_snapshot(
             }
             Some(EventSubscriptionEvent::State(_)) => {}
             None => {
-                return Err((
+                return Err(Failed::stated(
                     Exit::Failed,
-                    "registrar subscription ended before a snapshot".to_owned(),
+                    "registrar subscription ended before a snapshot",
                 ));
             }
         }
     }
 }
 
-fn termination(reason: &Termination) -> (Exit, String) {
+impl Failed {
+    /// An outcome the registrar itself produced, which another of its addresses would repeat.
+    fn stated(exit: Exit, message: impl Into<String>) -> Self {
+        Self {
+            exit,
+            message: message.into(),
+            unreachable: false,
+        }
+    }
+}
+
+fn termination(reason: &Termination) -> Failed {
     let exit = match reason {
         Termination::Rejected(status) => Exit::for_status(*status),
         Termination::AuthenticationExhausted => Exit::Unauthorized,
         Termination::NoInitialNotify | Termination::LocalExpiry => Exit::Timeout,
         _ => Exit::Failed,
     };
-    (exit, format!("registrar subscription failed: {reason:?}"))
+    Failed {
+        exit,
+        message: format!("registrar subscription failed: {reason:?}"),
+        // The only outcome that belongs to *this address* rather than to the registrar the name
+        // stands for: the SUBSCRIBE never reached a final response, so nothing has answered yet
+        // and a later address still can. A refusal, an exhausted challenge or an accepted
+        // subscription that stays silent is the registrar speaking, and asking a second address
+        // repeats a question that has already been answered — the rule
+        // `UserAgent::register_candidates` applies to a REGISTER, applied to a SUBSCRIBE.
+        unreachable: matches!(reason, Termination::TransactionFailed),
+    }
 }
 
 fn registrar_peers(delivery: EventNotification<RegistrationSnapshot>) -> Vec<Peer> {
@@ -737,10 +896,43 @@ mod tests {
     #[test]
     fn registrar_refusals_have_scriptable_exits() {
         assert_eq!(
-            termination(&Termination::Rejected(403)).0,
+            termination(&Termination::Rejected(403)).exit,
             Exit::Unauthorized
         );
-        assert_eq!(termination(&Termination::Rejected(489)).0, Exit::Rejected);
-        assert_eq!(termination(&Termination::NoInitialNotify).0, Exit::Timeout);
+        assert_eq!(
+            termination(&Termination::Rejected(489)).exit,
+            Exit::Rejected
+        );
+        assert_eq!(
+            termination(&Termination::NoInitialNotify).exit,
+            Exit::Timeout
+        );
+    }
+
+    /// `P-31`: which failures move the pass to the next address, and which end it.
+    ///
+    /// The whole of the candidate walk's correctness is this predicate. A registrar's refusal
+    /// retried against a second address asks a question that has already been answered — and
+    /// worse, a challenge that failed once would be re-presented with the same credentials at
+    /// every address behind the name.
+    #[test]
+    fn only_a_transaction_that_never_answered_moves_to_the_next_address() {
+        assert!(
+            termination(&Termination::TransactionFailed).unreachable,
+            "nothing answered at this address, so a later one still might"
+        );
+        for answered in [
+            Termination::Rejected(403),
+            Termination::Rejected(489),
+            Termination::AuthenticationExhausted,
+            Termination::NoInitialNotify,
+            Termination::LocalExpiry,
+            Termination::MalformedResponse,
+        ] {
+            assert!(
+                !termination(&answered).unreachable,
+                "{answered:?} is the registrar speaking, and a second address repeats the question"
+            );
+        }
     }
 }

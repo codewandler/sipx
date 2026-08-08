@@ -415,6 +415,122 @@ pub fn first(candidates: &[Target]) -> Result<&Target, Error> {
     })
 }
 
+/// What one candidate's attempt tells the pass to do next.
+///
+/// The distinction the pass cannot make for itself: only the caller knows whether the failure it
+/// just produced belongs to *this address* or to the name every address stands for.
+#[derive(Debug)]
+pub enum Attempted<T, E> {
+    /// The attempt succeeded, and the pass is over.
+    Reached(T),
+    /// This address did not answer. A later one still might.
+    Unreachable(E),
+    /// The far end answered, and it answered for the name — asking another address repeats a
+    /// question that has already been answered.
+    Answered(E),
+}
+
+/// Why a serial pass ended without reaching anything.
+///
+/// Each variant is a different finding with a different owner, which is the whole reason the pass
+/// reports rather than returning one flattened error: a spent budget is a fact about the caller's
+/// deadline, an exhausted list is a fact about the zone, and an answer is a fact about the peer.
+#[derive(Debug)]
+pub enum Unreached<E> {
+    /// Resolution produced no candidate to attempt.
+    Nothing,
+    /// The shared budget was spent before the next candidate could be started.
+    Expired {
+        /// How far the pass got before the deadline ended it.
+        attempts: Attempts,
+    },
+    /// Every candidate the pass reached failed to connect.
+    Unreachable {
+        /// How far the pass got, and how far it could have gone.
+        attempts: Attempts,
+        /// The failure the last attempted candidate produced.
+        last: E,
+    },
+    /// The far end answered, and its answer ends the pass.
+    Answered(E),
+}
+
+impl<E> Unreached<E> {
+    /// How far the pass got, for a failure that came from one.
+    ///
+    /// `None` — never `Some(zero)` — for an outcome no candidate was attempted for, because a
+    /// report saying zero candidates were attempted describes a pass that ran and got nowhere, and
+    /// these are the outcomes where no pass ran at all.
+    #[must_use]
+    pub fn attempts(&self) -> Option<Attempts> {
+        match self {
+            Self::Expired { attempts } | Self::Unreachable { attempts, .. } => Some(*attempts),
+            Self::Nothing | Self::Answered(_) => None,
+        }
+    }
+}
+
+/// Try the ordered candidates in turn, under one shared budget, until one is reached.
+///
+/// The serial pass, written once. `docs/specs/sip-target-resolution.md` §5: candidates are
+/// attempted **serially**, in order, and a later one never starts until the earlier attempt has
+/// finished — two requests in flight for one operation is a duplicate rather than a fallback. At
+/// most [`MAX_ATTEMPTS`] of them are tried.
+///
+/// `budget` is what the caller's whole attempt has left when the pass begins, and it funds every
+/// candidate *together* rather than each one separately: sixteen candidates with a copy of the
+/// deadline each would multiply the bound the caller stated by sixteen (`P-26`). Each attempt is
+/// handed what remains, and `None` states no deadline and leaves every attempt its own expiry.
+///
+/// `attempt` decides what moves the pass on, because the classification is the caller's:
+/// [`Attempted::Unreachable`] is this address's failure and [`Attempted::Answered`] is the far
+/// end's, and only the caller's error type can tell them apart.
+///
+/// # Errors
+///
+/// [`Unreached`], which names which of the four ways a pass can end without a result happened.
+pub async fn walk<T, E, F, Fut>(
+    candidates: &[Target],
+    budget: Option<Duration>,
+    mut attempt: F,
+) -> Result<T, Unreached<E>>
+where
+    F: FnMut(&Target, Option<Duration>) -> Fut,
+    Fut: std::future::Future<Output = Attempted<T, E>>,
+{
+    let mut attempts = Attempts::over(candidates.len());
+    let started = tokio::time::Instant::now();
+    let mut last = None;
+
+    for target in candidates.iter().take(MAX_ATTEMPTS) {
+        let remaining = match budget {
+            Some(budget) => {
+                let remaining = budget.saturating_sub(started.elapsed());
+                if remaining.is_zero() {
+                    return Err(Unreached::Expired { attempts });
+                }
+                Some(remaining)
+            }
+            None => None,
+        };
+        attempts.attempt();
+        match attempt(target, remaining).await {
+            Attempted::Reached(reached) => return Ok(reached),
+            Attempted::Unreachable(error) => last = Some(error),
+            Attempted::Answered(error) => return Err(Unreached::Answered(error)),
+        }
+    }
+
+    // Nothing is attempted at all only when the list was empty, which is a caller that resolved
+    // nothing; there is no connection failure to report for that.
+    Err(
+        last.map_or(Unreached::Nothing, |last| Unreached::Unreachable {
+            attempts,
+            last,
+        }),
+    )
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
