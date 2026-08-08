@@ -79,28 +79,22 @@ appeared twice before anyone named it.
 - [M-78 — Guard public enums by reachability, not by name](M-78-guard-public-enums-by-reachability.md) · Media · widening the guard from Error-suffixed names to every pub enum reports 149 workspace-wide and 49 on the media path, most of them pub inside private modules
 - [M-79 — Carry the header extension through the relay path](M-79-carry-the-extension-through-the-relay-path.md) · Media · M-75 preserved the extension at the packet layer, but Encoded carries only a payload type and bytes, so bridge and conference still drop it
 - [P-28 — Report the same fields across every outcome](P-28-report-the-same-fields-across-every-outcome.md) · Phone · register's success report carries aor and its failure report does not, so no script can match on it across both
+- [P-29 — Fund every phase from one process budget](P-29-fund-every-phase-from-one-process-budget.md) · Phone · P-26 bounded resolution BY the deadline rather than subtracting it FROM the deadline, so the worst case is two phases of the stated value
+- [P-31 — Walk every candidate in peers](P-31-walk-every-candidate-in-peers.md) · Phone · peers --registrar resolves and then takes first() only, so a registrar whose first address is dead is unreachable from peers while register recovers
 - [X-119 — Pace registry publication within its rate limit](X-119-pace-registry-publication-within-its-rate-limit.md) · Build · split out of X-93 · the 429 pacing row shares nothing with the rest of that story
 
 ## Next (ready — take the top one unless the user named a story)
-
-### Application SDK
-_The measure of this stack's reach is what can be built on it **without writing Rust**. Today the_
-- [C-6 — Reach the bridge and the conference from a call](C-6-reach-the-bridge-from-a-call.md) · Signalling · app-sdk · last; not v1-blocking · C-1 (M9) later upgrades the signalling half · size M
 
 ### Conformance
 - [X-125 — See what only the non-Linux jobs compile](X-125-see-what-only-the-non-linux-jobs-compile.md) · Build · two CI jobs were red for a day over a cfg that disagreed with its only caller · the Linux gate compiles the caller, so it cannot see it
 - [X-93 — Make protected release evidence faster without weakening it](X-93-make-protected-release-evidence-faster.md) · Build · measure cache and preflight changes against the 12m37 cold beta gate · follow-up
 
 ### Reliable diagnostic automation
-- [P-29 — Fund every phase from one process budget](P-29-fund-every-phase-from-one-process-budget.md) · Phone · P-26 bounded resolution BY the deadline rather than subtracting it FROM the deadline, so the worst case is two phases of the stated value
 - [P-30 — Bound the first NOTIFY in a registrar subscription](P-30-bound-the-first-notify-in-a-registrar-subscription.md) · Phone · peers --registrar waits Timer N — 64*T1, 32 seconds — with no operator control · the dominant unbounded wait once resolution is bounded
 
 ### Edge / B2BUA
 _A programmable SIP and media edge — transports, endpoints and routes, with dialog bridging and_
 - [C-8 — Relay the early negotiation carriers](C-8-relay-the-early-negotiation-carriers.md) · Call · C-7 refuses reliable provisionals, PRACK and offerless INVITE rather than half-relaying them · relaying those means authoring a description this role has no media for
-
-### Bounded endpoint resolution
-- [P-31 — Walk every candidate in peers](P-31-walk-every-candidate-in-peers.md) · Phone · peers --registrar resolves and then takes first() only, so a registrar whose first address is dead is unreachable from peers while register recovers
 
 ### Media
 _Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
@@ -117,12 +111,17 @@ _The workspace has seeded links, virtual time and call fixtures, but downstream 
 - [T-24 — Discover SIP endpoints on the local link](T-24-discover-on-the-local-link.md) · Transport · blocked on a scope decision — mDNS is a second protocol and a new parser eating unauthenticated multicast
 
 ## Backlog
+- [X-126 — The default load pair test rejects a call under suite contention](X-126-the-default-load-pair-test-rejects-a-call-under-suite-contention.md) · Quality · default_load_pair_completes_the_requested_signalling_workload fails intermittently in the full cli suite — the responder 503s one call at max_active, connecting 19 of 20
 
 ### The application host
 _The [app-sdk](https://github.com/codewandler/sipx/blob/main/docs/designs/app-sdk.md) epic ends where a process has to exist: something must hold real_
 - [A-3 — The TypeScript SDK and the two reference applications](A-3-typescript-sdk.md) · Application · app-host phase 2 · the reference apps are the contract's exit-from-experimental gate
 - [A-5 — Implement the embedded TypeScript runtime](A-5-embedded-runtime.md) · Application · app-host phase 3 · needs A-6 (the binding spec) and A-3 (the SDK it hosts)
 - [A-6 — Finish the engine-binding spec — isolation, lifecycle, budgets](A-6-engine-binding-spec.md) · Application · app-host phase 3 · spec before code, decided with measurements where the design says so
+
+### Application SDK
+_The measure of this stack's reach is what can be built on it **without writing Rust**. Today the_
+- [C-9 — Carry a bridge and a conference across a renegotiation](C-9-carry-a-bridge-across-a-renegotiation.md) · Signalling · filed from C-6 · a re-INVITE, a hold/resume or an ICE restart replaces a call's MediaSession and the bridge keeps forwarding the stopped one · size S/M
 
 ### browser audio SDK
 _Beta.4 proves that sipx can interoperate with a browser audio endpoint, but it does not let a web_
@@ -153,6 +152,9 @@ _Applications need to shape live call audio without forking the media runtime: o
 ### Endpoint discovery
 _sipx can call any endpoint you can already name, and cannot help you name one. `sipx dial` takes a_
 - [P-6 — Dial a peer by name](P-6-dial-a-peer-by-name.md) · Phone · needs P-5 — `sipx dial alice` where alice came out of `sipx peers`
+
+### Bounded endpoint resolution
+- [T-42 — Take the shared candidate pass in dial, load and scenario](T-42-take-the-shared-pass-in-dial-load-and-scenario.md) · Transport · five hand-rolled candidate loops remain across dial, load and scenario; three of them count no attempts, so their connection failures cannot say how far they got
 
 ### Ice
 - [M-24 — Gather a relayed candidate from a configured relay](M-24-ice-relayed-candidate.md) · Media · ice · RFC 8656 · after M-22 · the third RFC that made M-16 impossible as one story
@@ -215,6 +217,7 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [C-3 — Report call state as a typed event stream](C-3-call-events-as-a-stream.md) · Signalling · app-sdk keystone · the other stories report through this · size M
 - [C-4 — Serve many calls from one endpoint](C-4-serve-many-calls-from-one-endpoint.md) · Signalling · app-sdk · after C-3 · size M
 - [C-5 — The application contract crate and its sans-IO interpreter](C-5-app-contract-crate-and-interpreter.md) · Application · app-sdk · parallel to C-3/C-4/M-17/M-18 · spec is docs/specs/app-contract.md · size M
+- [C-6 — Reach the bridge and the conference from a call](C-6-reach-the-bridge-from-a-call.md) · Signalling · app-sdk · last; not v1-blocking · C-1 (M9) later upgrades the signalling half · size M
 - [C-7 — Couple two dialogs without terminating media](C-7-off-media-coupling.md) · Signalling · RFC 7092 §3.1.3 · transparent SDP mapping · split from C-1
 - [M-1 — Implement SDP and RFC 3264 offer/answer](M-1-sdp-and-offer-answer.md) · Media
 - [M-2 — Implement RTP and RTCP](M-2-rtp-and-rtcp.md) · Media

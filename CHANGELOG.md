@@ -27,6 +27,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `scripts/check-outcome-parity.py` derives each command's field set from its report builders and
   fails when one outcome omits a field a sibling carries.
 
+- **Two calls a host owns can be bridged, and several joined to a conference**, through
+  `sipx_call::CallBridge` and `sipx_call::CallConference` — the media coupling only, with each
+  `Call` still owned and driven by the host. DTMF while bridged is selectable when the bridge is
+  made (`DtmfBridging`), and `CallEvent::Bridged` / `CallEvent::Unbridged` report both ends of it on
+  the call event stream.
+
+- **`peers --registrar` tries every resolved address of a registrar in turn** instead of giving up
+  after the first, and reports `candidates_attempted` / `candidates_resolved` when none answers —
+  the shape `register`, `dial` and `load` already use.
+
 - **Registry publication is paced by the registry's own stated limits** and by the deadline it
   returns with a `429`, retried within a finite budget and stopped before any further upload once
   that budget is spent. An ordinary version update is not paced as though it were a new crate name.
@@ -42,6 +52,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   variants are the complete domain. **This is a breaking change for exhaustive `match` arms on any
   of the twenty-five:** each needs a fallback arm, and adding a variant to them stops being a
   breaking change in return.
+
+- **`dial`'s stated deadline funds the whole command rather than each phase.** A `--timeout 2`
+  run could spend two seconds resolving the target and two more on the invitation; every phase is
+  now funded from what the last one left, the way `register` has been since `P-25`, and `load`
+  bounds resolution by `--duration` as well as `--timeout`. `invitation_elapsed_ms` is consequently
+  measured from the start of the deadline rather than from the INVITE, so it covers the resolution
+  that deadline also pays for; `invitation_limit_ms` is unchanged and remains the value you stated.
+  `docs/specs/diagnostic-phone.md` §3.2's "starts when the initial INVITE is handed to the endpoint"
+  is withdrawn, with both rejected alternatives recorded in place.
 
 - **`sipx_media::Encoded` gained a public field.** Code constructing it as a struct literal should
   use `Encoded::new(payload_type, payload)`, which builds a payload this endpoint authored with no

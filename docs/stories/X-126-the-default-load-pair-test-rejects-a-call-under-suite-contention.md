@@ -1,5 +1,5 @@
 ---
-id: X-125
+id: X-126
 title: The default load pair test rejects a call under suite contention
 pillar: Quality
 status: backlog
@@ -75,3 +75,8 @@ completed and a red one means it did not.
   bound would not touch it, and `support::machine`'s `bound()` and `scripts/contention-proof.py` —
   which exist for exactly `X-118`'s mechanism — do not help here. If the two are merged, the fix for
   this one still has to be admission headroom or a changed assertion, not a tolerance.
+
+- 2026-08-08: renumbered from `X-125` on filing. Two agents allocated the same id in the same wave —
+  `X-125` was already taken by the non-Linux compile blind spot — so the id moved and nothing else
+  did. Cross-references to `X-118` in this file are unaffected; it remains a different mechanism
+  from that story's, which is the point of filing it separately.
