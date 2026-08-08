@@ -2,8 +2,8 @@
 id: A-39
 title: Build the speech provider contract skeleton
 pillar: Application
-status: in-progress
-priority: 5
+status: done
+priority:
 design: docs/designs/local-speech.md
 epic: local-speech
 areas: [app-sdk, speech, m16]
@@ -38,7 +38,7 @@ selection order — with no speech provider behind any of it. This is the thing 
 - [x] No speech recognition or synthesis implementation, model, accelerator dependency or audio
       retention ships in this story, and the public documentation does not present speech as an
       available capability.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -78,6 +78,8 @@ selection order — with no speech provider behind any of it. This is the thing 
   reads them. §9's extensibility record was re-verified against the real public API, as `A-25`'s
   progress note asked the first implementing story to do: `Device` and `Resources` are built one
   capability at a time rather than through positional constructors, so a new field stays additive.
+
+- 2026-08-08: closed against a green gate — `./scripts/gate.py` reported **40 steps, all green** on `main` at `1256b8e`. An earlier run on the same tree failed two `sipx-cli` audio tests; both pass in isolation and in the full 83-test `cli.rs` binary, and `M-59` independently hit the same class on a sibling test while five other checkouts were building on this shared box. `X-118` owns that flakiness.
 
 ## Notes
 

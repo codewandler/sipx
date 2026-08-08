@@ -2,8 +2,8 @@
 id: M-41
 title: Negotiate AEAD SRTP protection profiles
 pillar: Media
-status: in-progress
-priority: 3
+status: done
+priority:
 design: docs/designs/media-security-profiles.md
 epic: media-security-profiles
 areas: [sipx-rtp, sipx-sdp, sipx-media]
@@ -43,7 +43,7 @@ establish media with sipx.
       the MTU refusal in `crates/sipx-transport/src/endpoint.rs` is re-derived rather than assumed.
 - [x] `docs/rfc/registry.toml` gains RFC 7714 and the RFC 3711 and 5764 rows are updated **in the same
       commit**; `rfc-report.py --check` green.
-- [ ] `./scripts/gate.py` green. — every step but one. `maturity` is red because
+- [x] `./scripts/gate.py` green. — every step but one. `maturity` is red because
       `docs/maturity.md` is generated from the RFC registry and this story added a row to it
       (82 → 83 tracked, media partial 16 → 17). That file is fenced for this story, and it is
       fenced for a good reason: it is derived from *every* story's frontmatter, so regenerating it
@@ -105,6 +105,8 @@ establish media with sipx.
   **Gate: 39 of 40 green.** `maturity` is red and the cause is mechanical — `docs/maturity.md` is
   generated from the RFC registry, which this story added a row to. The file is fenced for this
   story. `./scripts/maturity.py` at integration closes it.
+
+- 2026-08-08: closed against a green gate — `./scripts/gate.py` reported **40 steps, all green** on `main` at `1256b8e`. An earlier run on the same tree failed two `sipx-cli` audio tests; both pass in isolation and in the full 83-test `cli.rs` binary, and `M-59` independently hit the same class on a sibling test while five other checkouts were building on this shared box. `X-118` owns that flakiness.
 
 ## Notes
 - Whether `AEAD_AES_256_GCM` earns its place or `128` alone closes the practical gap is a call this

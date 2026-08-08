@@ -73,14 +73,8 @@ appeared twice before anyone named it.
 ## Now (in progress)
 - [A-10 — Publish the stable crate set and diagnostic CLI artifacts](A-10-publish-the-stable-crates-and-cli.md) · Application · promote the public beta only after every v1 predicate; stable archives and SBOM live here
 - [A-38 — Publish and verify the second release candidate](A-38-publish-and-verify-rc3.md) · Application · after X-113 · the post-rc.2 wave as one immutable prerelease · no stable-1.0 claim widens
-- [A-39 — Build the speech provider contract skeleton](A-39-build-the-speech-provider-contract-skeleton.md) · Application · A-25 specified it and nothing implements it · the registry, session types and selection order every later speech story needs
-- [M-41 — Negotiate AEAD SRTP protection profiles](M-41-negotiate-aead-srtp-protection-profiles.md) · Media · RFC 7714 · one profile shipped today · AEAD-only peers cannot negotiate media with sipx at all · follow-up
-- [M-45 — Hold incoming audio in a jitter buffer](M-45-hold-incoming-audio-in-a-jitter-buffer.md) · Media · two independent field reports of seconds of added delay · characterise the current buffer before changing it
-- [M-54 — Expose bounded call PCM processing and resampling](M-54-expose-bounded-call-pcm-processing.md) · Media · after A-25 and M-43 · shared seam for local speech and deterministic analysis
 - [M-57 — Specify deterministic real-time call-audio processing](M-57-specify-real-time-call-audio-processor.md) · Media · M16 spec gate · sans-I/O bounded frame processor using M-54's shared seam
 - [M-70 — Accept multiplexed browser offers with unused component candidates](M-70-accept-multiplexed-browser-offers-with-unused-component-candidates.md) · Media · external review finding 9 · a second browser engine reaches SDP then fails the multiplexed profile
-- [P-25 — Bound a registration attempt](P-25-bound-a-registration-attempt.md) · Phone · external review finding 4's actual consequence · X-110 made --timeout an explicit error on register, but nothing bounds the attempt
-- [X-66 — Measure coverage and publish the number](X-66-measure-coverage-and-publish-the-number.md) · Build · 1756 test attributes and no measurement of what they reach · a number that is generated, never asserted · follow-up
 
 ## Next (ready — take the top one unless the user named a story)
 
@@ -247,6 +241,7 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [A-35 — Publish and verify 1.0.0-beta.6](A-35-publish-and-verify-beta6.md) · Application · published immutable beta · exact registry, CLI, Pages and prerelease evidence recorded
 - [A-36 — Publish and verify 1.0.0-beta.7](A-36-publish-and-verify-beta7.md) · Application · published immutable beta · exact registry, CLI, Pages and prerelease evidence recorded
 - [A-37 — Publish and verify the first release candidate](A-37-publish-and-verify-rc1.md) · Application · first release candidate · reviewed docs, exact registry packages and portable artifacts
+- [A-39 — Build the speech provider contract skeleton](A-39-build-the-speech-provider-contract-skeleton.md) · Application · A-25 specified it and nothing implements it · the registry, session types and selection order every later speech story needs
 - [C-1 — Drive two dialogs as one call](C-1-couple-two-dialogs.md) · Signalling · M9 · RFC 7092 · the B2BUA primitive; the product stays out of this repo
 - [C-2 — Carry media on an early dialog](C-2-early-media.md) · Media · M9 · RFC 3960 gateway model · one live session crosses early and confirmed dialog state
 - [C-3 — Report call state as a typed event stream](C-3-call-events-as-a-stream.md) · Signalling · app-sdk keystone · the other stories report through this · size M
@@ -289,9 +284,11 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [M-37 — Never put a fallback codec under a negotiated payload type](M-37-never-put-a-fallback-codec-under-a-negotiated-payload-type.md) · Media · R-08 in the 2026-07-30 repository review — failed Opus setup constructs Direct PCMU state while retaining the negotiated Opus payload type
 - [M-38 — Complete one browser-compatible WebRTC audio path](M-38-browser-compatible-webrtc-audio.md) · Media · epic tracker; reuse WSS, ICE, DTLS-SRTP and Opus, then prove their browser-audio composition
 - [M-39 — Close the packaged and independent-peer Opus proof](M-39-close-the-opus-product-proof.md) · Media · Opus is rate- and direction-correct through the CLI, normalized packages and an independent peer
+- [M-41 — Negotiate AEAD SRTP protection profiles](M-41-negotiate-aead-srtp-protection-profiles.md) · Media · RFC 7714 · one profile shipped today · AEAD-only peers cannot negotiate media with sipx at all · follow-up
 - [M-42 — Advertise a chosen address and latch RTP without ICE](M-42-advertise-a-chosen-address-and-latch-rtp-without-ice.md) · Media · the loudest unmet need in the surveyed ecosystem · most requesters are not doing ICE at all
 - [M-43 — Carry linear PCM in and out without format assumptions](M-43-carry-linear-pcm-in-and-out-without-format-assumptions.md) · Media · four reported use cases resolve to one unopinionated PCM boundary · not an AI feature
 - [M-44 — Negotiate and carry G.722](M-44-negotiate-and-carry-g722.md) · Media · the only codec with real demand that sipx lacks · static PT 9 with the RFC 3551 clock-rate trap
+- [M-45 — Hold incoming audio in a jitter buffer](M-45-hold-incoming-audio-in-a-jitter-buffer.md) · Media · two independent field reports of seconds of added delay · characterise the current buffer before changing it
 - [M-46 — Multiplex RTCP and negotiate the DTLS setup role](M-46-multiplex-rtcp-and-negotiate-the-dtls-setup-role.md) · Media · RFC 5761 + RFC 4145 · both are hard blockers for browser interop · prerequisites for M-38
 - [M-47 — Reject replayed SRTCP with a separate replay window](M-47-reject-replayed-srtcp.md) · Media · known gap in srtp.md §12.2 · authenticate first, then reject a repeated SRTCP index without touching the SRTP window
 - [M-48 — Specify the browser-audio profile and state machine](M-48-specify-browser-audio-profile.md) · Media · beta.4 starts here · normative profile, ordering, downgrade refusals, resource bounds and byte-level vectors before code
@@ -299,6 +296,7 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [M-50 — Run ICE, DTLS, SRTP and SRTCP on one nominated component](M-50-run-browser-media-on-one-component.md) · Media · beta.4 critical path · one bounded owner, nominated-peer binding and no bind/drop/rebind race
 - [M-51 — Prove browser audio against an independent endpoint](M-51-prove-browser-audio.md) · Media · beta.4 product proof · both SIP roles, non-silent Opus both ways, immediate fingerprint and downgrade negatives
 - [M-53 — Ship a runnable RTP echo example](M-53-ship-a-runnable-rtp-echo-example.md) · Media · discovered by X-97 · exercise the public RTP receive/send seam without inventing a second media stack
+- [M-54 — Expose bounded call PCM processing and resampling](M-54-expose-bounded-call-pcm-processing.md) · Media · after A-25 and M-43 · shared seam for local speech and deterministic analysis
 - [M-69 — Reject an unacceptable initial offer on the wire](M-69-reject-an-unacceptable-initial-offer-on-the-wire.md) · Media · external review finding 3 · no-common-codec failure sends no final SIP response
 - [M-71 — Deliver negotiated DTMF receive events through scenario](M-71-deliver-negotiated-dtmf-receive-events-through-scenario.md) · Media · external review finding 10 · digits send successfully but no typed receive event arrives
 - [P-1 — Build the CLI scaffold and machine-readable output](P-1-cli-scaffold-and-output.md) · Phone
@@ -324,6 +322,7 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [P-22 — Handle supervisor termination consistently](P-22-handle-supervisor-termination-consistently.md) · Phone · follow-up external review finding 5 · load-responder handles SIGINT but loses cleanup and its summary on SIGTERM
 - [P-23 — Validate output and capabilities before network I/O](P-23-validate-output-and-capabilities-before-network-io.md) · Phone · follow-up external review finding 9 · version ignores JSON and unavailable media features are reported only after a peer answers
 - [P-24 — Report call progress consistently](P-24-report-call-progress-consistently.md) · Phone · follow-up external review finding 11 · answer and load do not emit the INFO progress promised for -v
+- [P-25 — Bound a registration attempt](P-25-bound-a-registration-attempt.md) · Phone · external review finding 4's actual consequence · X-110 made --timeout an explicit error on register, but nothing bounds the attempt
 - [S-1 — Specify the SIP message model and parser](S-1-sip-message-parser-specs.md) · Signalling · gates every other sip-core story
 - [S-2 — Implement SIP URIs, header names and header parameters](S-2-uri-and-header-primitives.md) · Signalling
 - [S-3 — Implement typed headers with verbatim passthrough](S-3-typed-headers.md) · Signalling
@@ -473,6 +472,7 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [X-63 — Default overload advertisement breaks an independent peer](X-63-default-overload-advertisement-breaks-an-independent-peer.md) · Signalling
 - [X-64 — Pin the malformed-input refusals with named tests](X-64-pin-the-malformed-input-refusals-with-named-tests.md) · Build · three recurring input classes · properties currently asserted by design, sampled by fuzzing, pinned by nothing · beta-1
 - [X-65 — Assert the branch and tag RNG is cryptographic](X-65-assert-the-branch-and-tag-rng-is-cryptographic.md) · Build · spec says cryptographic because a guessable branch is a response-injection primitive · nothing fails if it stops being · beta-1
+- [X-66 — Measure coverage and publish the number](X-66-measure-coverage-and-publish-the-number.md) · Build · 1756 test attributes and no measurement of what they reach · a number that is generated, never asserted · follow-up
 - [X-67 — Split the call module along its seams](X-67-split-the-call-module-along-its-seams.md) · Build · call.rs is 6560 lines, ~6100 of them production · hold, transfer, session timers, re-INVITE and ICE restart in one file · follow-up
 - [X-68 — Explain the layering on the public site](X-68-explain-the-layering-on-the-public-site.md) · Build · sans-IO is the central design property and the site never states it · one page, one diagram · beta-1
 - [X-69 — Guide every shipped call verb](X-69-guide-every-shipped-call-verb.md) · Build · hold, transfer, DTMF, playback, recording and coupling all ship and appear only as bullets · follow-up

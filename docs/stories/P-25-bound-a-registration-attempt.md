@@ -2,8 +2,8 @@
 id: P-25
 title: Bound a registration attempt
 pillar: Phone
-status: in-progress
-priority: 2
+status: done
+priority:
 design:
 epic: diagnostic-automation
 areas: [sipx-cli, sipx-ua]
@@ -70,6 +70,8 @@ timeout.
   Left open deliberately: `--keep-alive`'s refreshes after a bounded first attempt are still
   governed by the granted lease alone, and `keep_registered` re-registers once unbounded before
   its loop. Both are pre-existing and named in the spec rather than changed here.
+
+- 2026-08-08: closed against a green gate — `./scripts/gate.py` reported **40 steps, all green** on `main` at `1256b8e`. An earlier run on the same tree failed two `sipx-cli` audio tests; both pass in isolation and in the full 83-test `cli.rs` binary, and `M-59` independently hit the same class on a sibling test while five other checkouts were building on this shared box. `X-118` owns that flakiness.
 
 ## Notes
 

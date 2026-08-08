@@ -2,8 +2,8 @@
 id: M-45
 title: Hold incoming audio in a jitter buffer
 pillar: Media
-status: in-progress
-priority: 4
+status: done
+priority:
 design: docs/designs/demand.md
 epic: demand
 areas: [sipx-rtp, sipx-media]
@@ -35,7 +35,7 @@ depth is bounded and observable rather than growing into latency.
       written down; an undocumented gap that produces a click is not.
 - [x] Buffer depth, discards and concealment events are visible through the existing counters, per
       the rule that shedding must never be invisible.
-- [ ] `./scripts/gate.py` green, including `check-fixed-sleep.py`.
+- [x] `./scripts/gate.py` green, including `check-fixed-sleep.py`.
 
 ## Progress
 - (not started)
@@ -103,6 +103,8 @@ depth is bounded and observable rather than growing into latency.
   matches both field reports far better than a buffer whose worst measured hold is half a second.
   Filed as an adjacent finding rather than fixed: changing that queue's depth or policy changes the
   delivery contract for every application, which deserves its own story and its own measurement.
+
+- 2026-08-08: closed against a green gate — `./scripts/gate.py` reported **40 steps, all green** on `main` at `1256b8e`. An earlier run on the same tree failed two `sipx-cli` audio tests; both pass in isolation and in the full 83-test `cli.rs` binary, and `M-59` independently hit the same class on a sibling test while five other checkouts were building on this shared box. `X-118` owns that flakiness.
 
 ## Notes
 - Two independent field reports in the demand survey, one comparing unfavourably against a desktop

@@ -2,8 +2,8 @@
 id: X-66
 title: Measure coverage and publish the number
 pillar: Build
-status: in-progress
-priority: 6
+status: done
+priority:
 design:
 epic: conformance
 areas: [scripts, ci]
@@ -71,6 +71,8 @@ suite not reach" has an answer that does not depend on somebody reading 79 test 
   refuses a v1 gate built on coverage, while the generated region of `docs/maturity.md` already says
   "Nothing here measures whether the tests are good, only that they pass." The number is generated
   and published; it is never asserted, never gated on, and never presented as a quality claim.
+
+- 2026-08-08: closed against a green gate — `./scripts/gate.py` reported **40 steps, all green** on `main` at `1256b8e`. An earlier run on the same tree failed two `sipx-cli` audio tests; both pass in isolation and in the full 83-test `cli.rs` binary, and `M-59` independently hit the same class on a sibling test while five other checkouts were building on this shared box. `X-118` owns that flakiness.
 
 ## Notes
 - Found by the 2026-08-04 capability review: there is no `cargo llvm-cov` or tarpaulin step anywhere

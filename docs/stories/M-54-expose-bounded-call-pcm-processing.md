@@ -2,8 +2,8 @@
 id: M-54
 title: Expose bounded call PCM processing and resampling
 pillar: Media
-status: in-progress
-priority: 1
+status: done
+priority:
 design: docs/designs/local-speech.md
 epic: local-speech
 areas: [sipx-media, sipx-audio, app-sdk, speech, audio-analysis, m16]
@@ -65,3 +65,4 @@ reusing M-43's unopinionated format conversion rather than creating speech-speci
   Left for the stories that consume it: `M-57`'s processor type is not built here (this story is its
   prerequisite, not its closure), and nothing is surfaced through `sipx-call` or the application SDK
   — `Call` still does not hand out its `MediaSession` (`C-6`), so `A-26`/`A-27`/`M-58` own that.
+- 2026-08-08: closed against a green gate — `./scripts/gate.py` reported **40 steps, all green** on `main` at `1256b8e`. An earlier run on the same tree failed two `sipx-cli` audio tests; both pass in isolation and in the full 83-test `cli.rs` binary, and `M-59` independently hit the same class on a sibling test while five other checkouts were building on this shared box. `X-118` owns that flakiness.
