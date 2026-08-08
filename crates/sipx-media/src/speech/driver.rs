@@ -27,6 +27,13 @@
 //! arm §8's drain deadline. If the session's `Stopped` does not arrive before it expires, the
 //! driver abandons the provider and emits `Stopped { aborted: true }` itself: an aborted stop is a
 //! reportable provider defect rather than a task nobody can join.
+//!
+//! **A stop releases, and then reports.** §11.5 makes `Stopped` mean what §5 and §6 already said it
+//! means — nothing owned remains — and the driver's own queue is part of "owned". So at the stop it
+//! erases every unconsumed output carrying call audio, drops the provider with whatever engine,
+//! model state and device allocation it holds, and releases the seam attachment; only then does it
+//! close its output stream. A consumer that has read its last output has therefore already observed
+//! the release, which is what makes cleanup inspectable instead of something to wait for.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -38,7 +45,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use super::bounds::SpeechBounds;
-use super::descriptor::ProviderKind;
+use super::descriptor::{ProviderId, ProviderKind};
 use super::lifecycle::{CancelReason, DeadlineKind};
 use super::recognition::{
     RecognitionInput, RecognitionOutput, RecognitionSession, recognition_inputs,
@@ -89,6 +96,9 @@ trait BoundedOutput {
 
     /// Whether this is the session's last output. §5 and §6 put nothing after it.
     fn is_stop(&self) -> bool;
+
+    /// Whether this output carries call audio, which §11.5 erases at the stop.
+    fn carries_audio(&self) -> bool;
 }
 
 impl BoundedOutput for RecognitionOutput {
@@ -101,6 +111,12 @@ impl BoundedOutput for RecognitionOutput {
 
     fn is_stop(&self) -> bool {
         matches!(self, Self::Stopped { .. })
+    }
+
+    /// Never: §5's outputs carry text and spans, and the audio they were derived from stays in the
+    /// seam's own queue, which the attachment releases when the driver drops it.
+    fn carries_audio(&self) -> bool {
+        false
     }
 }
 
@@ -117,6 +133,10 @@ impl BoundedOutput for SynthesisOutput {
 
     fn is_stop(&self) -> bool {
         matches!(self, Self::Stopped { .. })
+    }
+
+    fn carries_audio(&self) -> bool {
+        matches!(self, Self::Chunk(_))
     }
 }
 
@@ -205,6 +225,37 @@ impl<T: BoundedOutput> Outbox<T> {
     fn close(&self) {
         hold(&self.state).closed = true;
         self.ready.notify_waiters();
+    }
+
+    /// Erase every unconsumed output carrying call audio (§11.5).
+    ///
+    /// Run once, at the session's stop, and before the stream is closed. An unconsumed chunk is
+    /// audio the driver never handed on and now never will — the call it was for has stopped — so
+    /// keeping it would be retention past the operation that produced it, in the one place a host
+    /// would never think to look. Terminal and lifecycle outputs are untouched: they are the
+    /// outcome, and §5 and §6 never drop one.
+    fn erase_audio(&self) {
+        let mut state = hold(&self.state);
+        let mut erased = 0usize;
+        state.queue.retain(|output| {
+            if !output.carries_audio() {
+                return true;
+            }
+            if output.revision_of().is_none() {
+                erased = erased.saturating_add(1);
+            }
+            false
+        });
+        state.retained = state.retained.saturating_sub(erased);
+    }
+
+    /// How many unconsumed outputs still carry call audio.
+    fn audio(&self) -> usize {
+        hold(&self.state)
+            .queue
+            .iter()
+            .filter(|output| output.carries_audio())
+            .count()
     }
 
     fn take(&self) -> Option<T> {
@@ -334,6 +385,7 @@ impl Credit {
 /// Returns whether the session's `Stopped` has been applied; §5 puts nothing after it.
 fn pump_recognition<S: RecognitionSession>(
     provider: &mut S,
+    id: &ProviderId,
     outbox: &Outbox<RecognitionOutput>,
     deadlines: &mut Deadlines,
 ) -> bool {
@@ -341,11 +393,29 @@ fn pump_recognition<S: RecognitionSession>(
         let Some(output) = provider.poll_output() else {
             return false;
         };
+        // §11.4: the record names the typed lifecycle and cause and never what was said. It can:
+        // every value here that carries user data redacts itself.
         match &output {
-            RecognitionOutput::Ready => deadlines.disarm(),
+            RecognitionOutput::Ready => {
+                deadlines.disarm();
+                tracing::debug!(provider = %id, "speech recognition session ready");
+            }
             // The session is ending without the driver having asked. §5 bounds every stop with the
             // drain deadline, including the ones the provider starts.
-            RecognitionOutput::Failed(_) | RecognitionOutput::Lost(_) => deadlines.begin_stop(),
+            RecognitionOutput::Failed(cause) => {
+                deadlines.begin_stop();
+                // discard: nothing is discarded here. This reports the session's own terminal,
+                // which §5 never drops and which the consumer receives as an output; the word is
+                // the failure's name rather than a loss the media path absorbed.
+                tracing::debug!(provider = %id, %cause, "speech recognition session failed");
+            }
+            RecognitionOutput::Lost(cause) => {
+                deadlines.begin_stop();
+                tracing::debug!(provider = %id, %cause, "speech recognition session lost");
+            }
+            RecognitionOutput::Stopped { aborted } => {
+                tracing::debug!(provider = %id, aborted, "speech recognition session stopped");
+            }
             _ => {}
         }
         let last = output.is_stop();
@@ -360,6 +430,7 @@ fn pump_recognition<S: RecognitionSession>(
 /// The same, for a synthesis session.
 fn pump_synthesis<S: SynthesisSession>(
     provider: &mut S,
+    id: &ProviderId,
     outbox: &Outbox<SynthesisOutput>,
     deadlines: &mut Deadlines,
 ) -> bool {
@@ -368,11 +439,27 @@ fn pump_synthesis<S: SynthesisSession>(
             return false;
         };
         match &output {
-            SynthesisOutput::Ready => deadlines.disarm(),
+            SynthesisOutput::Ready => {
+                deadlines.disarm();
+                tracing::debug!(provider = %id, "speech synthesis session ready");
+            }
             // A request failing is not the session failing; §6 gives the session's own failure no
             // request identity, and only that one ends the session.
-            SynthesisOutput::Failed { request: None, .. } | SynthesisOutput::Lost(_) => {
+            SynthesisOutput::Failed {
+                request: None,
+                cause,
+            } => {
                 deadlines.begin_stop();
+                // discard: as on the recognition side — the session's own terminal, delivered to
+                // the consumer as an output and never absorbed here.
+                tracing::debug!(provider = %id, %cause, "speech synthesis session failed");
+            }
+            SynthesisOutput::Lost(cause) => {
+                deadlines.begin_stop();
+                tracing::debug!(provider = %id, %cause, "speech synthesis session lost");
+            }
+            SynthesisOutput::Stopped { aborted } => {
+                tracing::debug!(provider = %id, aborted, "speech synthesis session stopped");
             }
             _ => {}
         }
@@ -388,6 +475,7 @@ fn pump_synthesis<S: SynthesisSession>(
 /// Drive one recognition session until it stops (§5).
 async fn run_recognition<S: RecognitionSession>(
     mut provider: S,
+    id: ProviderId,
     mut processor: PcmProcessor,
     outbox: Arc<Outbox<RecognitionOutput>>,
     bounds: SpeechBounds,
@@ -399,7 +487,7 @@ async fn run_recognition<S: RecognitionSession>(
     let mut listening = true;
 
     loop {
-        if pump_recognition(&mut provider, &outbox, &mut deadlines) {
+        if pump_recognition(&mut provider, &id, &outbox, &mut deadlines) {
             break;
         }
         if let Some(after) = deadlines.rearm() {
@@ -449,7 +537,12 @@ async fn run_recognition<S: RecognitionSession>(
                     // §5: the drain expired. Whatever the provider still owns is abandoned with
                     // it, and the driver reports the stop it had to make in its place.
                     DeadlineKind::Drain => {
-                        if !pump_recognition(&mut provider, &outbox, &mut deadlines) {
+                        if !pump_recognition(&mut provider, &id, &outbox, &mut deadlines) {
+                            tracing::debug!(
+                                provider = %id,
+                                aborted = true,
+                                "speech recognition session stopped"
+                            );
                             outbox.push(RecognitionOutput::Stopped { aborted: true });
                         }
                         break;
@@ -460,12 +553,19 @@ async fn run_recognition<S: RecognitionSession>(
             else => break,
         }
     }
+    // §11.5, and in this order: erase what was owned, release the provider and the attachment, and
+    // only then report the stream closed. A consumer that has read its last output has observed all
+    // three, which is what lets a test inspect cleanup instead of waiting for it.
+    outbox.erase_audio();
+    drop(provider);
+    processor.detach();
     outbox.close();
 }
 
 /// Drive one synthesis session until it stops (§6).
 async fn run_synthesis<S: SynthesisSession>(
     mut provider: S,
+    id: ProviderId,
     outbox: Arc<Outbox<SynthesisOutput>>,
     credit: Arc<Credit>,
     bounds: SpeechBounds,
@@ -482,7 +582,7 @@ async fn run_synthesis<S: SynthesisSession>(
         while let Some((request, chunks)) = credit.take() {
             provider.deliver(SynthesisInput::Drained { request, chunks });
         }
-        if pump_synthesis(&mut provider, &outbox, &mut deadlines) {
+        if pump_synthesis(&mut provider, &id, &outbox, &mut deadlines) {
             break;
         }
         if let Some(after) = deadlines.rearm() {
@@ -512,7 +612,12 @@ async fn run_synthesis<S: SynthesisSession>(
                 match kind {
                     DeadlineKind::Warmup => deadlines.begin_stop(),
                     DeadlineKind::Drain => {
-                        if !pump_synthesis(&mut provider, &outbox, &mut deadlines) {
+                        if !pump_synthesis(&mut provider, &id, &outbox, &mut deadlines) {
+                            tracing::debug!(
+                                provider = %id,
+                                aborted = true,
+                                "speech synthesis session stopped"
+                            );
                             outbox.push(SynthesisOutput::Stopped { aborted: true });
                         }
                         break;
@@ -522,6 +627,9 @@ async fn run_synthesis<S: SynthesisSession>(
             else => break,
         }
     }
+    // §11.5, in the same order as the recognition driver's.
+    outbox.erase_audio();
+    drop(provider);
     outbox.close();
 }
 
@@ -571,10 +679,23 @@ impl RecognitionDriver {
             });
         }
         let processor = media.attach_processor(selected.processing(direction, bounds))?;
+        // §11.4: an ordinary record of the session that just started — who is running it, what it
+        // was admitted to do, and the limits it runs under. None of it is user data.
+        tracing::debug!(
+            provider = %selected.provider(),
+            kind = %selected.kind(),
+            admission = %selected.admission(),
+            input_frames = bounds.input_frames(),
+            unconsumed_outputs = bounds.unconsumed_outputs(),
+            warmup = ?bounds.warmup(),
+            drain = ?bounds.drain(),
+            "speech recognition session admitted",
+        );
         let outbox = Arc::new(Outbox::new(bounds));
         let (inputs, control) = mpsc::channel(CONTROL_SLACK);
         let task = tokio::spawn(run_recognition(
             provider,
+            selected.provider().clone(),
             processor,
             Arc::clone(&outbox),
             bounds,
@@ -680,11 +801,23 @@ impl SynthesisDriver {
                 selected: selected.kind(),
             });
         }
+        tracing::debug!(
+            provider = %selected.provider(),
+            kind = %selected.kind(),
+            admission = %selected.admission(),
+            queued_requests = bounds.queued_requests(),
+            request_text_octets = bounds.request_text_octets(),
+            chunk_window = bounds.chunk_window(),
+            warmup = ?bounds.warmup(),
+            drain = ?bounds.drain(),
+            "speech synthesis session admitted",
+        );
         let outbox = Arc::new(Outbox::new(bounds));
         let credit = Arc::new(Credit::default());
         let (inputs, control) = mpsc::channel(bounds.queued_requests() + CONTROL_SLACK);
         let task = tokio::spawn(run_synthesis(
             provider,
+            selected.provider().clone(),
             Arc::clone(&outbox),
             Arc::clone(&credit),
             bounds,
@@ -748,6 +881,16 @@ impl SynthesisDriver {
     /// How many outputs are waiting to be read.
     pub fn pending(&self) -> usize {
         self.outbox.pending()
+    }
+
+    /// How many unconsumed outputs still carry call audio (§11.5).
+    ///
+    /// Zero once the session has stopped, whether it stopped by cancellation, by call teardown or
+    /// by failing: audio the driver never handed on is erased at the stop rather than left in a
+    /// queue. Reading this after the output stream closes is how a host inspects that, without
+    /// waiting for anything.
+    pub fn retained_audio(&self) -> usize {
+        self.outbox.audio()
     }
 
     /// Wait for the driver's task to finish. Bounded on the same terms as

@@ -16,6 +16,8 @@ use std::time::Duration;
 
 use sipx_audio::PcmFormat;
 
+use super::privacy::{ProviderPrivacy, RetentionOptIn};
+
 /// A token that is not in the shape its field requires.
 ///
 /// One type for identity, voice, property and language tokens: the caller already knows which
@@ -571,8 +573,8 @@ pub struct ProviderDescriptor {
     id: ProviderId,
     version: String,
     kind: ProviderKind,
-    off_host: bool,
-    network: bool,
+    /// §3's four privacy properties, kept as the one declaration §4 step 2 admits or refuses.
+    privacy: ProviderPrivacy,
     languages: Vec<LanguageTag>,
     voices: Vec<Voice>,
     accepted_formats: Vec<PcmFormat>,
@@ -630,19 +632,45 @@ impl ProviderDescriptor {
     /// Whether audio, text or data derived from them ever leaves this machine.
     #[must_use]
     pub const fn off_host(&self) -> bool {
-        self.off_host
+        self.privacy.off_host()
     }
 
     /// Whether runtime operation requires any network egress at all.
     #[must_use]
     pub const fn network(&self) -> bool {
-        self.network
+        self.privacy.network()
+    }
+
+    /// Whether the provider can write call audio, transcripts or synthesis input somewhere durable
+    /// for diagnosis (§11.3).
+    ///
+    /// Declaring it does not make it happen: the host has to configure
+    /// [`RetentionOptIn::DebugCapture`](super::RetentionOptIn::DebugCapture) as well, or §4 step 2
+    /// refuses the provider outright.
+    #[must_use]
+    pub const fn debug_capture(&self) -> bool {
+        self.privacy.debug_capture()
+    }
+
+    /// Whether the provider keeps data derived from call audio or text past the session (§11.3).
+    #[must_use]
+    pub const fn derived_cache(&self) -> bool {
+        self.privacy.derived_cache()
+    }
+
+    /// The four properties §11 admits a provider on, as one value.
+    ///
+    /// The same type the session's [`SpeechAdmission`](super::SpeechAdmission) carries, so
+    /// discovery and the call event cannot disagree about what a provider does.
+    #[must_use]
+    pub const fn privacy(&self) -> ProviderPrivacy {
+        self.privacy
     }
 
     /// Whether this provider is local and offline: the conjunction of the two properties above.
     #[must_use]
     pub const fn is_local_offline(&self) -> bool {
-        !self.off_host && !self.network
+        self.privacy.is_local_offline()
     }
 
     /// The RFC 5646 tags supported, in declared order.
@@ -721,8 +749,7 @@ impl<K> ProviderDescriptorBuilder<K> {
                 id,
                 version,
                 kind,
-                off_host: false,
-                network: false,
+                privacy: ProviderPrivacy::LOCAL_OFFLINE,
                 languages: Vec::new(),
                 voices: Vec::new(),
                 accepted_formats: Vec::new(),
@@ -738,14 +765,42 @@ impl<K> ProviderDescriptorBuilder<K> {
     /// Declare that audio, text or data derived from them leaves this machine.
     #[must_use]
     pub fn off_host(mut self, off_host: bool) -> Self {
-        self.descriptor.off_host = off_host;
+        self.descriptor.privacy = self
+            .descriptor
+            .privacy
+            .declaring(RetentionOptIn::OffHostProcessing, off_host);
         self
     }
 
     /// Declare that runtime operation requires network egress.
     #[must_use]
     pub fn network(mut self, network: bool) -> Self {
-        self.descriptor.network = network;
+        self.descriptor.privacy = self
+            .descriptor
+            .privacy
+            .declaring(RetentionOptIn::NetworkEgress, network);
+        self
+    }
+
+    /// Declare that the provider can write call audio, transcripts or synthesis input somewhere
+    /// durable for diagnosis (§11.3).
+    #[must_use]
+    pub fn debug_capture(mut self, debug_capture: bool) -> Self {
+        self.descriptor.privacy = self
+            .descriptor
+            .privacy
+            .declaring(RetentionOptIn::DebugCapture, debug_capture);
+        self
+    }
+
+    /// Declare that the provider keeps data derived from call audio or text past the session
+    /// (§11.3).
+    #[must_use]
+    pub fn derived_cache(mut self, derived_cache: bool) -> Self {
+        self.descriptor.privacy = self
+            .descriptor
+            .privacy
+            .declaring(RetentionOptIn::PersistentDerivedData, derived_cache);
         self
     }
 

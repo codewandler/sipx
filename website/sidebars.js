@@ -50,6 +50,7 @@ const sidebars = {
       label: 'Reference',
       items: [
         'reference/security',
+        'reference/privacy',
         'reference/logging',
         'reference/compliance',
         'reference/comparison',

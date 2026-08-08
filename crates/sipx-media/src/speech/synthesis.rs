@@ -14,9 +14,12 @@
 //! **Production is windowed.** The driver grants a chunk window (§8) and returns credit with
 //! [`SynthesisInput::Drained`], so a provider cannot run ahead of a slow call into unbounded audio.
 
+use std::fmt;
+
 use sipx_audio::Pcm;
 
 use super::lifecycle::{CancelReason, DeadlineKind, FailureCause, LossCause};
+use super::privacy::{DataClass, Redacted};
 
 /// One synthesis request's identity within one session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -37,7 +40,11 @@ impl RequestId {
 }
 
 /// One chunk of synthesized audio (§6 `Chunk`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Its `Debug` redacts the samples (§11.4), on the same terms as
+/// [`RecognitionFrame`](super::RecognitionFrame): synthesized speech is call audio and call audio
+/// is user data, whichever direction it was going.
+#[derive(Clone, PartialEq, Eq)]
 pub struct SynthesisChunk {
     request: RequestId,
     sequence: u64,
@@ -88,6 +95,20 @@ impl SynthesisChunk {
     }
 }
 
+impl fmt::Debug for SynthesisChunk {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SynthesisChunk")
+            .field("request", &self.request)
+            .field("sequence", &self.sequence)
+            .field("offset", &self.offset)
+            .field(
+                "pcm",
+                &Redacted::samples(DataClass::CallAudio, self.pcm.samples().len()),
+            )
+            .finish()
+    }
+}
+
 /// What a cancellation applies to (§6 `Cancel`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -115,8 +136,10 @@ pub enum SynthesisRefusal {
 
 /// What a driver delivers to a synthesis session (§6).
 ///
-/// `#[non_exhaustive]` on the same terms as [`RecognitionInput`](super::RecognitionInput).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `#[non_exhaustive]` on the same terms as [`RecognitionInput`](super::RecognitionInput). Its
+/// `Debug` redacts the enqueued text (§11.4): what a host asked a call to say is user data, and
+/// `Enqueue` is the one value in this contract that carries it.
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SynthesisInput {
     /// Queue one bounded text request.
@@ -150,6 +173,41 @@ pub enum SynthesisInput {
         /// The generation it was armed in.
         generation: u64,
     },
+}
+
+impl fmt::Debug for SynthesisInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Enqueue {
+                request,
+                text,
+                replace,
+            } => f
+                .debug_struct("Enqueue")
+                .field("request", request)
+                .field(
+                    "text",
+                    &Redacted::octets(DataClass::SynthesisInput, text.len()),
+                )
+                .field("replace", replace)
+                .finish(),
+            Self::Cancel { scope, reason } => f
+                .debug_struct("Cancel")
+                .field("scope", scope)
+                .field("reason", reason)
+                .finish(),
+            Self::Drained { request, chunks } => f
+                .debug_struct("Drained")
+                .field("request", request)
+                .field("chunks", chunks)
+                .finish(),
+            Self::DeadlineFired { kind, generation } => f
+                .debug_struct("DeadlineFired")
+                .field("kind", kind)
+                .field("generation", generation)
+                .finish(),
+        }
+    }
 }
 
 /// What a synthesis session emits (§6).

@@ -40,6 +40,7 @@ mod bounds;
 mod descriptor;
 mod driver;
 mod lifecycle;
+mod privacy;
 mod recognition;
 mod registry;
 mod selection;
@@ -53,6 +54,10 @@ pub use descriptor::{
 };
 pub use driver::{DriverError, RecognitionDriver, SynthesisDriver};
 pub use lifecycle::{CancelReason, DeadlineKind, FailureCause, LossCause};
+pub use privacy::{
+    DataClass, ProviderPrivacy, Redacted, Retention, RetentionOptIn, Secret, SpeechAdmission,
+    SpeechPrivacy,
+};
 pub use recognition::{
     FrameInputs, RecognitionFrame, RecognitionInput, RecognitionOutput, RecognitionSession,
     SampleSpan, Utterance, UtteranceId, recognition_inputs,

@@ -29,9 +29,9 @@ use bytes::Bytes;
 use sipx_media::speech::{
     CancelReason, CancelScope, Conversion, DeadlineKind, Device, DeviceKind, DeviceRequirement,
     FailureCause, FallbackEngaged, LanguageRange, LanguageTag, LocalityPolicy, LossCause,
-    Malformed, ProviderDescriptor, ProviderId, ProviderKind, ProviderRegistry, RecognitionDriver,
-    RecognitionFrame, RecognitionInput, RecognitionOutput, RecognitionSession, RefusalReason,
-    RequestId, Resources, SampleSpan, Selected, SelectionContext, SelectionDocument,
+    Malformed, ProviderDescriptor, ProviderId, ProviderKind, ProviderPrivacy, ProviderRegistry,
+    RecognitionDriver, RecognitionFrame, RecognitionInput, RecognitionOutput, RecognitionSession,
+    RefusalReason, RequestId, Resources, SampleSpan, Selected, SelectionContext, SelectionDocument,
     SelectionError, SpeechBounds, SpeechPolicy, SynthesisChunk, SynthesisDriver, SynthesisInput,
     SynthesisOutput, SynthesisRefusal, SynthesisSession, Utterance, UtteranceId, Voice, VoiceToken,
     recognition_inputs,
@@ -932,9 +932,16 @@ fn dis_1_discovery_reports_every_field_and_repeats_itself() {
     assert_eq!(recogniser.kind(), ProviderKind::Recognition);
     assert!(!recogniser.off_host());
     assert!(!recogniser.network());
+    assert!(!recogniser.debug_capture());
+    assert!(!recogniser.derived_cache());
     assert!(
         recogniser.is_local_offline(),
         "local/offline is the conjunction of two declared properties, never an identity"
+    );
+    assert_eq!(
+        recogniser.privacy(),
+        ProviderPrivacy::LOCAL_OFFLINE,
+        "the four §11 properties are one declaration, and this provider makes none of the claims"
     );
     assert_eq!(recogniser.languages(), &[tag("en"), tag("de")]);
     assert_eq!(recogniser.accepted_formats(), &[wideband(), narrowband()]);
