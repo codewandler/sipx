@@ -350,6 +350,11 @@ def gate_steps(msrv: str) -> list[Step]:
         # no imports, the ABI export names, the size bound — were unenforced while the
         # kernel tests passed. 18s warm, so it belongs local rather than CI-only.
         Step("wasm kernel", "wasm", ("./scripts/check-wasm-kernel.sh",)),
+        # `T-33`: a separate claim from the one above, and it shares the `wasm` job because it
+        # needs the same target and the same built module. The kernel check says the artifact is
+        # the shape §4 promises; this says the browser binding drives it under the bounds
+        # `docs/specs/browser-signalling.md` states — either can hold while the other fails.
+        Step("browser binding", "wasm", ("./scripts/check-browser-binding.sh",)),
         Step("docs site", "site", ("./scripts/build-docs.sh",)),
     ]
 
