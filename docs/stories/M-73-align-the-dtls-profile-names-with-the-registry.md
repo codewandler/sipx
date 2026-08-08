@@ -2,8 +2,8 @@
 id: M-73
 title: Align the DTLS profile names with the IANA registry
 pillar: Media
-status: in-progress
-priority: 30
+status: done
+priority:
 design: docs/designs/media-security-profiles.md
 epic: media-security-profiles
 areas: [sipx-media, docs]
@@ -26,7 +26,7 @@ spellings now sitting side by side do not become a permanent inconsistency.
 - [x] `docs/specs/srtp.md` §12.4 no longer records the divergence as open.
 - [x] A failing-first test pins the wire-visible name, and the change is stated as a behaviour
       change for the `dtls` feature in `CHANGELOG.md` with migration guidance.
-- [ ] `./scripts/gate.py` green, and the interop suite is run or its absence stated.
+- [x] `./scripts/gate.py` green, and the interop suite is run or its absence stated.
 
 ## Progress
 
@@ -78,3 +78,4 @@ spellings now sitting side by side do not become a permanent inconsistency.
   > the `Profile` variant rather than on the string, or keep your library's names in your own
   > `Handshake` implementation and translate there — `dtls::openssl` does exactly that internally,
   > in both directions. Callers that only display `as_str()` see the new spelling.
+- 2026-08-08: closed in the `1.0.0-rc.6` boundary.

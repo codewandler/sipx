@@ -30,7 +30,7 @@
 //! but its SIP mapping is a sipx specification rather than an RFC. Its API and wire choices may
 //! change if a standard mapping is published; see `docs/specs/sip-quic.md`.
 
-// This crate's inline `#[cfg(test)]` modules opt out of coverage instrumentation, so the
+// This crate's inline test modules opt out of coverage instrumentation, so the
 // published figure measures the code rather than the tests measuring it. Never set outside
 // `cargo llvm-cov`, so every other build parses this and discards it. Applied by
 // `./scripts/coverage-report.py --annotate`; `docs/coverage.md` states what it costs.

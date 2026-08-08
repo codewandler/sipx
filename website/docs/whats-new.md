@@ -1,13 +1,38 @@
 ---
 title: What's new
-description: Release highlights and adoption notes for the sipx 1.0.0-rc.5 release candidate.
+description: Release highlights and adoption notes for the sipx 1.0.0-rc.6 release candidate.
 ---
 
 # What's new
 
 <!-- BEGIN generated:release-heading -->
-## 1.0.0-rc.5 — 2026-08-08
+## 1.0.0-rc.6 — 2026-08-08
 <!-- END generated:release-heading -->
+
+RC.6 is largely about this project's own evidence — what the coverage number counts, whether a
+generated report can be found, whether a story's status agrees with its acceptance, and whether a
+protection profile sipx negotiates has been agreed by something that is not sipx.
+
+Install the exact CLI release with:
+
+```bash
+cargo install --locked --version =1.0.0-rc.6 sipx-cli
+```
+
+- **Applications can name a destination instead of addressing one.** The bounded resolver moved into
+  the transport crate, so a library consumer gets the same deadlines, ordering and typed failures the
+  diagnostic phone has had, with the URI host still the TLS verification identity.
+- **AEAD-GCM has been agreed with an independent implementation.** A native browser and sipx settle
+  on `AEAD_AES_256_GCM` and carry non-silent audio both ways, with the browser deriving its own keys.
+  A deliberately wrong salt offset is proved to fail that run while every published vector still
+  passes. The 128-bit suite and the SDES keying path are not yet covered.
+- **`register` finishes its work before it reports it.** Every exit now joins the endpoint, not just
+  an expired deadline, and `--keep-alive` no longer sends a redundant second REGISTER.
+- **The coverage figure stopped counting the tests.** Inline test modules are excluded by rule, and
+  the published number moved from 90.13% to 86.76%.
+- **The DTLS profiles are named as the registry names them.**
+
+## 1.0.0-rc.5 — 2026-08-08
 
 RC.5 makes a call's audio observable and its speech contract runnable, exports the signalling kernel
 to WebAssembly, and adds a coupling role that stays entirely off the media path. It remains a
@@ -509,5 +534,5 @@ answer calls, but application callback bindings are not implemented.
 This website is built from `main`, so a page or API link may describe work newer than the tagged
 release. Use the exact crates.io version when reproducibility matters, and consult the
 [complete changelog](https://github.com/codewandler/sipx/blob/main/CHANGELOG.md) before updating a
-Git revision. Unreleased behavior is not part of `1.0.0-rc.5` merely because it appears on this
+Git revision. Unreleased behavior is not part of `1.0.0-rc.6` merely because it appears on this
 site.

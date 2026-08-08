@@ -7,6 +7,60 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0-rc.6] — 2026-08-08
+
+This candidate is mostly about the project's own evidence: what the coverage figure counts, whether
+a generated report can be found, whether a story's status agrees with its own acceptance, and
+whether a protection profile sipx negotiates has ever been agreed by something that is not sipx. It
+also finishes work the previous candidates left stated rather than done.
+
+### Added
+
+- **Bounded target resolution is reachable from the library, not only the phone.** The resolver
+  moved into `sipx-transport`; `Config::resolved` accepts a named target and keeps the URI host as
+  the TLS/WSS verification identity, and resolution failure, resolution timeout and connection
+  failure stay distinguishable through a typed error. The integration guide no longer instructs
+  applications to resolve the proxy themselves, and a public-content regression stops that
+  instruction returning.
+
+- **The AEAD-GCM key derivation has been agreed with an implementation that is not sipx.** A native
+  browser and sipx settle on `AEAD_AES_256_GCM` and carry non-silent audio both ways, with the
+  browser deriving its own session keys from the DTLS exporter — agreement no round-trip test in
+  this repository could have produced. The proof records the peer and its exact revision, and a
+  deliberately perturbed master-salt offset is proved to fail it while every published RFC vector
+  and all 448 local tests still pass. `AEAD_AES_128_GCM` and the SDES keying path remain unproven.
+
+- **A check reports a story whose status disagrees with its own acceptance.** Calibrated against 926
+  committed story states, it fires on the shape that let a fully delivered story be re-dispatched
+  three days later, and stays silent on a deliberate partial landing and on all 30 in-flight
+  branches. It reports rather than fails, because two of the three historical cases were fixed by
+  the very next commit.
+
+- **The generated reports are reachable and say what they do not claim.** The index is derived from
+  the sentence each generator already writes into its own output, so a new report cannot be added
+  and left undiscoverable, and each entry's non-claim is asserted to appear in the source page as
+  well — a paraphrase that sounds stronger than the original fails.
+
+### Changed
+
+- **The coverage figure no longer counts the tests measuring the code.** Inline `#[cfg(test)]`
+  modules are excluded by a syntactic rule rather than a file list, and the published figure moved
+  from 90.13% to 86.76%. On one crate, 37.5% of the lines the old number was computed over were that
+  crate's own tests. Branch coverage is unchanged, which is worth knowing: it is the number the page
+  calls the one worth acting on, and this mechanism does not touch it.
+
+- **The DTLS protection profiles are named as the registry names them.** The counter-mode profile
+  carried OpenSSL's spelling beside two registry names; it now carries the registry's, translated at
+  the library boundary in both directions. The wire identifier is unchanged.
+
+### Fixed
+
+- **Every `register` exit joins its endpoint before reporting.** Previously only an expired deadline
+  did, so a success, a rejection or a transport failure printed its result while its socket was
+  still held and read counters from a running endpoint. `--keep-alive` also stopped issuing a
+  redundant second REGISTER per invocation, and its refreshes are now bounded by the stated deadline
+  rather than only by the granted lease.
+
 ## [1.0.0-rc.5] — 2026-08-08
 
 This boundary is a wave of independent implementation, like the one before it. It puts the first two
@@ -3799,7 +3853,8 @@ Stated so nobody has to discover it from a stack trace:
 - **Interop is verified against Kamailio only.** A second implementation with different
   opinions — Asterisk, as a B2BUA rather than a proxy — has not been tried.
 
-[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.5...HEAD
+[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.6...HEAD
+[1.0.0-rc.6]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.5...v1.0.0-rc.6
 [1.0.0-rc.5]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.4...v1.0.0-rc.5
 [1.0.0-rc.4]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.3...v1.0.0-rc.4
 [1.0.0-rc.3]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.2...v1.0.0-rc.3

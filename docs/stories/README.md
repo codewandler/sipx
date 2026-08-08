@@ -75,11 +75,7 @@ appeared twice before anyone named it.
 - [A-38 — Publish and verify the second release candidate](A-38-publish-and-verify-rc3.md) · Application · after X-113 · the post-rc.2 wave as one immutable prerelease · no stable-1.0 claim widens
 - [M-70 — Accept multiplexed browser offers with unused component candidates](M-70-accept-multiplexed-browser-offers-with-unused-component-candidates.md) · Media · external review finding 9 · a second browser engine reaches SDP then fails the multiplexed profile
 - [M-72 — Prove the AEAD SRTP key derivation against an independent peer](M-72-prove-the-aead-srtp-key-derivation-against-a-peer.md) · Media · RFC 7714 publishes no KDF vector · a wrong salt placement makes two sipx endpoints interoperate with each other and nobody else, and every round-trip test still passes
-- [P-27 — Make every command exit a join barrier](P-27-make-every-command-exit-a-join-barrier.md) · Phone · P-25 added the join on register's deadline path only · every other exit still reports before its work is observably finished
-- [T-40 — Expose the bounded resolver to library consumers](T-40-expose-the-bounded-resolver-to-library-consumers.md) · Transport · T-38/T-39 built bounded resolution inside sipx-cli · the public guide still tells applications to resolve the proxy themselves
-- [X-115 — Catch implemented but unclosed stories](X-115-catch-implemented-but-unclosed-stories.md) · Build · A-16 was fully delivered, left at status backlog, then re-selected into a wave and dispatched to an implementor
 - [X-116 — Measure coverage without counting inline test modules](X-116-measure-coverage-without-inline-test-modules.md) · Build · the published 90% line figure is flattered because unit tests live inside src/ and path exclusion cannot reach them
-- [X-117 — Make the generated reports discoverable](X-117-make-the-generated-reports-discoverable.md) · Build · coverage, comparison, compliance and maturity are all reachable only by knowing their path
 
 ## Next (ready — take the top one unless the user named a story)
 
@@ -119,10 +115,6 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 _Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
 - [M-74 — Guard public data enums against exhaustive matching](M-74-guard-public-data-enums-against-exhaustive-matching.md) · Media · the non_exhaustive check only matches enums whose name ends in Error, so MediaProfile, IcePolicy, Keying and RtcpMode are unguarded
 - [M-75 — Preserve RTP header extensions on re-encode](M-75-preserve-rtp-header-extensions-on-re-encode.md) · Media · extensions are parsed on receive and silently dropped when a packet is re-encoded · harmless for audio today, a correctness trap for any relay
-
-### media security profiles
-_sipx implements exactly one SRTP protection profile:_
-- [M-73 — Align the DTLS profile names with the IANA registry](M-73-align-the-dtls-profile-names-with-the-registry.md) · Media · the counter-mode DTLS profile carries OpenSSL's spelling rather than the registry's; M-41 added registry-correct names beside it
 
 ### SIP core (sans-IO)
 _Everything above this layer inherits its correctness properties. SIP's genuinely hard parts —_
@@ -291,6 +283,7 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [M-59 — Report call signal level clipping and silence metrics](M-59-report-call-signal-metrics.md) · Media · after M-57 and M-54 · signal content only, distinct from M-10 network quality
 - [M-69 — Reject an unacceptable initial offer on the wire](M-69-reject-an-unacceptable-initial-offer-on-the-wire.md) · Media · external review finding 3 · no-common-codec failure sends no final SIP response
 - [M-71 — Deliver negotiated DTMF receive events through scenario](M-71-deliver-negotiated-dtmf-receive-events-through-scenario.md) · Media · external review finding 10 · digits send successfully but no typed receive event arrives
+- [M-73 — Align the DTLS profile names with the IANA registry](M-73-align-the-dtls-profile-names-with-the-registry.md) · Media · the counter-mode DTLS profile carries OpenSSL's spelling rather than the registry's; M-41 added registry-correct names beside it
 - [P-1 — Build the CLI scaffold and machine-readable output](P-1-cli-scaffold-and-output.md) · Phone
 - [P-2 — Implement `sipx register`](P-2-cli-register.md) · Phone
 - [P-3 — Implement `sipx dial`](P-3-cli-dial.md) · Phone
@@ -316,6 +309,7 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [P-24 — Report call progress consistently](P-24-report-call-progress-consistently.md) · Phone · follow-up external review finding 11 · answer and load do not emit the INFO progress promised for -v
 - [P-25 — Bound a registration attempt](P-25-bound-a-registration-attempt.md) · Phone · external review finding 4's actual consequence · X-110 made --timeout an explicit error on register, but nothing bounds the attempt
 - [P-26 — Cover resolution in every command deadline](P-26-cover-resolution-in-every-command-deadline.md) · Phone · dial --timeout starts its clock after resolution · a slow name can spend the resolver's eight seconds before the invitation is even sent
+- [P-27 — Make every command exit a join barrier](P-27-make-every-command-exit-a-join-barrier.md) · Phone · P-25 added the join on register's deadline path only · every other exit still reports before its work is observably finished
 - [S-1 — Specify the SIP message model and parser](S-1-sip-message-parser-specs.md) · Signalling · gates every other sip-core story
 - [S-2 — Implement SIP URIs, header names and header parameters](S-2-uri-and-header-primitives.md) · Signalling
 - [S-3 — Implement typed headers with verbatim passthrough](S-3-typed-headers.md) · Signalling
@@ -403,6 +397,7 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [T-37 — Preserve immediate transport failures as failures](T-37-preserve-immediate-transport-failures-as-failures.md) · Transport · external review finding 11 · a refused connection is currently reported as a SIP timeout
 - [T-38 — Specify bounded SIP endpoint resolution](T-38-specify-bounded-sip-endpoint-resolution.md) · Transport · external review finding 2 · spec-first target derivation, DNS ordering, identity and deadlines
 - [T-39 — Resolve named targets in every phone command](T-39-resolve-named-targets-in-every-phone-command.md) · Transport · external review finding 2 · after T-38 · dial, register and scenario accept named targets without manual address injection
+- [T-40 — Expose the bounded resolver to library consumers](T-40-expose-the-bounded-resolver-to-library-consumers.md) · Transport · T-38/T-39 built bounded resolution inside sipx-cli · the public guide still tells applications to resolve the proxy themselves
 - [X-1 — Scaffold the Cargo workspace, lint policy, licensing and CI](X-1-workspace-scaffold.md) · Core
 - [X-2 — Import the RFC 4475 torture corpus and its harness](X-2-rfc4475-torture-corpus.md) · Core
 - [X-3 — Enforce the provenance policy in CI and pre-commit](X-3-provenance-gate.md) · Core
@@ -495,6 +490,8 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [X-112 — Take the integrated gate green on main and reconcile derived artifacts](X-112-take-the-integrated-gate-green-on-main.md) · Build · the single deferred acceptance row 29 stories share · five steps are already proven red at the merge base
 - [X-113 — Record the post-rc.2 boundary and close the wave stories](X-113-record-the-post-rc2-boundary-and-close-the-wave.md) · Build · after X-112 · one changelog boundary, then every story whose acceptance actually holds closes
 - [X-114 — Instrument gate step timings](X-114-instrument-gate-step-timings.md) · Build · X-93's baseline exists only as prose in its own story · gate.py has no clock at all, so nothing can be shown to have got faster
+- [X-115 — Catch implemented but unclosed stories](X-115-catch-implemented-but-unclosed-stories.md) · Build · A-16 was fully delivered, left at status backlog, then re-selected into a wave and dispatched to an implementor
+- [X-117 — Make the generated reports discoverable](X-117-make-the-generated-reports-discoverable.md) · Build · coverage, comparison, compliance and maturity are all reachable only by knowing their path
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

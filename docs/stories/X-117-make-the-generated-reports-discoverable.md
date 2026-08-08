@@ -2,8 +2,8 @@
 id: X-117
 title: Make the generated reports discoverable
 pillar: Build
-status: in-progress
-priority: 29
+status: done
+priority:
 design:
 epic: conformance
 areas: [docs, website]
@@ -27,7 +27,7 @@ knowing its filename.
 - [x] A failing-first check fails when a new generated report is added without becoming reachable.
 - [x] Each link states what the report measures and what it deliberately does not, so a reader does
       not have to open it to learn it is not a quality claim.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -68,3 +68,4 @@ knowing its filename.
   own exclusions — so a changed measurement, a changed exclusion rule or a changed headline
   percentage leaves it true. What would break it is a rename of that page's `# ` heading or of its
   generated-by sentence, and both fail this check loudly rather than going quietly stale.
+- 2026-08-08: closed in the `1.0.0-rc.6` boundary.

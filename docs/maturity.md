@@ -60,20 +60,20 @@ No aggregate percentage is given. `media` and `core` differ in size and in how m
 
 | Pillar | Open stories |
 |---|---|
-| Media | 20 |
+| Media | 19 |
 | Application | 16 |
-| Build | 16 |
-| Phone | 5 |
-| Transport | 4 |
+| Build | 14 |
+| Phone | 4 |
 | Signalling | 3 |
+| Transport | 3 |
 | Call | 1 |
-| **total** | **65** |
+| **total** | **60** |
 
-290 stories done. `blocked` counts as open: a story parked on a dependency is distance, not progress.
+295 stories done. `blocked` counts as open: a story parked on a dependency is distance, not progress.
 
 ## Discovery versus closure
 
-<!-- maturity-event-days: {"basis":"sha256:1b5e03f011b8244184af26d59690d4f546cd77045ec7757e599141c4380f18ce","closed":{"2026-07-28":58,"2026-07-29":48,"2026-07-30":40,"2026-07-31":5,"2026-08-01":1,"2026-08-03":12,"2026-08-04":39,"2026-08-05":35,"2026-08-08":52},"filed":{"2026-07-28":95,"2026-07-29":42,"2026-07-30":44,"2026-07-31":3,"2026-08-03":1,"2026-08-04":51,"2026-08-05":73,"2026-08-06":17,"2026-08-08":30}} -->
+<!-- maturity-event-days: {"basis":"sha256:943467633f772db5283d165f7e7b7e91ded67bd435ffe8263ce83ae414cbdb92","closed":{"2026-07-28":58,"2026-07-29":48,"2026-07-30":40,"2026-07-31":5,"2026-08-01":1,"2026-08-03":12,"2026-08-04":39,"2026-08-05":35,"2026-08-08":57},"filed":{"2026-07-28":95,"2026-07-29":42,"2026-07-30":44,"2026-07-31":3,"2026-08-03":1,"2026-08-04":51,"2026-08-05":73,"2026-08-06":17,"2026-08-08":30}} -->
 
 Burn-down is not a maturity signal while discovery outpaces closure. The marker to watch is not a single day where closure wins but the date that crossover becomes **durable** — that is when the codebase stops surprising its authors.
 
@@ -88,7 +88,7 @@ Burn-down is not a maturity signal while discovery outpaces closure. The marker 
 | 2026-08-04 | 51 | 39 | -12 |
 | 2026-08-05 | 73 | 35 | -38 |
 | 2026-08-06 | 17 | 0 | -17 |
-| 2026-08-08 | 30 | 52 | +22 |
+| 2026-08-08 | 30 | 57 | +27 |
 
 Filed is a story file being added; closed is a `status: done` line appearing, so a story reopened and closed again counts twice — which is the honest reading of *closed that day*.
 

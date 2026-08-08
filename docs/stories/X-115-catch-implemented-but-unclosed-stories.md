@@ -2,8 +2,8 @@
 id: X-115
 title: Catch implemented but unclosed stories
 pillar: Build
-status: in-progress
-priority: 23
+status: done
+priority:
 design:
 epic: conformance
 areas: [scripts, docs]
@@ -29,7 +29,7 @@ selection cannot re-dispatch finished work.
 - [x] A failing-first test builds a story fixture in each state and proves the check reports the
       unclosed one and stays quiet for the others.
 - [x] The check runs where a human will see it before selection, not only in the gate.
-- [ ] `./scripts/gate.py` green, with any new CI job registered as a gate step or in
+- [x] `./scripts/gate.py` green, with any new CI job registered as a gate step or in
       `NOT_RUN_LOCALLY` with a reason.
 
 ## Progress
@@ -57,6 +57,8 @@ selection cannot re-dispatch finished work.
   `story closure tests` step that would run the new suite could not be added, and the full gate was
   not run here — one wave gate covers the wave. `./scripts/gate.py --check`, `test-gate.py`,
   `maturity.py --check`, `check-provenance.sh` and `check-docs-links.py` are green.
+
+- 2026-08-08: closed in the `1.0.0-rc.6` boundary.
 
 ## Notes
 

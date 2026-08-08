@@ -21,12 +21,12 @@ the tests themselves.
 
 ## Acceptance
 
-- [ ] `#[cfg(test)] mod tests` blocks inside `src/` are excluded from the measurement, and the
+- [x] `#[cfg(test)] mod tests` blocks inside `src/` are excluded from the measurement, and the
       published figure changes accordingly — a number that does not move proves the exclusion did
       not work.
       *Excluded: all 161 of them, and the exclusion is proven to move the number (see Progress).
       The published figure is not yet re-measured; `--measure` aborts on a merge-base test failure.*
-- [ ] The mechanism is stated on the page, and its cost is stated with it: whether it needs
+- [x] The mechanism is stated on the page, and its cost is stated with it: whether it needs
       `#[coverage(off)]`, a cfg the crates do not yet carry, or a tool upgrade.
       *Written and asserted in the generator; reaches `docs/coverage.md` with the same `--measure`.*
 - [x] The exclusion is generated from a rule, not a hand-maintained file list.
@@ -77,6 +77,11 @@ the tests themselves.
   exclusion. One `./scripts/coverage-report.py --measure` on a tree where that suite passes closes
   this story's remaining two Acceptance rows, and taking it on the integrated wave commit is where
   it belongs anyway.
+
+- 2026-08-08: the coordinator ran `./scripts/coverage-report.py --measure` on the integrated
+  wave tree, which is where the figure belongs since it records the commit it describes. The
+  published figure moved **90.13% → 86.76% over 61,480 lines** — the exclusion works, and a
+  figure that had not moved would have proved it did not. Only the shared gate row remains.
 
 ## Notes
 

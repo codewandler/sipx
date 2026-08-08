@@ -2493,7 +2493,7 @@ checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
 name = "sipx-app"
-version = "1.0.0-rc.5"
+version = "1.0.0-rc.6"
 dependencies = [
  "base64",
  "bytes",
@@ -2516,7 +2516,7 @@ dependencies = [
 
 [[package]]
 name = "sipx-app-protocol"
-version = "1.0.0-rc.5"
+version = "1.0.0-rc.6"
 dependencies = [
  "sipx-call",
  "sipx-media",
@@ -2528,7 +2528,7 @@ dependencies = [
 
 [[package]]
 name = "sipx-audio"
-version = "1.0.0-rc.5"
+version = "1.0.0-rc.6"
 dependencies = [
  "bytes",
  "opus",
@@ -2539,7 +2539,7 @@ dependencies = [
 
 [[package]]
 name = "sipx-call"
-version = "1.0.0-rc.5"
+version = "1.0.0-rc.6"
 dependencies = [
  "base64",
  "bytes",
@@ -2564,7 +2564,7 @@ dependencies = [
 
 [[package]]
 name = "sipx-cli"
-version = "1.0.0-rc.5"
+version = "1.0.0-rc.6"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2592,7 +2592,7 @@ dependencies = [
 
 [[package]]
 name = "sipx-media"
-version = "1.0.0-rc.5"
+version = "1.0.0-rc.6"
 dependencies = [
  "bytes",
  "hmac",
@@ -2612,7 +2612,7 @@ dependencies = [
 
 [[package]]
 name = "sipx-rtp"
-version = "1.0.0-rc.5"
+version = "1.0.0-rc.6"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -2629,7 +2629,7 @@ dependencies = [
 
 [[package]]
 name = "sipx-sdp"
-version = "1.0.0-rc.5"
+version = "1.0.0-rc.6"
 dependencies = [
  "bytes",
  "pretty_assertions",
@@ -2643,7 +2643,7 @@ dependencies = [
 
 [[package]]
 name = "sipx-sip"
-version = "1.0.0-rc.5"
+version = "1.0.0-rc.6"
 dependencies = [
  "base64",
  "bytes",
@@ -2660,7 +2660,7 @@ dependencies = [
 
 [[package]]
 name = "sipx-testkit"
-version = "1.0.0-rc.5"
+version = "1.0.0-rc.6"
 dependencies = [
  "base64",
  "bytes",
@@ -2681,7 +2681,7 @@ dependencies = [
 
 [[package]]
 name = "sipx-transport"
-version = "1.0.0-rc.5"
+version = "1.0.0-rc.6"
 dependencies = [
  "bytes",
  "futures-util",
@@ -2705,7 +2705,7 @@ dependencies = [
 
 [[package]]
 name = "sipx-ua"
-version = "1.0.0-rc.5"
+version = "1.0.0-rc.6"
 dependencies = [
  "bytes",
  "hmac",
@@ -2725,7 +2725,7 @@ dependencies = [
 
 [[package]]
 name = "sipx-wasm"
-version = "1.0.0-rc.5"
+version = "1.0.0-rc.6"
 dependencies = [
  "bytes",
  "pretty_assertions",

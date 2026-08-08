@@ -2,8 +2,8 @@
 id: T-40
 title: Expose the bounded resolver to library consumers
 pillar: Transport
-status: in-progress
-priority: 26
+status: done
+priority:
 design: docs/designs/endpoint-resolution.md
 epic: library-parity
 areas: [sipx-transport, sipx-ua, docs]
@@ -30,7 +30,7 @@ being told to resolve names itself and hand in an address.
       failing-first public-content regression prevents that instruction returning.
 - [x] A failing-first test proves a library consumer resolves and connects through a named target,
       and distinguishes resolution failure, resolution timeout and connection failure.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -51,6 +51,8 @@ being told to resolve names itself and hand in an address.
   Gate not run here: the coordinator runs one per wave. Focused verification is green except
   `sipx-transport --test discards`, which fails identically at the merge base over two `sipx-call`
   discard sites this diff does not touch.
+
+- 2026-08-08: closed in the `1.0.0-rc.6` boundary.
 
 ## Notes
 

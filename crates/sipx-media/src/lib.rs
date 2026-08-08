@@ -42,7 +42,7 @@
 //!   call gains the ability to transcribe or speak by depending on it; the types exist so `M-55`,
 //!   `M-56` and downstream replacements are written against one document (`A-39`).
 
-// This crate's inline `#[cfg(test)]` modules opt out of coverage instrumentation, so the
+// This crate's inline test modules opt out of coverage instrumentation, so the
 // published figure measures the code rather than the tests measuring it. Never set outside
 // `cargo llvm-cov`, so every other build parses this and discards it. Applied by
 // `./scripts/coverage-report.py --annotate`; `docs/coverage.md` states what it costs.

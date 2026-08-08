@@ -48,7 +48,7 @@
 //! CLI build and run. `M-39` supplies rate-correct bidirectional CLI audio and independent-peer
 //! evidence in both SIP roles. Optional RFC 7587 `fmtp` controls are not implemented.
 
-// This crate's inline `#[cfg(test)]` modules opt out of coverage instrumentation, so the
+// This crate's inline test modules opt out of coverage instrumentation, so the
 // published figure measures the code rather than the tests measuring it. Never set outside
 // `cargo llvm-cov`, so every other build parses this and discards it. Applied by
 // `./scripts/coverage-report.py --annotate`; `docs/coverage.md` states what it costs.

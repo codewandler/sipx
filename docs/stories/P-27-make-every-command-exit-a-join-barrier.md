@@ -2,8 +2,8 @@
 id: P-27
 title: Make every command exit a join barrier
 pillar: Phone
-status: in-progress
-priority: 24
+status: done
+priority:
 design:
 epic: diagnostic-automation
 areas: [sipx-cli, sipx-ua]
@@ -29,7 +29,7 @@ the work is observably finished, not merely that the result is known.
       `register_candidates` and then `keep_registered()`, which registers again immediately.
 - [x] `--keep-alive` refreshes are bounded rather than governed only by the granted lease, matching
       the deadline `P-25` established for the initial attempt.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -79,6 +79,8 @@ the work is observably finished, not merely that the result is known.
   the shutdown is now ordered and waits on the endpoint's cleanup barrier. `answer`'s and `dial`'s
   repaired exits have no dedicated test — each needs a full call plus an induced internal failure
   — and are covered only by the existing suites staying green.
+
+- 2026-08-08: closed in the `1.0.0-rc.6` boundary.
 
 ## Notes
 
