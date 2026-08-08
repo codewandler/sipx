@@ -2,8 +2,8 @@
 id: M-58
 title: Detect voice activity with typed call events
 pillar: Media
-status: backlog
-priority: 23
+status: ready
+priority: 13
 design: docs/designs/call-audio-analysis.md
 epic: call-audio-analysis
 areas: [sipx-audio, sipx-call, app-sdk, audio-analysis, vad, m16]

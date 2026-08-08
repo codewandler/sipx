@@ -2,8 +2,8 @@
 id: C-7
 title: Couple two dialogs without terminating media
 pillar: Signalling
-status: backlog
-priority:
+status: ready
+priority: 17
 design: docs/designs/edge.md
 epic: edge
 areas: [sipx-call, sipx-sdp]

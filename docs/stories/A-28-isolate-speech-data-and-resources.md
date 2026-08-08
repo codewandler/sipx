@@ -2,8 +2,8 @@
 id: A-28
 title: Isolate speech data and resources with no default retention
 pillar: Application
-status: backlog
-priority:
+status: ready
+priority: 12
 design: docs/designs/local-speech.md
 epic: local-speech
 areas: [app-sdk, speech, privacy, security, m16]

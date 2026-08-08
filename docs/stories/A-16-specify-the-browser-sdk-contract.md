@@ -2,8 +2,8 @@
 id: A-16
 title: Specify the browser SDK contract
 pillar: Application
-status: backlog
-priority: 13
+status: ready
+priority: 20
 design: docs/designs/browser-sdk.md
 epic: browser-sdk
 areas: [browser, wasm, javascript, m15]

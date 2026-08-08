@@ -2,8 +2,8 @@
 id: M-59
 title: Report call signal level clipping and silence metrics
 pillar: Media
-status: backlog
-priority: 24
+status: ready
+priority: 14
 design: docs/designs/call-audio-analysis.md
 epic: call-audio-analysis
 areas: [sipx-audio, sipx-call, app-sdk, audio-analysis, metrics, m16]

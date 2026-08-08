@@ -2,8 +2,8 @@
 id: C-6
 title: Reach the bridge and the conference from a call
 pillar: Signalling
-status: backlog
-priority:
+status: ready
+priority: 18
 design: docs/designs/app-sdk.md
 epic: app-sdk
 areas: [sipx-call, sipx-media]

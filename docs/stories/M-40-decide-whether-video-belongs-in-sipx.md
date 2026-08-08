@@ -2,8 +2,8 @@
 id: M-40
 title: Decide whether video belongs in sipx
 pillar: Media
-status: backlog
-priority: 30
+status: ready
+priority: 19
 design:
 epic: video
 areas: [sipx-sdp, sipx-media, sipx-call, interop, docs]

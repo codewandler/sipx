@@ -3,7 +3,7 @@ id: P-26
 title: Cover resolution in every command deadline
 pillar: Phone
 status: ready
-priority: 2
+priority: 15
 design:
 epic: diagnostic-automation
 areas: [sipx-cli, sipx-transport]

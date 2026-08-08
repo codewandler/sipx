@@ -3,7 +3,7 @@ id: A-40
 title: Drive speech sessions asynchronously
 pillar: Application
 status: ready
-priority: 6
+priority: 11
 design: docs/designs/local-speech.md
 epic: local-speech
 areas: [sipx-media, speech, m16]
