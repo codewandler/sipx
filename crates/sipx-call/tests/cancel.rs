@@ -331,7 +331,9 @@ fn an_answer_future_is_spawnable() {
 
     // Never polled — constructing the future is what type-checks the bound — but referenced
     // below so that the chain is live code and the assertion is really compiled.
-    #[expect(unreachable_code, unused_variables, clippy::diverging_sub_expression)]
+    // `allow`, not `expect`: coverage instrumentation changes which of these three actually
+    // fire, so under `cargo llvm-cov` an `expect` is unfulfilled and `-D warnings` rejects it.
+    #[allow(unreachable_code, unused_variables, clippy::diverging_sub_expression)]
     fn witness() {
         let invitation: Invitation = unreachable!();
         let endpoint: Handle = unreachable!();
