@@ -382,6 +382,37 @@ class TheInlineTestsAreExcludedFromTheMeasurement(unittest.TestCase):
             coverage.annotate_sources(root)
             self.assertEqual(coverage.annotation_problems(root), [])
 
+    def test_a_crate_with_no_inline_tests_declares_nothing(self):
+        """An unused `feature` gate warns under the coverage cfg, and only the measurement job
+        would ever see it — which is the kind of warning nobody reads and everybody inherits."""
+        with source_tree(
+            {"sipx-new/src/lib.rs": UNANNOTATED, "sipx-new/src/bin/tool.rs": NO_TESTS}
+        ) as root:
+            coverage.annotate_sources(root)
+            self.assertEqual(coverage.annotation_problems(root), [])
+            self.assertNotIn(
+                coverage.CRATE_ATTRIBUTE, (root / "sipx-new" / "src" / "bin" / "tool.rs").read_text()
+            )
+            self.assertIn(
+                coverage.CRATE_ATTRIBUTE, (root / "sipx-new" / "src" / "lib.rs").read_text()
+            )
+
+    def test_the_generated_attribute_survives_the_formatter(self):
+        """`cargo fmt` packs a crate's inner attributes into one block, so the generator emits one.
+
+        A blank line here is not cosmetic: the formatter would delete it, `cargo fmt --check` would
+        fail the gate, and the fix would look like editing generated output by hand.
+        """
+        with source_tree({"sipx-new/src/lib.rs": INNER_ATTRIBUTE}) as root:
+            coverage.annotate_sources(root)
+            text = (root / "sipx-new" / "src" / "lib.rs").read_text()
+            self.assertIn(coverage.CRATE_ATTRIBUTE, text)
+            self.assertNotIn("#![allow(clippy::print_stdout)]\n\n", text)
+        with source_tree({"sipx-new/src/lib.rs": UNANNOTATED}) as root:
+            coverage.annotate_sources(root)
+            text = (root / "sipx-new" / "src" / "lib.rs").read_text()
+            self.assertIn("//! A crate.\n\n", text, "a header and an attribute run together")
+
     def test_the_check_fails_when_the_page_claims_an_exclusion_the_source_does_not_carry(self):
         """The path exclusions' rule, applied to the source-level one: no claim without the act."""
         with source_tree({"sipx-new/src/lib.rs": UNANNOTATED}) as root:
@@ -434,6 +465,27 @@ mod tests {
         assert_eq!(add(1, 2), 3);
     }
 }
+"""
+
+#: A binary with nothing to exclude: its own crate, and no inline test module anywhere in it.
+NO_TESTS = """\
+//! A binary.
+
+fn main() {}
+"""
+
+#: A crate root that already carries an inner attribute — the shape `sipx-host.rs` has, and the one
+#: where the generator and the formatter can disagree about a blank line.
+INNER_ATTRIBUTE = """\
+//! A binary.
+
+// A binary may print.
+#![allow(clippy::print_stdout)]
+
+fn main() {}
+
+#[cfg(test)]
+mod tests {}
 """
 
 #: The other shape the rule has to reach: the test code is in a sibling file, still inside `src/`.

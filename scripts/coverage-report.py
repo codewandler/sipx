@@ -300,30 +300,36 @@ def inline_test_modules(lines: list[str]) -> list[tuple[int, str, bool]]:
     return found
 
 
-def prologue_end(lines: list[str]) -> int:
-    """Where a crate root's inner attributes end, which is where another one belongs.
+def prologue_end(lines: list[str]) -> tuple[int, bool]:
+    """Where a crate root's inner attributes end, and whether the last thing there was one.
 
     After the last `//!` or `#![…]` rather than after every leading comment: a `///` doc comment or a
     plain `//` note introduces the item under it, and an attribute inserted between the two would
     separate a doc comment from what it documents.
+
+    The flag is what keeps the output stable under `cargo fmt`, which packs a crate's inner
+    attributes into one contiguous block: a blank line belongs after a `//!` header and not between
+    two `#![…]`, and a generator whose output the formatter rewrites is a generator that fails the
+    gate every time it runs.
     """
     index = 0
     last = 0
+    after_attribute = False
     while index < len(lines):
         stripped = lines[index].strip()
         if not stripped:
             index += 1
         elif stripped.startswith("//!"):
             index += 1
-            last = index
+            last, after_attribute = index, False
         elif stripped.startswith("#!["):
             index = attribute_end(lines, index)
-            last = index
+            last, after_attribute = index, True
         elif stripped.startswith("//"):
             index += 1
         else:
             break
-    return last
+    return last, after_attribute
 
 
 def annotated_source(text: str, is_crate_root: bool) -> str:
@@ -335,9 +341,9 @@ def annotated_source(text: str, is_crate_root: bool) -> str:
         indent = lines[start][: len(lines[start]) - len(lines[start].lstrip())]
         lines.insert(start + 1, indent + MODULE_ATTRIBUTE)
     if is_crate_root and not any(line.strip() == CRATE_ATTRIBUTE for line in lines):
-        at = prologue_end(lines)
+        at, after_attribute = prologue_end(lines)
         block = [*CRATE_ATTRIBUTE_COMMENT, CRATE_ATTRIBUTE]
-        if at > 0 and lines[at - 1].strip():
+        if at > 0 and lines[at - 1].strip() and not after_attribute:
             block.insert(0, "")
         if at < len(lines) and lines[at].strip():
             block.append("")
@@ -351,6 +357,39 @@ def source_files(sources: pathlib.Path = SOURCES) -> list[pathlib.Path]:
 
 def crate_roots(sources: pathlib.Path = SOURCES) -> list[pathlib.Path]:
     return sorted({path for glob in CRATE_ROOT_GLOBS for path in sources.glob(glob)})
+
+
+def crate_scope(root: pathlib.Path, sources: pathlib.Path = SOURCES) -> list[pathlib.Path]:
+    """The files one crate root heads, which is cargo's default module layout read backwards.
+
+    A `src/bin/*.rs` is a crate of one file; a `lib.rs` or `main.rs` heads everything under `src/`
+    that is not one of those binaries.
+    """
+    if root.parent.name == "bin":
+        return [root]
+    return [
+        path
+        for path in source_files(sources)
+        if root.parent in path.parents and path.parent.name != "bin"
+    ]
+
+
+def declaring_roots(sources: pathlib.Path = SOURCES) -> list[pathlib.Path]:
+    """The crate roots that have to declare the feature: the ones heading a crate with a test module.
+
+    Not every root, though every root would compile. `feature(coverage_attribute)` in a crate that
+    never uses `#[coverage]` is an `unused_features` warning under the coverage cfg — a warning only
+    the measurement job would ever see, which is exactly the kind nobody reads and everybody
+    inherits.
+    """
+    return [
+        root
+        for root in crate_roots(sources)
+        if any(
+            inline_test_modules(path.read_text(encoding="utf-8").split("\n"))
+            for path in crate_scope(root, sources)
+        )
+    ]
 
 
 def named(path: pathlib.Path, sources: pathlib.Path) -> str:
@@ -377,7 +416,7 @@ def annotation_problems(sources: pathlib.Path = SOURCES) -> list[str]:
         ]
     bare = [
         named(path, sources)
-        for path in crate_roots(sources)
+        for path in declaring_roots(sources)
         if CRATE_ATTRIBUTE not in path.read_text(encoding="utf-8")
     ]
     problems = []
@@ -398,7 +437,7 @@ def annotation_problems(sources: pathlib.Path = SOURCES) -> list[str]:
 
 def annotate_sources(sources: pathlib.Path = SOURCES) -> list[pathlib.Path]:
     """Apply the rule, and report only the files it changed."""
-    roots = set(crate_roots(sources))
+    roots = set(declaring_roots(sources))
     changed = []
     for path in sorted(set(source_files(sources)) | roots):
         text = path.read_text(encoding="utf-8")
@@ -503,7 +542,13 @@ def schema_problems(data: object) -> list[str]:
 
     source_excluded = data.get("source_excluded")
     if not isinstance(source_excluded, list):
-        problems.append("source_excluded is missing")
+        # Named as its own situation rather than as a malformed field, because it has exactly one
+        # cause: the record was taken before `X-116` excluded the inline test modules, so the counts
+        # in it still include them. The remedy is a measurement, never an edit.
+        problems.append(
+            "source_excluded is missing: this record predates the source-level exclusion, so its "
+            f"counts still include the inline test modules — re-measure with `{REFRESH_COMMAND}`"
+        )
     else:
         recorded = [
             (entry.get("attribute"), entry.get("why"))
@@ -777,8 +822,9 @@ def render(data: dict) -> str:
         "carries the exclusion or fails an implementor's gate. A list of annotated files would rot",
         "on the first new module, and rot invisibly: the number would simply go back up.",
         "",
-        "**What it cost.** `#[coverage(off)]` is the unstable `coverage_attribute` feature, so each",
-        f"crate root declares `{CRATE_ATTRIBUTE}` and every",
+        "**What it cost.** `#[coverage(off)]` is the unstable `coverage_attribute` feature, so the",
+        "crate root of every crate holding one declares",
+        f"`{CRATE_ATTRIBUTE}` and every",
         f"annotation is a `cfg_attr` on `{COVERAGE_CFG}` — the cfg `cargo llvm-cov` sets on what it",
         "instruments. It is therefore **inert in every build that is not a coverage run**: the",
         "stable build, the MSRV build and every release artifact parse the attribute and discard it,",
@@ -1002,8 +1048,8 @@ def main() -> int:
         action="store_true",
         help=(
             "apply the source-level exclusion — put "
-            f"{MODULE_ATTRIBUTE} on every inline `#[cfg(test)] mod` under crates/*/src/ and "
-            f"{CRATE_ATTRIBUTE} in every crate root"
+            f"{MODULE_ATTRIBUTE} on every inline `#[cfg(test)] mod` under crates/*/src/, and "
+            f"{CRATE_ATTRIBUTE} in the crate root of every crate that has one"
         ),
     )
     parser.add_argument(
