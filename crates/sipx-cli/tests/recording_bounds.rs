@@ -51,6 +51,9 @@ use sipx_transport::{Config as TransportConfig, Target, bind};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 
+#[path = "support/uplift.rs"]
+mod uplift;
+
 /// 8 kHz mono, which is what G.711 carries and what `--record` writes.
 const SAMPLE_RATE: usize = 8000;
 
@@ -81,6 +84,9 @@ struct Heard {
 ///
 /// `hang_up_after` is the answerer's `--duration`, which is the cap on its recording.
 async fn record_a_call(case: &str, hang_up_after: u64, after: Duration, clip: usize) -> Heard {
+    // Every assertion below is about what reached a WAV file. A binary built without this run's
+    // features answers those with silence, which is what this file is here to distinguish (`X-121`).
+    uplift::assert_binary_matches_this_build();
     let dir = std::env::temp_dir().join(format!("sipx-cli-{}-{case}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("a scratch directory");
     let recording = dir.join("heard-by-callee.wav");

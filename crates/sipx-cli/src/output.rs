@@ -64,6 +64,12 @@ pub(crate) enum Value {
     /// a precision the model behind it does not have, and someone will compare two calls on the
     /// eighth digit.
     Decimal(f64, usize),
+    /// A set of names, rendered as a JSON array.
+    ///
+    /// A joined string would be a worse contract for the one thing a set has to express: *empty*.
+    /// `""` and `"none"` are both readings a consumer has to special-case, while `[]` is not, and
+    /// the empty case here is a build with no optional features — the ordinary one.
+    List(Vec<String>),
 }
 
 impl Value {
@@ -74,6 +80,14 @@ impl Value {
             Self::Bool(value) => value.to_string(),
             Self::Seconds(seconds) => seconds.to_string(),
             Self::Decimal(value, places) => format!("{value:.places$}"),
+            Self::List(names) => {
+                let body = names
+                    .iter()
+                    .map(|name| format!("\"{}\"", escape(name)))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!("[{body}]")
+            }
         }
     }
 
@@ -84,6 +98,11 @@ impl Value {
             Self::Bool(value) => value.to_string(),
             Self::Seconds(seconds) => format!("{seconds}s"),
             Self::Decimal(value, places) => format!("{value:.places$}"),
+            // `none` rather than an empty cell: a blank value in a two-column text report reads as
+            // a field the command failed to fill in, which is a different claim from "there are
+            // none of these".
+            Self::List(names) if names.is_empty() => "none".to_owned(),
+            Self::List(names) => names.join(", "),
         }
     }
 }
@@ -153,6 +172,20 @@ impl Report {
         // output. Reporting zero is no better; the field is simply omitted upstream.
         let value = if value.is_finite() { value } else { 0.0 };
         self.fields.insert(name, Value::Decimal(value, places));
+        self
+    }
+
+    /// Add a set of names.
+    #[must_use]
+    pub(crate) fn list(
+        mut self,
+        name: &str,
+        values: impl IntoIterator<Item: Into<String>>,
+    ) -> Self {
+        self.fields.insert(
+            name,
+            Value::List(values.into_iter().map(Into::into).collect()),
+        );
         self
     }
 

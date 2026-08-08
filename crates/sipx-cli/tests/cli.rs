@@ -46,6 +46,8 @@ async fn process_scenario() -> SemaphorePermit<'static> {
 }
 
 fn sipx() -> Command {
+    // Before anything is asserted about what sipx does, that it is *this* build (`X-121`).
+    support::uplift::assert_binary_matches_this_build();
     let mut command = Command::new(env!("CARGO_BIN_EXE_sipx"));
     // If an assertion fires while a child is running, the future is dropped but the process is
     // not — and a sipx that goes on retransmitting outlives the test binary. On CI that reads
@@ -1523,6 +1525,9 @@ async fn a_device_endpoint_without_the_feature_fails_before_network_io() {
 #[cfg(not(feature = "device-audio"))]
 #[test]
 fn listing_devices_without_the_feature_is_a_typed_failure() {
+    // This one asserts on a *refusal*, so a binary built with more features than the test would
+    // fail it on the exit code alone, with nothing said about why (`X-121`).
+    support::uplift::assert_binary_matches_this_build();
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_sipx"))
         .args(["devices", "--json"])
         .output()
@@ -2594,6 +2599,25 @@ async fn version_obeys_the_selected_output_contract() {
         serde_json::from_slice(&output.stdout).expect("version is one JSON object");
     assert_eq!(version["status"], "version");
     assert_eq!(version["version"], env!("CARGO_PKG_VERSION"));
+    // `X-121`: the version alone does not identify a build. Two binaries from this commit report
+    // the same version and refuse different commands, so the report names the compiled feature set
+    // as well — which is what lets a spawning test tell the binary it built from one left behind by
+    // another feature selection, instead of reading the difference as broken audio.
+    let mut expected: Vec<&str> = Vec::new();
+    if cfg!(feature = "device-audio") {
+        expected.push("device-audio");
+    }
+    if cfg!(feature = "dtls") {
+        expected.push("dtls");
+    }
+    if cfg!(feature = "opus") {
+        expected.push("opus");
+    }
+    assert_eq!(
+        version["features"],
+        serde_json::Value::from(expected),
+        "the binary reports the feature set this test was compiled with: {version}"
+    );
     assert_eq!(String::from_utf8_lossy(&output.stdout).lines().count(), 1);
     assert!(output.stderr.is_empty());
 

@@ -61,7 +61,12 @@ command's documented cleanup bound or produce another terminal record. A clean s
 0 after owned work joins. Handler or cleanup failure reports `failed` and exits 1.
 
 `sipx version` prints exactly `sipx <version>` in text mode. `sipx version --json` emits one object
-with `status: "version"` and the complete `version`; neither form accepts a positional argument.
+with `status: "version"`, the complete `version`, and `features` — the array of optional features
+this binary was compiled with, sorted, and empty for a default build. Two binaries built from one
+commit report the same version while refusing different commands, so `features` is how a script or
+a test tells them apart without running a command and reading the refusal. Neither form accepts a
+positional argument, and the text form carries the version only: it is compared byte for byte
+against `sipx <version>` when a downloaded release artifact is smoke-tested.
 
 Build-capability checks happen before destination resolution, local file/device setup, transport
 binding or peer traffic. Opus, DTLS-SRTP, the browser-audio profile and explicit device endpoints

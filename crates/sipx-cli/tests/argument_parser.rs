@@ -1,5 +1,8 @@
 //! Regression guard for `X-110`: command-line syntax has one declarative owner.
 
+#[path = "support/uplift.rs"]
+mod uplift;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -64,6 +67,7 @@ mod tests {
         use std::os::unix::ffi::OsStringExt as _;
         use std::process::Command;
 
+        crate::uplift::assert_binary_matches_this_build();
         let invalid = OsString::from_vec(vec![b's', b'i', b'p', b':', 0xff]);
         let output = Command::new(env!("CARGO_BIN_EXE_sipx"))
             .arg("dial")

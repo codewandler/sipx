@@ -9,8 +9,15 @@ use sipx_sip::HeaderName;
 use sipx_transport::{Config, bind};
 use tokio::process::Command;
 
+// Shared with the other process-test binaries in this crate rather than re-declared: the rule is
+// that anything spawning `target/debug/sipx` checks the build first, and a rule is cheaper to keep
+// than a list of which files are feature-sensitive.
+#[path = "support/uplift.rs"]
+mod uplift;
+
 #[tokio::test]
 async fn dial_advertise_reaches_via_contact_and_sdp_without_binding_the_public_ip() {
+    uplift::assert_binary_matches_this_build();
     let (peer, mut incoming) = bind(Config::new("127.0.0.1:0".parse().unwrap()))
         .await
         .expect("binds peer");
