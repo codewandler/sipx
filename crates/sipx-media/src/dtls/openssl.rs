@@ -166,14 +166,46 @@ impl std::fmt::Debug for Session {
     }
 }
 
+/// The name OpenSSL's `use_srtp` option table uses for a profile.
+///
+/// Deliberately not [`Profile::as_str`], which is the IANA registry's spelling. OpenSSL's table
+/// calls `0x0001` `SRTP_AES128_CM_SHA1_80`, without the `HMAC_` that RFC 5764 §4.1.2 and the
+/// registry both carry; RFC 7714 §14.2's two AEAD names it uses verbatim. So the translation is
+/// one row, and it is a **translation and not a correction** — both names denote `0x0001`, which
+/// is the only thing §4.1.1 puts on the wire.
+///
+/// It has to happen somewhere, and here is the only place it can: `set_tlsext_use_srtp` matches
+/// the string against that table and rejects the whole list on one unknown name, which leaves the
+/// context with no `use_srtp` extension at all rather than with a weaker profile. That failure is
+/// loud, but it is a failure of every DTLS-SRTP call — so it is pinned by a test rather than left
+/// to the interop suite, which only CI runs.
+fn openssl_name(profile: Profile) -> &'static str {
+    match profile {
+        Profile::Aes128CmHmacSha1_80 => "SRTP_AES128_CM_SHA1_80",
+        Profile::AeadAes128Gcm | Profile::AeadAes256Gcm => profile.as_str(),
+    }
+}
+
+/// The profile OpenSSL's name for it selects, if sipx can key it.
+///
+/// The inverse of [`openssl_name`] over the offered list, rather than [`Profile::parse`]: what
+/// `selected_srtp_profile` reports is a string out of OpenSSL's table, so it is that table's
+/// spelling that comes back and not the registry's.
+fn from_openssl_name(name: &str) -> Option<Profile> {
+    Profile::strongest_first()
+        .into_iter()
+        .find(|profile| openssl_name(*profile) == name)
+}
+
 /// The `use_srtp` extension value: profile names, strongest first, colon-separated.
 ///
 /// The separator is OpenSSL's own list syntax for this option and is not RFC 5764's — §4.1.1 puts
-/// the two-byte identifiers on the wire, and the library maps the names to them.
+/// the two-byte identifiers on the wire, and the library maps the names to them. The names are
+/// that syntax too, hence [`openssl_name`].
 fn offered_profiles() -> String {
     Profile::strongest_first()
         .into_iter()
-        .map(Profile::as_str)
+        .map(openssl_name)
         .collect::<Vec<_>>()
         .join(":")
 }
@@ -267,8 +299,9 @@ impl Handshake for Session {
     fn profile(&self) -> Option<Profile> {
         // Matched back by name rather than trusted: a profile this stack cannot key is `None`
         // here, and `super::establish` turns that into `Error::NoProfile` instead of exporting
-        // material for a transform nothing can apply.
-        Profile::parse(self.stream.as_ref()?.ssl().selected_srtp_profile()?.name())
+        // material for a transform nothing can apply. The name comes out of OpenSSL's own table,
+        // so it is matched against that table's spelling — the same one `offered_profiles` put in.
+        from_openssl_name(self.stream.as_ref()?.ssl().selected_srtp_profile()?.name())
     }
 
     fn export(&self, len: usize) -> Result<Vec<u8>, Self::Error> {
@@ -283,5 +316,66 @@ impl Handshake for Session {
             .export_keying_material(&mut out, super::EXPORTER_LABEL, None)
             .map_err(|error| DtlsError::Ssl(error.to_string()))?;
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod tests {
+    use super::*;
+
+    /// Every name sipx offers is one OpenSSL's `use_srtp` table knows.
+    ///
+    /// The assertion that matters is the second one, and it is made against the library rather
+    /// than against a list written out here: `set_tlsext_use_srtp` rejects the **whole** list on a
+    /// single unknown name, so a profile spelled the registry's way at this boundary does not
+    /// negotiate a weaker profile — it negotiates none, on every DTLS-SRTP call, in both roles.
+    /// That is the failure mode `M-73` had to not introduce while renaming `0x0001` in
+    /// [`Profile::as_str`], and only the library can say whether it did.
+    #[test]
+    fn openssl_accepts_every_name_in_the_offered_list() {
+        assert_eq!(
+            offered_profiles(),
+            "SRTP_AEAD_AES_256_GCM:SRTP_AEAD_AES_128_GCM:SRTP_AES128_CM_SHA1_80"
+        );
+
+        let mut context = SslContext::builder(SslMethod::dtls()).unwrap();
+        context
+            .set_tlsext_use_srtp(&offered_profiles())
+            .expect("openssl knows every profile name sipx offers");
+    }
+
+    /// The registry's spelling and OpenSSL's are different strings for the same identifier.
+    ///
+    /// Both directions, because both are used: names go out through `offered_profiles` and come
+    /// back through `selected_srtp_profile`. A one-way translation would offer a profile the
+    /// handshake could agree on and then fail to recognise it in the answer, which surfaces as
+    /// `NoProfile` after a handshake that succeeded.
+    #[test]
+    fn the_counter_mode_name_is_translated_in_both_directions() {
+        assert_eq!(
+            Profile::Aes128CmHmacSha1_80.as_str(),
+            "SRTP_AES128_CM_HMAC_SHA1_80",
+            "the registry's spelling, RFC 5764 §4.1.2"
+        );
+        assert_eq!(
+            openssl_name(Profile::Aes128CmHmacSha1_80),
+            "SRTP_AES128_CM_SHA1_80",
+            "openssl's spelling for the same 0x0001"
+        );
+
+        for profile in Profile::strongest_first() {
+            assert_eq!(from_openssl_name(openssl_name(profile)), Some(profile));
+        }
+        assert_eq!(
+            from_openssl_name("SRTP_AES128_CM_HMAC_SHA1_80"),
+            None,
+            "openssl never reports the registry's spelling back"
+        );
     }
 }
