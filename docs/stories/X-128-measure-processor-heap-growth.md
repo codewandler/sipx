@@ -1,5 +1,5 @@
 ---
-id: X-126
+id: X-128
 title: Measure DSP processor heap growth
 pillar: Build
 status: backlog
@@ -48,3 +48,6 @@ processor's own state — into a measured figure, so `docs/specs/custom-call-dsp
 - `docs/specs/custom-call-dsp.md` §9.1 states the limit and why it is stated rather than hidden;
   §11.1 states that an unprovable check is reported and never passed.
 - `M-68` needs measured per-frame allocation budgets and will consume whatever this settles.
+
+- 2026-08-08: renumbered from `X-126` on filing; that id was allocated in the same wave to the
+  load-pair test that rejects a call under suite contention. Only the id moved.
