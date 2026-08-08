@@ -47,6 +47,16 @@ protected evidence contract `A-37` used for `rc.2` — and without widening any 
 - 2026-08-08: selected as the exit of the release-boundary wave. `main` stands 61 commits ahead of
   `origin/main` at selection, and `Cargo.toml` still reads `1.0.0-rc.2`.
 
+- 2026-08-08: **the candidate is cut locally.** `./scripts/gate.py` was green end to end at `3b22cec`
+  (37 steps); the only changes after it were story frontmatter, the generated board, `maturity.md`
+  and roadmap prose, and every checker those touch — maturity, sync-website, comparison, docs links
+  and provenance — was re-verified green on the frozen tree. Annotated tag `v1.0.0-rc.3` now points
+  at release commit `9e8bef8` with the workspace at `1.0.0-rc.3` and a clean tree.
+- 2026-08-08: **publication is deliberately unrun.** `git push` and the protected registry workflow
+  are the irreversible half and are held for explicit authorization, so the acceptance rows covering
+  exact-SHA `main` CI, the pushed tag, registry packages, portable assets, Pages and the GitHub
+  prerelease stay open. Nothing about `v1.0.0-rc.1` or `v1.0.0-rc.2` was moved or overwritten.
+
 ## Notes
 
 - `A-37` owns `rc.2` and `A-10` owns the stable crate set; neither is superseded by this story.
