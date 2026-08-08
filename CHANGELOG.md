@@ -7,6 +7,37 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Removed
+
+- **Breaking: `MediaDiscardCounts::srtp_protect_failures` is removed.** Read
+  `malformed_extensions_dropped` instead: it counts the same caller mistake — a header extension
+  whose length word disagrees with its bytes — one boundary earlier, at `Packet::encode`, where the
+  extension is dropped and the payload still sent. `rc.11` closed the only route by which a caller
+  could make the protect failure happen, leaving a published field nothing could move; every
+  `protect` failure path was enumerated against the code before it went. `MediaSession::discard_counts`
+  and `MediaDiscardCounts::total()` are otherwise unchanged and no other field's meaning moved.
+
+### Fixed
+
+- **The browser session kernel refuses a WebSocket message carrying more than one SIP message**, or
+  one message followed by any other octets, instead of acting on the first and silently discarding
+  the rest (`docs/specs/sip-tls.md` §4). The host could not have detected this itself without
+  parsing SIP in JavaScript, which is exactly what the kernel exists to avoid.
+
+- **`load` no longer cancels the call that reached its `--calls` or `--duration` bound.** A bound
+  closes admission and the calls it admitted are waited for, so `--calls 1` reports the call it
+  placed and no bounded run under-reports by one. A process stop still ends calls in flight at once.
+  With `--call-duration` set, admitted calls now serve their holding period, so a run's wall time
+  can grow by up to one call duration.
+
+### Changed
+
+- **What a bridged RTP header extension means to a peer that negotiated none is now settled**: sipx
+  negotiates no `a=extmap`, translates no element identifier between the legs of a bridge, and
+  answers an offered `a=extmap` by omitting it. `docs/specs/media-runtime.md` §5 carries the
+  RFC 3550 §5.3.1 argument, its limits, and what would reopen it.
+
+
 ### Changed
 
 - **`load` and `scenario` report `candidates_attempted` and `candidates_resolved`** when a
