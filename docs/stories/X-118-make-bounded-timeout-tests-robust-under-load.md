@@ -51,6 +51,16 @@ weakening what they assert.
   load-sensitive assertion remains once the deterministic cause is gone; it may be that little or
   none of what was attributed to load was load.
 
+- 2026-08-08: **a third instance, and a new shape.** The `rc.8` gate failed on
+  `register::tests::every_exit_joins_the_endpoint_before_the_terminal_record` with `bind: Address
+  already in use (os error 98)` — `P-27`'s join probe rebinds the endpoint's port to prove it was
+  released, and under the full workspace run something else took the port first, so the command
+  reported `failed`/1 where the test expected `timeout`/5. It passes in isolation and across the
+  whole `sipx-cli` package suite (91 of 91). So this is not a wall-clock assertion at all: it is a
+  **port-reuse race**, which belongs in this story's scope but is a different mechanism from the
+  timing ones, and needs a different fix — a probe that observes release without competing for the
+  port, or one that tolerates losing the race without changing the assertion's meaning.
+
 ## Notes
 
 - This matters more now: concurrent implementors are the normal working mode, so a load-sensitive

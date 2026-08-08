@@ -4,6 +4,8 @@
 //! parser change that silently starts preserving one — or starts dropping a different one — fails
 //! here rather than surprising the next caller who forwards someone else's description.
 
+#![allow(clippy::expect_used)]
+
 use sipx_sdp::parse;
 
 /// A description that exercises every field the round trip is documented to lose.
