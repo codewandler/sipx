@@ -7,6 +7,37 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`sipx-audio` gains `dsp`**: the deterministic custom call-DSP contract
+  (`docs/specs/custom-call-dsp.md`) — one sans-I/O frame processor for built-in effects, noise
+  reduction and application-supplied DSP, with capability discovery, a caller-owned bounded
+  workspace, three named execution profiles of which only proven-inline and supervised-isolated may
+  claim that over-budget work cannot stall RTP, and a conformance harness that reports what it
+  cannot prove instead of passing it.
+
+- **Voice-activity thresholds calibrate against a call's own background noise**, under bounds
+  declared entirely in sample counts — a floor, a ceiling, a maximum movement per update period, a
+  warm-up and a bounded freeze while voice is open — with every move announced as a typed
+  observation and the effective thresholds readable from `AudioAnalyzer::thresholds` and
+  `Call::voice_thresholds` without mutating anything or exposing audio.
+
+- **`MediaDiscardCounts::srtp_protect_failures`** counts RTP packets dropped because SRTP refused to
+  protect them. That branch was documented as unreachable until `Encoded::extension` became public:
+  an extension whose length word overstates its bytes makes a header longer than the packet, and the
+  resulting drop moved no counter.
+
+- **The off-media coupling relays the early negotiation carriers.** `100rel` is mirrored onto the
+  target INVITE, a reliable provisional carrying a description crosses both dialogs with PRACK
+  correlated on each, and an offerless INVITE is relayed as RFC 3262 §5's delayed offer rather than
+  refused `488`.
+
+### Changed
+
+- **A read-only preflight requires the exact-SHA `main` CI run and its Pages deployment job before
+  the release gate runs**, and an exactly-keyed Actions cache restored after immutable-tag
+  validation speeds the gate without touching the isolated rehearsal, resume and consumer proofs.
+
 ## [1.0.0-rc.10] — 2026-08-08
 
 Nine stories: a measured answer to the flakiness question, the relay's header extension, one budget
