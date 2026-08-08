@@ -927,10 +927,14 @@ native-browser job and complete release gate passed before beta.4 was published.
 ### Video admission — `video`
 
 Video remains a non-goal of the current [vision](vision.md), and this post-beta epic does not reverse
-that decision by appearing on the roadmap. `M-40` is an admission gate: measure the cost of one
+that decision by appearing on the roadmap. `M-40` was an admission gate: measure the cost of one
 bounded send-and-receive profile, then either keep video outside sipx with the evidence recorded or
-explicitly amend the vision and write a normative spec before implementation. Until that decision,
-there is no video codec, SDP profile, packetizer, runtime or public support claim in scope.
+explicitly amend the vision and write a normative spec before implementation.
+
+**Decided 2026-08-08 — not admitted.** The [record](designs/video.md) measures that cost, finds no
+demand anywhere behind it, and leaves the vision unchanged. There is no video codec, SDP profile,
+packetizer, runtime or public support claim in scope, and no implementation child may become `ready`.
+The record states what evidence would reverse the decision, and nothing weaker re-opens it.
 
 The proposed maturity ladder is deliberately separate from release maturity: **0 proposed** (the
 current state), **1 admitted** (vision, scope, budgets and spec agreed), **2 negotiable** (one
@@ -943,8 +947,10 @@ backlog debt.
 The browser-compatible audio epic is a prerequisite only for a future **browser** video claim. Its
 WSS, ICE, DTLS-SRTP, RTP/SAVPF and RTCP-mux composition can be reused, but video adds its own codec,
 packetization, feedback, congestion, timing and resource-safety obligations under RFC 3264, RFC
-3550, RFC 4585, RFC 5104, RFC 6184, RFC 7741, RFC 7742, RFC 8834 and RFC 9429. `M-40` must resolve
-that complete cost before any implementation child becomes ready.
+3550, RFC 4585, RFC 5104, RFC 6184, RFC 7741, RFC 7742, RFC 8834 and RFC 9429. The
+[record](designs/video.md) says which of those the audio epic pre-pays and which are new work, and
+finds the decisive one is the codec itself: those RFCs specify payload formats, not encoders or
+decoders.
 
 ### Endpoint discovery — `discovery` _(four stories)_
 
