@@ -517,6 +517,7 @@ pub(crate) fn option_tags(value: &str) -> impl Iterator<Item = &str> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

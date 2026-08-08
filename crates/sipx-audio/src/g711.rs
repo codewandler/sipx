@@ -123,6 +123,7 @@ pub fn alaw_decode_all(codes: &[u8]) -> Vec<i16> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

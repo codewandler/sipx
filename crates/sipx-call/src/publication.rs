@@ -996,6 +996,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -1074,6 +1075,7 @@ mod admission_tests {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

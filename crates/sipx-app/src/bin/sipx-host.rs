@@ -13,6 +13,12 @@
 // the argument reader has nowhere to hand an error to but the operator.
 #![allow(clippy::print_stderr, clippy::print_stdout)]
 
+// This crate's inline `#[cfg(test)]` modules opt out of coverage instrumentation, so the
+// published figure measures the code rather than the tests measuring it. Never set outside
+// `cargo llvm-cov`, so every other build parses this and discards it. Applied by
+// `./scripts/coverage-report.py --annotate`; `docs/coverage.md` states what it costs.
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+
 use std::process::ExitCode;
 
 use sipx_app::host::Host;

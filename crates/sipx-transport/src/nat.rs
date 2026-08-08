@@ -160,6 +160,7 @@ fn replace_top_via(request: &mut Request, value: Bytes) {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

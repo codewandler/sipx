@@ -790,6 +790,7 @@ fn prune(pairs: &mut Vec<CandidatePair>, locals: &[LocalCandidate], remotes: &[R
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

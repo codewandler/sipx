@@ -1427,6 +1427,7 @@ pub async fn accept_loop(listener: TcpListener, incoming: mpsc::Sender<(TcpStrea
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

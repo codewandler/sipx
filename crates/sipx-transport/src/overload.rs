@@ -411,6 +411,7 @@ fn rewrite_top_via(headers: &mut Headers, addition: &[u8]) -> bool {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

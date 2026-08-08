@@ -17,6 +17,7 @@ pub fn new_cnonce() -> String {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::panic)]
 mod tests {
     /// Two cnonces in a row must differ; a fixed one defeats the point of a client nonce.

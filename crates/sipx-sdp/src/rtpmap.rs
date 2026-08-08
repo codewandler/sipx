@@ -171,6 +171,7 @@ fn decimal(field: &str) -> Result<u32, &str> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

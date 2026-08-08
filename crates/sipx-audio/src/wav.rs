@@ -166,6 +166,7 @@ pub fn write_wav(mut sink: impl Write, wav: &Wav) -> Result<(), WavError> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(
     clippy::cast_possible_truncation,
     clippy::unwrap_used,

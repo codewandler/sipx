@@ -60,6 +60,12 @@
 //! here is the intended way to change that, and it is a decision with a `CHANGELOG.md` entry rather
 //! than a convenience.
 
+// This crate's inline `#[cfg(test)]` modules opt out of coverage instrumentation, so the
+// published figure measures the code rather than the tests measuring it. Never set outside
+// `cargo llvm-cov`, so every other build parses this and discards it. Applied by
+// `./scripts/coverage-report.py --annotate`; `docs/coverage.md` states what it costs.
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+
 pub mod config;
 pub mod harness;
 pub mod host;

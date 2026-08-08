@@ -439,6 +439,7 @@ pub(crate) fn cseq_number(headers: &sipx_sip::Headers) -> Option<u32> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

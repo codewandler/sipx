@@ -290,6 +290,7 @@ pub(crate) fn parse_u64(value: &[u8], header: &'static str) -> Result<u64, Heade
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

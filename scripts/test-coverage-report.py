@@ -104,6 +104,10 @@ def measurement(lines=(70, 100), branches=(30, 60), functions=(8, 10), crates=No
         "commit": "0" * 40,
         "command": ["cargo", "llvm-cov", "--workspace"],
         "excluded": [{"pattern": pattern, "why": why} for pattern, why in coverage.EXCLUDED],
+        "source_excluded": [
+            {"attribute": attribute, "why": why} for attribute, why in coverage.SOURCE_EXCLUDED
+        ],
+        "test_modules_excluded": 3,
         "totals": counts(lines, branches, functions),
         "crates": crates
         if crates is not None
@@ -323,6 +327,163 @@ class TheFigureStatesItsLimits(unittest.TestCase):
         data["commit"] = "a" * 40
         self.assertIn("a" * 40, coverage.render(data))
         self.assertIn(data["measured_at"], coverage.render(data))
+
+
+class TheInlineTestsAreExcludedFromTheMeasurement(unittest.TestCase):
+    """`X-116`: the exclusions are paths, and this project's unit tests are not in a path.
+
+    `--ignore-filename-regex` removes `tests/`, and an inline `#[cfg(test)] mod tests` sits in the
+    middle of the file it tests, so the published figure partly measured the tests themselves. The
+    fix is a source-level exclusion — `#[coverage(off)]`, behind the cfg `cargo llvm-cov` sets — and
+    the thing that makes it trustworthy is that no file names it: the rule is syntactic, applied by
+    the generator, and checked by the same scan that applies it. A hand-maintained list of annotated
+    files would rot on the first new module, and rot silently, because the number would simply go
+    back up without anything failing.
+    """
+
+    def test_every_inline_test_module_is_excluded(self):
+        problems = coverage.annotation_problems()
+        self.assertEqual(
+            problems,
+            [],
+            "an inline test module is still measured, so the published figure counts test code as "
+            f"code under test — apply the rule with `./scripts/coverage-report.py "
+            f"{coverage.ANNOTATE_FLAG}`",
+        )
+
+    def test_the_rule_is_syntactic_and_not_a_list_of_files(self):
+        """A fresh module nobody registered anywhere is caught by the scan alone."""
+        with source_tree({"sipx-new/src/lib.rs": UNANNOTATED}) as root:
+            problems = coverage.annotation_problems(root)
+            self.assertTrue(problems, "a new inline test module was not noticed by the scan")
+            self.assertIn("sipx-new/src/lib.rs", " ".join(problems))
+
+    def test_a_module_the_rule_reaches_is_annotated_without_being_named(self):
+        with source_tree({"sipx-new/src/lib.rs": UNANNOTATED}) as root:
+            changed = coverage.annotate_sources(root)
+            self.assertEqual([path.name for path in changed], ["lib.rs"])
+            self.assertEqual(coverage.annotation_problems(root), [])
+            text = (root / "sipx-new" / "src" / "lib.rs").read_text()
+            self.assertIn(coverage.MODULE_ATTRIBUTE, text)
+            self.assertIn(coverage.CRATE_ATTRIBUTE, text)
+
+    def test_applying_the_rule_twice_changes_nothing(self):
+        """The annotator is a generator, so a second run is a no-op or it is not one."""
+        with source_tree({"sipx-new/src/lib.rs": UNANNOTATED}) as root:
+            coverage.annotate_sources(root)
+            once = (root / "sipx-new" / "src" / "lib.rs").read_text()
+            self.assertEqual(coverage.annotate_sources(root), [])
+            self.assertEqual((root / "sipx-new" / "src" / "lib.rs").read_text(), once)
+
+    def test_a_module_declared_as_a_file_is_reached_too(self):
+        """`#[cfg(test)] mod vectors;` puts the test code in a sibling file, still under `src/`."""
+        with source_tree({"sipx-new/src/lib.rs": FILE_MODULE}) as root:
+            self.assertTrue(coverage.annotation_problems(root))
+            coverage.annotate_sources(root)
+            self.assertEqual(coverage.annotation_problems(root), [])
+
+    def test_the_check_fails_when_the_page_claims_an_exclusion_the_source_does_not_carry(self):
+        """The path exclusions' rule, applied to the source-level one: no claim without the act."""
+        with source_tree({"sipx-new/src/lib.rs": UNANNOTATED}) as root:
+            with report_of(measurement()) as (measurement_path, report_path):
+                self.assertEqual(coverage.check(measurement_path, report_path, root), 1)
+                coverage.annotate_sources(root)
+                self.assertEqual(coverage.check(measurement_path, report_path, root), 0)
+
+    def test_the_page_states_the_mechanism_and_what_it_costs(self):
+        page = coverage.render(measurement())
+        for phrase in coverage.MECHANISM_STATED:
+            self.assertIn(phrase, page, f"the page does not state {phrase!r}")
+
+    def test_the_source_exclusion_is_recorded_the_way_the_path_ones_are(self):
+        page = coverage.render(measurement())
+        for attribute, why in coverage.SOURCE_EXCLUDED:
+            self.assertIn(attribute, page)
+            self.assertIn(why, page)
+        data = measurement()
+        data["source_excluded"] = [{"attribute": "#[nothing]", "why": "invented"}]
+        problems = coverage.schema_problems(data)
+        self.assertTrue(problems, "a record may not claim a source exclusion this script never made")
+
+    def test_the_exclusion_gates_on_no_number(self):
+        """A source exclusion is still not a threshold: it says what was measured, never how much."""
+        with source_tree({"sipx-new/src/lib.rs": ANNOTATED_NOTHING_COVERED}) as root:
+            self.assertEqual(coverage.annotation_problems(root), [])
+
+
+#: A crate whose tests are inline and unexcluded — the state the whole workspace was in before
+#: `X-116`, reproduced small enough to reverse in a temporary directory.
+UNANNOTATED = """\
+//! A crate.
+
+/// Adds.
+pub fn add(a: u32, b: u32) -> u32 {
+    a + b
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::panic
+)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adds() {
+        assert_eq!(add(1, 2), 3);
+    }
+}
+"""
+
+#: The other shape the rule has to reach: the test code is in a sibling file, still inside `src/`.
+FILE_MODULE = """\
+//! A crate.
+
+/// Adds.
+pub fn add(a: u32, b: u32) -> u32 {
+    a + b
+}
+
+#[cfg(test)]
+mod vectors;
+"""
+
+#: Already correct, and covering nothing at all. The exclusion is about *what* is measured; a
+#: measurement of zero is as green here as anywhere else on this page.
+ANNOTATED_NOTHING_COVERED = """\
+//! A crate.
+
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+
+/// Never called.
+pub fn add(a: u32, b: u32) -> u32 {
+    a + b
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {}
+"""
+
+
+class source_tree:
+    """A throwaway `crates/` tree, for the states the real workspace cannot be put into."""
+
+    def __init__(self, files):
+        self.files = files
+
+    def __enter__(self):
+        self.directory = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.directory.name)
+        for name, text in self.files.items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+        return root
+
+    def __exit__(self, *_):
+        self.directory.cleanup()
 
 
 class report_of:

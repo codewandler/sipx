@@ -42,6 +42,7 @@
 /// and no master key, so reaching the RFC's numbers means stepping over key derivation — which is
 /// a thing a test may do and a public API may not.
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -1094,6 +1095,7 @@ fn rtp_header_len(packet: &[u8]) -> Option<usize> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

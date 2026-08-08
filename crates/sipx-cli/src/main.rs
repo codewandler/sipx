@@ -23,6 +23,12 @@
 //! than one that errors: for example, a cleartext transport for a `sips:` URI.
 //!
 
+// This crate's inline `#[cfg(test)]` modules opt out of coverage instrumentation, so the
+// published figure measures the code rather than the tests measuring it. Never set outside
+// `cargo llvm-cov`, so every other build parses this and discards it. Applied by
+// `./scripts/coverage-report.py --annotate`; `docs/coverage.md` states what it costs.
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+
 mod advertise;
 mod answer;
 mod cli;
@@ -250,6 +256,7 @@ const RECORD_IDLE: std::time::Duration = std::time::Duration::from_millis(500);
 const DIGIT_GAP: std::time::Duration = std::time::Duration::from_millis(800);
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;

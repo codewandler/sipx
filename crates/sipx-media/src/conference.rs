@@ -389,6 +389,7 @@ async fn mix_loop(members: Members, samples_per_frame: usize, interval: Duration
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

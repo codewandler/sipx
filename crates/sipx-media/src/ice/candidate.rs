@@ -410,6 +410,7 @@ pub fn assign_local_preferences(candidates: &mut [LocalCandidate]) {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
