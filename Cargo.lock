@@ -2725,7 +2725,7 @@ dependencies = [
 
 [[package]]
 name = "sipx-wasm"
-version = "1.0.0-rc.4"
+version = "1.0.0-rc.3"
 dependencies = [
  "bytes",
  "pretty_assertions",

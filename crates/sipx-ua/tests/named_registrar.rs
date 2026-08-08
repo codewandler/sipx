@@ -25,9 +25,7 @@ use sipx_sip::build::ResponseBuilder;
 use sipx_sip::{HeaderName, StatusCode, Uri};
 use sipx_transport::destination::{Kind, Resolver};
 use sipx_transport::dns::DnsResolver;
-use sipx_transport::{
-    CleartextTransports, Config as TransportConfig, Handle, TransportKind, bind,
-};
+use sipx_transport::{CleartextTransports, Config as TransportConfig, Handle, TransportKind, bind};
 use sipx_ua::{Config, UserAgent};
 use tokio::net::UdpSocket;
 
@@ -111,11 +109,9 @@ fn resolver(nameserver: SocketAddr, budget: Duration) -> Resolver {
 
 /// A registrar that grants every lease it is asked for, over UDP.
 async fn registrar() -> Handle {
-    let (handle, mut incoming) = bind(TransportConfig::new(
-        "127.0.0.1:0".parse().expect("valid"),
-    ))
-    .await
-    .expect("binds");
+    let (handle, mut incoming) = bind(TransportConfig::new("127.0.0.1:0".parse().expect("valid")))
+        .await
+        .expect("binds");
     let responder = handle.clone();
     tokio::spawn(async move {
         while let Some(request) = incoming.recv().await {
@@ -125,15 +121,18 @@ async fn registrar() -> Handle {
                 .value(&HeaderName::Contact)
                 .map(|value| String::from_utf8_lossy(&value).into_owned())
                 .expect("a REGISTER carries the contact it registers");
-            let response =
-                ResponseBuilder::to_request(&request.request, StatusCode::new(200).expect("valid"), "OK")
-                    .expect("builds")
-                    .header(
-                        HeaderName::Contact,
-                        Bytes::from(format!("{contact};expires=600")),
-                    )
-                    .expect("valid")
-                    .build();
+            let response = ResponseBuilder::to_request(
+                &request.request,
+                StatusCode::new(200).expect("valid"),
+                "OK",
+            )
+            .expect("builds")
+            .header(
+                HeaderName::Contact,
+                Bytes::from(format!("{contact};expires=600")),
+            )
+            .expect("valid")
+            .build();
             let _ = responder.respond(&request.key, response).await;
         }
     });
@@ -142,11 +141,9 @@ async fn registrar() -> Handle {
 
 /// An endpoint for the agent side of a test.
 async fn endpoint() -> Handle {
-    let (handle, _incoming) = bind(TransportConfig::new(
-        "127.0.0.1:0".parse().expect("valid"),
-    ))
-    .await
-    .expect("binds");
+    let (handle, _incoming) = bind(TransportConfig::new("127.0.0.1:0".parse().expect("valid")))
+        .await
+        .expect("binds");
     handle
 }
 
