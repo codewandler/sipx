@@ -118,6 +118,10 @@ def gate_steps(msrv: str) -> list[Step]:
     return [
         Step("gate consistency", "gate", (ENTRY_POINT, "--check")),
         Step("gate tests", "gate", ("python3", "scripts/test-gate.py")),
+        # X-115: the checker's whole product is one distinction — implemented-but-unclosed
+        # versus being-implemented — and a checker that got that wrong would be silent,
+        # which is indistinguishable from a clean board. Milliseconds, no toolchain.
+        Step("story closure tests", "gate", ("python3", "scripts/test-story-closure.py")),
         # X-15 wrote a schema guard for the RFC registry and a suite for it, and nothing ran the
         # suite. It belongs here: it is a test of a gate script, it takes milliseconds, and the
         # alternative is a test file that can rot without anybody hearing about it.
