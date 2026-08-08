@@ -93,9 +93,15 @@ echo "==> checking internal docs links and anchors"
 # nothing if no page carries it, which is how all four generated reports came to be reachable only
 # by already knowing their filename (X-117). The index region is generated from the pages that
 # exist, so a fifth report is red here on the commit that adds it.
+#
+# The check runs before its own suite, which is the opposite of the ordering `gate.py` uses for
+# script tests, and deliberately: an unreachable report fails *both*, and the suite would report it
+# as a unittest traceback naming `test_the_repository_index_is_current`. The check reports it as
+# the sentence naming the page and what to do about it. Whichever runs first is the message a
+# reader gets, so the precise one goes first and the suite still runs behind it.
 echo "==> checking every generated report is reachable"
-python3 scripts/test-report-index.py
 ./scripts/check-report-index.py --check
+python3 scripts/test-report-index.py
 
 # The site build. The four reporting handlers in docusaurus.config.js are the link check for the
 # published half; a page that links to something the site does not publish, or to an anchor no

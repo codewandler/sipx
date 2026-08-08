@@ -265,6 +265,23 @@ class Registration(unittest.TestCase):
         self.assertIn("./scripts/check-report-index.py --check", script)
         self.assertIn("python3 scripts/test-report-index.py", script)
 
+    def test_the_step_states_what_it_checks(self):
+        """`build-docs.sh`'s header enumerates its contract; a check missing from it is invisible."""
+        self.assertIn("check-report-index.py --check", BUILD_DOCS.read_text().split("set -euo")[0])
+
+    def test_the_check_runs_before_its_own_suite(self):
+        """An unreachable report fails both. The one that names the page has to speak first.
+
+        Reversed, the reader gets a unittest traceback for
+        `test_the_repository_index_is_current` instead of the sentence naming the page and the
+        entry it needs — a docs defect surfacing as a generic docs-site failure.
+        """
+        script = BUILD_DOCS.read_text()
+        self.assertLess(
+            script.index("./scripts/check-report-index.py --check"),
+            script.index("python3 scripts/test-report-index.py"),
+        )
+
 
 if __name__ == "__main__":
     sys.exit(0 if unittest.main(exit=False, verbosity=2).result.wasSuccessful() else 1)

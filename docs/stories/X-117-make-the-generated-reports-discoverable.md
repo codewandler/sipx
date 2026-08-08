@@ -54,3 +54,17 @@ knowing its filename.
   unaccounted for). It also means the check runs late, after the step's `cargo build --examples`;
   a cheap early `gate` step for `check-report-index.py --check` and `test-report-index.py` would
   be better placed, and needs an edit to `gate.py` that this story was fenced from.
+
+  The check runs **before** its own suite inside that step, which is the reverse of the ordering
+  `gate.py` uses for script tests and is deliberate: an unreachable report fails both, and
+  whichever runs first is the message a reader gets. The suite reports it as a traceback naming
+  `test_the_repository_index_is_current`; the check reports it as the sentence naming the page and
+  the entry it needs. Both orderings were run, and `test_the_check_runs_before_its_own_suite` pins
+  the one that names the defect.
+
+  Nothing here reads a figure out of a report, which matters while `X-116` is changing how
+  `docs/coverage.md`'s number is measured. The coverage entry describes the page's *shape* — that
+  it is arithmetic over recorded counts rather than a transcribed figure, and that it names its
+  own exclusions — so a changed measurement, a changed exclusion rule or a changed headline
+  percentage leaves it true. What would break it is a rename of that page's `# ` heading or of its
+  generated-by sentence, and both fail this check loudly rather than going quietly stale.

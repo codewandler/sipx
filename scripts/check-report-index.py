@@ -122,8 +122,10 @@ ENTRIES = {
     ),
     "coverage.md": Entry(
         measures=(
-            "which lines, branches and functions the suite executes, per crate and workspace-wide, "
-            "as arithmetic over counts recorded by `cargo llvm-cov` at a named commit."
+            "which lines, branches and functions the suite executes, per crate and "
+            "workspace-wide, as arithmetic over recorded counts rather than a transcribed figure. "
+            "It names the commit it was measured at, what the measurement leaves out, and the "
+            "code no test reaches at all."
         ),
         deliberately_not=(
             "**no threshold gates the build on any number on it**, and a drop fails nothing. It "
