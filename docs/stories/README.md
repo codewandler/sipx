@@ -75,6 +75,7 @@ appeared twice before anyone named it.
 - [A-38 — Publish and verify the second release candidate](A-38-publish-and-verify-rc3.md) · Application · after X-113 · the post-rc.2 wave as one immutable prerelease · no stable-1.0 claim widens
 - [A-39 — Build the speech provider contract skeleton](A-39-build-the-speech-provider-contract-skeleton.md) · Application · A-25 specified it and nothing implements it · the registry, session types and selection order every later speech story needs
 - [M-41 — Negotiate AEAD SRTP protection profiles](M-41-negotiate-aead-srtp-protection-profiles.md) · Media · RFC 7714 · one profile shipped today · AEAD-only peers cannot negotiate media with sipx at all · follow-up
+- [M-45 — Hold incoming audio in a jitter buffer](M-45-hold-incoming-audio-in-a-jitter-buffer.md) · Media · two independent field reports of seconds of added delay · characterise the current buffer before changing it
 - [M-54 — Expose bounded call PCM processing and resampling](M-54-expose-bounded-call-pcm-processing.md) · Media · after A-25 and M-43 · shared seam for local speech and deterministic analysis
 - [M-57 — Specify deterministic real-time call-audio processing](M-57-specify-real-time-call-audio-processor.md) · Media · M16 spec gate · sans-I/O bounded frame processor using M-54's shared seam
 - [M-70 — Accept multiplexed browser offers with unused component candidates](M-70-accept-multiplexed-browser-offers-with-unused-component-candidates.md) · Media · external review finding 9 · a second browser engine reaches SDP then fails the multiplexed profile
@@ -106,7 +107,7 @@ _Applications need small, predictable facts about live audio even when no speech
 
 ### demand-led capability work
 _sipx's backlog has been derived from RFCs, from our own review findings, and from what the design_
-- [M-45 — Hold incoming audio in a jitter buffer](M-45-hold-incoming-audio-in-a-jitter-buffer.md) · Media · two independent field reports of seconds of added delay · characterise the current buffer before changing it
+- [M-76 — Bound the inbound audio queue in time](M-76-bound-the-inbound-audio-queue-in-time.md) · Media · M-45 measured the jitter buffer and cleared it · the inbound channel holds 256 frames, which is 5.12 seconds of audio with no time bound, counter or shed policy
 
 ### Reliable diagnostic automation
 - [P-26 — Cover resolution in every command deadline](P-26-cover-resolution-in-every-command-deadline.md) · Phone · dial --timeout starts its clock after resolution · a slow name can spend the resolver's eight seconds before the invitation is even sent
@@ -118,6 +119,7 @@ _sipx's backlog has been derived from RFCs, from our own review findings, and fr
 ### Edge / B2BUA
 _A programmable SIP and media edge — transports, endpoints and routes, with dialog bridging and_
 - [C-7 — Couple two dialogs without terminating media](C-7-off-media-coupling.md) · Signalling · RFC 7092 §3.1.3 · transparent SDP mapping · split from C-1
+- [C-8 — Relay the early negotiation carriers](C-8-relay-the-early-negotiation-carriers.md) · Call · C-7 refuses reliable provisionals, PRACK and offerless INVITE rather than half-relaying them · relaying those means authoring a description this role has no media for
 
 ### Bounded endpoint resolution
 - [T-41 — Report the candidates a connection failure attempted](T-41-report-the-candidates-a-connection-failure-attempted.md) · Transport · the spec's ConnectionFailed promises how many candidates were attempted; only the last error reaches the operator
@@ -139,6 +141,10 @@ _Signalling that cannot carry audio is a curiosity. The media layer is also wher
 _sipx implements exactly one SRTP protection profile:_
 - [M-72 — Prove the AEAD SRTP key derivation against an independent peer](M-72-prove-the-aead-srtp-key-derivation-against-a-peer.md) · Media · RFC 7714 publishes no KDF vector · a wrong salt placement makes two sipx endpoints interoperate with each other and nobody else, and every round-trip test still passes
 - [M-73 — Align the DTLS profile names with the IANA registry](M-73-align-the-dtls-profile-names-with-the-registry.md) · Media · the counter-mode DTLS profile carries OpenSSL's spelling rather than the registry's; M-41 added registry-correct names beside it
+
+### SIP core (sans-IO)
+_Everything above this layer inherits its correctness properties. SIP's genuinely hard parts —_
+- [S-52 — Document what an SDP round trip loses](S-52-document-what-an-sdp-round-trip-loses.md) · Signalling · parse plus to_string_sdp is lossy in ways nothing states · harmless for a description sipx authors, fatal for one it relays
 
 ### supported test surfaces
 _The workspace has seeded links, virtual time and call fixtures, but downstream applications have no_
