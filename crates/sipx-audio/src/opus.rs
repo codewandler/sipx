@@ -160,6 +160,7 @@ fn channel_layout(channels: usize) -> Result<opus::Channels, OpusError> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

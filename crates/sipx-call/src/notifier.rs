@@ -668,6 +668,7 @@ async fn answer(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::dialog_tag_matches;
 

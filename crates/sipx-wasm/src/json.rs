@@ -126,6 +126,7 @@ fn escape_into(value: &str, out: &mut String) {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

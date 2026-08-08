@@ -545,6 +545,7 @@ fn push_utf8(raw: &[u8], out: &mut String) -> Result<(), JsonError> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

@@ -51,6 +51,7 @@ pub fn mix_excluding(sources: &[Vec<i16>], exclude: usize, samples: usize) -> Ve
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

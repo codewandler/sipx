@@ -23,6 +23,14 @@ the tool — a stored percentage is rejected by the schema — every percentage 
 performed at render time, and `--check` byte-compares the page against that arithmetic. Editing the
 figure by hand fails the gate.
 
+**Excluded by a rule, never by a list.** Test code is executed by definition, so counting it
+measures the suite against itself. Paths handle most of it, but `--ignore-filename-regex` removes a
+*file* and this project keeps its unit tests inside the file they test — so `X-116` reaches them
+with `#[coverage(off)]` in the source instead. The attribute is applied by `--annotate` and checked
+by `--check`, both from the same syntactic scan for `#[cfg(test)] mod`: no file is named anywhere,
+because a hand-maintained list of annotated files would rot on the first new module and rot
+silently, the number simply going back up with nothing failing.
+
 **Two halves, deliberately split.** Measuring means an instrumented rebuild of the workspace and a
 full run of the suite, which is minutes and a second copy of `target/`; rendering and comparing needs
 nothing but this file and a JSON document. So `--measure` runs in CI, where the raw reports are
@@ -86,6 +94,62 @@ EXCLUDED = (
 #: One regex, because `--ignore-filename-regex` takes one.
 IGNORE_REGEX = "|".join(pattern for pattern, _ in EXCLUDED)
 
+#: The cfg `cargo llvm-cov` sets on the crates it instruments, and the reason the exclusion below
+#: costs a stable build nothing: outside a coverage run the cfg is never set, so every `cfg_attr`
+#: guarded by it is parsed and discarded.
+COVERAGE_CFG = "coverage_nightly"
+
+#: What an inline test module carries, and what a crate root carries so that it may. `#[coverage]`
+#: is the unstable `coverage_attribute` feature, which is why both are `cfg_attr` rather than plain
+#: attributes — the measurement already needs nightly for `--branch`, and nothing else may.
+MODULE_ATTRIBUTE = f"#[cfg_attr({COVERAGE_CFG}, coverage(off))]"
+CRATE_ATTRIBUTE = f"#![cfg_attr({COVERAGE_CFG}, feature(coverage_attribute))]"
+
+#: What the crate attribute is introduced by, so that a reader who meets it in a crate root is told
+#: where to go rather than left to guess why a coverage cfg is in their library.
+CRATE_ATTRIBUTE_COMMENT = (
+    "// This crate's inline `#[cfg(test)]` modules opt out of coverage instrumentation, so the",
+    "// published figure measures the code rather than the tests measuring it. Never set outside",
+    "// `cargo llvm-cov`, so every other build parses this and discards it. Applied by",
+    "// `./scripts/coverage-report.py --annotate`; `docs/coverage.md` states what it costs.",
+)
+
+#: The attribute the rule keys on. Recognised as a line of its own, which is how every one of them
+#: is written in this workspace and what `--annotate` produces.
+CFG_TEST = "#[cfg(test)]"
+
+#: Where the rule looks. The workspace is `crates/*`, and only `src/` matters: `tests/`, `benches/`
+#: and `examples/` are already removed by path, above.
+SOURCES = ROOT / "crates"
+
+#: A crate root is where a `feature` gate has to be declared, and these are cargo's own default
+#: target paths — a rule rather than a list, so a new crate or a new binary is covered by existing
+#: code the day it appears.
+CRATE_ROOT_GLOBS = ("*/src/lib.rs", "*/src/main.rs", "*/src/bin/*.rs")
+
+#: The flag that applies the rule. Named once, because the diagnostics quote it.
+ANNOTATE_FLAG = "--annotate"
+
+#: The exclusion no path can express, and why. Shaped like `EXCLUDED` and printed the same way:
+#: an exclusion the page claims is one the measurement has to have made.
+SOURCE_EXCLUDED = (
+    (
+        MODULE_ATTRIBUTE,
+        "an inline `#[cfg(test)] mod` is test code in the middle of a source file, which no "
+        "filename pattern can reach; this removes it from the instrumentation instead, so it "
+        "leaves the figure for the same reason `/tests/` does",
+    ),
+)
+
+#: Sentences the page must carry about the mechanism, asserted by the test suite for the reason
+#: `DISCLAIMED` is: a source-level exclusion is invisible from the number, so the page states what
+#: was done to the measurement and what it cost, or the number is unexplained.
+MECHANISM_STATED = (
+    MODULE_ATTRIBUTE,
+    "unstable `coverage_attribute` feature",
+    "inert in every build that is not a coverage run",
+)
+
 #: The counters read out of the tool, in the order the page prints them. `lines` and `branches` are
 #: the two the story asks for; `functions` costs nothing and is the one that most often shows a
 #: module nothing calls.
@@ -112,6 +176,10 @@ END = "<!-- END coverage -->"
 #: How to refresh the figure, named in the page and in the diagnostics, because a reader who finds
 #: the number stale needs the command rather than an invitation to read this file.
 REFRESH_COMMAND = f"./scripts/coverage-report.py {MEASURE_FLAG}"
+
+#: How to apply the source-level exclusion, quoted by the checker for the same reason: a module that
+#: escaped the rule is fixed by re-running the rule, never by editing a file the checker named.
+ANNOTATE_COMMAND = f"./scripts/coverage-report.py {ANNOTATE_FLAG}"
 
 #: Where `--measure` writes the raw reports when no destination is given.
 DEFAULT_OUT = ROOT / "target" / "coverage"
@@ -174,6 +242,210 @@ def artifact_commands(out_dir: pathlib.Path) -> list[list[str]]:
         # `--output-dir` is the parent: the tool creates `html/` inside whatever it is given.
         [*common, "--html", "--output-dir", str(out_dir)],
     ]
+
+
+# --------------------------------------------------------------------------------------------
+# The source-level exclusion
+# --------------------------------------------------------------------------------------------
+#
+# One scan, read two ways: `--annotate` applies it and `--check` verifies it. They share a function
+# rather than a convention, because the failure this guards against is a module that escapes the
+# rule — and two implementations of "what a test module looks like" is exactly how one escapes.
+
+
+#: `mod tests {` and `mod vectors;` both put test code under `src/`; the second only moves it to a
+#: sibling file, which is still not a path any exclusion above can name.
+MODULE_ITEM = re.compile(r"\s*(pub(\([\w:]+\))?\s+)?mod\s+(\w+)\s*[{;]")
+
+
+def attribute_end(lines: list[str], start: int) -> int:
+    """The index after the attribute beginning at `start`, which may span lines.
+
+    `#[allow(…)]` is written across five lines throughout this workspace, so a scan that assumes one
+    attribute per line stops at the first one and never reaches the `mod` behind it.
+    """
+    depth = 0
+    index = start
+    while index < len(lines):
+        depth += lines[index].count("[") - lines[index].count("]")
+        index += 1
+        if depth <= 0:
+            break
+    return index
+
+
+def inline_test_modules(lines: list[str]) -> list[tuple[int, str, bool]]:
+    """Every `#[cfg(test)] mod` in one file: where its `#[cfg(test)]` is, its name, and whether it
+    already carries the exclusion.
+
+    Syntactic and deliberately shallow — it reads attributes and the item they sit on, and knows
+    nothing about module nesting. A test module inside a test module would be annotated twice, which
+    is redundant rather than wrong; the alternative is counting braces through string literals, and
+    a miscount there would silently swallow the next module in the file.
+    """
+    found = []
+    index = 0
+    while index < len(lines):
+        if lines[index].strip() != CFG_TEST:
+            index += 1
+            continue
+        item = attribute_end(lines, index)
+        while item < len(lines) and lines[item].lstrip().startswith("#["):
+            item = attribute_end(lines, item)
+        if item < len(lines) and MODULE_ITEM.match(lines[item]):
+            name = MODULE_ITEM.match(lines[item]).group(3)
+            annotated = any(line.strip() == MODULE_ATTRIBUTE for line in lines[index:item])
+            found.append((index, name, annotated))
+        index += 1
+    return found
+
+
+def prologue_end(lines: list[str]) -> tuple[int, bool]:
+    """Where a crate root's inner attributes end, and whether the last thing there was one.
+
+    After the last `//!` or `#![…]` rather than after every leading comment: a `///` doc comment or a
+    plain `//` note introduces the item under it, and an attribute inserted between the two would
+    separate a doc comment from what it documents.
+
+    The flag is what keeps the output stable under `cargo fmt`, which packs a crate's inner
+    attributes into one contiguous block: a blank line belongs after a `//!` header and not between
+    two `#![…]`, and a generator whose output the formatter rewrites is a generator that fails the
+    gate every time it runs.
+    """
+    index = 0
+    last = 0
+    after_attribute = False
+    while index < len(lines):
+        stripped = lines[index].strip()
+        if not stripped:
+            index += 1
+        elif stripped.startswith("//!"):
+            index += 1
+            last, after_attribute = index, False
+        elif stripped.startswith("#!["):
+            index = attribute_end(lines, index)
+            last, after_attribute = index, True
+        elif stripped.startswith("//"):
+            index += 1
+        else:
+            break
+    return last, after_attribute
+
+
+def annotated_source(text: str, is_crate_root: bool) -> str:
+    """One source file with the exclusion applied, and unchanged if it already carries it."""
+    lines = text.split("\n")
+    for start, _, already in reversed(inline_test_modules(lines)):
+        if already:
+            continue
+        indent = lines[start][: len(lines[start]) - len(lines[start].lstrip())]
+        lines.insert(start + 1, indent + MODULE_ATTRIBUTE)
+    if is_crate_root and not any(line.strip() == CRATE_ATTRIBUTE for line in lines):
+        at, after_attribute = prologue_end(lines)
+        block = [*CRATE_ATTRIBUTE_COMMENT, CRATE_ATTRIBUTE]
+        if at > 0 and lines[at - 1].strip() and not after_attribute:
+            block.insert(0, "")
+        if at < len(lines) and lines[at].strip():
+            block.append("")
+        lines[at:at] = block
+    return "\n".join(lines)
+
+
+def source_files(sources: pathlib.Path = SOURCES) -> list[pathlib.Path]:
+    return sorted(sources.glob("*/src/**/*.rs"))
+
+
+def crate_roots(sources: pathlib.Path = SOURCES) -> list[pathlib.Path]:
+    return sorted({path for glob in CRATE_ROOT_GLOBS for path in sources.glob(glob)})
+
+
+def crate_scope(root: pathlib.Path, sources: pathlib.Path = SOURCES) -> list[pathlib.Path]:
+    """The files one crate root heads, which is cargo's default module layout read backwards.
+
+    A `src/bin/*.rs` is a crate of one file; a `lib.rs` or `main.rs` heads everything under `src/`
+    that is not one of those binaries.
+    """
+    if root.parent.name == "bin":
+        return [root]
+    return [
+        path
+        for path in source_files(sources)
+        if root.parent in path.parents and path.parent.name != "bin"
+    ]
+
+
+def declaring_roots(sources: pathlib.Path = SOURCES) -> list[pathlib.Path]:
+    """The crate roots that have to declare the feature: the ones heading a crate with a test module.
+
+    Not every root, though every root would compile. `feature(coverage_attribute)` in a crate that
+    never uses `#[coverage]` is an `unused_features` warning under the coverage cfg — a warning only
+    the measurement job would ever see, which is exactly the kind nobody reads and everybody
+    inherits.
+    """
+    return [
+        root
+        for root in crate_roots(sources)
+        if any(
+            inline_test_modules(path.read_text(encoding="utf-8").split("\n"))
+            for path in crate_scope(root, sources)
+        )
+    ]
+
+
+def named(path: pathlib.Path, sources: pathlib.Path) -> str:
+    """A path a reader can open, whether it is in this repository or a fixture tree."""
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path.relative_to(sources))
+
+
+def annotation_problems(sources: pathlib.Path = SOURCES) -> list[str]:
+    """Every inline test module the measurement would still count, as sentences.
+
+    Not a threshold and not a number: this reports which modules escaped the rule, never how many
+    lines any of them holds. A workspace with no inline tests at all reports nothing.
+    """
+    escaped = []
+    for path in source_files(sources):
+        lines = path.read_text(encoding="utf-8").split("\n")
+        escaped += [
+            f"{named(path, sources)}:{start + 1} `mod {name}`"
+            for start, name, annotated in inline_test_modules(lines)
+            if not annotated
+        ]
+    bare = [
+        named(path, sources)
+        for path in declaring_roots(sources)
+        if CRATE_ATTRIBUTE not in path.read_text(encoding="utf-8")
+    ]
+    problems = []
+    if escaped:
+        problems.append(
+            f"{len(escaped)} inline test modules do not carry {MODULE_ATTRIBUTE}, so the "
+            f"measurement counts test code as code under test — apply the rule with "
+            f"`{ANNOTATE_COMMAND}`. First: " + ", ".join(escaped[:3])
+        )
+    if bare:
+        problems.append(
+            f"{len(bare)} crate roots do not declare {CRATE_ATTRIBUTE}, so the exclusion in them "
+            f"would not compile under the coverage cfg — apply the rule with `{ANNOTATE_COMMAND}`. "
+            "First: " + ", ".join(bare[:3])
+        )
+    return problems
+
+
+def annotate_sources(sources: pathlib.Path = SOURCES) -> list[pathlib.Path]:
+    """Apply the rule, and report only the files it changed."""
+    roots = set(declaring_roots(sources))
+    changed = []
+    for path in sorted(set(source_files(sources)) | roots):
+        text = path.read_text(encoding="utf-8")
+        annotated = annotated_source(text, path in roots)
+        if annotated != text:
+            path.write_text(annotated, encoding="utf-8")
+            changed.append(path)
+    return changed
 
 
 # --------------------------------------------------------------------------------------------
@@ -267,6 +539,33 @@ def schema_problems(data: object) -> list[str]:
                 "excluded does not match the exclusions this script applies; the page would list "
                 f"exclusions the measurement never made — re-measure with `{REFRESH_COMMAND}`"
             )
+
+    source_excluded = data.get("source_excluded")
+    if not isinstance(source_excluded, list):
+        # Named as its own situation rather than as a malformed field, because it has exactly one
+        # cause: the record was taken before `X-116` excluded the inline test modules, so the counts
+        # in it still include them. The remedy is a measurement, never an edit.
+        problems.append(
+            "source_excluded is missing: this record predates the source-level exclusion, so its "
+            f"counts still include the inline test modules — re-measure with `{REFRESH_COMMAND}`"
+        )
+    else:
+        recorded = [
+            (entry.get("attribute"), entry.get("why"))
+            for entry in source_excluded
+            if isinstance(entry, dict)
+        ]
+        if recorded != [(attribute, why) for attribute, why in SOURCE_EXCLUDED]:
+            problems.append(
+                "source_excluded does not match the source-level exclusion this script applies; "
+                f"the page would claim an exclusion the build never made — re-measure with "
+                f"`{REFRESH_COMMAND}`"
+            )
+    modules = data.get("test_modules_excluded")
+    if not isinstance(modules, int) or isinstance(modules, bool) or modules < 0:
+        # A count, like every other figure in this record, and for the same reason: the page states
+        # how many test modules left the measurement, and a reader can check it with one `grep`.
+        problems.append("test_modules_excluded is not a count")
 
     counter_problems = counters_problems("totals", data.get("totals"))
     crates = data.get("crates")
@@ -371,6 +670,13 @@ def measurement_from_export(
         "commit": commit,
         "command": measure_command(),
         "excluded": [{"pattern": pattern, "why": why} for pattern, why in EXCLUDED],
+        "source_excluded": [
+            {"attribute": attribute, "why": why} for attribute, why in SOURCE_EXCLUDED
+        ],
+        "test_modules_excluded": sum(
+            len(inline_test_modules(path.read_text(encoding="utf-8").split("\n")))
+            for path in source_files()
+        ),
         "totals": read_counts(data["totals"]),
         "crates": {name: crates[name] for name in sorted(crates)},
     }, []
@@ -415,7 +721,8 @@ def summary(data: dict) -> str:
         "",
         f"Measured at `{data['commit']}` with `{data['tool_version']}`, excluding "
         + ", ".join(f"`{pattern}`" for pattern, _ in EXCLUDED)
-        + ".",
+        + f", and the {data['test_modules_excluded']} inline `#[cfg(test)]` modules that "
+        "`#[coverage(off)]` removes from the instrumentation.",
         "",
         "**Nothing gates on this.** No threshold, no ratchet, and no failure when it drops. It "
         "measures what the suite executes, not whether executing it proved anything — see "
@@ -495,12 +802,46 @@ def render(data: dict) -> str:
     lines += [f"| `{pattern}` | {why} |" for pattern, why in EXCLUDED]
     lines += [
         "",
+        "### The tests inside the source files",
+        "",
+        "A path pattern removes a *file*, and this project keeps its unit tests in the middle of the",
+        "file they test — so the exclusions above reach `tests/` and cannot reach a",
+        "`#[cfg(test)] mod tests` in `src/`. `X-66` published a figure that partly measured the",
+        "tests themselves and said so; this is what closed it (`X-116`):",
+        "",
+        "| Attribute | Why |",
+        "|---|---|",
+    ]
+    lines += [f"| `{attribute}` | {why} |" for attribute, why in SOURCE_EXCLUDED]
+    lines += [
+        "",
+        f"Every `#[cfg(test)] mod` under `crates/*/src/` carries it — "
+        f"{data['test_modules_excluded']} of them at the commit above — and **no file is named**",
+        "anywhere. The rule is one syntactic scan, applied by",
+        f"`{ANNOTATE_COMMAND}` and verified by `--check`, so a test module added tomorrow either",
+        "carries the exclusion or fails an implementor's gate. A list of annotated files would rot",
+        "on the first new module, and rot invisibly: the number would simply go back up.",
+        "",
+        "**What it cost.** `#[coverage(off)]` is the unstable `coverage_attribute` feature, so the",
+        "crate root of every crate holding one declares",
+        f"`{CRATE_ATTRIBUTE}` and every",
+        f"annotation is a `cfg_attr` on `{COVERAGE_CFG}` — the cfg `cargo llvm-cov` sets on what it",
+        "instruments. It is therefore **inert in every build that is not a coverage run**: the",
+        "stable build, the MSRV build and every release artifact parse the attribute and discard it,",
+        "and the workspace declares the cfg under `[workspace.lints.rust]` so that the builds which",
+        "never set it do not warn about it either. No toolchain was added — `--branch` already",
+        "required nightly — and nothing that ships changed. What it buys is that the figure below",
+        "no longer rises for writing a unit test.",
+        "",
         "## What the number still cannot see",
         "",
-        "- **An inline `#[cfg(test)] mod tests` lives in `src/` and is counted.** The exclusions",
-        "  above are paths, and this project keeps unit tests beside the code they test, so the",
-        "  figure is flattered by however much test code sits inside a source file. Integration",
-        "  tests under `/tests/` are excluded; their inline siblings cannot be, by path.",
+        "- **`#[cfg(test)]` on anything that is not a module is still counted.** The rule reaches a",
+        "  `#[cfg(test)] mod`, which is where this workspace puts its unit tests and their fixtures.",
+        "  A bare `#[cfg(test)] fn` or `#[cfg(test)] impl` beside the code it helps is not a module,",
+        "  and stays in the figure.",
+        "- **The exclusion holds only while the cfg is set.** Measuring with `--no-cfg-coverage`, or",
+        "  with a tool that does not set it, silently restores the flattered number rather than",
+        f"  failing — which is why `{REFRESH_COMMAND}` is the only recorded way to take one.",
         "- **Doctests are not instrumented, and the gate runs them.** The tool measures the `--tests`",
         "  targets, so a line whose only caller is an example in a doc comment reads here as",
         "  unreached while `cargo test --workspace --all-features` executes it. The gap is in this",
@@ -569,8 +910,17 @@ def write(measurement_path: pathlib.Path = MEASUREMENT, report_path: pathlib.Pat
     return 0
 
 
-def check(measurement_path: pathlib.Path = MEASUREMENT, report_path: pathlib.Path = REPORT) -> int:
-    """Verify the page is what the record says, and nothing about the number itself."""
+def check(
+    measurement_path: pathlib.Path = MEASUREMENT,
+    report_path: pathlib.Path = REPORT,
+    sources: pathlib.Path = SOURCES,
+) -> int:
+    """Verify the page is what the record says, and nothing about the number itself.
+
+    The source scan is here rather than in `--measure` alone because that is the half nobody runs
+    locally. A test module written today would otherwise re-enter the measurement at the next CI
+    run, months after the diff that added it — this fails in the implementor's own gate instead.
+    """
     data, problems = load(measurement_path)
     if data is None:
         report_problems(problems)
@@ -585,6 +935,10 @@ def check(measurement_path: pathlib.Path = MEASUREMENT, report_path: pathlib.Pat
                 f"./scripts/coverage-report.py. The figures are generated — do not edit them."
             ]
         )
+        return 1
+    escaped = annotation_problems(sources)
+    if escaped:
+        report_problems(escaped)
         return 1
     totals = data["totals"]
     print(
@@ -634,6 +988,13 @@ def head_commit() -> str:
 
 def measure(out_dir: pathlib.Path, measurement_path: pathlib.Path, report_path: pathlib.Path) -> int:
     """Take a measurement, record its counts, and re-render the page from them."""
+    escaped = annotation_problems()
+    if escaped:
+        # Before the build rather than after it. A measurement taken over a tree where a test module
+        # escaped the rule is a number the page would describe as excluding it, and half an hour of
+        # instrumented build is a long way to go to publish that.
+        report_problems(escaped)
+        return 1
     out_dir.mkdir(parents=True, exist_ok=True)
     code = run(measure_command(out_dir))
     if code != 0:
@@ -683,6 +1044,15 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        ANNOTATE_FLAG,
+        action="store_true",
+        help=(
+            "apply the source-level exclusion — put "
+            f"{MODULE_ATTRIBUTE} on every inline `#[cfg(test)] mod` under crates/*/src/, and "
+            f"{CRATE_ATTRIBUTE} in the crate root of every crate that has one"
+        ),
+    )
+    parser.add_argument(
         "--out",
         type=pathlib.Path,
         default=DEFAULT_OUT,
@@ -697,6 +1067,15 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+    if args.annotate:
+        changed = annotate_sources()
+        for path in changed:
+            print(f"coverage: excluded the inline tests in {path.relative_to(ROOT)}")
+        print(
+            f"coverage: {len(changed)} files annotated. The figure is unchanged until "
+            f"`{REFRESH_COMMAND}` is run."
+        )
+        return 0
     if args.measure:
         return measure(args.out, MEASUREMENT, REPORT)
     if args.check:

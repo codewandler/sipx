@@ -333,6 +333,7 @@ pub(crate) fn duplicate_policy_header(request: &Request, semantic: &sipx_sip::He
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

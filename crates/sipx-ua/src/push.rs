@@ -264,6 +264,7 @@ pub fn in_contact(contact: &str, device: &Device) -> String {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
