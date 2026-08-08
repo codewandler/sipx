@@ -3,7 +3,7 @@ id: X-122
 title: Make the browser proof assertions non-vacuous
 pillar: Build
 status: ready
-priority: 11
+priority: 4
 design:
 epic: test-surfaces
 areas: [scripts, tests]

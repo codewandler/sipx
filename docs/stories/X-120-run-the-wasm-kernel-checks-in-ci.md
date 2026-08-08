@@ -3,7 +3,7 @@ id: X-120
 title: Run the WASM kernel checks in CI
 pillar: Build
 status: ready
-priority: 37
+priority: 7
 design:
 epic: browser-sdk
 areas: [ci, scripts, wasm]

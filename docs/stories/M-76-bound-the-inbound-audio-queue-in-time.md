@@ -3,7 +3,7 @@ id: M-76
 title: Bound the inbound audio queue in time
 pillar: Media
 status: ready
-priority: 8
+priority: 1
 design:
 epic: demand
 areas: [sipx-media, sipx-audio]

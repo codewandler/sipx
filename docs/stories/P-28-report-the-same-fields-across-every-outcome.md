@@ -3,7 +3,7 @@ id: P-28
 title: Report the same fields across every outcome
 pillar: Phone
 status: ready
-priority: 25
+priority: 6
 design:
 epic: diagnostic-automation
 areas: [sipx-cli]

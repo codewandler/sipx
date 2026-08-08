@@ -3,7 +3,7 @@ id: M-74
 title: Guard public data enums against exhaustive matching
 pillar: Media
 status: ready
-priority: 31
+priority: 8
 design:
 epic: media
 areas: [sipx-media, sipx-call, scripts]

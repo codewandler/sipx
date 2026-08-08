@@ -3,7 +3,7 @@ id: M-77
 title: Carry a refused frame forward in voice detection
 pillar: Media
 status: ready
-priority: 9
+priority: 2
 design: docs/designs/call-audio-analysis.md
 epic: call-audio-analysis
 areas: [sipx-call, sipx-audio]

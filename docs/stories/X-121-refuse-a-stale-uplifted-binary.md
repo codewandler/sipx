@@ -3,7 +3,7 @@ id: X-121
 title: Refuse a stale uplifted binary
 pillar: Build
 status: ready
-priority: 10
+priority: 3
 design:
 epic: test-surfaces
 areas: [sipx-cli, scripts]
