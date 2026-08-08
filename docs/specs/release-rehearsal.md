@@ -204,6 +204,32 @@ frontier and advances. A visibility timeout names the still-absent packages and 
 verification before publication resumes. If no missing package is ready, the helper fails and names
 the unavailable dependencies. It never guesses that a successful upload is already visible.
 
+### 4.1 Pacing a frontier within the registry's rate limit
+
+Uploads inside a frontier are spaced by the registry's own limit, never by a constant delay chosen
+to stand in for it. crates.io states two allowances, and they differ by an order of magnitude: a
+**new crate name** once every ten minutes after a burst of five, and a **new version of a name that
+already exists** once a minute after a burst of thirty. The helper models each as a token bucket and
+selects one per package by asking the registry whether that name exists under any version. Only
+Cargo's exact `could not find name` result means the name is new; any other diagnostic is a registry
+failure and refuses the invocation, exactly as the version probe does. Consequently an ordinary
+version update is not delayed merely because first-name creation once required pacing.
+
+When the registry answers `429`, it — and not the model — is the authority on its own limit. The
+refusal's retry hint is read from a `Retry-After` header, as delta-seconds or an HTTP-date, or from
+the deadline the refusal body states after "try again after". That deadline replaces the modelled
+allowance: the upload is retried at it, and the rest of that class is paced from it. A `429` that
+states no deadline falls back to the class's stated refill interval rather than to an invented
+delay. A failure that is not a `429` is not a rate limit and is never retried.
+
+Two finite bounds hold this closed. `--registry-retry-budget-seconds` is the **total** wall-clock a
+single invocation may spend waiting on rate limits, and a wait longer than the budget's remainder
+stops the invocation. A single package is retried at most three times, which covers a deadline read,
+waited out and restated once. Either exhaustion reports the registry's own `429` line verbatim,
+names the packages this run did publish, and stops **before** dispatching any further upload — so a
+stopped run leaves a registry state that the ordinary frontier, visibility and checksum rules resume
+from, with nothing republished and no published bytes moved.
+
 ## 5. Test vectors
 
 | Vector | Workspace shape or invocation | Required result |
@@ -228,3 +254,6 @@ the unavailable dependencies. It never guesses that a successful upload is alrea
 | R18 | protected recovery names a failed same-tag release whose gate/rehearsal passed and publication failed, with matching visible bytes | fixed controller may advance one missing frontier; wrong run/workflow/step/commit/controller or byte mismatch dispatches no upload |
 | R19 | Cargo VCS record omits `git.dirty`, sets a boolean, or gives a non-boolean value | omitted/false is clean; true is dirty; malformed is refused |
 | R20 | local package-set verification derives and stages testkit's complete public workspace dependency closure, then compiles the archived RTP echo example | every exact closure member resolves from staged bytes; never substitute an older registry package or claim publication |
+| R21 | a frontier of new crate names, and the same frontier of names that already exist | the burst and refill the registry states for that class alone decide the spacing; an existing name is not paced as a new one |
+| R22 | `429` with a `Retry-After` header, with a body deadline, and with neither | retry at the stated deadline and pace the rest of the class from it; without a hint use that class's stated refill; a non-`429` failure is never retried |
+| R23 | a `429` deadline beyond the remaining retry budget, or a fourth rate-limited attempt | report the registry's own `429` and the packages already published, and dispatch no further upload; a rerun resumes the remaining frontier without republishing |

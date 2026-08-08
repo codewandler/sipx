@@ -9,6 +9,7 @@ recording runner.
 
 from __future__ import annotations
 
+import datetime
 import importlib.util
 import io
 import json
@@ -110,6 +111,33 @@ def github_recovery_environment(
         "CARGO_REGISTRY_TOKEN": "fixture-secret-never-used",
         "SIPX_FAILED_RELEASE_RUN_ID": failed_run_id,
     }
+
+
+def workspace_metadata(*, two_public: bool = False) -> dict[str, object]:
+    """Cargo metadata for one or two real public workspace crates at the workspace version."""
+
+    workspace = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["workspace"]
+    version = workspace["package"]["version"]
+    crate = ROOT / "crates" / "sipx-sip"
+    records = [
+        package(
+            "sipx-sip",
+            version=version,
+            manifest_path=str(crate / "Cargo.toml"),
+            readme=str(crate / "README.md"),
+        )
+    ]
+    if two_public:
+        second = ROOT / "crates" / "sipx-sdp"
+        records.append(
+            package(
+                "sipx-sdp",
+                version=version,
+                manifest_path=str(second / "Cargo.toml"),
+                readme=str(second / "README.md"),
+            )
+        )
+    return {"packages": records}
 
 
 class ThePublicPackageGraph(unittest.TestCase):
@@ -597,30 +625,7 @@ class ThePublicationBoundary(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def main_metadata(self, *, two_public: bool = False) -> dict[str, object]:
-        workspace = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["workspace"]
-        version = workspace["package"]["version"]
-        crate = ROOT / "crates" / "sipx-sip"
-        records = [
-            package(
-                "sipx-sip",
-                version=version,
-                manifest_path=str(crate / "Cargo.toml"),
-                readme=str(crate / "README.md"),
-            )
-        ]
-        if two_public:
-            second = ROOT / "crates" / "sipx-sdp"
-            records.append(
-                package(
-                    "sipx-sdp",
-                    version=version,
-                    manifest_path=str(second / "Cargo.toml"),
-                    readme=str(second / "README.md"),
-                )
-            )
-        return {
-            "packages": records
-        }
+        return workspace_metadata(two_public=two_public)
 
     def test_main_dry_run_dispatch_is_bounded_and_names_crates_io(self) -> None:
         calls: list[tuple[tuple[str, ...], float]] = []
@@ -666,6 +671,7 @@ class ThePublicationBoundary(unittest.TestCase):
             mock.patch.object(release, "_metadata", return_value=self.main_metadata()),
             mock.patch.object(release, "_checkout", return_value=(False, (tag,), (tag,))),
             mock.patch.object(release, "_registry_available", side_effect=lambda *_args: next(visible)),
+            mock.patch.object(release, "_registry_name_exists", return_value=True),
             mock.patch.object(release, "_bounded_run", side_effect=bounded),
         ):
             self.assertEqual(
@@ -707,6 +713,7 @@ class ThePublicationBoundary(unittest.TestCase):
             mock.patch.object(
                 release, "_registry_available", side_effect=lambda *_args: next(visible)
             ),
+            mock.patch.object(release, "_registry_name_exists", return_value=True),
             mock.patch.object(release, "_bounded_run", side_effect=bounded),
         ):
             self.assertEqual(
@@ -779,6 +786,7 @@ class ThePublicationBoundary(unittest.TestCase):
                 mock.patch.object(
                     release, "_registry_available", side_effect=lambda *_args: next(visible)
                 ),
+                mock.patch.object(release, "_registry_name_exists", return_value=True),
                 mock.patch.object(release, "_bounded_run", side_effect=bounded),
             ):
                 self.assertEqual(
@@ -1520,6 +1528,313 @@ signal.pause()
         self.assertEqual(("sipx-core",), result.available)
         self.assertEqual((), result.missing)
         self.assertLess(clock[0], 10.0)
+
+
+STATED_DEADLINE = datetime.datetime(
+    2026, 8, 8, 12, 34, 56, tzinfo=datetime.timezone.utc
+).timestamp()
+
+RATE_LIMITED_WITH_BODY_DEADLINE = (
+    "    Uploading sipx-core v1.0.0-rc.9 (/work/crates/sipx-core)\n"
+    "error: failed to publish to registry at https://crates.io\n"
+    "\n"
+    "Caused by:\n"
+    "  the remote server responded with an error (status 429 Too Many Requests): You have "
+    "published too many new crates in a short period of time. Please try again after "
+    "2026-08-08T12:34:56Z or email help@crates.io to have your limit increased.\n"
+)
+
+RATE_LIMITED_WITH_HEADER = (
+    "error: failed to publish to registry at https://crates.io\n"
+    "\n"
+    "Caused by:\n"
+    "  the remote server responded with an error (status 429 Too Many Requests)\n"
+    "  Retry-After: 900\n"
+)
+
+RATE_LIMITED_WITH_HTTP_DATE = (
+    "error: failed to publish to registry at https://crates.io\n"
+    "\n"
+    "Caused by:\n"
+    "  the remote server responded with an error (status 429 Too Many Requests)\n"
+    "  Retry-After: Sat, 08 Aug 2026 12:34:56 GMT\n"
+)
+
+RATE_LIMITED_WITHOUT_A_HINT = (
+    "error: failed to publish to registry at https://crates.io\n"
+    "\n"
+    "Caused by:\n"
+    "  the remote server responded with an error (status 429 Too Many Requests)\n"
+)
+
+
+def paced_dispatch(
+    clock: list[float],
+    attempts: list[tuple[str, float]],
+    answers: dict[tuple[str, int], tuple[int, str]],
+):
+    """A recording publish dispatcher whose registry answer is injected per package attempt."""
+
+    def dispatch(package: str) -> subprocess.CompletedProcess[str]:
+        attempts.append((package, clock[0]))
+        seen = sum(1 for name, _at in attempts if name == package)
+        returncode, stderr = answers.get((package, seen), (0, ""))
+        return subprocess.CompletedProcess(
+            ("cargo", "publish", "--registry", "crates-io", "--locked", "-p", package),
+            returncode,
+            "",
+            stderr,
+        )
+
+    return dispatch
+
+
+class TheRegistryRateLimit(unittest.TestCase):
+    """Pacing is driven entirely by injected registry answers on an injected clock (X-119)."""
+
+    def injected_clock(self) -> tuple[list[float], list[float], dict[str, object]]:
+        clock = [0.0]
+        waits: list[float] = []
+
+        def pause(seconds: float) -> None:
+            waits.append(seconds)
+            clock[0] += seconds
+
+        return (
+            clock,
+            waits,
+            {
+                "monotonic": lambda: clock[0],
+                "pause": pause,
+                "now": lambda: 0.0,
+                "report": lambda _line: None,
+            },
+        )
+
+    def test_new_crate_names_are_spaced_by_the_registry_stated_limit(self) -> None:
+        clock, waits, injected = self.injected_clock()
+        attempts: list[tuple[str, float]] = []
+        frontier = tuple(f"sipx-{index}" for index in range(7))
+        published = release.publish_frontier(
+            frontier,
+            paced_dispatch(clock, attempts, {}),
+            new_crates=frontier,
+            budget_seconds=3600.0,
+            **injected,
+        )
+        self.assertEqual(frontier, published)
+        # crates.io states a burst of five new crates and one further name every ten minutes.
+        self.assertEqual([0.0, 0.0, 0.0, 0.0, 0.0, 600.0, 1200.0], [at for _name, at in attempts])
+        self.assertEqual([600.0, 600.0], waits)
+
+    def test_an_ordinary_version_update_is_not_paced_by_the_new_crate_limit(self) -> None:
+        clock, waits, injected = self.injected_clock()
+        attempts: list[tuple[str, float]] = []
+        frontier = tuple(f"sipx-{index}" for index in range(7))
+        published = release.publish_frontier(
+            frontier,
+            paced_dispatch(clock, attempts, {}),
+            new_crates=(),
+            budget_seconds=3600.0,
+            **injected,
+        )
+        self.assertEqual(frontier, published)
+        self.assertEqual([0.0] * 7, [at for _name, at in attempts])
+        self.assertEqual([], waits)
+
+    def test_a_rate_limited_upload_retries_at_the_deadline_the_registry_states(self) -> None:
+        clock, waits, injected = self.injected_clock()
+        attempts: list[tuple[str, float]] = []
+        frontier = ("sipx-core", "sipx-call")
+        published = release.publish_frontier(
+            frontier,
+            paced_dispatch(clock, attempts, {("sipx-core", 1): (101, RATE_LIMITED_WITH_HEADER)}),
+            new_crates=frontier,
+            budget_seconds=3600.0,
+            **injected,
+        )
+        self.assertEqual(frontier, published)
+        # The registry's own 900s deadline replaces the modelled allowance, and the next name is
+        # then spaced from that deadline rather than from the optimistic start of the run.
+        self.assertEqual(
+            [("sipx-core", 0.0), ("sipx-core", 900.0), ("sipx-call", 1500.0)], attempts
+        )
+        self.assertEqual([900.0, 600.0], waits)
+
+    def test_a_rate_limited_upload_without_a_hint_falls_back_to_the_stated_refill(self) -> None:
+        clock, waits, injected = self.injected_clock()
+        attempts: list[tuple[str, float]] = []
+        published = release.publish_frontier(
+            ("sipx-core",),
+            paced_dispatch(clock, attempts, {("sipx-core", 1): (101, RATE_LIMITED_WITHOUT_A_HINT)}),
+            new_crates=("sipx-core",),
+            budget_seconds=3600.0,
+            **injected,
+        )
+        self.assertEqual(("sipx-core",), published)
+        self.assertEqual([("sipx-core", 0.0), ("sipx-core", 600.0)], attempts)
+        self.assertEqual([600.0], waits)
+
+    def test_an_exhausted_retry_budget_reports_the_429_and_publishes_nothing_further(self) -> None:
+        clock, waits, injected = self.injected_clock()
+        attempts: list[tuple[str, float]] = []
+        frontier = ("sipx-core", "sipx-call", "sipx-cli")
+        with self.assertRaises(release.ReleaseError) as refused:
+            release.publish_frontier(
+                frontier,
+                paced_dispatch(
+                    clock, attempts, {("sipx-call", 1): (101, RATE_LIMITED_WITH_HEADER)}
+                ),
+                new_crates=frontier,
+                budget_seconds=60.0,
+                **injected,
+            )
+        message = str(refused.exception)
+        self.assertIn("429", message)
+        self.assertIn("sipx-call", message)
+        self.assertIn("sipx-core", message)
+        self.assertEqual([("sipx-core", 0.0), ("sipx-call", 0.0)], attempts)
+        self.assertEqual([], waits)
+
+    def test_an_ordinary_publish_failure_is_not_treated_as_a_rate_limit(self) -> None:
+        clock, waits, injected = self.injected_clock()
+        attempts: list[tuple[str, float]] = []
+        with self.assertRaises(release.ReleaseError) as refused:
+            release.publish_frontier(
+                ("sipx-core", "sipx-call"),
+                paced_dispatch(
+                    clock,
+                    attempts,
+                    {("sipx-core", 1): (101, "error: failed to verify package tarball\n")},
+                ),
+                new_crates=("sipx-core", "sipx-call"),
+                budget_seconds=3600.0,
+                **injected,
+            )
+        self.assertNotIn("429", str(refused.exception))
+        self.assertEqual([("sipx-core", 0.0)], attempts)
+        self.assertEqual([], waits)
+
+    def test_the_retry_hint_reads_a_header_or_the_registry_body_deadline(self) -> None:
+        header = release.rate_limit_refusal(RATE_LIMITED_WITH_HEADER, now=0.0)
+        assert header is not None
+        self.assertEqual(900.0, header.retry_seconds)
+        self.assertIn("429", header.detail)
+
+        for text in (RATE_LIMITED_WITH_BODY_DEADLINE, RATE_LIMITED_WITH_HTTP_DATE):
+            refusal = release.rate_limit_refusal(text, now=STATED_DEADLINE - 900.0)
+            assert refusal is not None
+            self.assertEqual(900.0, refusal.retry_seconds)
+
+        silent = release.rate_limit_refusal(RATE_LIMITED_WITHOUT_A_HINT, now=0.0)
+        assert silent is not None
+        self.assertIsNone(silent.retry_seconds)
+
+        self.assertIsNone(
+            release.rate_limit_refusal(
+                "error: the remote server responded with an error (status 403 Forbidden)\n",
+                now=0.0,
+            )
+        )
+        self.assertIsNone(
+            release.rate_limit_refusal("    Uploading sipx-core v1.0.429\n", now=0.0)
+        )
+
+    def test_an_elapsed_registry_deadline_never_becomes_a_negative_wait(self) -> None:
+        refusal = release.rate_limit_refusal(
+            RATE_LIMITED_WITH_BODY_DEADLINE, now=STATED_DEADLINE + 60.0
+        )
+        assert refusal is not None
+        self.assertEqual(0.0, refusal.retry_seconds)
+
+    def test_an_unreadable_name_probe_paces_conservatively_rather_than_refusing(self) -> None:
+        answers = {
+            0: "",
+            101: (
+                "error: could not find `sipx-core` in registry "
+                "`https://github.com/rust-lang/crates.io-index`\n"
+            ),
+        }
+        for returncode, expected in ((0, True), (101, False)):
+            with mock.patch.object(
+                release,
+                "_bounded_run",
+                return_value=subprocess.CompletedProcess(
+                    (), returncode, "", answers[returncode]
+                ),
+            ):
+                self.assertIs(expected, release._registry_name_exists("sipx-core"))
+        with mock.patch.object(
+            release,
+            "_bounded_run",
+            return_value=subprocess.CompletedProcess((), 1, "", "error: network unreachable\n"),
+        ):
+            # A pacing hint can neither skip nor repeat an upload, so an unreadable one paces
+            # conservatively instead of refusing the release the version probe still governs.
+            self.assertIsNone(release._registry_name_exists("sipx-core"))
+
+    def test_a_paced_run_that_stops_mid_frontier_resumes_without_republishing(self) -> None:
+        version = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["workspace"][
+            "package"
+        ]["version"]
+        tag = f"v{version}"
+        visible = {"sipx-sdp": False, "sipx-sip": False}
+        uploads: list[str] = []
+        run = [1]
+        resumed: list[object] = []
+
+        def bounded(command: tuple[str, ...], *, cwd: pathlib.Path, timeout: float, env=None):
+            del cwd, timeout, env
+            if "publish" not in command:
+                return subprocess.CompletedProcess(command, 0, "", "")
+            package = command[command.index("-p") + 1]
+            uploads.append(package)
+            if package == "sipx-sip" and run[0] == 1:
+                return subprocess.CompletedProcess(command, 101, "", RATE_LIMITED_WITH_HEADER)
+            visible[package] = True
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        def paced_main() -> int:
+            with (
+                mock.patch.dict(os.environ, {"CI": "", "GITHUB_ACTIONS": ""}),
+                mock.patch.object(release, "_install_cleanup_handlers"),
+                mock.patch.object(
+                    release, "_metadata", return_value=workspace_metadata(two_public=True)
+                ),
+                mock.patch.object(release, "_checkout", return_value=(False, (tag,), (tag,))),
+                mock.patch.object(
+                    release, "_registry_available", side_effect=lambda name, *_rest: visible[name]
+                ),
+                mock.patch.object(release, "_registry_name_exists", return_value=False),
+                mock.patch.object(release, "verify_resume_bytes", return_value=[]) as resume,
+                mock.patch.object(release, "_bounded_run", side_effect=bounded),
+            ):
+                status = release.main(
+                    (
+                        "--publish",
+                        "--confirm-publish",
+                        tag,
+                        "--registry-retry-budget-seconds",
+                        "1",
+                    )
+                )
+                resumed.append(resume.call_args)
+            return status
+
+        # A budget smaller than the registry's stated deadline stops the first run mid-frontier
+        # without spending any wall-clock time in this test.
+        self.assertEqual(1, paced_main())
+        self.assertEqual(["sipx-sdp", "sipx-sip"], uploads)
+        self.assertTrue(visible["sipx-sdp"])
+        self.assertFalse(visible["sipx-sip"])
+
+        run[0] = 2
+        uploads.clear()
+        self.assertEqual(0, paced_main())
+        # The already-published name is neither republished nor moved: it is re-proved against the
+        # registry's checksums and then skipped, and only the missing name is dispatched.
+        self.assertEqual(["sipx-sip"], uploads)
+        self.assertIn("sipx-sdp", resumed[-1].args[1])
 
 
 if __name__ == "__main__":
