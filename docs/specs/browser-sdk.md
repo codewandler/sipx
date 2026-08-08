@@ -156,11 +156,37 @@ background execution.
 | `sipx_kernel_new` | `(cfg_ptr: u32, cfg_len: u32) -> i32` | create a kernel from a `BSDK-CFG` JSON document; returns a handle or a negative error |
 | `sipx_kernel_free` | `(handle: i32) -> i32` | cancel everything and destroy the kernel (§6.5); idempotent-safe: a second call is `E_INVALID_HANDLE` |
 | `sipx_command` | `(handle: i32, ptr: u32, len: u32, now_ms: u64) -> i32` | submit one §5.2 command |
-| `sipx_input_bytes` | `(handle: i32, ptr: u32, len: u32, now_ms: u64) -> i32` | one received signalling message (one WebSocket message = one SIP message, RFC 7118 §5) |
+| `sipx_input_bytes` | `(handle: i32, ptr: u32, len: u32, now_ms: u64) -> i32` | one received signalling message; the buffer is exactly one SIP message and nothing else (§4.3.1) |
 | `sipx_input_timer` | `(handle: i32, timer_id: u64, now_ms: u64) -> i32` | a previously requested timer fired |
 | `sipx_input_entropy` | `(handle: i32, ptr: u32, len: u32) -> i32` | append host entropy to the pool (§4.7) |
 | `sipx_next_output` | `(handle: i32) -> u64` | packed buffer of the next output record (§4.6); `0` when drained |
 | `sipx_snapshot` | `(handle: i32) -> u64` | packed buffer of a read-only JSON state/counter snapshot (§4.11) |
+
+#### 4.3.1 `sipx_input_bytes` carries one message, and the frame is that message
+
+[sip-tls.md](sip-tls.md) §4 is normative here and the kernel enforces it: over WebSocket the frame
+boundary **is** the message boundary (RFC 7118 §5), so a buffer holding half a message, two
+messages, or one message followed by any other octets is malformed. The rule is "the frame is the
+message", not "the frame starts with a message" — the datagram tolerance of RFC 3261 §18.3, where
+octets after the body are noise to ignore, does **not** apply to this entry point.
+
+All four shapes get the same answer, and it is the answer a hostile datagram already gets (§4.10):
+the call returns `0`, `parse_errors` increments, no output record is produced, and **nothing is
+acted on** — no transaction is created, no dialog is opened, and no response is composed from a
+message that happened to parse before the frame ran out of agreement. A peer that frames wrongly
+has revealed it disagrees about where messages end, so the part that parsed is no more trustworthy
+than the part that did not.
+
+The kernel cannot close the connection; it has no socket (§3.1). The counter is the whole of what
+it can say, and [browser-signalling.md](browser-signalling.md) §5 is where a raised count becomes a
+close. A host driving this ABI directly owes the same: read §4.11 after an input that produced no
+records, and close on a raised `parse_errors`.
+
+`Content-Length` is the one framing rule that does not carry over from a stream. sip-tls.md §4
+makes it optional over WebSocket because the frame says where the message ends, so a message that
+omits it is accepted and its body runs to the end of the buffer (RFC 3261 §20.14) — which also
+settles the frame whose body happens to look like a second message: those octets were already
+spent, and it is one message.
 
 ### 4.4 Ownership
 

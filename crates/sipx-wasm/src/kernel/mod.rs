@@ -15,8 +15,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use bytes::Bytes;
+use sipx_sip::error::{FramingError, ParseError};
 use sipx_sip::transaction::{Dispatch, TuEvent};
-use sipx_sip::{Message, Output, Reliability, Timer, Timers, TransactionKey, TransactionLayer};
+use sipx_sip::{
+    Limits, Message, Output, Reliability, StreamParser, Timer, Timers, TransactionKey,
+    TransactionLayer,
+};
 
 use crate::bounds;
 use crate::command::Command;
@@ -249,8 +253,7 @@ impl Kernel {
         }
         self.advance(now_ms)?;
 
-        let limits = sipx_sip::Limits::datagram();
-        let Ok(message) = sipx_sip::parse_datagram(Bytes::copy_from_slice(bytes), &limits) else {
+        let Some(message) = parse_frame(bytes) else {
             // §4.10: hostile network input is a value, not a host-contract violation. It is
             // counted and dropped, and no event invents a call (`BSDK-NEG-13`).
             self.counters.parse_errors = self.counters.parse_errors.saturating_add(1);
@@ -431,5 +434,45 @@ impl Kernel {
             // no field for it.
             TuEvent::Timeout | TuEvent::TransportError => self.on_timeout(key),
         }
+    }
+}
+
+/// The one SIP message a received WebSocket message carries, or `None` if the frame is malformed.
+///
+/// `docs/specs/sip-tls.md` §4 is the rule: over WebSocket the frame boundary **is** the message
+/// boundary (RFC 7118 §5). Half a message, two messages, and one message followed by anything at
+/// all are malformed on the same terms — the shape promised is "the frame is the message", not
+/// "the frame starts with a message". All of them answer `None`, and [`Kernel::input_bytes`]
+/// counts them into `parse_errors`, which is the whole of what the kernel can do about it: it has
+/// no socket to close, and `docs/specs/browser-signalling.md` §5 makes a raised count the host's
+/// signal to close the connection.
+///
+/// What this deliberately does **not** do is decide *why* a frame was refused. A host that could
+/// act differently on "unparseable" than on "wrongly framed" would have to be trusted to do so,
+/// and §4 gives both the same answer, so the distinction would be a counter nobody may branch on.
+///
+/// The stream framer is reused rather than reimplemented: it already knows every rule about where
+/// a message ends, and a second copy of those rules is a second place for them to drift. Only what
+/// is done with the answer differs — here anything other than exactly one whole message is a
+/// fault. `Content-Length` is the single rule that does not carry over. It is mandatory on a
+/// stream because nothing else says where a message ends; a frame says, so §4 makes it optional
+/// here and RFC 3261 §20.14 runs the body to the end of the frame. Its absence therefore falls
+/// back to the datagram reading rather than being refused — which is also why a frame whose body
+/// happens to look like a second message is one message: those octets were already spent.
+fn parse_frame(bytes: &[u8]) -> Option<Message> {
+    let limits = Limits::datagram();
+    let mut parser = StreamParser::new(limits);
+    match parser.push(bytes) {
+        Ok(mut messages) => {
+            if parser.pending() == 0 && messages.len() == 1 {
+                messages.pop()
+            } else {
+                None
+            }
+        }
+        Err(ParseError::Framing(FramingError::ContentLengthRequired)) => {
+            sipx_sip::parse_datagram(Bytes::copy_from_slice(bytes), &limits).ok()
+        }
+        Err(_) => None,
     }
 }

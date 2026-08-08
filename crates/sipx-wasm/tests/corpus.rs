@@ -95,10 +95,54 @@ fn the_corpus_replay_digest_is_stable_across_targets() {
     );
 }
 
-/// The digest of the whole replay, as of this crate's first green run on `x86_64-unknown-linux-gnu`
-/// and `wasm32-wasip1`.
+/// The digest of the whole replay, on `x86_64-unknown-linux-gnu` and `wasm32-wasip1`.
+///
+/// Re-derived once since it was first pinned, by `S-53`, for the one case below and no other:
+/// 61 of the 62 cases replay byte for byte as they did.
 const EXPECTED_REPLAY_DIGEST: &str =
-    "08853aecba47467524dc3e444c7d0a85804f51dba2b7bb49c8a5afc4e281752f";
+    "32c86355a32cde3a180540a0716fd2d48b783fec3d4aa2e4e69c71077a13a42e";
+
+/// `rfc4475/dblreq.dat` is a **datagram** rule, and this entry point is not a datagram.
+///
+/// RFC 4475 §3.1.1.8 puts a complete second request after the first in one UDP datagram and says
+/// a parser must take the first and ignore the rest — which RFC 3261 §18.3 licenses, because a
+/// datagram carries at most one message and the remainder is noise. `sipx_input_bytes` is fed a
+/// WebSocket message, where RFC 7118 §5 and `docs/specs/sip-tls.md` §4 say the opposite: the frame
+/// boundary *is* the message boundary, so the same octets mean the peer disagrees about where
+/// messages end.
+///
+/// This is the single case whose replay `S-53` moved, and it is the only reason the digest above
+/// was re-derived. Before, the kernel answered the embedded `REGISTER` with a `405` and set that
+/// transaction's timer while the second request vanished uncounted; now the frame is refused whole
+/// and the host is told the only way §4.11 allows.
+#[test]
+fn the_one_datagram_case_that_a_frame_refuses() {
+    let bytes = corpus::CASES
+        .iter()
+        .find(|(name, _)| *name == "rfc4475/dblreq.dat")
+        .expect("RFC 4475 §3.1.1.8 is in the corpus")
+        .1;
+
+    let mut host = Host::new();
+    host.entropy(&tape(0x55));
+    host.clear_log();
+
+    assert_eq!(host.receive_bytes(bytes), 0, "a value, not a refusal");
+    assert!(
+        host.log.is_empty(),
+        "the first request must not be answered: {:?}",
+        host.log
+    );
+    let snapshot = host.snapshot();
+    assert!(
+        snapshot.contains(r#""parse_errors":1"#),
+        "counted, which is what closes the connection (browser-signalling.md §5): {snapshot}"
+    );
+    assert!(
+        snapshot.contains(r#""pendingTimers":0"#),
+        "and no transaction outlived it: {snapshot}"
+    );
+}
 
 fn replay_digest() -> String {
     let mut hasher = Sha256::new();
