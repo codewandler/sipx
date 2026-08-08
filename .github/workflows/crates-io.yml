@@ -36,6 +36,10 @@ jobs:
     env:
       RELEASE_TAG: ${{ github.ref_name }}
       REQUESTED_RELEASE_TAG: ${{ inputs.tag }}
+      # Where the gate's own clock writes this run's step timings. Outside the workspace, so the
+      # release checkout stays clean and `cargo clean` inside a gate step cannot remove the record
+      # of the run that is making it.
+      GATE_TIMINGS: ${{ runner.temp }}/sipx-gate-timings.json
     steps:
       - name: Check out the exact tag
         uses: actions/checkout@v4
@@ -126,6 +130,39 @@ jobs:
             echo "notes=$notes"
           } >>"$GITHUB_OUTPUT"
 
+      # X-93. The gate is the expensive half of a release, and it used to run before anything had
+      # asked whether the evidence it depends on exists at all: beta run 30906820031 spent 12m37 in
+      # a cold gate on a commit whose input was already wrong. These two API reads cost a second.
+      #
+      # This is an ordering change and never a substitute. It establishes that the exact-SHA `main`
+      # CI run and its Pages deployment job exist and succeeded — nothing more. The complete gate
+      # still runs, and the deployed page is still probed over HTTP after the registry consumer
+      # proof, because a successful deployment job and a page answering are different claims.
+      - name: Require exact-SHA main CI and Pages deployment evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_id="$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&head_sha=$RELEASE_SHA&per_page=100" \
+            --jq '.workflow_runs | map(select(.head_sha == env.RELEASE_SHA and .head_branch == "main" and .conclusion == "success")) | first | .id // empty')"
+          if [[ -z "$run_id" ]]; then
+            echo "no successful main CI run has head_sha $RELEASE_SHA" >&2
+            exit 1
+          fi
+          deployment_job="$(gh api --paginate \
+            -H 'Accept: application/vnd.github+json' \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?per_page=100" \
+            --jq '.jobs[] | select(.name == "deploy docs site" and .conclusion == "success") | .id' \
+            | head -n 1)"
+          if [[ -z "$deployment_job" ]]; then
+            echo "CI run $run_id has no successful deploy docs site job" >&2
+            exit 1
+          fi
+          echo "preflight: CI run $run_id job $deployment_job is bound to $RELEASE_SHA"
+
       - name: Install release build prerequisites
         run: |
           sudo apt-get update
@@ -134,11 +171,64 @@ jobs:
           msrv="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["rust-version"])')"
           rustup toolchain install "$msrv" --profile minimal
 
+      # The Node dependency cache. `cache: npm` keyed on the exact website lockfile, which caches
+      # the npm *downloads* only. A `website/node_modules` cache was measured rather than assumed
+      # (X-93) and deliberately not added: see `docs/specs/release-workflow.md` §2.1 for the
+      # figures and the decision.
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
           cache-dependency-path: website/package-lock.json
+
+      # Every input that decides whether a build artifact from a previous release can be believed,
+      # read from its authoritative source rather than restated here. A key that is coarser than
+      # the artifacts it names is how a stale build reaches a release gate; a key derived from an
+      # input nobody read is the same defect one step earlier.
+      - name: Derive the release build cache key
+        id: build_cache_key
+        shell: bash
+        run: |
+          set -euo pipefail
+          msrv="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["rust-version"])')"
+          inputs="$RUNNER_TEMP/sipx-release-cache-inputs.txt"
+          {
+            echo "runner=$RUNNER_OS-$RUNNER_ARCH-${ImageOS:-unknown}"
+            echo "lockfile=$(sha256sum Cargo.lock | cut -d ' ' -f 1)"
+            echo "ci-flags=$(awk '/^env:/ { inside = 1; next } inside && /^[^[:space:]]/ { inside = 0 } inside' .github/workflows/ci.yml | sha256sum | cut -d ' ' -f 1)"
+            echo "stable=$(rustc +stable -vV | sha256sum | cut -d ' ' -f 1)"
+            echo "msrv=$msrv-$(rustc +"$msrv" -vV | sha256sum | cut -d ' ' -f 1)"
+            echo "native=$(pkg-config --modversion opus openssl alsa | sha256sum | cut -d ' ' -f 1)"
+          } >"$inputs"
+          echo "release build cache inputs:"
+          cat "$inputs"
+          echo "key=sipx-release-gate-v1-$(sha256sum "$inputs" | cut -d ' ' -f 1)" >>"$GITHUB_OUTPUT"
+
+      # Restored here and nowhere earlier: everything above this line establishes that the tag is
+      # the immutable input the release claims to be, and a build directory seeded before that is
+      # an input nobody authorised.
+      #
+      # No `restore-keys`: a near-miss restore would seed the release gate with artifacts built
+      # from a different lockfile or toolchain, which is the one thing an exact key is for.
+      # `continue-on-error`, because a cache is an optimisation — a missing, half-written or
+      # corrupt entry leaves the gate a colder build directory and nothing else, and the gate
+      # behind it runs every one of its steps either way.
+      #
+      # `path` is an allow-list. `release.py` gives package rehearsal, resume verification and the
+      # registry consumer their own `CARGO_HOME` and `--target-dir` under the runner temp, and
+      # `consumer_environment` strips any inherited one, so nothing cached here can reach them.
+      # That isolation is the evidence, not incidental build work.
+      - name: Restore the Actions-managed Rust artifact cache
+        id: build_cache
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        with:
+          key: ${{ steps.build_cache_key.outputs.key }}
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
 
       - name: Run the complete release gate
         env:
@@ -148,7 +238,72 @@ jobs:
             echo "the release environment must provide SIPX_DENYLIST" >&2
             exit 1
           fi
-          exec ./scripts/gate.py
+          exec ./scripts/gate.py --timings "$GATE_TIMINGS"
+
+      # What makes the cache a decision rather than a hope. The gate's own clock records whether
+      # the build directory was cold or warm and what each step cost; this puts that record on the
+      # run page and keeps the JSON. Two protected runs — one that missed and one that hit — are
+      # what the 60-second retention rule in `docs/specs/release-workflow.md` §2.1 is read against.
+      # Nothing here gates on a duration.
+      - name: Record the gate's cold or warm timings
+        if: always()
+        env:
+          CACHE_RESTORED: ${{ steps.build_cache.outputs.cache-hit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -s "$GATE_TIMINGS" ]]; then
+            echo "the gate wrote no timings record; nothing to report" >&2
+            exit 0
+          fi
+          python3 - "$GATE_TIMINGS" "${CACHE_RESTORED:-}" >>"$GITHUB_STEP_SUMMARY" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          record = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          restored = sys.argv[2] == "true"
+          cache = record.get("cache", {})
+          print("### release gate timings")
+          print()
+          print(f"- artifact cache restored: `{restored}`")
+          print(f"- build directory: `{cache.get('state', 'unknown')}` — {cache.get('why', '')}")
+          print(f"- commit: `{record.get('commit', 'unknown')}`")
+          print(f"- wall clock: `{record.get('wall_clock_seconds', 'unknown')}` s")
+          print()
+          print("| step | seconds | outcome |")
+          print("|---|---|---|")
+          for step in sorted(record.get("steps", []), key=lambda row: -row.get("seconds", 0.0)):
+              print(f"| {step.get('name')} | {step.get('seconds')} | {step.get('outcome')} |")
+          PY
+
+      - name: Preserve the gate timings record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-gate-timings
+          path: ${{ env.GATE_TIMINGS }}
+          if-no-files-found: warn
+
+      # Saved only from a green gate: the job stops at the first red step, so a cache entry can
+      # only ever describe a build the complete gate accepted. `continue-on-error` for the same
+      # reason as the restore — a cache write that fails is not a failed release.
+      #
+      # The one cache result this workflow is allowed to act on, and the only step it may decide:
+      # `actions/cache/save` builds the archive before it discovers the key is taken, so saving
+      # after an exact restore would spend minutes compressing a build directory that came back
+      # byte-for-byte and make a hit slower than a miss.
+      - name: Save the Actions-managed Rust artifact cache
+        if: steps.build_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          key: ${{ steps.build_cache_key.outputs.key }}
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
 
       - name: Rehearse the locked registry packages
         run: ./scripts/release.py --dry-run

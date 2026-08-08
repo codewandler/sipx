@@ -14,12 +14,257 @@ WORKFLOW = ROOT / ".github" / "workflows" / "crates-io.yml"
 RESUME_WORKFLOW = ROOT / ".github" / "workflows" / "crates-io-resume.yml"
 SPEC = ROOT / "docs" / "specs" / "release-workflow.md"
 
+#: Steps of the ordinary release job that X-93's speed work is not allowed to move, skip or make
+#: conditional. Named here because every rule below that talks about the preflight or the artifact
+#: cache is positional relative to one of them, and a name spelled twice is a name that drifts.
+PREFLIGHT_STEP = "Require exact-SHA main CI and Pages deployment evidence"
+CACHE_KEY_STEP = "Derive the release build cache key"
+CACHE_KEY_STEP_ID = "build_cache_key"
+CACHE_RESTORE_STEP = "Restore the Actions-managed Rust artifact cache"
+CACHE_SAVE_STEP = "Save the Actions-managed Rust artifact cache"
+TIMINGS_STEP = "Record the gate's cold or warm timings"
+TAG_VALIDATION_STEP = "Validate the immutable annotated tag"
+GATE_STEP = "Run the complete release gate"
+
+#: Every step that carries a normative release claim. None of them may be skipped, reordered behind
+#: a cache, or conditioned on anything: a cache is an optimisation, and an optimisation that can
+#: decide whether a proof runs is not an optimisation any more.
+NORMATIVE_STEPS = (
+    TAG_VALIDATION_STEP,
+    PREFLIGHT_STEP,
+    GATE_STEP,
+    "Rehearse the locked registry packages",
+    "Publish dependency-ready frontiers under a finite bound",
+    "Verify the exact registry consumer and installed CLI",
+    "Verify Pages deployment from the release commit",
+)
+
+#: Exactly what the release job's artifact cache may hold. An allow-list rather than a deny-list:
+#: the claim it must not weaken is the *isolated* one — `release.py` gives package rehearsal, the
+#: resume proof and the registry consumer their own `CARGO_HOME` and `--target-dir` under the
+#: runner temp, and a cache that reached any of those would turn a fresh registry fetch into a
+#: replay of bytes this run already had.
+CACHEABLE_PATHS = (
+    "~/.cargo/registry/index",
+    "~/.cargo/registry/cache",
+    "~/.cargo/git/db",
+    "target",
+)
+
+#: What the release build cache key must be derived from, and the token that proves each input was
+#: read rather than assumed. Anything absent here makes the key coarser than the artifacts it
+#: names, which is the failure mode that serves a stale build to a release gate.
+CACHE_KEY_INPUTS = (
+    ("runner image", r"\$RUNNER_OS-\$RUNNER_ARCH-\$\{ImageOS"),
+    ("the workspace lockfile", r"sha256sum Cargo\.lock"),
+    ("the CI flags the gate runs under", r"ci-flags=[^\n]*\.github/workflows/ci\.yml"),
+    ("the stable toolchain", r"rustc \+stable -vV"),
+    ("the MSRV toolchain", r"rustc \+\"\$msrv\" -vV"),
+    ("the native feature libraries", r"pkg-config --modversion opus openssl alsa"),
+)
+
 
 def required(text: str, label: str, pattern: str, problems: list[str]) -> None:
     """Append one named structural defect when ``pattern`` is absent."""
 
     if re.search(pattern, text, re.MULTILINE | re.DOTALL) is None:
         problems.append(label)
+
+
+def step_body(text: str, name: str) -> str:
+    """One named step of the release job, up to the next step, or `""` when there is no such step.
+
+    Sliced rather than matched across the whole file on purpose. Both the preflight and the
+    post-consumer Pages proof query the same Actions endpoints, so a whole-file `re.search` for
+    either one's evidence is answered by the other's copy — and "the preflight proved it" versus
+    "something later proved it" is the entire distinction these rules exist to hold.
+    """
+
+    match = re.search(
+        rf"(?ms)^      - name: {re.escape(name)}$.*?(?=^      - (?:name|uses|id):|\Z)", text
+    )
+    return "" if match is None else match.group()
+
+
+def _step_position(text: str, name: str) -> int:
+    """Where one named step starts, or `-1`."""
+
+    return text.find(f"      - name: {name}")
+
+
+def preflight_problems(text: str) -> list[str]:
+    """Hold the cheap read-only evidence check in front of the gate, without letting it become one.
+
+    X-93. The gate is the expensive half of a release and it ran first, so a run whose exact-SHA
+    `main` CI evidence never existed still paid twelve minutes to find that out. Reading the
+    evidence first is free. What it must never become is a *substitute*: CI succeeding on the same
+    commit is not the release gate, and the deployment job answering the API is not the deployed
+    page answering HTTP.
+    """
+
+    problems: list[str] = []
+    preflight = step_body(text, PREFLIGHT_STEP)
+    if not preflight:
+        problems.append("read-only exact-SHA CI and Pages preflight is absent")
+        return problems
+
+    gate = _step_position(text, GATE_STEP)
+    validation = _step_position(text, TAG_VALIDATION_STEP)
+    position = _step_position(text, PREFLIGHT_STEP)
+    if validation < 0 or not validation < position:
+        problems.append("preflight reads Actions evidence before the tag is validated")
+    if gate < 0 or not position < gate:
+        problems.append("preflight does not run before the expensive gate")
+
+    for label, pattern in (
+        ("preflight does not select the CI run by release head SHA", r"actions/workflows/ci\.yml/runs\?[^\n]*head_sha=\$RELEASE_SHA"),
+        ("preflight does not recheck the returned run against the release head SHA", r"\.head_sha == env\.RELEASE_SHA"),
+        ("preflight does not require the successful Pages deployment job", r"deploy docs site[^\n]*conclusion == [\"']success[\"']"),
+        ("preflight accepts a missing exact-SHA CI run", r"no successful main CI run has head_sha \$RELEASE_SHA.*?exit 1"),
+        ("preflight accepts a missing Pages deployment job", r"has no successful deploy docs site job.*?exit 1"),
+        ("preflight GitHub read token is not scoped to the preflight step", r"env:\s*\n\s+GH_TOKEN:\s*\$\{\{\s*github\.token\s*\}\}"),
+    ):
+        required(preflight, label, pattern, problems)
+
+    # The preflight is evidence *about* a deployment, never the deployment answering. Both public
+    # probes stay where the state machine puts them: after the registry consumer proof.
+    if re.search(r"(?m)^\s*curl\b", preflight):
+        problems.append("preflight probes the public site instead of leaving that to the Pages proof")
+    for label, pattern in (
+        ("public guide probe is no longer the single post-consumer proof", r"https://codewandler\.github\.io/sipx/docs/getting-started"),
+        ("public API probe is no longer the single post-consumer proof", r"https://codewandler\.github\.io/sipx/api/sipx_call/index\.html"),
+    ):
+        if len(re.findall(pattern, text)) != 1:
+            problems.append(label)
+
+    # Counted, not merely present. The preflight queries the same two endpoints as the
+    # post-consumer proof, so a presence check on either sentence is answered by whichever copy
+    # survives — and one copy is exactly the substitution this story must not ship.
+    for label, pattern in (
+        ("Pages run is not selected by release head SHA", r"actions/workflows/ci\.yml/runs\?[^\n]*head_sha=\$RELEASE_SHA"),
+        ("returned Pages run is not checked against release head SHA", r"\.head_sha == env\.RELEASE_SHA"),
+        ("Pages evidence does not require the deployment job", r"deploy docs site[^\n]*conclusion == [\"']success[\"']"),
+    ):
+        if len(re.findall(pattern, text)) != 2:
+            problems.append(label)
+
+    return problems
+
+
+def _cache_paths(step: str) -> list[str]:
+    """The literal paths one cache step names, in order."""
+
+    match = re.search(r"(?ms)^          path:\s*\|\s*\n(.*?)(?=^          \S|^      - |\Z)", step)
+    if match is None:
+        return []
+    return [line.strip() for line in match.group(1).splitlines() if line.strip()]
+
+
+def build_cache_problems(text: str) -> list[str]:
+    """Hold the artifact cache to being an optimisation and nothing else.
+
+    X-93 asks for a faster release without a weaker one, and every way a cache weakens a release is
+    a placement question rather than a correctness one: restored before the tag is validated it is
+    an input nobody authorised; reaching the isolated consumer roots it replays bytes the release is
+    supposed to fetch fresh; conditioning a step it decides whether a proof runs; and a shared
+    `CARGO_TARGET_DIR` hands the release gate a directory some other run owns. So the rules here are
+    positional and exhaustive, and the retention decision is left to recorded timings.
+    """
+
+    problems: list[str] = []
+    restore = step_body(text, CACHE_RESTORE_STEP)
+    save = step_body(text, CACHE_SAVE_STEP)
+    key_step = step_body(text, CACHE_KEY_STEP)
+    timings = step_body(text, TIMINGS_STEP)
+
+    # A shared build directory is refused outright rather than checked for where it points: X-34
+    # recorded the decision against one, and a release job is the last place to reopen it.
+    if "CARGO_TARGET_DIR" in text:
+        problems.append("release workflow sets a shared CARGO_TARGET_DIR")
+
+    # A proof that runs only on a cache miss, or only on a cache hit, is not a proof. The one place
+    # a cache result may decide anything is the cache's own save: re-archiving a ten-gigabyte build
+    # directory that was restored byte-for-byte would make a hit *slower* than a miss, which is the
+    # opposite of what this story is for.
+    if re.search(r"if:[^\n]*cache-hit", text.replace(save, "", 1) if save else text):
+        problems.append("a release step is conditioned on a cache hit")
+    for name in NORMATIVE_STEPS:
+        body = step_body(text, name)
+        if body and re.search(r"(?m)^        if:", body):
+            problems.append(f"normative release step {name!r} is conditional")
+
+    if not restore:
+        problems.append("Actions-managed Rust artifact cache is never restored")
+    if not save:
+        problems.append("Actions-managed Rust artifact cache is never saved")
+    if not key_step:
+        problems.append("release build cache key is not derived from named inputs")
+    if not restore or not save or not key_step:
+        return problems
+
+    validation = _step_position(text, TAG_VALIDATION_STEP)
+    restored_at = _step_position(text, CACHE_RESTORE_STEP)
+    keyed_at = _step_position(text, CACHE_KEY_STEP)
+    gate_at = _step_position(text, GATE_STEP)
+    saved_at = _step_position(text, CACHE_SAVE_STEP)
+    if validation < 0 or not validation < keyed_at < restored_at:
+        problems.append("artifact cache is restored before the immutable tag is validated")
+    if gate_at < 0 or not restored_at < gate_at < saved_at:
+        problems.append("artifact cache is not restored before and saved after the complete gate")
+
+    for label, pattern in (
+        ("artifact cache is not the first-party Actions cache", r"uses:\s*actions/cache/restore@v4"),
+        ("artifact cache save is not the first-party Actions cache", r"uses:\s*actions/cache/save@v4"),
+    ):
+        required(restore + save, label, pattern, problems)
+
+    # A cache that can end a release is worse than no cache: a corrupt or half-written entry is an
+    # infrastructure fact, and the gate behind it still runs every step either way.
+    for name, step in ((CACHE_RESTORE_STEP, restore), (CACHE_SAVE_STEP, save)):
+        if re.search(r"(?m)^        continue-on-error:\s*true", step) is None:
+            problems.append(f"a failed cache step can stop the release: {name!r}")
+    if re.search(r"(?m)^          restore-keys:", restore) is not None:
+        problems.append("artifact cache accepts an inexact restore key")
+    if re.search(r"(?m)^        if:[^\n]*cache-hit != 'true'", save) is None:
+        problems.append("artifact cache is re-archived even when the exact entry was restored")
+
+    for label, pattern in CACHE_KEY_INPUTS:
+        required(key_step, f"release build cache key does not cover {label}", pattern, problems)
+    if re.search(r"key:\s*[^\n]*steps\." + CACHE_KEY_STEP_ID + r"\.outputs\.key", restore) is None:
+        problems.append("artifact cache key is not the derived key")
+
+    for name, step in ((CACHE_RESTORE_STEP, restore), (CACHE_SAVE_STEP, save)):
+        paths = _cache_paths(step)
+        if list(CACHEABLE_PATHS) != paths:
+            problems.append(f"{name!r} does not cache exactly the workspace build and registry downloads")
+
+    # The gate's own clock is the only source of a cold-versus-warm figure, so a cache that is not
+    # measured cannot be retained or dropped on evidence. Recording it is part of the mechanism.
+    required(text, "the gate run records no timings", r"\./scripts/gate\.py --timings [\"']\$GATE_TIMINGS[\"']", problems)
+    if not timings:
+        problems.append("the gate's cold or warm timings are never recorded")
+    else:
+        for label, pattern in (
+            ("recorded timings do not state whether the build directory was warm", r"cache"),
+            ("recorded timings are not preserved as run evidence", r"GITHUB_STEP_SUMMARY"),
+            ("recorded timings are skipped when the gate fails", r"(?m)^        if:\s*always\(\)"),
+        ):
+            required(timings, label, pattern, problems)
+
+    # The Node dependency cache. `build-docs.sh` installs only when `website/node_modules` is
+    # absent, so an exact-lock cache of that directory can skip installation and nothing else —
+    # but only while no cache reaches the site output or the rustdoc build it also produces.
+    required(
+        text,
+        "the Node dependency cache is not keyed on the exact website lockfile",
+        r"cache:\s*npm\s*\n\s+cache-dependency-path:\s*website/package-lock\.json",
+        problems,
+    )
+    for forbidden in ("website/build", "target/doc"):
+        if any(forbidden in path for path in _cache_paths(restore) + _cache_paths(save)):
+            problems.append(f"a cache holds {forbidden}, which would skip a build rather than an install")
+
+    return problems
 
 
 def workflow_problems(text: str) -> list[str]:
@@ -74,9 +319,6 @@ def workflow_problems(text: str) -> list[str]:
         ("frontier loop does not require the all-visible observation", r"all public packages are already registry-visible"),
         ("exact registry consumer proof is absent", r"--verify-consumer"),
         ("consumer command has no finite bound", r"--consumer-timeout-seconds\s+[1-9][0-9]*"),
-        ("Pages run is not selected by release head SHA", r"actions/workflows/ci\.yml/runs\?.*head_sha=\$RELEASE_SHA"),
-        ("returned Pages run is not checked against release head SHA", r"\.head_sha == env\.RELEASE_SHA"),
-        ("Pages evidence does not require the deployment job", r"deploy docs site.*conclusion == [\"']success[\"']"),
         ("GitHub read token is not scoped to the Pages step", r"Verify Pages deployment from the release commit\s*\n\s+env:\s*\n\s+GH_TOKEN:\s*\$\{\{\s*github\.token\s*\}\}"),
         ("public guide is not probed", r"https://codewandler\.github\.io/sipx/docs/getting-started"),
         ("public API is not probed", r"https://codewandler\.github\.io/sipx/api/sipx_call/index\.html"),
@@ -104,6 +346,9 @@ def workflow_problems(text: str) -> list[str]:
     )
     for label, pattern in checks:
         required(text, label, pattern, problems)
+
+    problems.extend(preflight_problems(text))
+    problems.extend(build_cache_problems(text))
 
     if re.search(r"(?m)^\s*cargo\s+publish\b", text):
         problems.append("workflow calls cargo publish directly instead of the release helper")
@@ -329,6 +574,43 @@ def specification_problems(text: str) -> list[str]:
         r"no existing\s+asset may be overwritten or deleted",
         problems,
     )
+    # X-93's clauses, each matched across line wraps: the specification is prose the checker greps,
+    # and a rule that breaks when a paragraph is rewrapped teaches people to stop rewrapping.
+    for label, words in (
+        (
+            "specification does not put a read-only preflight in front of the gate",
+            "Missing or wrong-SHA evidence MUST stop the release before the gate",
+        ),
+        (
+            "specification lets the preflight replace the post-consumer Pages proof",
+            "It MUST NOT probe the public site",
+        ),
+        (
+            "specification lets CI success substitute for a normative proof",
+            "MUST NOT be substituted for the complete gate or for any other normative proof",
+        ),
+        (
+            "specification does not place the artifact cache after immutable-tag validation",
+            "MAY be restored, and only after the immutable-tag facts of §3 are established",
+        ),
+        (
+            "specification does not keep the isolated helper roots out of the cache",
+            "no cache may hold the isolated `CARGO_HOME` or target directories",
+        ),
+        (
+            "specification does not require every gate step to run on a cache miss",
+            "MUST still run every one of the gate's steps",
+        ),
+        (
+            "specification states no retention rule for the artifact cache",
+            "retained only if the recorded cold and warm figures differ by at least 60 seconds",
+        ),
+        (
+            "specification lets a Node dependency cache skip more than installation",
+            "MAY skip installation and MUST NOT skip the site, anchor or rustdoc builds",
+        ),
+    ):
+        required(text, label, r"\s+".join(re.escape(word) for word in words.split()), problems)
     return problems
 
 

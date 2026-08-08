@@ -581,5 +581,327 @@ class RecoveryMutations(unittest.TestCase):
         )
 
 
+def _block(text: str, first_step: str, next_step: str) -> str:
+    """One step's source, from its name line up to the name line of the step after it."""
+
+    start = text.index(f"      - name: {first_step}\n")
+    end = text.index(f"      - name: {next_step}\n")
+    assert start < end, f"{first_step!r} no longer precedes {next_step!r}"
+    return text[start:end]
+
+
+PREFLIGHT_BLOCK = _block(
+    WORKFLOW,
+    "Require exact-SHA main CI and Pages deployment evidence",
+    "Install release build prerequisites",
+)
+RESTORE_BLOCK = _block(
+    WORKFLOW,
+    "Restore the Actions-managed Rust artifact cache",
+    "Run the complete release gate",
+)
+
+
+class PreflightMutations(unittest.TestCase):
+    """X-93: the cheap evidence read in front of the gate may not become the evidence."""
+
+    def assert_mutation(self, old: str, new: str, expected: str) -> None:
+        self.assertTrue(old in WORKFLOW, f"fixture no longer contains {old!r}")
+        self.assertIn(expected, checker.workflow_problems(WORKFLOW.replace(old, new, 1)))
+
+    def test_the_preflight_must_exist_and_stand_between_validation_and_the_gate(self) -> None:
+        self.assertIn(
+            "read-only exact-SHA CI and Pages preflight is absent",
+            checker.workflow_problems(WORKFLOW.replace(PREFLIGHT_BLOCK, "", 1)),
+        )
+        moved_after_the_gate = WORKFLOW.replace(PREFLIGHT_BLOCK, "", 1) + PREFLIGHT_BLOCK
+        self.assertIn(
+            "preflight does not run before the expensive gate",
+            checker.workflow_problems(moved_after_the_gate),
+        )
+        validation = "      - name: Validate the immutable annotated tag\n"
+        moved_before_validation = WORKFLOW.replace(PREFLIGHT_BLOCK, "", 1).replace(
+            validation, PREFLIGHT_BLOCK + validation, 1
+        )
+        self.assertIn(
+            "preflight reads Actions evidence before the tag is validated",
+            checker.workflow_problems(moved_before_validation),
+        )
+
+    def test_the_preflight_must_bind_its_own_evidence_to_the_release_commit(self) -> None:
+        # Each mutation hits the preflight's copy, which is the first in the file. Both the
+        # preflight-specific rule and the paired count fire: one copy of this evidence is exactly
+        # the substitution the story refuses.
+        for old, new, expected in (
+            (
+                "head_sha=$RELEASE_SHA",
+                "head_sha=main",
+                "preflight does not select the CI run by release head SHA",
+            ),
+            (
+                ".head_sha == env.RELEASE_SHA",
+                ".head_sha != null",
+                "preflight does not recheck the returned run against the release head SHA",
+            ),
+            (
+                'deploy docs site" and .conclusion == "success',
+                'build docs site" and .conclusion == "success',
+                "preflight does not require the successful Pages deployment job",
+            ),
+        ):
+            with self.subTest(expected=expected):
+                self.assert_mutation(old, new, expected)
+
+    def test_the_preflight_must_refuse_missing_evidence_rather_than_report_it(self) -> None:
+        refusals = PREFLIGHT_BLOCK.replace("exit 1", "exit 0")
+        problems = checker.workflow_problems(WORKFLOW.replace(PREFLIGHT_BLOCK, refusals, 1))
+        self.assertIn("preflight accepts a missing exact-SHA CI run", problems)
+        self.assertIn("preflight accepts a missing Pages deployment job", problems)
+
+    def test_the_preflight_read_token_is_scoped_to_it(self) -> None:
+        unscoped = PREFLIGHT_BLOCK.replace(
+            "        env:\n          GH_TOKEN: ${{ github.token }}\n", "", 1
+        )
+        self.assertIn(
+            "preflight GitHub read token is not scoped to the preflight step",
+            checker.workflow_problems(WORKFLOW.replace(PREFLIGHT_BLOCK, unscoped, 1)),
+        )
+
+    def test_the_preflight_may_not_take_over_the_public_http_proof(self) -> None:
+        probing = PREFLIGHT_BLOCK.replace(
+            '          echo "preflight: CI run $run_id job $deployment_job is bound to $RELEASE_SHA"\n',
+            "          curl --fail --silent https://codewandler.github.io/sipx/docs/getting-started\n",
+            1,
+        )
+        problems = checker.workflow_problems(WORKFLOW.replace(PREFLIGHT_BLOCK, probing, 1))
+        self.assertIn(
+            "preflight probes the public site instead of leaving that to the Pages proof", problems
+        )
+        self.assertIn("public guide probe is no longer the single post-consumer proof", problems)
+
+    def test_the_post_consumer_pages_proof_still_states_its_own_evidence(self) -> None:
+        # Mutate the *second* copy: the preflight's survives, so only a counted rule can see this.
+        for marker, expected in (
+            ("head_sha=$RELEASE_SHA", "Pages run is not selected by release head SHA"),
+            (
+                ".head_sha == env.RELEASE_SHA",
+                "returned Pages run is not checked against release head SHA",
+            ),
+            (
+                'deploy docs site" and .conclusion == "success',
+                "Pages evidence does not require the deployment job",
+            ),
+        ):
+            with self.subTest(expected=expected):
+                second = WORKFLOW.index(marker, WORKFLOW.index(marker) + len(marker))
+                mutated = WORKFLOW[:second] + "unbound" + WORKFLOW[second + len(marker) :]
+                self.assertIn(expected, checker.workflow_problems(mutated))
+
+
+class BuildCacheMutations(unittest.TestCase):
+    """X-93: the artifact cache is an optimisation, and every rule here says so structurally."""
+
+    def assert_mutation(self, old: str, new: str, expected: str) -> None:
+        self.assertTrue(old in WORKFLOW, f"fixture no longer contains {old!r}")
+        self.assertIn(expected, checker.workflow_problems(WORKFLOW.replace(old, new, 1)))
+
+    def test_the_cache_is_restored_only_after_the_tag_is_validated(self) -> None:
+        self.assertIn(
+            "Actions-managed Rust artifact cache is never restored",
+            checker.workflow_problems(WORKFLOW.replace(RESTORE_BLOCK, "", 1)),
+        )
+        validation = "      - name: Validate the immutable annotated tag\n"
+        hoisted = WORKFLOW.replace(RESTORE_BLOCK, "", 1).replace(
+            validation, RESTORE_BLOCK + validation, 1
+        )
+        self.assertIn(
+            "artifact cache is restored before the immutable tag is validated",
+            checker.workflow_problems(hoisted),
+        )
+        after_the_gate = WORKFLOW.replace(RESTORE_BLOCK, "", 1).replace(
+            "      - name: Rehearse the locked registry packages\n",
+            RESTORE_BLOCK + "      - name: Rehearse the locked registry packages\n",
+            1,
+        )
+        self.assertIn(
+            "artifact cache is not restored before and saved after the complete gate",
+            checker.workflow_problems(after_the_gate),
+        )
+
+    def test_the_cache_may_not_end_a_release_or_restore_inexactly(self) -> None:
+        self.assert_mutation(
+            "        continue-on-error: true\n",
+            "",
+            "a failed cache step can stop the release: 'Restore the Actions-managed Rust artifact cache'",
+        )
+        loosened = RESTORE_BLOCK.replace(
+            "          path: |\n",
+            "          restore-keys: |\n            sipx-release-gate-v1-\n          path: |\n",
+            1,
+        )
+        self.assertIn(
+            "artifact cache accepts an inexact restore key",
+            checker.workflow_problems(WORKFLOW.replace(RESTORE_BLOCK, loosened, 1)),
+        )
+        self.assert_mutation(
+            "          key: ${{ steps.build_cache_key.outputs.key }}\n",
+            "          key: sipx-release-gate-v1\n",
+            "artifact cache key is not the derived key",
+        )
+        self.assert_mutation(
+            "        if: steps.build_cache.outputs.cache-hit != 'true'\n",
+            "",
+            "artifact cache is re-archived even when the exact entry was restored",
+        )
+
+    def test_every_named_key_input_is_load_bearing(self) -> None:
+        for old, new, label in (
+            ("$RUNNER_OS-$RUNNER_ARCH-${ImageOS:-unknown}", "$RUNNER_OS", "runner image"),
+            ("sha256sum Cargo.lock", "sha256sum Cargo.toml", "the workspace lockfile"),
+            (
+                ".github/workflows/ci.yml | sha256sum",
+                "/dev/null | sha256sum",
+                "the CI flags the gate runs under",
+            ),
+            ("rustc +stable -vV", "rustc -vV", "the stable toolchain"),
+            ('rustc +"$msrv" -vV', "true", "the MSRV toolchain"),
+            (
+                "pkg-config --modversion opus openssl alsa",
+                "echo unknown",
+                "the native feature libraries",
+            ),
+        ):
+            with self.subTest(label=label):
+                self.assert_mutation(
+                    old, new, f"release build cache key does not cover {label}"
+                )
+
+    def test_the_cache_may_not_reach_the_isolated_helper_roots(self) -> None:
+        self.assert_mutation(
+            "            target\n",
+            "            target\n            ${{ runner.temp }}/sipx-registry-consumer\n",
+            "'Restore the Actions-managed Rust artifact cache' does not cache exactly the "
+            "workspace build and registry downloads",
+        )
+        self.assertIn(
+            "release workflow sets a shared CARGO_TARGET_DIR",
+            checker.workflow_problems(
+                WORKFLOW.replace(
+                    "      GATE_TIMINGS:", "      CARGO_TARGET_DIR: /shared\n      GATE_TIMINGS:", 1
+                )
+            ),
+        )
+
+    def test_a_cache_result_may_not_decide_whether_a_proof_runs(self) -> None:
+        conditioned = WORKFLOW.replace(
+            "      - name: Run the complete release gate\n",
+            "      - name: Run the complete release gate\n"
+            "        if: steps.build_cache.outputs.cache-hit != 'true'\n",
+            1,
+        )
+        problems = checker.workflow_problems(conditioned)
+        self.assertIn("a release step is conditioned on a cache hit", problems)
+        self.assertIn(
+            "normative release step 'Run the complete release gate' is conditional", problems
+        )
+        skipped = WORKFLOW.replace(
+            "      - name: Verify the exact registry consumer and installed CLI\n",
+            "      - name: Verify the exact registry consumer and installed CLI\n"
+            "        if: github.event_name == 'push'\n",
+            1,
+        )
+        self.assertIn(
+            "normative release step 'Verify the exact registry consumer and installed CLI' "
+            "is conditional",
+            checker.workflow_problems(skipped),
+        )
+
+    def test_the_cold_and_warm_figures_are_recorded_and_kept(self) -> None:
+        self.assert_mutation(
+            './scripts/gate.py --timings "$GATE_TIMINGS"',
+            "./scripts/gate.py",
+            "the gate run records no timings",
+        )
+        timings = _block(
+            WORKFLOW, "Record the gate's cold or warm timings", "Preserve the gate timings record"
+        )
+        self.assertIn(
+            "the gate's cold or warm timings are never recorded",
+            checker.workflow_problems(WORKFLOW.replace(timings, "", 1)),
+        )
+        self.assertIn(
+            "recorded timings are skipped when the gate fails",
+            checker.workflow_problems(
+                WORKFLOW.replace(timings, timings.replace("        if: always()\n", "", 1), 1)
+            ),
+        )
+
+    def test_a_node_cache_may_skip_installation_and_nothing_further(self) -> None:
+        self.assert_mutation(
+            "          cache-dependency-path: website/package-lock.json",
+            "          cache-dependency-path: website/package.json",
+            "the Node dependency cache is not keyed on the exact website lockfile",
+        )
+        self.assert_mutation(
+            "            target\n",
+            "            target\n            website/build\n",
+            "a cache holds website/build, which would skip a build rather than an install",
+        )
+
+
+class SpeedSpecificationMutations(unittest.TestCase):
+    """The normative half of X-93: prose the checker greps, so each clause is mutated here."""
+
+    def assert_mutation(self, old: str, new: str, expected: str) -> None:
+        self.assertTrue(old in SPEC_TEXT, f"specification no longer contains {old!r}")
+        self.assertIn(expected, checker.specification_problems(SPEC_TEXT.replace(old, new, 1)))
+
+    def test_the_preflight_clauses_are_normative(self) -> None:
+        self.assert_mutation(
+            "Missing or wrong-SHA evidence MUST stop the release before the gate.",
+            "Missing evidence is reported and the release continues.",
+            "specification does not put a read-only preflight in front of the gate",
+        )
+        self.assert_mutation(
+            "It MUST NOT probe the public site",
+            "It may probe the public site",
+            "specification lets the preflight replace the post-consumer Pages proof",
+        )
+        self.assert_mutation(
+            "MUST NOT be substituted for the complete gate or for any other normative proof",
+            "may stand in for the complete gate",
+            "specification lets CI success substitute for a normative proof",
+        )
+
+    def test_the_cache_clauses_are_normative(self) -> None:
+        self.assert_mutation(
+            "MAY be restored, and only after the immutable-tag facts of §3 are established",
+            "MAY be restored at any point in the job",
+            "specification does not place the artifact cache after immutable-tag validation",
+        )
+        self.assert_mutation(
+            "no cache may hold the isolated `CARGO_HOME` or target directories",
+            "a cache may hold every build directory",
+            "specification does not keep the isolated helper roots out of the cache",
+        )
+        self.assert_mutation(
+            "MUST still run every one of the gate's steps",
+            "MAY skip the steps whose artifacts were restored",
+            "specification does not require every gate step to run on a cache miss",
+        )
+
+    def test_the_retention_rules_are_normative(self) -> None:
+        self.assert_mutation(
+            "retained only if the recorded cold and warm figures differ by at least 60 seconds",
+            "retained because it is obviously faster",
+            "specification states no retention rule for the artifact cache",
+        )
+        self.assert_mutation(
+            "MAY skip installation and MUST NOT skip the site, anchor or rustdoc builds",
+            "MAY skip the site build",
+            "specification lets a Node dependency cache skip more than installation",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
