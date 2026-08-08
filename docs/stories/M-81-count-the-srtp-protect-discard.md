@@ -122,3 +122,17 @@ what SRTP authenticates or encrypts.
   > protect them. The branch was documented as unreachable until `M-79` made `Encoded::extension`
   > public: an extension whose length word overstates its bytes makes a header longer than the
   > packet, and the resulting drop moved no counter.
+
+- 2026-08-08: **the fixture this story was proved with is now unreachable, and the pointer above is
+  stale on purpose rather than by neglect.** `M-85` refused a self-inconsistent extension at
+  `Packet::encode`, which is strictly earlier than the branch this story counted: the 255-words-over
+  -eight-octets fixture is the same disagreement further out, so it never reaches
+  `SrtpContext::protect` any more. `M-85` retargeted the test to what now happens and renamed it
+  `an_extension_overstating_past_the_packet_costs_no_packet` — media arrives, the extension does
+  not, and `srtp_protect_failures` stays at zero. The old name in this file's Acceptance and
+  Progress is what the row was satisfied by on the day, and is left readable as history.
+  **`srtp_protect_failures` is kept.** It is published, and `protect` retains cipher-level failure
+  paths no argument here closes — but nothing a *caller* does can reach it now, which is one step
+  from the "a field stuck at zero" that `docs/specs/media-runtime.md` §4 argues against twice.
+  `M-90` is filed to settle that before the freeze.
+

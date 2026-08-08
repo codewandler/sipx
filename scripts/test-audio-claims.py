@@ -298,8 +298,27 @@ class TheModuleReader(unittest.TestCase):
         self.assertEqual(
             # `analysis` (voice activity) and `signal` (level, clipping, silence) are
             # deterministic signal analysis, not codecs — they carry no audio claim and
-            # load no model. They are listed because this asserts what the crate declares.
-            ["analysis", "g711", "g722", "l16", "mix", "opus", "pcm", "signal", "wav"],
+            # load no model. `dsp` and its two children are `M-63`'s processor contract and
+            # conformance harness: a sans-I/O frame interface with no algorithm behind it, so
+            # likewise no audio claim. All are listed because this asserts what the crate
+            # *declares*, and a module the reader cannot see is a claim nothing checks — which is
+            # why this is a literal list rather than a rule that would grow to fit whatever it
+            # found. Adding a module to `sipx-audio` is meant to fail here until someone says
+            # what it is.
+            [
+                "analysis",
+                "dsp",
+                "dsp::conformance",
+                "dsp::contract",
+                "g711",
+                "g722",
+                "l16",
+                "mix",
+                "opus",
+                "pcm",
+                "signal",
+                "wav",
+            ],
             sorted(m.name for m in self.modules),
         )
 
