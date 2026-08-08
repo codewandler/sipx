@@ -8,6 +8,8 @@ The default is a read-only graph and checkout check. See
 from __future__ import annotations
 
 import argparse
+import datetime
+import email.utils
 import hashlib
 import json
 import os
@@ -72,6 +74,63 @@ class ArchiveEvidence(NamedTuple):
     checksum: str
     git_sha1: str
     dirty: bool
+
+
+class RegistryRateLimit(NamedTuple):
+    """One publication allowance the registry states, as the token bucket it operates."""
+
+    burst: int
+    refill_seconds: float
+
+
+class RateLimitBucket(NamedTuple):
+    """What this invocation currently believes one stated allowance permits, and from when.
+
+    `level` is the number of uploads the allowance still permits as of `updated`; `not_before` is
+    the moment the registry itself named in a refusal, which overrides the model whenever it is
+    later than the model would be.
+    """
+
+    limit: RegistryRateLimit
+    level: float
+    updated: float
+    not_before: float
+
+
+class RateLimitRefusal(NamedTuple):
+    """One registry rate-limit refusal, with the retry hint it did or did not carry."""
+
+    retry_seconds: float | None
+    detail: str
+
+
+# crates.io states two publication limits, and they differ by an order of magnitude: a new crate
+# name is allowed once every ten minutes after a burst of five, while a new version of a name that
+# already exists is allowed once a minute after a burst of thirty. Modelling both is what keeps an
+# ordinary version bump out of the new-name pacing; modelling one would be the constant delay this
+# replaces.
+NEW_CRATE_RATE_LIMIT = RegistryRateLimit(burst=5, refill_seconds=600.0)
+NEW_VERSION_RATE_LIMIT = RegistryRateLimit(burst=30, refill_seconds=60.0)
+NEW_CRATE = "new-crate"
+NEW_VERSION = "new-version"
+# The registry states one deadline per refusal. Three attempts covers a deadline that is read,
+# waited out, and then restated once; beyond that the registry is refusing rather than pacing.
+RATE_LIMIT_RETRY_ATTEMPTS = 3
+RATE_LIMIT_SIGNALS = (
+    re.compile(r"\bstatus:?\s+429\b", re.IGNORECASE),
+    re.compile(r"\b429\s+too\s+many\s+requests\b", re.IGNORECASE),
+    re.compile(r"\(429\)"),
+)
+RETRY_AFTER_HEADER = re.compile(
+    r"^[^\S\n]*retry-after[^\S\n]*:[^\S\n]*(\S.*?)[^\S\n]*$", re.IGNORECASE | re.MULTILINE
+)
+RETRY_DEADLINE_ANCHOR = re.compile(r"try again (?:after|at)\b", re.IGNORECASE)
+RFC_3339_MOMENT = re.compile(
+    r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?"
+)
+HTTP_DATE_MOMENT = re.compile(
+    r"[A-Za-z]{3},\s+\d{1,2}\s+[A-Za-z]{3}\s+\d{4}\s+\d{2}:\d{2}:\d{2}\s+[A-Za-z]{2,5}"
+)
 
 
 def package_records(
@@ -953,6 +1012,20 @@ def _capture(
     return _bounded_run(command, cwd=root, timeout=timeout)
 
 
+def _dispatch(
+    command: Sequence[str], root: pathlib.Path, timeout: float
+) -> subprocess.CompletedProcess[str]:
+    """Run one Cargo write candidate, echoing exactly what the registry answered."""
+
+    print("+ " + " ".join(command))
+    result = _bounded_run(tuple(command), cwd=root, timeout=timeout)
+    if result.stdout:
+        print(result.stdout, end="")
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr)
+    return result
+
+
 def _metadata(root: pathlib.Path = ROOT) -> dict[str, object]:
     result = _capture(
         ("cargo", "metadata", "--locked", "--format-version", "1", "--no-deps"), root=root
@@ -1052,6 +1125,220 @@ def _registry_available(
         return False
     complaint = result.stderr.strip() or f"status {result.returncode}"
     raise ReleaseError(f"crates.io probe failed for {package}@{version}: {complaint}")
+
+
+def _registry_name_exists(
+    package: str, timeout: float = 15.0, root: pathlib.Path = ROOT
+) -> bool | None:
+    """Ask whether the registry already carries this crate name under any version.
+
+    `None` means the registry gave no readable answer. Unlike the exact-version probe, this one
+    selects only which stated limit paces an upload and can neither skip nor repeat one, so an
+    unreadable answer paces conservatively instead of refusing a release: the version probe still
+    decides what is published, and a name read wrongly is corrected by the registry's own `429`.
+    """
+
+    result = _bounded_run(
+        ("cargo", "info", package, "--registry", "crates-io", "--color", "never"),
+        cwd=root,
+        timeout=max(0.1, timeout),
+    )
+    if result.returncode == 0:
+        return True
+    exact_not_found = (
+        f"error: could not find `{package}` in registry "
+        "`https://github.com/rust-lang/crates.io-index`"
+    )
+    lines = [line.strip() for line in result.stderr.splitlines() if line.strip()]
+    errors = [line for line in lines if line.startswith(("error:", "warning:"))]
+    if result.returncode == 101 and errors == [exact_not_found]:
+        return False
+    return None
+
+
+def rate_limit_bucket(limit: RegistryRateLimit, at: float) -> RateLimitBucket:
+    """Start one allowance at the burst the registry states, with nothing yet spent."""
+
+    return RateLimitBucket(limit, float(limit.burst), at, at)
+
+
+def rate_limit_ready_at(bucket: RateLimitBucket) -> float:
+    """The earliest moment the stated allowance and the registry's own answers both permit one."""
+
+    if bucket.level >= 1.0:
+        modelled = bucket.updated
+    else:
+        modelled = bucket.updated + (1.0 - bucket.level) * bucket.limit.refill_seconds
+    return max(modelled, bucket.not_before)
+
+
+def rate_limit_wait(bucket: RateLimitBucket, at: float) -> float:
+    """How long an upload at `at` must wait; zero when the allowance already permits it."""
+
+    return max(0.0, rate_limit_ready_at(bucket) - at)
+
+
+def rate_limit_consume(bucket: RateLimitBucket, at: float) -> RateLimitBucket:
+    """Charge one upload at `at`, first refilling the allowance for the time that has passed."""
+
+    elapsed = max(0.0, at - bucket.updated)
+    level = min(
+        float(bucket.limit.burst), bucket.level + elapsed / bucket.limit.refill_seconds
+    )
+    return bucket._replace(level=max(0.0, level - 1.0), updated=at)
+
+
+def rate_limit_restate(bucket: RateLimitBucket, at: float, delay: float) -> RateLimitBucket:
+    """Replace the modelled allowance with the deadline the registry itself stated.
+
+    The registry is the authority on its own limit, so its deadline becomes the moment one upload
+    is permitted again, and the model resumes from there rather than from this run's optimistic
+    start.
+    """
+
+    deadline = at + max(0.0, delay)
+    return bucket._replace(level=1.0, updated=deadline, not_before=deadline)
+
+
+def _stated_moment(value: str) -> float | None:
+    """Read one RFC 3339 or HTTP-date instant as a Unix timestamp, or nothing at all."""
+
+    text = value.strip()
+    try:
+        moment = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        try:
+            moment = email.utils.parsedate_to_datetime(text)
+        except (TypeError, ValueError):
+            return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=datetime.timezone.utc)
+    return moment.timestamp()
+
+
+def _retry_hint_seconds(text: str, now: float) -> float | None:
+    """Read the registry's own retry hint: a `Retry-After` header, or its refusal's deadline."""
+
+    header = RETRY_AFTER_HEADER.search(text)
+    if header is not None:
+        value = header.group(1)
+        if re.fullmatch(r"[0-9]+", value):
+            return float(value)
+        moment = _stated_moment(value)
+        if moment is not None:
+            return max(0.0, moment - now)
+    anchor = RETRY_DEADLINE_ANCHOR.search(text)
+    if anchor is not None:
+        tail = text[anchor.end() :]
+        for pattern in (RFC_3339_MOMENT, HTTP_DATE_MOMENT):
+            found = pattern.search(tail)
+            if found is None:
+                continue
+            moment = _stated_moment(found.group(0))
+            if moment is not None:
+                return max(0.0, moment - now)
+    return None
+
+
+def rate_limit_refusal(text: str, *, now: float) -> RateLimitRefusal | None:
+    """Recognise a rate-limit refusal in a Cargo publication report, and the hint it carried.
+
+    A refusal that states no deadline is still a refusal; the caller falls back to the registry's
+    stated allowance rather than inventing a delay. Anything that is not a `429` is not a rate
+    limit and must not be retried.
+    """
+
+    detail = None
+    for line in text.splitlines():
+        if any(pattern.search(line) for pattern in RATE_LIMIT_SIGNALS):
+            detail = line.strip()
+            break
+    if detail is None:
+        return None
+    return RateLimitRefusal(_retry_hint_seconds(text, now), detail)
+
+
+def _resume_note(published: Sequence[str]) -> str:
+    """Say what this run did upload, so the operator knows a rerun resumes rather than repeats."""
+
+    accepted = ", ".join(published) if published else "nothing"
+    return (
+        f"; this run published {accepted} and stopped before any further upload, so a later "
+        "invocation resumes from registry visibility"
+    )
+
+
+def publish_frontier(
+    frontier: Sequence[str],
+    dispatch: Callable[[str], subprocess.CompletedProcess[str]],
+    *,
+    new_crates: Sequence[str],
+    budget_seconds: float,
+    monotonic: Callable[[], float] = time.monotonic,
+    pause: Callable[[float], None] = time.sleep,
+    now: Callable[[], float] = time.time,
+    report: Callable[[str], None] = print,
+) -> tuple[str, ...]:
+    """Upload one frontier at the registry's stated pace, within a finite rate-limit budget.
+
+    No wait here is a fixed delay standing in for the limit. Spacing comes from the allowance the
+    registry publishes for the class of upload, and from the deadline the registry states when it
+    answers `429`. Exhausting the budget or the retry attempts raises before the next upload is
+    dispatched, which is what keeps a stopped run resumable rather than partly repeated.
+    """
+
+    if budget_seconds <= 0:
+        raise ReleaseError("registry rate-limit budget must be greater than zero")
+    names = set(new_crates)
+    buckets = {
+        NEW_CRATE: rate_limit_bucket(NEW_CRATE_RATE_LIMIT, monotonic()),
+        NEW_VERSION: rate_limit_bucket(NEW_VERSION_RATE_LIMIT, monotonic()),
+    }
+    remaining = float(budget_seconds)
+    published: list[str] = []
+    for package in frontier:
+        kind = NEW_CRATE if package in names else NEW_VERSION
+        refusal = None
+        for _attempt in range(RATE_LIMIT_RETRY_ATTEMPTS):
+            wait = rate_limit_wait(buckets[kind], monotonic())
+            if wait > 0.0:
+                if wait > remaining:
+                    stated = "" if refusal is None else f": {refusal.detail}"
+                    raise ReleaseError(
+                        f"{package}: the registry's {kind} rate limit needs {wait:g}s before this "
+                        f"upload, beyond the {remaining:g}s left in the rate-limit "
+                        f"budget{stated}" + _resume_note(published)
+                    )
+                report(f"{package}: waiting {wait:g}s for the registry's stated {kind} limit")
+                pause(wait)
+                remaining -= wait
+            buckets[kind] = rate_limit_consume(buckets[kind], monotonic())
+            result = dispatch(package)
+            if result.returncode == 0:
+                published.append(package)
+                break
+            refusal = rate_limit_refusal(result.stdout + result.stderr, now=now())
+            if refusal is None:
+                raise ReleaseError(
+                    f"{package}: publication failed with status {result.returncode}"
+                    + _resume_note(published)
+                )
+            report(f"{package}: {refusal.detail}")
+            buckets[kind] = rate_limit_restate(
+                buckets[kind],
+                monotonic(),
+                buckets[kind].limit.refill_seconds
+                if refusal.retry_seconds is None
+                else refusal.retry_seconds,
+            )
+        else:
+            detail = "" if refusal is None else f": {refusal.detail}"
+            raise ReleaseError(
+                f"{package}: the registry still refuses publication after "
+                f"{RATE_LIMIT_RETRY_ATTEMPTS} rate-limited attempts{detail}"
+                + _resume_note(published)
+            )
+    return tuple(published)
 
 
 def consumer_manifest(version: str, libraries: Sequence[str]) -> str:
@@ -1616,6 +1903,15 @@ def _parser() -> argparse.ArgumentParser:
         help="finite visibility bound after an upload (publish mode only; default: 120)",
     )
     parser.add_argument(
+        "--registry-retry-budget-seconds",
+        type=float,
+        default=1800.0,
+        help=(
+            "finite total wait for the registry's stated publication limits and its 429 deadlines "
+            "during one publication (publish mode only; default: 1800)"
+        ),
+    )
+    parser.add_argument(
         "--consumer-timeout-seconds",
         type=float,
         default=900.0,
@@ -1660,6 +1956,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     if args.registry_wait_seconds <= 0:
         print("--registry-wait-seconds must be greater than zero", file=sys.stderr)
+        return 1
+    if args.registry_retry_budget_seconds <= 0:
+        print("--registry-retry-budget-seconds must be greater than zero", file=sys.stderr)
         return 1
     if args.consumer_timeout_seconds <= 0:
         print("--consumer-timeout-seconds must be greater than zero", file=sys.stderr)
@@ -1817,21 +2116,37 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "no package is dependency-ready; registry visibility is incomplete for: "
                     + ", ".join(missing)
                 )
-            commands = commands_for(mode, frontier)
+            uploads = dict(zip(frontier, commands_for(mode, frontier), strict=True))
+            new_crates = []
+            for name in frontier:
+                known = _registry_name_exists(name, 15.0, release_root)
+                if known is None:
+                    print(
+                        f"{name}: the registry gave no readable name answer; pacing it under the "
+                        "stated new-crate limit"
+                    )
+                if not known:
+                    new_crates.append(name)
+            print(
+                f"registry pacing: {len(new_crates)} new crate name(s), "
+                f"{len(frontier) - len(new_crates)} existing name(s)"
+            )
+            publish_frontier(
+                frontier,
+                lambda package: _dispatch(
+                    uploads[package], release_root, args.command_timeout_seconds
+                ),
+                new_crates=new_crates,
+                budget_seconds=args.registry_retry_budget_seconds,
+            )
         else:
             excluded = tuple(package.name for package in packages if not package.public)
-            commands = commands_for(mode, order, excluded=excluded)
-        for command in commands:
-            print("+ " + " ".join(command))
-            result = _bounded_run(
-                command, cwd=release_root, timeout=args.command_timeout_seconds
-            )
-            if result.stdout:
-                print(result.stdout, end="")
-            if result.stderr:
-                print(result.stderr, end="", file=sys.stderr)
-            if result.returncode != 0:
-                raise ReleaseError(f"command failed with status {result.returncode}: {' '.join(command)}")
+            for command in commands_for(mode, order, excluded=excluded):
+                result = _dispatch(command, release_root, args.command_timeout_seconds)
+                if result.returncode != 0:
+                    raise ReleaseError(
+                        f"command failed with status {result.returncode}: {' '.join(command)}"
+                    )
         if mode == "publish":
             visibility = poll_registry_visibility(
                 frontier,
