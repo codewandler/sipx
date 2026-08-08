@@ -2724,6 +2724,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "sipx-wasm"
+version = "1.0.0-rc.3"
+dependencies = [
+ "bytes",
+ "pretty_assertions",
+ "serde_json",
+ "sha2",
+ "sipx-sdp",
+ "sipx-sip",
+]
+
+[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"

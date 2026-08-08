@@ -51,10 +51,9 @@
 //! multiplexed RTCP, and that required audio vocabulary. It is one bounded audio endpoint profile,
 //! not a browser API or a general WebRTC compatibility claim.
 //!
-//! Absent rather than experimental, so that nobody looks for it: a signalling-only coupling that
-//! leaves media endpoint-owned (`C-7`), and **multi-party** call bridging or conferencing. A
-//! [`Coupling`] can own two calls and attach a bounded media bridge, but `Call` does not expose its
-//! `MediaSession` for arbitrary application-side mixing.
+//! Absent rather than experimental, so that nobody looks for it: **multi-party** call bridging or
+//! conferencing. A [`Coupling`] can own two calls and attach a bounded media bridge, but `Call`
+//! does not expose its `MediaSession` for arbitrary application-side mixing.
 //!
 //! [`Error`] is `#[non_exhaustive]`: additive diagnostics stay additive for downstream callers, so
 //! a `match` over it carries a `_` arm.
@@ -73,6 +72,7 @@ mod media_policy;
 pub mod notifier;
 pub mod publication;
 pub mod rel;
+pub mod signal_metrics;
 mod signalling;
 mod snapshot;
 pub mod subscriber;
@@ -80,6 +80,7 @@ pub mod transfer;
 // Crate-private: every item in it is `pub(crate)`, and a `pub mod` whose contents are all
 // private renders as an empty page in the API reference — a promise of surface that is not there.
 mod update;
+pub mod voice;
 
 pub use call::{
     Call, Credentials, DialOptions, Dialing, MediaAddress, Served, answer, answer_at, answer_early,
@@ -90,6 +91,7 @@ pub use call::{
     serve_until,
 };
 pub use counters::SignallingCounts;
+pub use coupling::transparent::{OffMediaCoupling, OffMediaOptions};
 pub use coupling::{
     CancelAction, ConfirmedCoupling, Coupling, CouplingEnd, CouplingState, EarlyCoupling,
     FailureAction, Leg, OfferAction, OfferAxis,
@@ -118,6 +120,7 @@ pub use rel::{
     Ringing, ring, ring_early, ring_early_with, ring_early_with_policy, ring_early_with_policy_at,
     ring_offer_early, ring_offer_early_with_policy, ring_offer_early_with_policy_at,
 };
+pub use signal_metrics::SignalMetrics;
 pub use signalling::{SignallingCall, SignallingEvent};
 pub use snapshot::{
     DialogNotQuiescent, DialogPersistenceError, DialogRestoreContext, DialogSessionAction,
@@ -129,3 +132,4 @@ pub use subscriber::{
     EventSubscriptions, EventSubscriptionsHandle,
 };
 pub use transfer::{Referral, Replaces, Transfer, TransferState};
+pub use voice::VoiceActivity;

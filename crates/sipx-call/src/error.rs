@@ -124,6 +124,18 @@ pub enum Error {
     /// The transport failed.
     #[error("transport: {0}")]
     Transport(#[from] sipx_transport::Error),
+    /// A voice-activity profile was refused before anything was attached to the call (`M-58`).
+    #[error("voice activity profile: {0}")]
+    VoiceActivityProfile(#[from] sipx_audio::analysis::AnalysisError),
+    /// A signal-metric reporting profile was refused before anything was attached (`M-59`).
+    ///
+    /// Either the analysis half is outside a domain `call-audio-processing.md` §5.1 declares, or
+    /// the reporting cadence is outside its own.
+    #[error("signal metrics profile: {0}")]
+    SignalMetricsProfile(#[from] sipx_audio::signal::SignalProfileError),
+    /// The call's bounded PCM processing seam refused an attachment (`M-54`).
+    #[error("call audio processing: {0}")]
+    CallAudioProcessing(#[from] sipx_media::ProcessingError),
     /// A message could not be built.
     #[error("build: {0}")]
     Build(#[from] sipx_sip::error::BuildError),
@@ -133,6 +145,12 @@ pub enum Error {
     /// The SDP could not be read.
     #[error("sdp: {0}")]
     Sdp(String),
+    /// A description could not be put in front of the other dialog of an off-media coupling.
+    ///
+    /// Distinct from [`Self::Sdp`] because it is not the reader that failed: the description
+    /// parsed and this side declined to relay it, which is a decision with a named reason.
+    #[error("relayed description: {0}")]
+    Relay(#[from] sipx_sdp::RelayError),
     /// A named browser-audio policy boundary refused setup or renegotiation.
     #[error("browser-audio profile: {0}")]
     Profile(#[from] sipx_sdp::browser_audio::ProfileError),

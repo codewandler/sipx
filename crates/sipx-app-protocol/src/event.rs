@@ -495,6 +495,68 @@ impl DialOutcome {
     }
 }
 
+/// Which side of a call's audio an observation belongs to (§5.3, `call.voice.*`).
+///
+/// Not [`Direction`], which says who called whom: an inbound call's *outbound* audio is this side
+/// speaking, and folding the two would make "the caller stopped talking" unreadable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioDirection {
+    /// Audio received from the far end.
+    Inbound,
+    /// Audio this side sent.
+    Outbound,
+}
+
+impl AudioDirection {
+    /// Its spelling on the wire.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Inbound => "inbound",
+            Self::Outbound => "outbound",
+        }
+    }
+
+    /// Read one back, or `None` for a word this version does not define.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "inbound" => Some(Self::Inbound),
+            "outbound" => Some(Self::Outbound),
+            _ => None,
+        }
+    }
+}
+
+/// Why voice ended (§5.3, `call.voice.ended`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VoiceEndCause {
+    /// The configured hangover elapsed with no further voice.
+    Hangover,
+    /// A reset cut it: a discontinuity in the audio, a format change, or the call's audio
+    /// finishing. An application that was told voice started is always told it ended.
+    Cut,
+}
+
+impl VoiceEndCause {
+    /// Its spelling on the wire, in §5.3's tagged form.
+    #[must_use]
+    pub fn to_json(self) -> Json {
+        match self {
+            Self::Hangover => tagged::name("hangover"),
+            Self::Cut => tagged::name("cut"),
+        }
+    }
+
+    pub(crate) fn from_json(value: &Json) -> Option<Self> {
+        match tagged::read(value)? {
+            ("hangover", _) => Some(Self::Hangover),
+            ("cut", _) => Some(Self::Cut),
+            _ => None,
+        }
+    }
+}
+
 /// How far a transfer this side asked for has got (§5.3, `call.transfer.progress`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransferState {
@@ -561,6 +623,77 @@ pub enum EventKind {
         digit: char,
         /// How long it was held.
         duration_ms: u32,
+    },
+    /// Deterministic signal analysis found voice on one side of the call's audio.
+    ///
+    /// Never recognition: no speech model is loaded to produce this, and a host with no speech
+    /// runtime still emits it.
+    VoiceStarted {
+        /// Which side of the audio.
+        direction: AudioDirection,
+        /// This call's voice-observation number, from 0.
+        sequence: u64,
+        /// Where it sat, in samples from the start of the current analysis epoch.
+        sample_time: u64,
+        /// The rate `sample_time` is counted at.
+        sample_rate: u32,
+    },
+    /// That voice stopped, at the end of the last active window.
+    VoiceEnded {
+        /// Which side of the audio.
+        direction: AudioDirection,
+        /// This call's voice-observation number, from 0.
+        sequence: u64,
+        /// Where it sat, in samples from the start of the current analysis epoch.
+        sample_time: u64,
+        /// The rate `sample_time` is counted at.
+        sample_rate: u32,
+        /// Whether the hangover elapsed or a reset cut it.
+        cause: VoiceEndCause,
+    },
+    /// A reporting period of the call's audio completed (`M-59`).
+    ///
+    /// Signal *content* — what the audio carried — and never packet delivery: loss, jitter,
+    /// round-trip time and the MOS estimate are the media stack's RTP/RTCP surface and appear
+    /// nowhere here.
+    SignalMetrics {
+        /// Which side of the audio.
+        direction: AudioDirection,
+        /// The measurement run, advanced whenever the analysis timeline restarts.
+        epoch: u64,
+        /// This report's number within its epoch, from 0.
+        sequence: u64,
+        /// The first sample covered, in samples from the start of the epoch.
+        sample_time: u64,
+        /// The rate `sample_time` and `samples` are counted at.
+        sample_rate: u32,
+        /// How many samples the report covers.
+        samples: u64,
+        /// How many analysis windows the report covers.
+        windows: u32,
+        /// The largest sample magnitude over the coverage, 0..=32,768.
+        peak: u32,
+        /// `floor(sqrt(floor(Σs² / samples)))`, in the same amplitude units as `peak`.
+        rms: u32,
+        /// How many samples sat at full scale, either sign.
+        clipped_samples: u64,
+        /// How many covered windows clipped.
+        clipping_windows: u32,
+        /// How many covered windows met the activation threshold on DC-free variance.
+        active_windows: u32,
+        /// How many covered windows stayed below the silence floor.
+        silent_windows: u32,
+    },
+    /// Unbroken silence in the call's audio reached the configured timeout (`M-59`).
+    SignalSilence {
+        /// Which side of the audio.
+        direction: AudioDirection,
+        /// The measurement run the silent run belongs to.
+        epoch: u64,
+        /// The first sample of the silent run, from the start of the epoch.
+        sample_time: u64,
+        /// The rate `sample_time` is counted at.
+        sample_rate: u32,
     },
     /// A `play` ran out or was cut.
     PlaybackFinished {
@@ -646,6 +779,10 @@ impl EventKind {
             Self::EarlyMediaStarted => "call.early_media.started",
             Self::Answered => "call.answered",
             Self::Dtmf { .. } => "call.dtmf",
+            Self::VoiceStarted { .. } => "call.voice.started",
+            Self::VoiceEnded { .. } => "call.voice.ended",
+            Self::SignalMetrics { .. } => "call.signal.metrics",
+            Self::SignalSilence { .. } => "call.signal.silence",
             Self::PlaybackFinished { .. } => "call.playback.finished",
             Self::GatherFinished { .. } => "call.gather.finished",
             Self::RecordingFinished { .. } => "call.recording.finished",
@@ -666,13 +803,17 @@ impl EventKind {
     /// Enumerable so that "the crate covers the table" is a test rather than a promise; the
     /// derived test in `tests/spec_tables.rs` reads the section and compares.
     #[must_use]
-    pub fn type_names() -> [&'static str; 16] {
+    pub fn type_names() -> [&'static str; 20] {
         [
             "call.incoming",
             "call.ringing",
             "call.early_media.started",
             "call.answered",
             "call.dtmf",
+            "call.voice.started",
+            "call.voice.ended",
+            "call.signal.metrics",
+            "call.signal.silence",
             "call.playback.finished",
             "call.gather.finished",
             "call.recording.finished",
@@ -715,6 +856,33 @@ impl EventKind {
             Self::Dtmf { digit, duration_ms } => {
                 members.push(("digit", Some(Json::Str(digit.to_string()))));
                 members.push(("duration_ms", Some(Json::from(*duration_ms))));
+            }
+            Self::VoiceStarted {
+                direction,
+                sequence,
+                sample_time,
+                sample_rate,
+            } => {
+                members.push(("direction", Some(Json::Str(direction.as_str().to_owned()))));
+                members.push(("sequence", Some(Json::from(*sequence))));
+                members.push(("sample_time", Some(Json::from(*sample_time))));
+                members.push(("sample_rate", Some(Json::from(*sample_rate))));
+            }
+            Self::VoiceEnded {
+                direction,
+                sequence,
+                sample_time,
+                sample_rate,
+                cause,
+            } => {
+                members.push(("direction", Some(Json::Str(direction.as_str().to_owned()))));
+                members.push(("sequence", Some(Json::from(*sequence))));
+                members.push(("sample_time", Some(Json::from(*sample_time))));
+                members.push(("sample_rate", Some(Json::from(*sample_rate))));
+                members.push(("cause", Some(cause.to_json())));
+            }
+            Self::SignalMetrics { .. } | Self::SignalSilence { .. } => {
+                members.extend(self.signal_members());
             }
             Self::PlaybackFinished {
                 instruction_id,
@@ -789,6 +957,23 @@ impl EventKind {
                     .ok_or(Error::BadField { field: "digit" })?,
                 duration_ms: u32_field(value, "duration_ms")?,
             },
+            "call.voice.started" => Self::VoiceStarted {
+                direction: audio_direction_field(value)?,
+                sequence: u64_field(value, "sequence")?,
+                sample_time: u64_field(value, "sample_time")?,
+                sample_rate: u32_field(value, "sample_rate")?,
+            },
+            "call.voice.ended" => Self::VoiceEnded {
+                direction: audio_direction_field(value)?,
+                sequence: u64_field(value, "sequence")?,
+                sample_time: u64_field(value, "sample_time")?,
+                sample_rate: u32_field(value, "sample_rate")?,
+                cause: value
+                    .get("cause")
+                    .and_then(VoiceEndCause::from_json)
+                    .ok_or(Error::BadField { field: "cause" })?,
+            },
+            "call.signal.metrics" | "call.signal.silence" => signal_event(type_name, value)?,
             "call.playback.finished" => Self::PlaybackFinished {
                 instruction_id: string_field(value, "instruction_id")?,
                 completed: bool_field(value, "completed")?,
@@ -949,6 +1134,104 @@ pub(crate) fn u32_field(value: &Json, field: &'static str) -> Result<u32> {
     u32::try_from(raw).map_err(|_| Error::BadField { field })
 }
 
+pub(crate) fn u64_field(value: &Json, field: &'static str) -> Result<u64> {
+    let raw = value
+        .get(field)
+        .and_then(Json::as_i64)
+        .ok_or(Error::MissingField { field })?;
+    u64::try_from(raw).map_err(|_| Error::BadField { field })
+}
+
+/// The `M-59` signal events' extra fields (§5.3).
+///
+/// Split out of [`EventKind::to_json`] because the two rows carry between them more fields than any
+/// other event in the vocabulary, and a `match` arm that long makes the other fifteen harder to
+/// read rather than these two easier.
+impl EventKind {
+    fn signal_members(&self) -> Vec<(&'static str, Option<Json>)> {
+        match self {
+            Self::SignalMetrics {
+                direction,
+                epoch,
+                sequence,
+                sample_time,
+                sample_rate,
+                samples,
+                windows,
+                peak,
+                rms,
+                clipped_samples,
+                clipping_windows,
+                active_windows,
+                silent_windows,
+            } => vec![
+                ("direction", Some(Json::Str(direction.as_str().to_owned()))),
+                ("epoch", Some(Json::from(*epoch))),
+                ("sequence", Some(Json::from(*sequence))),
+                ("sample_time", Some(Json::from(*sample_time))),
+                ("sample_rate", Some(Json::from(*sample_rate))),
+                ("samples", Some(Json::from(*samples))),
+                ("windows", Some(Json::from(*windows))),
+                ("peak", Some(Json::from(*peak))),
+                ("rms", Some(Json::from(*rms))),
+                ("clipped_samples", Some(Json::from(*clipped_samples))),
+                ("clipping_windows", Some(Json::from(*clipping_windows))),
+                ("active_windows", Some(Json::from(*active_windows))),
+                ("silent_windows", Some(Json::from(*silent_windows))),
+            ],
+            Self::SignalSilence {
+                direction,
+                epoch,
+                sample_time,
+                sample_rate,
+            } => vec![
+                ("direction", Some(Json::Str(direction.as_str().to_owned()))),
+                ("epoch", Some(Json::from(*epoch))),
+                ("sample_time", Some(Json::from(*sample_time))),
+                ("sample_rate", Some(Json::from(*sample_rate))),
+            ],
+            // Every other variant writes its own members; this is only reached through the two
+            // arms above.
+            _ => Vec::new(),
+        }
+    }
+}
+
+/// Read one of the two `M-59` signal events back (§5.3).
+fn signal_event(type_name: &str, value: &Json) -> Result<EventKind> {
+    Ok(match type_name {
+        "call.signal.metrics" => EventKind::SignalMetrics {
+            direction: audio_direction_field(value)?,
+            epoch: u64_field(value, "epoch")?,
+            sequence: u64_field(value, "sequence")?,
+            sample_time: u64_field(value, "sample_time")?,
+            sample_rate: u32_field(value, "sample_rate")?,
+            samples: u64_field(value, "samples")?,
+            windows: u32_field(value, "windows")?,
+            peak: u32_field(value, "peak")?,
+            rms: u32_field(value, "rms")?,
+            clipped_samples: u64_field(value, "clipped_samples")?,
+            clipping_windows: u32_field(value, "clipping_windows")?,
+            active_windows: u32_field(value, "active_windows")?,
+            silent_windows: u32_field(value, "silent_windows")?,
+        },
+        _ => EventKind::SignalSilence {
+            direction: audio_direction_field(value)?,
+            epoch: u64_field(value, "epoch")?,
+            sample_time: u64_field(value, "sample_time")?,
+            sample_rate: u32_field(value, "sample_rate")?,
+        },
+    })
+}
+
+fn audio_direction_field(value: &Json) -> Result<AudioDirection> {
+    value
+        .get("direction")
+        .and_then(Json::as_str)
+        .and_then(AudioDirection::parse)
+        .ok_or(Error::BadField { field: "direction" })
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -1029,6 +1312,47 @@ mod tests {
         assert!(headers.is_empty());
         assert!(headers.set("From", "<sip:alice@example.com>"));
         assert_eq!(headers.get("from"), Some("<sip:alice@example.com>"));
+    }
+
+    /// §5.3's two voice rows, field by field (`M-58`).
+    ///
+    /// The identity of the call is deliberately absent from the event body: it is the envelope's
+    /// §5.2 snapshot `id`, and repeating it here would be a second spelling that can disagree.
+    #[test]
+    fn the_voice_events_carry_exactly_the_fields_section_5_3_names() {
+        let started = EventKind::VoiceStarted {
+            direction: AudioDirection::Outbound,
+            sequence: 7,
+            sample_time: 3_200,
+            sample_rate: 16_000,
+        }
+        .to_json();
+        assert_eq!(
+            started.get("type").unwrap().as_str(),
+            Some("call.voice.started")
+        );
+        assert_eq!(started.get("direction").unwrap().as_str(), Some("outbound"));
+        assert_eq!(started.get("sequence").unwrap().as_i64(), Some(7));
+        assert_eq!(started.get("sample_time").unwrap().as_i64(), Some(3_200));
+        assert_eq!(started.get("sample_rate").unwrap().as_i64(), Some(16_000));
+        assert!(
+            started.get("call_id").is_none(),
+            "the call is named by the envelope, once"
+        );
+
+        let ended = EventKind::VoiceEnded {
+            direction: AudioDirection::Inbound,
+            sequence: 8,
+            sample_time: 3_360,
+            sample_rate: 16_000,
+            cause: VoiceEndCause::Cut,
+        }
+        .to_json();
+        assert_eq!(
+            ended.get("type").unwrap().as_str(),
+            Some("call.voice.ended")
+        );
+        assert_eq!(ended.get("cause").unwrap().as_str(), Some("cut"));
     }
 
     /// §4: an unknown event type is the app's to ignore, so reading one must not be an error.

@@ -23,7 +23,8 @@
 use std::collections::BTreeSet;
 
 use sipx_app_protocol::{
-    DialOutcome, EndCause, EventKind, Failure, GatherReason, OnFailure, Policy, TransferState, Verb,
+    AudioDirection, DialOutcome, EndCause, EventKind, Failure, GatherReason, OnFailure, Policy,
+    TransferState, Verb, VoiceEndCause,
 };
 
 const SPEC: &str = include_str!("../../../docs/specs/app-contract.md");
@@ -161,12 +162,22 @@ fn section_5_3_s_inline_enumerations_match_their_types() {
     }
     assert_eq!(
         lists.len(),
-        4,
-        "§5.3 should carry four inline lists: {lists:?}"
+        6,
+        "§5.3 should carry six inline lists: {lists:?}"
     );
 
     for (field, values) in lists {
         let implemented: Vec<String> = match field.as_str() {
+            // `M-58`'s two rows carry one list each, which is the shape this test can check: two
+            // lists on one row would both key on that row's type and only one of them could match.
+            "call.voice.started" => [AudioDirection::Inbound, AudioDirection::Outbound]
+                .iter()
+                .map(|d| d.as_str().to_owned())
+                .collect(),
+            "call.voice.ended" => [VoiceEndCause::Hangover, VoiceEndCause::Cut]
+                .iter()
+                .map(|c| tag_of(&c.to_json()))
+                .collect(),
             "call.gather.finished" => [
                 GatherReason::Terminator,
                 GatherReason::Max,

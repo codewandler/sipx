@@ -29,11 +29,12 @@ use bytes::Bytes;
 use sipx_media::speech::{
     CancelReason, CancelScope, Conversion, DeadlineKind, Device, DeviceKind, DeviceRequirement,
     FailureCause, FallbackEngaged, LanguageRange, LanguageTag, LocalityPolicy, LossCause,
-    Malformed, ProviderDescriptor, ProviderId, ProviderKind, ProviderRegistry, RecognitionFrame,
-    RecognitionInput, RecognitionOutput, RecognitionSession, RefusalReason, RequestId, Resources,
-    SampleSpan, SelectionContext, SelectionDocument, SelectionError, SpeechBounds, SpeechPolicy,
-    SynthesisChunk, SynthesisInput, SynthesisOutput, SynthesisRefusal, SynthesisSession, Utterance,
-    UtteranceId, Voice, VoiceToken, recognition_inputs,
+    Malformed, ProviderDescriptor, ProviderId, ProviderKind, ProviderPrivacy, ProviderRegistry,
+    RecognitionDriver, RecognitionFrame, RecognitionInput, RecognitionOutput, RecognitionSession,
+    RefusalReason, RequestId, Resources, SampleSpan, Selected, SelectionContext, SelectionDocument,
+    SelectionError, SpeechBounds, SpeechPolicy, SynthesisChunk, SynthesisDriver, SynthesisInput,
+    SynthesisOutput, SynthesisRefusal, SynthesisSession, Utterance, UtteranceId, Voice, VoiceToken,
+    recognition_inputs,
 };
 use sipx_media::{
     AudioDirection, Codec, Config, DiscontinuityKind, MediaPort, MediaSession, Pcm, PcmEncoding,
@@ -385,6 +386,8 @@ struct InertRecognition {
     ready: bool,
     flushed: bool,
     stop: Stop,
+    /// Never emit `Stopped`, so the drain has nothing to complete on. LIF-6's wedged provider.
+    wedged: bool,
     open: Option<Open>,
     next_id: UtteranceId,
     consumed: u64,
@@ -400,10 +403,21 @@ impl InertRecognition {
             ready: false,
             flushed: false,
             stop: Stop::Running,
+            wedged: false,
             open: None,
             next_id: UtteranceId::FIRST,
             consumed: 0,
         }
+    }
+
+    /// Wedge the session: everything terminal is emitted, and `Stopped` never follows.
+    ///
+    /// This is LIF-6's subject. It is a provider defect by construction — §5 makes `Stopped` the
+    /// session's last output and requires it — and the point of the vector is that a defective
+    /// provider becomes a reported abort rather than a driver that never finishes.
+    fn wedged(mut self) -> Self {
+        self.wedged = true;
+        self
     }
 
     /// Signal readiness. Result outputs are allowed only after this.
@@ -562,7 +576,7 @@ impl RecognitionSession for InertRecognition {
         if let Some(output) = self.outputs.pop_front() {
             return Some(output);
         }
-        if self.stop == Stop::Draining {
+        if self.stop == Stop::Draining && !self.wedged {
             self.stop = Stop::Stopped;
             return Some(RecognitionOutput::Stopped { aborted: false });
         }
@@ -585,6 +599,8 @@ struct InertSynthesis {
     generation: u64,
     ready: bool,
     stop: Stop,
+    /// Never emit `Stopped`. LIF-6's wedged provider, on the synthesis side.
+    wedged: bool,
     queued: VecDeque<RequestId>,
     started: Option<(RequestId, usize, u64)>,
     outstanding: usize,
@@ -604,10 +620,17 @@ impl InertSynthesis {
             generation: 1,
             ready: false,
             stop: Stop::Running,
+            wedged: false,
             queued: VecDeque::new(),
             started: None,
             outstanding: 0,
         }
+    }
+
+    /// Wedge the session: `Stopped` never follows the drain. LIF-6's subject.
+    fn wedged(mut self) -> Self {
+        self.wedged = true;
+        self
     }
 
     fn with_bounds(mut self, bounds: SpeechBounds) -> Self {
@@ -849,7 +872,7 @@ impl SynthesisSession for InertSynthesis {
         if let Some(output) = self.outputs.pop_front() {
             return Some(output);
         }
-        if self.stop == Stop::Draining {
+        if self.stop == Stop::Draining && !self.wedged {
             self.stop = Stop::Stopped;
             return Some(SynthesisOutput::Stopped { aborted: false });
         }
@@ -909,9 +932,16 @@ fn dis_1_discovery_reports_every_field_and_repeats_itself() {
     assert_eq!(recogniser.kind(), ProviderKind::Recognition);
     assert!(!recogniser.off_host());
     assert!(!recogniser.network());
+    assert!(!recogniser.debug_capture());
+    assert!(!recogniser.derived_cache());
     assert!(
         recogniser.is_local_offline(),
         "local/offline is the conjunction of two declared properties, never an identity"
+    );
+    assert_eq!(
+        recogniser.privacy(),
+        ProviderPrivacy::LOCAL_OFFLINE,
+        "the four §11 properties are one declaration, and this provider makes none of the claims"
     );
     assert_eq!(recogniser.languages(), &[tag("en"), tag("de")]);
     assert_eq!(recogniser.accepted_formats(), &[wideband(), narrowband()]);
@@ -2168,13 +2198,476 @@ async fn a_speech_failure_leaves_the_call_established() {
     session.shutdown().await;
 }
 
-// REC-7 and LIF-6 are deliberately absent, and this is the note rather than an omission.
-//
-// Both are obligations of the **driver** — §2's "host-owned asynchronous shell" that owns every
-// task and bounded queue. REC-7 is the unconsumed-output bound and its coalescing; LIF-6 is the
-// drain deadline and the aborted `Stopped` the driver emits against a wedged provider. `A-39`
-// ships the contract and no driver, so there is nothing here for either vector to run against:
-// `SpeechBounds` states both limits, `RecognitionOutput::Stopped { aborted }` and
-// `DeadlineKind::Drain` are the values a driver would use, and the vectors belong to the story
-// that builds one. REC-3's half of the same family *is* run above, because the queue it bounds is
-// the `M-54` seam's and that exists today.
+// ---------------------------------------------------------------------------------------------
+// The driver §2 asks for — REC-7 and LIF-6, which `A-39` had nothing to run against (`A-40`).
+// ---------------------------------------------------------------------------------------------
+
+/// Read a driver's outputs until it reaches its terminal one.
+async fn drain_driver(driver: &mut RecognitionDriver) -> Vec<RecognitionOutput> {
+    let mut seen = Vec::new();
+    // A bound on failure, the same one on every pass and never a definition of silence: the loop
+    // leaves on the driver closing its output stream and on nothing else, so no assertion here
+    // depends on how long a gap between two outputs was. A driver that never stops is precisely
+    // what LIF-6 is about, and this turns that into a named failure instead of a hung suite.
+    while let Some(output) = tokio::time::timeout(ARRIVAL_BOUND, driver.recv())
+        .await
+        .expect("the driver reaches its terminal output")
+    {
+        seen.push(output);
+    }
+    seen
+}
+
+/// The same, for a synthesis driver.
+async fn drain_synthesis_driver(driver: &mut SynthesisDriver) -> Vec<SynthesisOutput> {
+    let mut seen = Vec::new();
+    // A bound on failure, on the same terms as `drain_driver` above: the loop's exit is the closed
+    // output stream, and the duration decides only how a wedged driver is reported.
+    while let Some(output) = tokio::time::timeout(ARRIVAL_BOUND, driver.recv())
+        .await
+        .expect("the driver reaches its terminal output")
+    {
+        seen.push(output);
+    }
+    seen
+}
+
+/// One selected recognition provider, pinned to the call clock so the seam converts nothing.
+fn selected_recognition(context: &SelectionContext<'_>) -> Selected {
+    SpeechPolicy::new()
+        .with_default(
+            ProviderKind::Recognition,
+            recognition_document("inert", "en").with_conversion(Conversion::Deny),
+        )
+        .select(ProviderKind::Recognition, None, context)
+        .expect("the inert recogniser satisfies its own document")
+}
+
+/// One selected synthesis provider.
+fn selected_synthesis(context: &SelectionContext<'_>) -> Selected {
+    SpeechPolicy::new()
+        .with_default(
+            ProviderKind::Synthesis,
+            synthesis_document("inert-voice", "en", "flat"),
+        )
+        .select(ProviderKind::Synthesis, None, context)
+        .expect("the inert synthesiser satisfies its own document")
+}
+
+/// REC-7, and A-40 acceptance rows 1 and 2: a consumer that reads nothing coalesces revisions to
+/// the newest and loses no terminal, while the call carries audio throughout.
+///
+/// Eight packets into an eight-frame seam queue, so nothing is dropped here and the script runs in
+/// full; the loss half of REC-7 is the vector after this one. §8's bound of four unconsumed
+/// terminal-and-lifecycle outputs is reached exactly at the last `Final` (`Warming`, `Ready`, and
+/// one terminal per utterance), which is what makes the driver stop consuming provider output
+/// instead of growing its queue.
+///
+/// The surviving revision of each utterance is its **third**, carrying the whole text and the whole
+/// span — the `Partial` that opened it and the revision after that were coalesced away. §5 permits
+/// exactly that ("a coalesced or missed revision cannot leave a consumer permanently wrong"),
+/// because no event is ever a delta.
+#[tokio::test]
+async fn rec_7_unconsumed_output_coalesces_to_the_newest_revision() {
+    let registry = registry();
+    let (session, peer, session_addr) = session_and_peer().await;
+    let context = SelectionContext::new(&registry, 8_000).expect("the call clock is a PCM rate");
+    let selected = selected_recognition(&context);
+    assert_eq!(selected.format(), narrowband());
+
+    let bounds = SpeechBounds::DEFAULTS
+        .with_input_frames(8)
+        .expect("eight frames is a bound")
+        .with_unconsumed_outputs(4)
+        .expect("four outputs is a bound")
+        .with_pending_revisions(1)
+        .expect("one revision is a bound");
+
+    let mut provider = InertRecognition::new([
+        Recognise::Open,
+        Recognise::Revise,
+        Recognise::Revise,
+        Recognise::Finish,
+        Recognise::Open,
+        Recognise::Revise,
+        Recognise::Revise,
+        Recognise::Finish,
+    ]);
+    provider.warm();
+    let mut driver = RecognitionDriver::attach(
+        &session,
+        &selected,
+        AudioDirection::Inbound,
+        bounds,
+        provider,
+    )
+    .expect("selection precedes attachment, and this one succeeded");
+
+    feed(&peer, session_addr, 8).await;
+    // The consumer reads nothing until the audio has gone by. The call is unaffected: every packet
+    // is decoded and delivered while the driver's output queue sits at its bound.
+    for _ in 0..8 {
+        let frame = tokio::time::timeout(ARRIVAL_BOUND, session.recv())
+            .await
+            .expect("the call keeps carrying audio past a stalled speech consumer")
+            .expect("a frame");
+        assert_eq!(frame.len(), SAMPLES_PER_PACKET);
+    }
+    session.shutdown().await;
+
+    let outputs = drain_driver(&mut driver).await;
+    let samples = SAMPLES_PER_PACKET as u64;
+    assert_eq!(
+        outputs,
+        vec![
+            RecognitionOutput::Warming,
+            RecognitionOutput::Ready,
+            RecognitionOutput::Replacement(Utterance::new(
+                UtteranceId::FIRST,
+                3,
+                String::new(),
+                SampleSpan::new(0, 3 * samples)
+            )),
+            RecognitionOutput::Final(Utterance::new(
+                UtteranceId::FIRST,
+                3,
+                String::new(),
+                SampleSpan::new(0, 4 * samples)
+            )),
+            RecognitionOutput::Replacement(Utterance::new(
+                UtteranceId::new(1),
+                3,
+                String::new(),
+                SampleSpan::new(4 * samples, 3 * samples)
+            )),
+            RecognitionOutput::Final(Utterance::new(
+                UtteranceId::new(1),
+                3,
+                String::new(),
+                SampleSpan::new(4 * samples, 4 * samples)
+            )),
+            RecognitionOutput::Stopped { aborted: false },
+        ],
+        "one revision per utterance survives, both terminals do, and `Stopped` is last"
+    );
+    assert_eq!(
+        driver.pending(),
+        0,
+        "nothing is owned after the last output"
+    );
+    tokio::time::timeout(ARRIVAL_BOUND, driver.join())
+        .await
+        .expect("the driver's task is joined rather than abandoned");
+}
+
+/// REC-7, second half: the output bound stops frame consumption, and the input degrades by REC-3's
+/// policy — bounded, named loss rather than unbounded memory.
+///
+/// `Warming` and `Ready` are lifecycle outputs, so a bound of two is reached before the first frame
+/// is ever consumed. The driver therefore consumes **no** audio at all while twelve packets go by,
+/// which makes the arithmetic exact rather than approximate: a two-frame seam queue keeps the last
+/// two and drops the other ten, and the single `Discontinuity(Overflow)` that names them puts the
+/// surviving audio at sample time `10 × 160`. That number is the whole assertion — it is the
+/// accumulated loss, reported to the session rather than silently absorbed.
+#[tokio::test]
+async fn rec_7_the_output_bound_degrades_the_input_by_the_rec_3_policy() {
+    let registry = registry();
+    let (session, peer, session_addr) = session_and_peer().await;
+    let context = SelectionContext::new(&registry, 8_000).expect("the call clock is a PCM rate");
+    let selected = selected_recognition(&context);
+
+    let bounds = SpeechBounds::DEFAULTS
+        .with_input_frames(2)
+        .expect("two frames is a bound")
+        .with_unconsumed_outputs(2)
+        .expect("two outputs is a bound");
+
+    let mut provider = InertRecognition::new([Recognise::Open, Recognise::Finish]);
+    provider.warm();
+    let mut driver = RecognitionDriver::attach(
+        &session,
+        &selected,
+        AudioDirection::Inbound,
+        bounds,
+        provider,
+    )
+    .expect("attaches");
+
+    feed(&peer, session_addr, 12).await;
+    // The seam is offered a frame before the call delivers it, so twelve frames on the call side is
+    // the happens-before for twelve frames offered to the attachment.
+    for _ in 0..12 {
+        tokio::time::timeout(ARRIVAL_BOUND, session.recv())
+            .await
+            .expect("the call keeps carrying audio")
+            .expect("a frame");
+    }
+    session.shutdown().await;
+
+    let outputs = drain_driver(&mut driver).await;
+    let samples = SAMPLES_PER_PACKET as u64;
+    let lost = 10 * samples;
+    assert_eq!(
+        outputs,
+        vec![
+            RecognitionOutput::Warming,
+            RecognitionOutput::Ready,
+            RecognitionOutput::Partial(Utterance::new(
+                UtteranceId::FIRST,
+                1,
+                String::new(),
+                SampleSpan::new(lost, samples)
+            )),
+            RecognitionOutput::Final(Utterance::new(
+                UtteranceId::FIRST,
+                1,
+                String::new(),
+                SampleSpan::new(lost, 2 * samples)
+            )),
+            RecognitionOutput::Stopped { aborted: false },
+        ],
+        "ten frames were dropped while the consumer stalled, and the gap named all ten"
+    );
+    tokio::time::timeout(ARRIVAL_BOUND, driver.join())
+        .await
+        .expect("the driver's task is joined");
+}
+
+/// A-40 acceptance row 1, synthesis half: a synthesis session runs to completion off the driver,
+/// and §6's chunk window is what keeps it from running ahead.
+///
+/// The provider is scripted for six chunks and the window grants four, so the last two can only be
+/// produced once the driver has returned credit — which it does when it hands a chunk to the
+/// consumer, and at no other time. A driver that never returned credit would stop at chunk four and
+/// this vector would hang out at its bound.
+#[tokio::test]
+async fn the_driver_runs_a_synthesis_session_to_completion_within_the_chunk_window() {
+    let registry = registry();
+    let context = SelectionContext::new(&registry, 8_000).expect("the call clock is a PCM rate");
+    let selected = selected_synthesis(&context);
+
+    let mut provider = InertSynthesis::new(6);
+    provider.warm();
+    let mut driver = SynthesisDriver::spawn(&selected, SpeechBounds::DEFAULTS, provider)
+        .expect("a synthesis selection starts a synthesis driver");
+    assert_eq!(driver.format(), narrowband());
+
+    let request = RequestId::new(0);
+    assert!(
+        driver.enqueue(request, "unspoken".to_owned(), false),
+        "the driver's input queue accepts the request"
+    );
+
+    let mut outputs = Vec::new();
+    loop {
+        let output = tokio::time::timeout(ARRIVAL_BOUND, driver.recv())
+            .await
+            .expect("the request reaches its terminal")
+            .expect("the session has not stopped");
+        let completed = matches!(output, SynthesisOutput::Completed { .. });
+        outputs.push(output);
+        if completed {
+            break;
+        }
+    }
+    driver.cancel(CancelScope::Session, CancelReason::Shutdown);
+    outputs.extend(drain_synthesis_driver(&mut driver).await);
+
+    let chunks: Vec<&SynthesisChunk> = outputs
+        .iter()
+        .filter_map(|output| match output {
+            SynthesisOutput::Chunk(chunk) => Some(chunk),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        chunks.len(),
+        6,
+        "every chunk crosses the window: {outputs:?}"
+    );
+    for (position, chunk) in chunks.iter().enumerate() {
+        assert_eq!(chunk.sequence(), position as u64);
+        assert_eq!(chunk.offset(), position as u64 * SAMPLES_PER_PACKET as u64);
+    }
+    assert!(outputs.contains(&SynthesisOutput::Started { request }));
+    assert!(outputs.contains(&SynthesisOutput::Completed {
+        request,
+        samples: 6 * SAMPLES_PER_PACKET as u64
+    }));
+    assert_eq!(
+        outputs.last(),
+        Some(&SynthesisOutput::Stopped { aborted: false }),
+        "a session that stops itself is not an aborted stop"
+    );
+    tokio::time::timeout(ARRIVAL_BOUND, driver.join())
+        .await
+        .expect("the driver's task is joined");
+}
+
+/// LIF-6: the drain deadline fired against a wedged provider yields an aborted `Stopped`, and a
+/// clean drain does not.
+///
+/// Both halves run against the same bound, because the difference between them is the whole
+/// vector: `Stopped { aborted: true }` is a reportable provider defect, and reading it as "the
+/// session stopped" would lose the only report there is. The deadline is lowered to bound the
+/// failure — §8's own words for what a deadline is — and neither half asserts on an elapsed
+/// duration: the obedient session stops before the deadline can be reached at all, and the wedged
+/// one is observed through the `Stopped` the driver emits in its place.
+#[tokio::test]
+async fn lif_6_the_drain_deadline_aborts_a_wedged_session() {
+    let registry = registry();
+    let context = SelectionContext::new(&registry, 8_000).expect("the call clock is a PCM rate");
+    let selected = selected_synthesis(&context);
+    let bounds = SpeechBounds::DEFAULTS
+        .with_drain(Duration::from_millis(50))
+        .expect("fifty milliseconds is a bound");
+
+    let mut wedged = InertSynthesis::new(1).wedged();
+    wedged.warm();
+    let mut driver = SynthesisDriver::spawn(&selected, bounds, wedged).expect("starts");
+    driver.cancel(CancelScope::Session, CancelReason::Shutdown);
+    let outputs = drain_synthesis_driver(&mut driver).await;
+    assert_eq!(
+        outputs.last(),
+        Some(&SynthesisOutput::Stopped { aborted: true }),
+        "the drain deadline expired, so the driver stopped the session itself: {outputs:?}"
+    );
+    tokio::time::timeout(ARRIVAL_BOUND, driver.join())
+        .await
+        .expect("an aborted session still joins its task");
+
+    let mut obedient = InertSynthesis::new(1);
+    obedient.warm();
+    let mut driver = SynthesisDriver::spawn(&selected, bounds, obedient).expect("starts");
+    driver.cancel(CancelScope::Session, CancelReason::Shutdown);
+    let outputs = drain_synthesis_driver(&mut driver).await;
+    assert_eq!(
+        outputs.last(),
+        Some(&SynthesisOutput::Stopped { aborted: false }),
+        "a session that stops within the deadline is never marked aborted: {outputs:?}"
+    );
+    tokio::time::timeout(ARRIVAL_BOUND, driver.join())
+        .await
+        .expect("the driver's task is joined");
+}
+
+/// LIF-6 on the recognition side, on a live call: the same drain rule, the same abort.
+///
+/// The drain deadline is lowered to bound the failure rather than to schedule anything — the
+/// assertion is on the `Stopped` the driver emits, never on an elapsed duration — and the call is
+/// still established afterwards, because a wedged speech provider is not a call failure (§7).
+#[tokio::test]
+async fn lif_6_a_wedged_recognition_session_is_aborted_and_leaves_the_call_established() {
+    let registry = registry();
+    let (session, peer, session_addr) = session_and_peer().await;
+    let context = SelectionContext::new(&registry, 8_000).expect("the call clock is a PCM rate");
+    let selected = selected_recognition(&context);
+
+    let bounds = SpeechBounds::DEFAULTS
+        .with_drain(Duration::from_millis(50))
+        .expect("fifty milliseconds is a bound");
+    let mut provider = InertRecognition::new([]).wedged();
+    provider.warm();
+    let mut driver = RecognitionDriver::attach(
+        &session,
+        &selected,
+        AudioDirection::Inbound,
+        bounds,
+        provider,
+    )
+    .expect("attaches");
+
+    driver.cancel(CancelReason::Application);
+    let outputs = drain_driver(&mut driver).await;
+    assert_eq!(
+        outputs.last(),
+        Some(&RecognitionOutput::Stopped { aborted: true }),
+        "the driver aborts the provider it cannot drain: {outputs:?}"
+    );
+    tokio::time::timeout(ARRIVAL_BOUND, driver.join())
+        .await
+        .expect("the aborted task is joined, not leaked");
+
+    feed(&peer, session_addr, 4).await;
+    let frame = tokio::time::timeout(ARRIVAL_BOUND, session.recv())
+        .await
+        .expect("the call is established and stays established")
+        .expect("a frame");
+    assert_eq!(frame.len(), SAMPLES_PER_PACKET);
+    session.shutdown().await;
+}
+
+/// A-40 acceptance row 4, and LIF-5 on a live call: cancellation and call teardown each drop and
+/// join the driver's task, and each is observed as an event.
+///
+/// Teardown reaches the session as `Cancel(CallEnded)` and never as a failure (§7), and the seam
+/// hands over everything it already holds before it reports completion — so the frame fed below is
+/// consumed first and its utterance is resolved as a cancellation rather than lost.
+#[tokio::test]
+async fn cancellation_and_call_teardown_join_every_driver_task() {
+    let registry = registry();
+    let (session, peer, session_addr) = session_and_peer().await;
+    let context = SelectionContext::new(&registry, 8_000).expect("the call clock is a PCM rate");
+    let selected = selected_recognition(&context);
+    let bounds = SpeechBounds::DEFAULTS;
+
+    let mut idle = InertRecognition::new([]);
+    idle.warm();
+    let mut cancelled =
+        RecognitionDriver::attach(&session, &selected, AudioDirection::Inbound, bounds, idle)
+            .expect("attaches");
+    cancelled.cancel(CancelReason::Application);
+    assert_eq!(
+        drain_driver(&mut cancelled).await,
+        vec![
+            RecognitionOutput::Warming,
+            RecognitionOutput::Ready,
+            RecognitionOutput::Stopped { aborted: false },
+        ]
+    );
+    tokio::time::timeout(ARRIVAL_BOUND, cancelled.join())
+        .await
+        .expect("cancellation joins the driver's task");
+
+    let mut speaking = InertRecognition::new([Recognise::Open]);
+    speaking.warm();
+    let mut torn_down = RecognitionDriver::attach(
+        &session,
+        &selected,
+        AudioDirection::Inbound,
+        bounds,
+        speaking,
+    )
+    .expect("attaches");
+    feed(&peer, session_addr, 1).await;
+    tokio::time::timeout(ARRIVAL_BOUND, session.recv())
+        .await
+        .expect("the call carries the frame")
+        .expect("a frame");
+    session.shutdown().await;
+
+    let outputs = drain_driver(&mut torn_down).await;
+    let samples = SAMPLES_PER_PACKET as u64;
+    assert_eq!(
+        outputs,
+        vec![
+            RecognitionOutput::Warming,
+            RecognitionOutput::Ready,
+            RecognitionOutput::Partial(Utterance::new(
+                UtteranceId::FIRST,
+                1,
+                String::new(),
+                SampleSpan::new(0, samples)
+            )),
+            RecognitionOutput::Cancelled {
+                utterance: UtteranceId::FIRST,
+                reason: CancelReason::CallEnded,
+            },
+            RecognitionOutput::Stopped { aborted: false },
+        ],
+        "SIP teardown is a cancellation with its own reason, never a failure"
+    );
+    tokio::time::timeout(ARRIVAL_BOUND, torn_down.join())
+        .await
+        .expect("call teardown joins the driver's task");
+}

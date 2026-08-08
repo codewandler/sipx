@@ -61,10 +61,7 @@ pub(crate) async fn run(options: RegisterOptions, format: Format) -> Exit {
         Err(message) => return fail(format, Exit::Usage, &message),
     };
 
-    let resolver = match attempt.remaining() {
-        Some(remaining) => crate::destination::Resolver::within(remaining),
-        None => crate::destination::Resolver::system(),
-    };
+    let resolver = crate::destination::Resolver::within(attempt.remaining());
     let candidates = match resolver
         .resolve(
             &parsed_aor,

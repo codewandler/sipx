@@ -70,8 +70,8 @@ mod call;
 pub use crate::document::{Document, DtmfMode, Gather, Instruction, Source, TransferTarget, Verb};
 pub use crate::error::{Error, Result};
 pub use crate::event::{
-    CONTRACT, CallSnapshot, CallState, DialOutcome, Direction, EndCause, Envelope, EventKind,
-    GatherReason, Headers, Leg, MediaState, TransferState,
+    AudioDirection, CONTRACT, CallSnapshot, CallState, DialOutcome, Direction, EndCause, Envelope,
+    EventKind, GatherReason, Headers, Leg, MediaState, TransferState, VoiceEndCause,
 };
 pub use crate::interpreter::{
     Callback, Effect, Input, Interpreter, MAX_QUEUED_EVENTS, Output, Response, Timer,

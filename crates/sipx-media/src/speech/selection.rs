@@ -23,6 +23,7 @@ use super::descriptor::{
     Device, DeviceRequirement, LanguageRange, LanguageTag, ProviderDescriptor, ProviderId,
     ProviderKind, VoiceToken,
 };
+use super::privacy::{SpeechAdmission, SpeechPrivacy};
 use super::registry::ProviderRegistry;
 use crate::processing::{AudioDirection, Processing};
 
@@ -63,7 +64,8 @@ pub enum Malformed {
 /// The host's admission policy for a provider's declared locality (§4 step 2).
 ///
 /// The default refuses both, which is the epic's stated default of local and offline execution.
-/// `A-28` owns enforcement and retention; this type is only the admission decision selection makes.
+/// It is the locality half of [`SpeechPrivacy`], which is what §4 step 2 reads as a whole: the
+/// retention half ([`SpeechPrivacy::admits_retention`]) is checked immediately after this one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct LocalityPolicy {
     off_host: bool,
@@ -280,15 +282,16 @@ impl SelectionDocument {
 #[derive(Debug, Clone, Copy)]
 pub struct SelectionContext<'a> {
     registry: &'a ProviderRegistry,
-    locality: LocalityPolicy,
+    privacy: SpeechPrivacy,
     call_clock: PcmFormat,
 }
 
 impl<'a> SelectionContext<'a> {
     /// Read selection against `registry` for a call whose media clock runs at `media_clock` Hz.
     ///
-    /// The host locality policy starts at [`LocalityPolicy::LOCAL_ONLY`]; widen it with
-    /// [`Self::with_locality`].
+    /// The host privacy policy starts at [`SpeechPrivacy::LOCAL_NO_RETENTION`] — local, offline and
+    /// nothing kept past the operation. Widen it with [`Self::with_privacy`], or its locality half
+    /// alone with [`Self::with_locality`].
     ///
     /// # Errors
     ///
@@ -298,15 +301,22 @@ impl<'a> SelectionContext<'a> {
     pub fn new(registry: &'a ProviderRegistry, media_clock: u32) -> Result<Self, PcmError> {
         Ok(Self {
             registry,
-            locality: LocalityPolicy::LOCAL_ONLY,
+            privacy: SpeechPrivacy::LOCAL_NO_RETENTION,
             call_clock: PcmFormat::new(media_clock, PcmEncoding::Signed16)?,
         })
     }
 
-    /// Use a wider host locality policy.
+    /// Use a wider host locality policy, leaving the retention opt-ins where they are.
     #[must_use]
     pub const fn with_locality(mut self, locality: LocalityPolicy) -> Self {
-        self.locality = locality;
+        self.privacy = self.privacy.with_locality(locality);
+        self
+    }
+
+    /// Use a wider host privacy policy: locality and retention together (§11.3).
+    #[must_use]
+    pub const fn with_privacy(mut self, privacy: SpeechPrivacy) -> Self {
+        self.privacy = privacy;
         self
     }
 
@@ -319,7 +329,13 @@ impl<'a> SelectionContext<'a> {
     /// The host locality policy in force.
     #[must_use]
     pub const fn locality(&self) -> LocalityPolicy {
-        self.locality
+        self.privacy.locality()
+    }
+
+    /// The whole host privacy policy in force.
+    #[must_use]
+    pub const fn privacy(&self) -> SpeechPrivacy {
+        self.privacy
     }
 
     /// The seam's call-clock format.
@@ -347,6 +363,17 @@ pub enum RefusalReason {
         off_host: bool,
         /// The descriptor's declared network property.
         network: bool,
+    },
+    /// Step 2: host retention policy does not admit what the descriptor declares (§11.3).
+    ///
+    /// Separate from [`Self::LocalityRefused`] because they are separate host decisions and lead to
+    /// separate configuration changes: one is "this provider would send the call somewhere else",
+    /// the other is "this provider would keep it".
+    RetentionRefused {
+        /// The descriptor's declared debug-capture property.
+        debug_capture: bool,
+        /// The descriptor's declared derived-cache property.
+        derived_cache: bool,
     },
     /// Step 3: no declared tag matches the requested range under RFC 4647 §3.3.1.
     UnsupportedLanguage {
@@ -451,6 +478,7 @@ pub struct Selected {
     conversion: Conversion,
     position: usize,
     passed_over: Vec<Refusal>,
+    admission: SpeechAdmission,
 }
 
 impl Selected {
@@ -508,6 +536,17 @@ impl Selected {
     #[must_use]
     pub fn passed_over(&self) -> &[Refusal] {
         &self.passed_over
+    }
+
+    /// What this session was admitted to do (§11.3).
+    ///
+    /// A host output on the speech event stream, and the only place a consumer has to look to
+    /// answer "is this call's audio being kept, or leaving this machine?". It exists on `Selected`
+    /// rather than beside it because step 2 is what produced it: an admission that could be built
+    /// without a selection would be a claim rather than a record.
+    #[must_use]
+    pub const fn admission(&self) -> &SpeechAdmission {
+        &self.admission
     }
 
     /// The `M-54` seam request this selection makes (`docs/specs/call-audio-seam.md` §5).
@@ -683,14 +722,25 @@ fn evaluate(
         .resolve(candidate, kind)
         .ok_or(RefusalReason::UnknownProvider { kind })?;
 
-    // Step 2: host locality policy admits what the descriptor declares.
+    // Step 2: host privacy policy admits what the descriptor declares — locality first, because
+    // "this provider would send the call somewhere else" is the coarser fact, then retention.
+    let declared = descriptor.privacy();
     if !context
         .locality()
-        .admits(descriptor.off_host(), descriptor.network())
+        .admits(declared.off_host(), declared.network())
     {
         return Err(RefusalReason::LocalityRefused {
-            off_host: descriptor.off_host(),
-            network: descriptor.network(),
+            off_host: declared.off_host(),
+            network: declared.network(),
+        });
+    }
+    if !context
+        .privacy()
+        .admits_retention(declared.debug_capture(), declared.derived_cache())
+    {
+        return Err(RefusalReason::RetentionRefused {
+            debug_capture: declared.debug_capture(),
+            derived_cache: declared.derived_cache(),
         });
     }
 
@@ -754,6 +804,7 @@ fn evaluate(
         conversion,
         position: 0,
         passed_over: Vec::new(),
+        admission: SpeechAdmission::new(candidate.clone(), kind, declared, context.privacy()),
     })
 }
 

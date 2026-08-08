@@ -12,6 +12,12 @@ Cargo.lock.orig
 /fuzz/corpus
 /fuzz/Cargo.lock
 
+# The browser WebAssembly module. Excluded from the workspace, so it resolves its own lock the
+# way `fuzz` does, and its target/ holds a second copy of the dependency graph built for another
+# architecture.
+/wasm/target
+/wasm/Cargo.lock
+
 # Agent worktrees. Scratch checkouts live inside the repo, each with its own multi-gigabyte
 # target/, so an `add -A` here would be both wrong and enormous. Scoped to the subdirectory rather
 # than to /.claude so that tracked settings under it stay committable.

@@ -101,8 +101,15 @@ all, and is unchanged in every way, including its timing.
 
 The lookup is bounded twice: **two seconds** for any one question, and **eight seconds** for the
 whole resolution including the ordering that follows it. Both are ceilings rather than waits.
-`register --timeout <S>` lowers both under whatever the attempt has left, so resolution can never
-spend a budget the attempt has already given away.
+
+Every command that states a deadline is the ceiling over its own lookup rather than something the
+lookup is added to. `dial --timeout`, `load --timeout` and `scenario --timeout` — or a `dial`
+frame's `timeout_ms` — lower both bounds under themselves; `register --timeout` lowers them under
+whatever the attempt has left; and `peers`, which states no attempt deadline, lowers them under the
+subscription lifetime `--expires` asks for. A command given two seconds spends at most two on the
+lookup rather than eight before its own clock starts. A generous deadline changes nothing: these
+are minimums against the two figures above, never extensions of them, and `--timeout 0` leaves the
+resolver's own bounds in place along with transaction expiry.
 
 Resolution keeps the identity you asked for. TLS and WSS connect to the selected address and verify
 the name from the URI (or `--tls-server-name`), never the address; a `sips:` URI and an explicitly
@@ -142,7 +149,7 @@ Place a call: `sipx dial sip:bob@pbx.example`
 | `--dtmf <DIGITS>` | Send these digits once the call is up |
 | `--early-media` | Receive a reliable provisional media session before the final answer; incompatible with `--profile browser-audio` |
 | `--duration <S>` | Hang up after this many seconds once connected (default 30); a supported process stop hangs up early and reports `interrupted` |
-| `--timeout <S>` | Give up if not answered in this many seconds (default 20). `0` waits as long as the transaction layer does — 32 seconds |
+| `--timeout <S>` | Give up if not answered in this many seconds (default 20). It is also the ceiling on target resolution, so a name that will not resolve cannot spend the resolver's own eight seconds first. `0` waits as long as the transaction layer does — 32 seconds |
 | `--cancel-timeout <S>` | Additional invitation-cancellation allowance after timeout or Ctrl-C (default 2). `0` performs no timed cancellation wait |
 | `--from <URI>` | Our own address (default `sip:sipx@<local>`) |
 | `--password <P>` | Digest password; prefer `SIPX_PASSWORD` because argv is world-readable |
@@ -267,7 +274,7 @@ sipx load sip:load@192.0.2.1:5060 --rate 10 --concurrency 32 --calls 100 --seed 
 | `--calls <N>` | Stop after admitting this many calls |
 | `--duration <S>` | Stop admission after this many seconds |
 | `--call-duration <S>` | End each answered call after this many seconds (default 0) |
-| `--timeout <S>` | Bound each call setup (default 20) |
+| `--timeout <S>` | Bound each call setup (default 20), and with it the one target resolution the run's calls share |
 | `--mode <M>` | `signalling` (default) or the separately explicit `generated-media` workload |
 | `--seed <N>` | Reproduce arrival jitter and deterministic workload data (default 0) |
 | `--from <URI>` | Address used by the generated callers |
@@ -411,7 +418,7 @@ List what can be called: `sipx peers --json`
 | `--registrar <AOR>` | Subscribe to this registrar's current registrations |
 | `--password <P>` | Digest password; prefer `SIPX_PASSWORD` because argv is visible |
 | `--target <ADDR>` | Registrar host or address, when it cannot be derived from the AOR |
-| `--expires <S>` | Positive requested subscription lifetime (default 3600) |
+| `--expires <S>` | Positive requested subscription lifetime (default 3600). This command states no attempt deadline, so it is also the ceiling on target resolution: a subscription that may live one second does not spend eight finding the registrar |
 | `--watch <S>` | Keep applying updates for this many seconds after the first snapshot |
 | `--local <ADDR>` | Local signalling bind address |
 | `--transport <T>` | `udp`, `tcp`, `tls`, `ws`, or `wss`, with the shared TLS options |
@@ -500,7 +507,7 @@ string `id` in its completion or refusal event.
 | `--ice <P>` | Select `disabled`, `host`, or `stun` |
 | `--stun-server <ADDR>` | STUN server as `host:port` for `--ice stun` |
 | `--header <H>` | Add an application-owned field to originated INVITEs; repeat |
-| `--timeout <S>` | Default outbound answer timeout (default 20) |
+| `--timeout <S>` | Default outbound answer timeout (default 20), covering each `dial` command's target resolution; a frame's own `timeout_ms` replaces it and bounds that command's resolution instead |
 
 The v1 commands are `dial`, `accept`, `reject`, `play`, `stop_playback`, `start_recording`,
 `stop_recording`, `send_dtmf`, `hold`, `resume`, `transfer`, `hangup`, `wait_for`, and `shutdown`.

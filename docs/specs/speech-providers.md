@@ -60,10 +60,19 @@ media clock, via the M-54 seam), and driver-fired deadlines carrying a generatio
 with a stale generation is ignored. The core crates `sipx-sip` and `sipx-sdp` are untouched by this
 epic and MUST NOT gain any speech dependency.
 
+The generation is the **driver's**, and the driver is what ignores a stale one. It arms every
+deadline in the current generation and advances the generation whenever it disarms one, so a firing
+already in flight when readiness arrived carries the previous generation; the driver MUST NOT
+deliver a `DeadlineFired` for a deadline it has already disarmed. A session MAY compare the
+generation it receives against the one it started in — that is checking the same fact a second
+time, and nothing in this contract is allowed to depend on it. Stating the owner matters because a
+provider has no other way to learn the current generation: nothing tells it when a deadline was
+armed.
+
 **Locality is a property, not a name.** A provider whose descriptor declares no network egress and
 no off-host processing MUST NOT open a network connection or move audio, text or derived data off
 the machine, in any state including failure. The descriptor claim is admitted or refused by host
-policy (§4 step 2); A-28 specifies enforcement and retention.
+policy (§4 step 2); §11 specifies retention, redaction and the opt-ins that widen that policy.
 
 **Ownership.** Every input and output is an owned value. Audio uses `Pcm`/`PcmFormat` from
 [`linear-pcm.md`](linear-pcm.md); text is owned UTF-8. A provider MUST NOT retain a borrowed view
@@ -87,6 +96,8 @@ A `ProviderDescriptor` reports:
 | `kind` | both | `Recognition` or `Synthesis`; one descriptor describes one kind |
 | `off_host` | both | whether audio, text or data derived from them ever leaves this machine |
 | `network` | both | whether runtime operation requires any network egress at all |
+| `debug_capture` | both | whether the provider can write call audio, transcript or synthesis input to a durable destination for diagnosis (§11) |
+| `derived_cache` | both | whether the provider keeps data derived from call audio or text past the session (§11) |
 | `languages` | both | RFC 5646 tags the provider supports; matching per RFC 4647 §3.3.1 |
 | `voices` | synthesis | stable voice tokens, each with the RFC 5646 tags it can speak and declared properties |
 | `accepted_formats` | recognition | explicit list of `PcmFormat` values accepted as session input |
@@ -96,7 +107,11 @@ A `ProviderDescriptor` reports:
 | `resources` | both | estimates: bytes to warm the provider, resident bytes per session, and a warm-up duration estimate |
 
 *Local/offline* is the conjunction `off_host = false` and `network = false`; it is defined by these
-properties and never by a product identity. `resources` values are estimates for capacity planning;
+properties and never by a product identity. It is a claim about *where* data goes and says nothing
+about *how long* it is kept: a provider that never leaves the machine and writes every transcript to
+a file declares `off_host = false` and `debug_capture = true`, and §11's opt-ins are what admit or
+refuse the second half. The four properties together are the provider's privacy declaration, and
+§4 step 2 admits it as a whole. `resources` values are estimates for capacity planning;
 the binding guarantee is behavioral — a provider that cannot meet its declared real-time profile
 refuses setup with the measured requirement (M-55/M-56) rather than degrading silently.
 
@@ -154,7 +169,7 @@ value and the descriptor facts consulted:
 | Step | Check | Typed reason on failure |
 |---|---|---|
 | 1 | `provider` is registered with the requested `kind` | `UnknownProvider` |
-| 2 | host locality policy admits `off_host`/`network` (A-28 opt-ins) | `LocalityRefused` |
+| 2 | host privacy policy admits the descriptor's declaration (§11.3): `off_host`/`network` first, then `debug_capture`/`derived_cache` | `LocalityRefused`, then `RetentionRefused` |
 | 3 | `language` range matches `languages` per RFC 4647 §3.3.1 | `UnsupportedLanguage` |
 | 4 | the named voice exists and speaks a tag matching the range | `UnsupportedVoice` |
 | 5 | the operating-format rule below yields a format | `UnsupportedFormat` |
@@ -264,6 +279,13 @@ with cause `ProtocolViolation`. If the drain deadline fires before `Stopped`, th
 provider's tasks and emits `Stopped` itself, marking the stop aborted; an aborted stop is a
 reportable provider defect, not a hang.
 
+The abort has a fixed order: the driver delivers `DeadlineFired` with kind drain, applies whatever
+output that produces, and aborts only if `Stopped` still has not arrived. A provider that can still
+stop itself therefore reports an unaborted `Stopped`, and only one that cannot is abandoned. The
+driver's own `Stopped` is emitted whatever the output bound says — that bound pauses *consumption
+from the provider*, and never drops, coalesces or delays a terminal, least of all the one the driver
+produced because the provider would not.
+
 ## 6. Synthesis contract
 
 | Input | Data |
@@ -303,6 +325,11 @@ provider's.
 **Production bound.** The driver grants a chunk window (§8). The provider MUST NOT have more
 unconsumed chunks outstanding than the window; `Drained` returns credit. A provider cannot run
 ahead of a slow call into unbounded audio.
+
+Credit is returned when the driver **hands a chunk on**, and at no other time. Returning it when the
+driver merely received the chunk would make the window bound the driver's own buffer rather than the
+pipeline, and the memory the bound exists to bound would move one queue along instead of being
+bounded — which is why "unconsumed" is measured at the consumer and not at the driver.
 
 **Cancellation.** Cancelling a queued request yields its `Cancelled` immediately. Cancelling a
 started request stops production within the window: at most one already-in-flight `Chunk` MAY
@@ -468,3 +495,113 @@ utterance at every discontinuity, and declares `off_host = false`, `network = fa
 | LIF-4 | scripted provider loss with a satisfying chain | every lost-session output precedes the successor's first output; `FallbackEngaged` names both identities; policy fields unchanged; identities restart |
 | LIF-5 | tear down the call mid-session | session-scope cancel with reason `CallEnded`; drains observable via `Stopped`; distinguishable by type from every failure event |
 | LIF-6 | fire the drain deadline against a wedged scripted provider | the driver aborts and emits an aborted `Stopped`; nothing owned remains |
+
+### Privacy and isolation
+
+| ID | Vector | Expected |
+|---|---|---|
+| PRV-1 | read the classification and the unconfigured default | every class of §11.1 is classified; each user-data class defaults to `LiveOperation` and names the one opt-in that changes it; the unconfigured policy engages nothing and admits only a provider that declares nothing |
+| PRV-2 | register providers declaring `debug_capture`, `derived_cache` and `off_host`; select each with nothing configured, then with one opt-in | each is visible in discovery; each is refused with its own typed reason (`RetentionRefused`, `LocalityRefused`); one opt-in admits one of them and no other; the admission event names the opt-ins in force and the policy configured |
+| PRV-3 | two calls, one registered provider, different bounds and different audio | no output of either session carries the other's audio, text or identity; each session's loss is its own input bound's; utterance identities restart per session; cancelling one leaves the other producing |
+| PRV-4 | run a session under a log subscriber that records every field | the records name the provider identity, the contract kind, the limits, the lifecycle and the typed cause; no record contains audio samples, transcript text, synthesis input, a model path or a credential |
+| PRV-5 | cancel a session, tear a call down, and fail a session, each with work outstanding | every unconsumed output carrying audio is erased; terminal and lifecycle outputs survive; the provider and the seam attachment are released before the output stream closes, and repeating the cycle past the seam's attachment ceiling still attaches |
+
+## 11. Data classes, retention and redaction
+
+This section is the epic's privacy rule. It applies to every provider, including one written
+downstream: a contract that specified ordering and bounds but left retention to each implementation
+would make "no audio is kept" a property of whichever provider you happened to install.
+
+### 11.1 Classification
+
+| Class | What it is | User data | Default retention | Opt-in that extends it |
+|---|---|---|---|---|
+| call audio | PCM entering a recognition session or leaving a synthesis one | yes | the live operation | debug capture |
+| transcript | recognition text, at any revision | yes | the live operation | debug capture |
+| synthesis input | the text a host asked a session to speak | yes | the live operation | debug capture |
+| model state | weights and warmed engine state | no | the provider's lifetime | — |
+| credential | material a provider needs to reach whatever it reaches | no | the provider's lifetime | — |
+| derived cache | anything computed from call audio or text: adaptation state, embeddings, indexes | yes | the live operation | persistent derived data |
+
+*User data* means it came from a call and belongs to it. The two classes that are not user data
+belong to the provider and are bounded by the provider being loaded; no host configuration extends
+them, because there is no call for them to outlive.
+
+### 11.2 The default is no retention
+
+**A provider MUST NOT retain user data beyond the live operation that produced it**, and the
+operation is named per class: for a recognition result it ends at the utterance's terminal, for a
+synthesized chunk at the hand-off to the call, and for everything a session holds at `Stopped`.
+`Stopped` already means the session owns no task, queue, buffer or device allocation (§5, §6); §11.5
+says what that obliges the driver to do.
+
+This is the behaviour of an endpoint whose host has configured nothing. Retention is not a default
+that a careful host turns off; it is a thing a host has to ask for, one opt-in at a time.
+
+### 11.3 Three things that need an explicit host decision
+
+| Opt-in | What it admits | Declared by |
+|---|---|---|
+| debug capture | call audio, transcript or synthesis input written to a durable destination | `debug_capture` |
+| persistent derived data | a cache derived from user data surviving the session | `derived_cache` |
+| off-host processing | user data leaving this machine, and the network egress that carries it | `off_host`, `network` |
+
+Each is host configuration and nothing else: no provider, no fallback step and no default enables
+one. §4 step 2 evaluates the host's policy against the descriptor's declaration and refuses a
+provider whose declaration exceeds it — `LocalityRefused` for the locality half, `RetentionRefused`
+for the retention half, reported separately because they lead to different host decisions. The two
+are checked in that order so a refusal names the coarser fact first.
+
+An admitted session MUST report what it was admitted to do, on the speech event stream, before it
+produces anything: the provider identity, the contract kind, the declaration, and the opt-ins in
+force. The opt-ins in force are the ones the *provider* declared, not the ones the host permitted —
+a host that permits debug capture and runs a provider that captures nothing has a session with no
+opt-in in force, and reporting otherwise would make the event useless for answering "what is
+happening to this call?".
+
+Two obligations follow for a provider that declares an opt-in it was not admitted for: it MUST NOT
+perform the operation, and it MUST NOT be selected. The second is what this specification can
+enforce; the first is a conformance obligation X-105's suite tests.
+
+### 11.4 What an ordinary log may contain
+
+An ordinary log record MUST be able to report the typed provider identity, the contract kind, the
+lifecycle transition, the configured limits and the typed failure or cancellation cause. It MUST NOT
+contain audio samples, transcript text, synthesis input, model paths or credentials.
+
+The obligation is on the *types*, not on the caller. Every value in this contract that carries user
+data renders as its class and its size and never as its content, so a record written as `?value` is
+already redacted; a provider's own credentials and model paths have a carrier whose only rendering
+is a redaction. A rule that depended on every future caller remembering it would be a convention,
+and this specification does not have conventions.
+
+Size and class are deliberately still reportable. "An utterance of 33 octets was cancelled with
+reason `CallEnded`" is what makes a production incident diagnosable at all, and it is not a
+transcript.
+
+### 11.5 Erasure and release at the stop
+
+When a session stops — by flush, by cancellation, by call teardown, by provider failure, by loss, or
+by the drain deadline's abort — the driver MUST, in this order:
+
+1. erase every unconsumed output it holds that carries call audio;
+2. release the provider, and with it whatever engine, model state and device allocation the provider
+   held;
+3. release its seam attachment (§1);
+4. and only then report its output stream closed.
+
+Terminal and lifecycle outputs are not erased: they are the operation's outcome, §5 and §6 forbid
+dropping one, and a consumer that never learns why a session ended has been told less than nothing.
+Unconsumed *audio* is different — the call it was for has stopped, so it is data with no remaining
+purpose and no remaining retention basis.
+
+The ordering is what makes cleanup observable. A consumer that has read a session's last output has
+already observed the release, so a conformance test inspects a released resource rather than waiting
+for a duration and concluding. Note the one thing the language cannot promise: erasure means no copy
+survives and no consumer can still reach one, not that a freed heap block was overwritten — an
+allocator may have copied it already, and a specification that claimed otherwise would be claiming
+something nothing checks.
+
+Every queue in this contract is per-session and every session is per call (§8), so erasure and
+release are per call too: one call's stop touches no other call's queue, budget, provider state or
+events, including when both calls run the same registered provider (§2).

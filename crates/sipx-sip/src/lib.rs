@@ -45,6 +45,9 @@ mod escape;
 pub mod event;
 pub mod gruu;
 pub mod headers;
+// RFC 8224/8225 authenticated identity, behind the default-on `identity` feature: it reaches an
+// elliptic-curve implementation and, through it, an operating-system entropy source.
+#[cfg(feature = "identity")]
 pub mod identity;
 pub mod message;
 pub mod name;

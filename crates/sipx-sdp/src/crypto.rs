@@ -124,6 +124,11 @@ impl Crypto {
     /// `None` when the signalling is not secure, and that is the point of the signature: RFC
     /// 4568 §7.1 makes a secure path a condition of use, and a function that returned a key
     /// regardless would leave every caller one forgotten check away from publishing it.
+    ///
+    /// Requires the default-on `sdes-keys` feature: minting a master key needs an
+    /// operating-system entropy source, and a build that has none must not be able to reach a
+    /// weaker one by accident.
+    #[cfg(feature = "sdes-keys")]
     #[must_use]
     pub fn offer(tag: u32, suite: Suite, secure_signalling: bool) -> Option<Self> {
         if !secure_signalling {
@@ -289,6 +294,7 @@ impl Crypto {
 }
 
 /// Fill a buffer with cryptographically random bytes.
+#[cfg(feature = "sdes-keys")]
 fn fill_random(out: &mut [u8]) {
     use rand::RngCore;
     rand::rng().fill_bytes(out);

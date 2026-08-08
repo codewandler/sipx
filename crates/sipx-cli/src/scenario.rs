@@ -64,7 +64,9 @@ pub(crate) async fn run(options: ScenarioOptions) -> Exit {
         handle,
         incoming,
         transport,
-        resolver: crate::destination::Resolver::system(),
+        // The actor's own client and cache. Every `dial` narrows a copy of it under that
+        // command's deadline; the process itself states none.
+        resolver: crate::destination::Resolver::within(None),
         policy: media.policy(),
         headers,
         call: None,
@@ -242,8 +244,16 @@ impl Actor {
         if to.scheme().is_secure() && !self.transport.kind().is_secure() {
             return Err("a sips: target requires tls or wss; no downgrade is permitted".to_owned());
         }
+        // Read before the lookup, because it is the ceiling over it: this command's own deadline,
+        // or the process default when the frame does not carry one. The actor's resolver is
+        // narrowed rather than rebuilt so the cache survives a `dial` that gave a tight bound.
+        let timeout = optional_u64(value, "timeout_ms")?.map_or_else(
+            || Duration::from_secs(self.options.timeout),
+            Duration::from_millis,
+        );
         let candidates = self
             .resolver
+            .narrowed((!timeout.is_zero()).then_some(timeout))
             .resolve(&to, None, self.transport, &self.options.signalling)
             .await
             .map_err(|error| error.to_string())?;
@@ -257,10 +267,6 @@ impl Actor {
             .map_or_else(|| format!("<sip:sipx@{media_address}>"), str::to_owned);
         let mut options =
             sipx_call::DialOptions::new(from.clone(), media_address).with_media_policy(self.policy);
-        let timeout = optional_u64(value, "timeout_ms")?.map_or_else(
-            || Duration::from_secs(self.options.timeout),
-            Duration::from_millis,
-        );
         if !timeout.is_zero() {
             options = options.with_timeout(timeout);
         }
