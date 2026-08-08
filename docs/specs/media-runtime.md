@@ -1,6 +1,6 @@
 # Media runtime construction and ownership
 
-**Status:** normative · **Stories:** M-32, M-35, M-36, M-37, P-15, M-71
+**Status:** normative · **Stories:** M-32, M-35, M-36, M-37, M-45, P-15, M-71
 
 ## 1. Scope
 
@@ -165,8 +165,9 @@ unprotect failures; packets from a foreign SSRC; completed DTMF digits refused b
 application queue; unknown RTP payload types; playback completion reports with no listener; ICE
 driver datagrams and data-sent notes refused by its queue; renegotiation replies with no listener;
 ICE outputs failing to send; redundant server-reflexive candidates;
-non-STUN-server datagrams consumed while gathering; and frames lost by an attached PCM processor
-under the bounded-queue policy of [call-audio-seam.md](call-audio-seam.md) §6.
+non-STUN-server datagrams consumed while gathering; frames lost by an attached PCM processor
+under the bounded-queue policy of [call-audio-seam.md](call-audio-seam.md) §6; and the three
+jitter-buffer consequences of §4.2.
 
 An ICE output naming no bound socket has no counter: it is structurally unreachable because every
 base the agent can name was created from the exact socket vector the driver owns. The site carries
@@ -192,6 +193,51 @@ read racing a discard can observe the value immediately before or after that dis
 or double-count the increment. Tests that cause asynchronous loss MUST wait for the named counter to
 rise with a bounded deadline. A fixed sleep followed by an assertion is not evidence that the count
 is honest under load.
+
+### 4.2 The jitter buffer's play-out, and what it discards
+
+The receive loop drains the buffer on arrival: it pushes each accepted packet and then releases
+everything the buffer is willing to release. Depth is therefore latency, directly — a buffer of
+`depth` packets holds a packet for at most `depth` packetisation intervals before playing it — and
+the ceiling on depth is the ceiling on that latency. `M-45` measured it: on ten synthetic traces of
+1500 G.711 packets, including 300 ms spikes on a third of them, a 3 s straggler and a 1 s stall,
+the longest any packet was held was 515 ms and the depth returned to its floor after every
+disturbance. The buffer is bounded and it does not ratchet.
+
+Three consequences follow from a release, and each MUST increment exactly one counter.
+
+| Consequence | Counter | Meaning |
+|---|---|---|
+| the buffer refused a packet whose slot had been played | `jitter_late` | audio arrived and will not be heard; the depth is too shallow for this network |
+| the buffer refused a sequence it was already holding | `jitter_duplicates` | the network delivered the same packet twice |
+| a slot was filled because its packet never arrived | `jitter_concealed` | a gap in the timeline, filled |
+
+`push_at` returns whether the packet was kept, and the answer is `#[must_use]`: a caller in the
+media path cannot drop it silently, because a refusal that increments nothing is exactly the
+invisible shedding §4 exists to prevent.
+
+**Concealment.** A slot whose packet never arrived is filled with one packetisation interval of
+silence before the packet behind it is delivered. Silence rather than an estimated waveform: it is
+codec-independent and cannot invent speech that was not sent. Filling the slot is what keeps the
+played timeline the length the far end sent — without it the packets either side of a gap are
+delivered back to back, which is both a discontinuity in the waveform and a permanent 20 ms of
+drift per lost packet.
+
+Concealment is bounded at **200 ms** of consecutive missing packets, in time rather than in
+packets, because a packet is 10 ms of audio in one codec and 60 in another. A longer run is a
+stream discontinuity rather than loss — a far end that stopped, was partitioned, or restarted —
+and MUST NOT be filled: doing so would inject the whole outage into the timeline as silence. The
+unfilled remainder is not counted here. RFC 3550 cumulative loss already carries it and
+`MediaSession::quality` reports it, and publishing the same span under two names would make the
+snapshot's totals lie.
+
+A relaying session conceals nothing. It hands payloads on in the codec they arrived in, silence
+would have to be encoded to join them, and the far leg's own buffer conceals its own gaps.
+
+The seam of [call-audio-seam.md](call-audio-seam.md) §7 is told a concealed slot was `Loss` and is
+not offered the silence as audio. A processor that adds spans to delivered lengths therefore still
+reconstructs the timeline, and a speech provider is not handed invented quiet it would read as the
+caller pausing.
 
 ## 5. Test vectors
 
@@ -219,6 +265,9 @@ is honest under load.
 | D2 | one RTP packet using neither the negotiated nor a known static payload type | no audio is delivered and `unknown_payload_type = 1` |
 | D3 | one packet after a different SSRC has established the stream | no stream state moves and `foreign_ssrc = 1` |
 | D4 | a source discard is added without a nearby counter increment or `// discard:` reason | the media discard enumeration test fails with its file and line |
+| D10 | G.711 at 20 ms, depth 1; sequences 1, 2 and 4 arrive | four packets of audio are delivered, the third being silence, and `jitter_concealed = 1` |
+| D11 | G.711 at 20 ms, depth 1; sequences 1 and 400 arrive | twelve packets of audio — two carried, ten concealed — and `jitter_concealed = 10`; the rest of the gap is reported only as RFC 3550 loss |
+| D12 | depth 2; sequences 1, 2, 3, then 1 again and 3 again | `jitter_late = 1` and `jitter_duplicates = 1`; neither copy is played |
 | D5 | negotiated PT 96, `80e003e8000003e8decafbad010a00a0`, then PT 96 packets `806003e9000003e8decafbad010a0140` and `806003ea000003e8decafbad018a01e0` | one digit `1`, duration 480 timestamp units |
 | D6 | D5 followed by two newer copies of the final `018a01e0` payload, a duplicate sequence, and a late continuation | still one digit `1`; state does not move backwards |
 | D7 | PT 96 start `80e007d000000bb8decafbad030a00a0`, continuation `806007d100000bb8decafbad030a0140`, then the explicit silence expiration | one digit `3`, duration 320 timestamp units; a later end report cannot emit it again |
