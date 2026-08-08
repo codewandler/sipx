@@ -237,6 +237,27 @@ Closing the rest needs a SIP peer built with AEAD-GCM, pinned and public, that c
 *require* a GCM suite so a silent fall back to counter mode fails the run rather than passing it.
 That is a peer this harness does not have, not a gap in the harness.
 
+### The candidate, measured rather than read about
+
+`holius/baresip:v2` was checked on the wire and does both keyings, which no peer here does:
+
+- **SDES.** Offered `a=crypto:1 AEAD_AES_256_GCM inline:…` it answers `200` echoing that suite and
+  logs `SRTP is Enabled (cryptosuite=AEAD_AES_256_GCM)`; same for `AEAD_AES_128_GCM`. Its SRTP
+  comes from a library that implements the ciphers itself against OpenSSL's primitives rather than
+  delegating to `libsrtp`, so it is a third reading of RFC 7714 rather than a second copy of one.
+- **DTLS-SRTP.** It advertises `SRTP_AES128_CM_SHA1_80:SRTP_AES128_CM_SHA1_32:SRTP_AEAD_AES_128_GCM:SRTP_AEAD_AES_256_GCM`
+  and completed a handshake in *both* roles against an OpenSSL peer advertising GCM only.
+
+Two things a reviewer should weigh before it becomes a profile. It is an image in a personal
+namespace at 833 MB, against criterion 4 above — pinned and public, but neither official nor quick.
+And it **never originates a GCM `a=crypto`**: one hardcoded suite, no configuration key. That is
+fine while sipx is the offerer, which is the direction the media-security role runs.
+
+`AEAD_AES_128_GCM` needs one more thing in either keying, and it is on our side: sipx offers
+strongest-first and there is no public way to narrow a call's offer to a single suite.
+`Capabilities::with_srtp_suites` does it at the `sipx-sdp` layer and `DialOptions` exposes nothing
+equivalent, so covering the 128-bit suite is an API question, not only a peer question.
+
 ## Still to do
 
 The five released signalling transports run against both profiles. A profile can put WS and WSS on

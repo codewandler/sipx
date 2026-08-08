@@ -71,6 +71,14 @@ repository can write will catch it being wrong.
   `AEAD_AES_128_GCM`, and both suites over SDES, need a SIP peer that is built with GCM and can be
   made to *require* it; recorded in `tests/interop/README.md` and `docs/specs/srtp.md` §12.10.
 
+  A candidate for that peer was found and verified on the wire — `holius/baresip:v2` answers both
+  GCM suites over SDES and completes a GCM DTLS-SRTP handshake in both roles — with two caveats
+  recorded in `tests/interop/README.md`: it is a personal-namespace 833 MB image, and it never
+  *originates* a GCM offer. **The 128-bit suite is blocked on us, not on it:** sipx offers
+  strongest-first and no public API narrows a call's offer to one suite, so `DialOptions` would
+  need what `Capabilities::with_srtp_suites` already does a layer down. That is an API decision
+  this story should not take on its own.
+
 ## Notes
 
 - `tests/interop/run.sh` already supplies peer discovery by `*/profile.sh`, pinned public images,
