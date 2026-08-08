@@ -52,7 +52,8 @@ contains the capability's word. `sipx-media` may claim bridging because it has `
 gap.
 
 A fourth rule runs over the API rather than over the prose, because `A-9` froze what a published
-crate may add and an enum variant is the one addition that breaks a caller who did nothing wrong.
+crate may add and an additive change that breaks a caller who did nothing wrong is the one thing a
+published crate may not do quietly. Two shapes of item can do it.
 
 **Extensibility.** A public enum either carries `#[non_exhaustive]` or argues beside itself why its
 variants are the complete domain. Which enums that covers is decided by **reachability from the
@@ -64,6 +65,22 @@ dressed as contract. `M-78` replaced the rule this succeeds, which selected by a
 `Error` — a spelling convention standing in for a visibility question, so `MediaProfile`,
 `IcePolicy` and `Keying` were unguarded for the life of the project while an internal
 `ParseError` was held to the contract.
+
+**Extensibility, for structs** (`M-80`). The same rule and the same reachability, over a public
+struct that has **public fields**: adding a field breaks every downstream struct literal exactly as
+adding a variant breaks every downstream exhaustive `match`. This check said for most of its life
+that structs were out of scope "because a struct can add a private field without breaking a
+caller". That is true of a struct whose fields are private and false of every struct on the media
+surface: `M-75` added `Packet::extension`, `M-79` added `Encoded::extension`, and each additive
+change broke in-tree literals — twice in two stories, which is a rate rather than a hypothetical.
+
+Because the corrected selector turns up around two hundred reachable public-field structs at once,
+the struct rule runs behind two boundaries and both are stated where they are defined:
+`MEDIA_SURFACE` names the crates, and `breakable_structs` names the property — a struct the crate
+*already publishes a `new` for*, which is the crate having said construction is the constructor's
+job while leaving the literal legal. What is not yet held is counted and printed on every run, the
+way the enum rollout's remainder is. See `struct_problems` for why `#[non_exhaustive]` is the side
+of this decision that stays reversible, and so the one a pre-1.0 release should take.
 
 Three things this deliberately does not do.
 
@@ -222,11 +239,34 @@ _WORD = re.compile(r"[A-Z]+(?![a-z])|[A-Z][a-z0-9]*|[a-z0-9]+")
 #: crate a row is about.
 _CRATE_CELL = re.compile(r"`sipx(?:-[a-z0-9]+)*`")
 
-#: A public enum. Enums and not structs, because a struct can add a private field without
-#: breaking a caller while every enum variant is part of every downstream exhaustive match. Line
-#: anchored for the reason the item patterns above are: a doc comment quoting `pub enum Foo` is
-#: prose.
+#: A public enum. Line anchored for the reason the item patterns above are: a doc comment quoting
+#: `pub enum Foo` is prose.
 _PUBLIC_ENUM = re.compile(r"(?m)^[ \t]*pub enum (?P<name>\w+)")
+
+#: A public struct, read the same way and for the same question. This pattern's comment used to
+#: say enums and never structs, "because a struct can add a private field without breaking a
+#: caller" — which is true of a struct whose fields are private and false of one whose fields are
+#: `pub`. `M-75` added `Packet::extension` and `M-79` added `Encoded::extension`, and each
+#: additive change broke every struct literal that named the type. See `struct_problems`.
+_PUBLIC_STRUCT = re.compile(r"(?m)^[ \t]*pub struct (?P<name>\w+)")
+
+#: A public field of a braced struct, line anchored inside the struct's own body. `pub(crate)` and
+#: `pub(super)` are deliberately not matched: a caller outside the crate cannot name those fields,
+#: so it cannot write the literal that a new field would break.
+_PUBLIC_FIELD = re.compile(r"(?m)^[ \t]*pub +\w+ *:")
+
+#: A public field of a tuple struct, where there is no name to anchor on.
+_PUBLIC_TUPLE_FIELD = re.compile(r"(?<![\w:])pub(?![\w(])")
+
+#: An inherent `impl` block for a named type, up to its opening brace. Trait implementations are
+#: excluded by the pattern itself: `impl Default for Packet` puts the trait name where this
+#: expects the type, so it does not match.
+_INHERENT_IMPL = r"(?m)^impl(?:<[^>]*>)? {name}\b(?![\w:])[^{{]*\{{"
+
+#: A published constructor. `const fn new` counts; a `pub fn new` returning something else does
+#: not need distinguishing, because a type that publishes `new` at all has named the way it is
+#: meant to be built.
+_CONSTRUCTOR = re.compile(r"(?m)^[ \t]*pub (?:const )?fn new\b")
 
 #: A re-export. The body runs to the semicolon and may span lines, because that is how a crate
 #: root writes a long one. What it re-exports is read out of the body by `reexports` below.
@@ -235,6 +275,12 @@ _REEXPORT = re.compile(r"(?m)^[ \t]*pub use\s+(?P<body>[^;]+);")
 #: The one phrase that classifies an intentionally exhaustive enum. Like the fixed-sleep guard's
 #: classifications, the reason lives at the site it excuses rather than in a list here.
 EXHAUSTIVE_REASON = "/// Exhaustive by design:"
+
+#: The same, for a struct whose public fields are deliberately the whole record. A separate phrase
+#: rather than the enum's, because they answer different questions — "these variants are the
+#: domain" and "these fields are the record" — and a reader who writes one at the other's type has
+#: not made the argument the rule asked for.
+COMPLETE_REASON = "/// Complete by design:"
 
 #: The crates whose reachable public enums are held to the guard today.
 #:
@@ -251,6 +297,19 @@ EXHAUSTIVE_REASON = "/// Exhaustive by design:"
 #: which is not one reviewable change; `M-74` paid down the media path, which is the surface the
 #: argument was made for. The remainder is recorded in `M-78`'s progress note.
 GUARDED_SURFACE = ("sipx-audio", "sipx-call", "sipx-media", "sipx-rtp", "sipx-sdp")
+
+#: The crates whose reachable public-field structs are held to the guard today (`M-80`).
+#:
+#: A second boundary rather than a second entry in the one above, because the struct rule is a
+#: release behind the enum rule and saying so in a diff is cheaper than a comment claiming both are
+#: at the same place. The struct rule reaches the two crates the relay path runs through, which is
+#: where both breakages happened and where the argument for the rule was made.
+#:
+#: The same mechanical property as `GUARDED_SURFACE`: it names crates and never a struct, so no
+#: type inside a crate in scope can be excused one at a time, and the run prints how many reachable
+#: public-field structs the rule does not hold. That number is large — see `struct_problems` for
+#: why the rule is additionally narrowed by a property of the type rather than by widening this.
+MEDIA_SURFACE = ("sipx-media", "sipx-rtp")
 
 #: `sipx-app-protocol` owns a closed, versioned application vocabulary and documents its own
 #: exceptions, so `A-9` explicitly leaves it out — a decision that outlives any particular
@@ -583,21 +642,24 @@ def reexports(module: str, text: str) -> tuple[set[tuple[str, str]], set[str]]:
     return named, globs
 
 
-def reachable_enums(crate: str) -> list[tuple[Path, str, str, int]]:
-    """Every public enum of a crate a downstream `match` can name, with where it is written.
+def reachable(crate: str, pattern: re.Pattern[str]) -> list[tuple[Path, str, str, int]]:
+    """Every item of a crate matching `pattern` that a downstream crate can name.
 
     Two ways to be nameable, and the second is why a name-based or a module-visibility-only rule
-    both get this wrong. A `pub enum` in a module reached only through `pub mod` declarations is
-    public because its path is writable. A `pub enum` in a *private* module is public when the
+    both get this wrong. A `pub` item in a module reached only through `pub mod` declarations is
+    public because its path is writable. A `pub` item in a *private* module is public when the
     crate re-exports it — `sipx-call` keeps `MediaProfile` in a private `media_policy` and
     publishes it from the crate root, and a reader that stopped at module visibility would call
     the type it publishes an implementation detail.
 
-    The converse is the half `M-78` was filed for: a `pub enum` in a private module that nothing
+    The converse is the half `M-78` was filed for: a `pub` item in a private module that nothing
     re-exports is not public API, however `pub` it is written, and marking it would be noise
     dressed as contract.
 
-    A binary crate returns nothing: it has no public API for anybody to match on.
+    The walk is the same question for an enum and for a struct — "can somebody outside write this
+    type's name" — so `M-80` made the item pattern the parameter rather than copying the walk.
+
+    A binary crate returns nothing: it has no public API for anybody to name.
     """
     entry = entry_point(crate)
     if entry.name != "lib.rs":
@@ -647,11 +709,162 @@ def reachable_enums(crate: str) -> list[tuple[Path, str, str, int]]:
 
     found = []
     for module, reach in sorted(graph.items()):
-        for match in _PUBLIC_ENUM.finditer(sources[module]):
+        for match in pattern.finditer(sources[module]):
             name = match.group("name")
             if module in exported or (module, name) in published_names:
                 found.append((reach.path, module, name, match.start()))
     return found
+
+
+def reachable_enums(crate: str) -> list[tuple[Path, str, str, int]]:
+    """Every public enum of a crate a downstream `match` can name."""
+    return reachable(crate, _PUBLIC_ENUM)
+
+
+def reachable_structs(crate: str) -> list[tuple[Path, str, str, int]]:
+    """Every public struct of a crate a downstream literal can name."""
+    return reachable(crate, _PUBLIC_STRUCT)
+
+
+def preamble(source: str, offset: int) -> str:
+    """What is written immediately above an item: its attributes and its doc comment.
+
+    Bounded at the blank line above, so a rationale written over a different item does not classify
+    this one.
+    """
+    return source[source.rfind("\n\n", 0, offset) + 2 : offset]
+
+
+def declaration(source: str, offset: int) -> tuple[str, str]:
+    """A struct's shape and its field list, read from the `pub struct` at `offset`.
+
+    Three shapes and they break differently. A unit struct has no fields to add to. A tuple struct
+    and a braced struct both do, and both spell a public field differently, so the shape has to
+    come back with the body rather than be guessed from it.
+
+    Angle brackets are skipped before the body opens, because a generic parameter list sits between
+    the name and the body and a `where` clause can put a `{` nowhere else. Inside the body only the
+    opening delimiter is counted: a struct body holds field types, and no field type contains an
+    unbalanced brace.
+    """
+    index, angle, end = offset, 0, len(source)
+    while index < end:
+        character = source[index]
+        if character == "<":
+            angle += 1
+        elif character == ">":
+            angle -= 1
+        elif angle == 0 and character in "{(;":
+            break
+        index += 1
+    if index >= end or source[index] == ";":
+        return ("unit", "")
+    opener = source[index]
+    shape, closer = ("braced", "}") if opener == "{" else ("tuple", ")")
+    depth, scan = 0, index
+    while scan < end:
+        if source[scan] == opener:
+            depth += 1
+        elif source[scan] == closer:
+            depth -= 1
+            if depth == 0:
+                return (shape, source[index + 1 : scan])
+        scan += 1
+    raise ValueError(f"a `pub struct` at offset {offset} has no closing `{closer}`")
+
+
+def has_a_public_field(shape: str, body: str) -> bool:
+    """Whether a caller in another crate can name a field of this struct, and so write a literal."""
+    if shape == "unit":
+        return False
+    pattern = _PUBLIC_FIELD if shape == "braced" else _PUBLIC_TUPLE_FIELD
+    return pattern.search(body) is not None
+
+
+def publishes_a_constructor(source: str, name: str) -> bool:
+    """Whether the crate offers a `pub fn new` for this type in an inherent `impl`."""
+    for opening in re.finditer(_INHERENT_IMPL.format(name=re.escape(name)), source):
+        depth, scan = 0, opening.end() - 1
+        while scan < len(source):
+            if source[scan] == "{":
+                depth += 1
+            elif source[scan] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            scan += 1
+        if _CONSTRUCTOR.search(source[opening.end() : scan]):
+            return True
+    return False
+
+
+def breakable_structs(crate: str) -> list[tuple[Path, str, str, int]]:
+    """Reachable public structs whose field set is part of the contract and already has a `new`.
+
+    The rule this narrows is general and stated in `struct_problems`: any reachable struct with a
+    public field breaks downstream literals when a field is added. Two narrowings stand between
+    that rule and what runs, and both are boundaries rather than excuses.
+
+    `MEDIA_SURFACE` is the crate boundary. This one is the type boundary, and it is a property
+    rather than a list: a struct is held when the crate *already publishes a constructor for it*.
+    That is not a proxy for importance. A crate that ships `T::new(..)` and leaves every field
+    `pub` has published two ways to build one value and can only evolve one of them — which is
+    exactly how `M-75` and `M-79` turned two additive changes into two breaking ones. The
+    attribute is how the crate's existing intent becomes something a compiler checks.
+
+    A public-field struct with no constructor is a different piece of work rather than the same
+    work deferred: `#[non_exhaustive]` on one leaves a downstream caller with no way to build it at
+    all, so the constructor has to be designed first. `M-92` carries those.
+
+    The boundary also widens by itself in the right direction. The day a type here gains a `new`,
+    the guard picks it up without anybody remembering to edit a list.
+    """
+    found = []
+    for path, module, name, offset in reachable_structs(crate):
+        source = code(path.read_text(encoding="utf-8"))
+        shape, body = declaration(source, offset)
+        if has_a_public_field(shape, body) and publishes_a_constructor(source, name):
+            found.append((path, module, name, offset))
+    return found
+
+
+def struct_problems(crates: list[str]) -> list[str]:
+    """Reachable public structs that promise their current field set can never grow.
+
+    A public struct with a public field is as breakable by an additive change as a public enum is,
+    and the two breakages this rule was filed for are the evidence: `M-75` added
+    `Packet::extension` and `M-79` added `Encoded::extension`, and each broke every struct literal
+    naming the type. The check treated structs as safe because a struct *can* add a private field
+    without breaking a caller — true of a struct whose fields are private, and false of every
+    struct on this surface.
+
+    `#[non_exhaustive]` is the only side of this that stays available. Adding it after `1.0.0`
+    freezes the API is itself a breaking change and so needs a major release; removing it never is.
+    A type marked now can be unmarked in any later minor release, and a type left unmarked at v1 is
+    decided for the life of the major version — which is why `M-80` settled it at `1.0.0-rc.10`
+    rather than leaving it to the release that would have foreclosed it.
+
+    The argument for an exception lives beside the type — never in a list here — so a reader who
+    has to add a field meets it at the moment the question arises.
+    """
+    problems = []
+    for crate in crates:
+        for path, _module, name, offset in breakable_structs(crate):
+            source = code(path.read_text(encoding="utf-8"))
+            above = preamble(source, offset)
+            if "#[non_exhaustive]" in above or COMPLETE_REASON in above:
+                continue
+            line = source.count("\n", 0, offset) + 1
+            try:
+                where = path.relative_to(ROOT)
+            except ValueError:
+                where = path
+            problems.append(
+                f"{where}:{line} `{name}` is reachable from the crate root, has public fields and "
+                f"publishes a constructor; add `#[non_exhaustive]` or an adjacent "
+                f"`{COMPLETE_REASON}` rationale"
+            )
+    return problems
 
 
 def enum_problems(crates: list[str]) -> list[str]:
@@ -665,8 +878,8 @@ def enum_problems(crates: list[str]) -> list[str]:
     for crate in crates:
         for path, _module, name, offset in reachable_enums(crate):
             source = code(path.read_text(encoding="utf-8"))
-            preamble = source[source.rfind("\n\n", 0, offset) + 2 : offset]
-            if "#[non_exhaustive]" in preamble or EXHAUSTIVE_REASON in preamble:
+            above = preamble(source, offset)
+            if "#[non_exhaustive]" in above or EXHAUSTIVE_REASON in above:
                 continue
             line = source.count("\n", 0, offset) + 1
             try:
@@ -692,6 +905,38 @@ def outside_the_boundary(crates: list[str]) -> list[str]:
         for crate in crates
         if crate not in GUARDED_SURFACE and crate != CLOSED_VOCABULARY
     ]
+
+
+def guarded_structs(crates: list[str]) -> list[str]:
+    """The crates whose reachable structs this run holds to the guard. See `MEDIA_SURFACE`."""
+    return [crate for crate in crates if crate in MEDIA_SURFACE and crate != CLOSED_VOCABULARY]
+
+
+def outstanding_structs(crates: list[str]) -> list[str]:
+    """Every reachable public-field struct in the workspace the struct rule does not hold yet.
+
+    Counted over all published crates and not only the ones outside `MEDIA_SURFACE`, because the
+    type boundary in `breakable_structs` leaves work inside the guarded crates too. A debt line
+    that reported only the crates outside would have said the media surface was finished.
+    """
+    outstanding = []
+    for crate in crates:
+        if crate == CLOSED_VOCABULARY:
+            continue
+        # Keyed on where the type is written and not on its name: `sipx-media` declares a `Config`
+        # in `session` and another in `ice::agent`, and a name-keyed set would have reported the
+        # second one as held because the first is.
+        held = {(module, offset) for _path, module, _name, offset in breakable_structs(crate)}
+        for path, module, name, offset in reachable_structs(crate):
+            source = code(path.read_text(encoding="utf-8"))
+            shape, body = declaration(source, offset)
+            if not has_a_public_field(shape, body) or (module, offset) in held:
+                continue
+            above = preamble(source, offset)
+            if "#[non_exhaustive]" in above or COMPLETE_REASON in above:
+                continue
+            outstanding.append(f"{path}:{name}")
+    return outstanding
 
 
 def crate_vocabulary(entry: Path, found: list[Module]) -> frozenset[str]:
@@ -979,7 +1224,7 @@ def main() -> int:
         return 1
 
     read_crates = [read(name, tables) for name in crates]
-    problems += enum_problems(guarded(crates))
+    problems += enum_problems(guarded(crates)) + struct_problems(guarded_structs(crates))
     for crate in read_crates:
         problems += (
             claim_problems(crate) + agreement_problems(crate) + stability_problems(crate)
@@ -1014,6 +1259,13 @@ def main() -> int:
     print(
         f"{len(GUARDED_SURFACE)} crates hold every reachable public enum non-exhaustive or argued; "
         f"{len(debt)} reachable enums outside that boundary are still exhaustive"
+    )
+    # The struct rule's debt, on the same terms and for the same reason (`M-80`).
+    structs = outstanding_structs(crates)
+    print(
+        f"{len(MEDIA_SURFACE)} crates hold every reachable public struct that has public fields "
+        f"and a constructor non-exhaustive or argued; {len(structs)} reachable public-field "
+        f"structs elsewhere can still be broken by a new field"
     )
     return 0
 

@@ -377,7 +377,12 @@ impl Decoding {
 }
 
 /// How a session is configured.
+///
+/// `#[non_exhaustive]` on the same terms as [`Encoded`]: build one with
+/// [`Config::new`] and assign the rest. A configuration is the surface most likely to grow an
+/// option, and the one where growing it must not break somebody who set three fields.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Config {
     /// Where to send until symmetric RTP learns better.
     pub remote: SocketAddr,
@@ -724,7 +729,28 @@ impl std::fmt::Debug for SrtpKeys {
 }
 
 /// A packet's payload as it arrived, still encoded.
+///
+/// # Stability
+///
+/// `#[non_exhaustive]`: build one with [`Encoded::new`] and assign whatever else it needs — a
+/// relay sets [`Encoded::extension`] from the packet it is forwarding. The fields stay `pub` and
+/// stay readable and assignable from anywhere; the attribute forbids the struct literal and
+/// nothing else.
+///
+/// The reason is a rate and not a prediction. This type carries what arrived on a wire format that
+/// grows, and it has already grown twice under callers: `M-79` added [`Encoded::extension`] here
+/// and `M-75` added the same field to [`sipx_rtp::Packet`], and each of those additive changes
+/// broke every struct literal naming the type. `M-80` marked the two **together**, because they
+/// are the two ends of one relay path and marking one would have left the other free to break the
+/// same caller in the same way for the same reason.
+///
+/// The timing is the rest of the argument. `#[non_exhaustive]` can be **removed** in any minor
+/// release without breaking a caller, and can only be **added** in a major one. Marking now keeps
+/// both answers reachable; shipping `1.0.0` unmarked would have spent the choice on the answer
+/// that two stories had already shown to be wrong. See `docs/roadmap.md`'s v1 predicate 4, which
+/// is where a contract stops being editable to fit a change.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Encoded {
     /// What it is encoded in.
     pub payload_type: u8,
@@ -4557,14 +4583,13 @@ async fn deliver(
         if let Some(completed) = dtmf.finish_on_media(packet.sequence) {
             deliver_digit(to, digits, completed, config.clock_rate);
         }
-        let encoded = Encoded {
-            payload_type: packet.payload_type,
-            payload: packet.payload.clone(),
-            // Both clones are reference counts rather than copies. Dropping the extension here is
-            // what left the relay path stripping what `M-75` had just taught the packet layer to
-            // keep, so it goes on whatever the far side does with it (`M-79`).
-            extension: packet.extension.clone(),
-        };
+        let mut encoded = Encoded::new(packet.payload_type, packet.payload.clone());
+        // Both clones are reference counts rather than copies. Dropping the extension here is
+        // what left the relay path stripping what `M-75` had just taught the packet layer to
+        // keep, so it goes on whatever the far side does with it (`M-79`). Assigned rather than
+        // written in a literal because the type is `#[non_exhaustive]`: this is the relay, so it
+        // is also the migration every downstream relay has to make (`M-80`).
+        encoded.extension = packet.extension.clone();
         return tokio::select! {
             () = stop.wait() => false,
             result = to.encoded.send(encoded) => result.is_ok(),
@@ -4907,19 +4932,9 @@ mod tests {
             "the stopped generation's timeout cannot enter the replacement queue"
         );
 
-        let mut complete = Packet::new(
-            96,
-            1,
-            5000,
-            7,
-            DtmfEvent {
-                digit: Digit::Number(8),
-                end: true,
-                volume: 10,
-                duration: 800,
-            }
-            .encode(),
-        );
+        let mut event = DtmfEvent::new(Digit::Number(8), 800);
+        event.end = true;
+        let mut complete = Packet::new(96, 1, 5000, 7, event.encode());
         complete.marker = true;
         raw.send_to(&complete.encode(), session.local_addr())
             .await
@@ -6100,12 +6115,8 @@ mod tests {
         let mut config = Config::new(any(), Codec::Pcmu);
         config.dtmf_payload_type = Some(96);
         let stop = Stop::default();
-        let event = DtmfEvent {
-            digit: Digit::Number(6),
-            end: true,
-            volume: 10,
-            duration: 800,
-        };
+        let mut event = DtmfEvent::new(Digit::Number(6), 800);
+        event.end = true;
 
         let wrong = Packet::new(101, 1, 1000, 7, event.encode());
         assert!(
@@ -6177,19 +6188,9 @@ mod tests {
             Some((Digit::Number(3), Duration::from_millis(40)))
         );
 
-        let late_end = Packet::new(
-            96,
-            3,
-            3000,
-            7,
-            DtmfEvent {
-                digit: Digit::Number(3),
-                end: true,
-                volume: 10,
-                duration: 320,
-            }
-            .encode(),
-        );
+        let mut late = DtmfEvent::new(Digit::Number(3), 320);
+        late.end = true;
+        let late_end = Packet::new(96, 3, 3000, 7, late.encode());
         raw.send_to(&late_end.encode(), session.local_addr())
             .await
             .expect("late end sends");
@@ -6265,12 +6266,8 @@ mod tests {
         let stop = Stop::default();
 
         for sequence in 0u16..33 {
-            let event = DtmfEvent {
-                digit: Digit::Number(5),
-                end: true,
-                volume: 10,
-                duration: 160,
-            };
+            let mut event = DtmfEvent::new(Digit::Number(5), 160);
+            event.end = true;
             let packet = Packet::new(
                 dtmf::DEFAULT_PAYLOAD_TYPE,
                 sequence,
@@ -6692,5 +6689,26 @@ mod tests {
         assert_eq!(Codec::from_payload_type(9), Some(Codec::G722));
         assert_eq!(Codec::from_payload_type(11), Some(Codec::L16));
         assert_eq!(Codec::from_payload_type(10), None, "stereo L16 is not ours");
+    }
+
+    #[test]
+    fn the_constructor_reaches_every_field_a_literal_could_set() {
+        // `M-80`, and the same assertion `sipx-rtp` makes about `Packet` — the two types were
+        // marked together, so the proof that marking them cost a caller nothing is made in both
+        // places rather than once.
+        //
+        // Compared through `Debug` because `Encoded` carries `Bytes` and derives no `PartialEq`.
+        // The derived `Debug` enumerates every field, including one added after this was written,
+        // which a hand-written list of field comparisons would not.
+        let mut built = Encoded::new(96, Bytes::from_static(&[1, 2, 3]));
+        built.extension = Some(Bytes::from_static(&[0xBE, 0xDE, 0, 0]));
+
+        let literal = Encoded {
+            payload_type: 96,
+            payload: Bytes::from_static(&[1, 2, 3]),
+            extension: Some(Bytes::from_static(&[0xBE, 0xDE, 0, 0])),
+        };
+
+        assert_eq!(format!("{literal:?}"), format!("{built:?}"));
     }
 }
