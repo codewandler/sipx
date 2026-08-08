@@ -64,6 +64,7 @@ use tokio::sync::{Mutex, mpsc, watch};
 
 use crate::counters::{DiscardMeters, MediaDiscardCounts};
 use crate::ice;
+use crate::processing::{AudioDirection, PcmProcessor, Processing, ProcessingError, Taps};
 
 /// Which G.711 flavour a session carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -779,6 +780,11 @@ pub struct MediaSession {
     /// Stopped generations replaced in place but not yet completely joined. The replacement owns
     /// them before its first await, so cancellation cannot turn reconfiguration into detachment.
     retired: Mutex<Vec<MediaSession>>,
+    /// Attached application PCM processors (`M-54`, `docs/specs/call-audio-seam.md`).
+    ///
+    /// The registry, not the workers: the seam spawns nothing, so this adds no handle for
+    /// shutdown to join. A renegotiation carries the attachments to the replacement generation.
+    taps: Arc<Taps>,
     #[cfg(all(test, feature = "dtls"))]
     browser_profile_tasks: Option<Arc<crate::browser::ProfileTasks>>,
     #[cfg(all(test, feature = "dtls"))]
@@ -926,6 +932,8 @@ struct Shared {
     /// A counter of full keypresses received, for an `Interrupt::OnDigit` playback to watch.
     keypresses: Arc<watch::Sender<u64>>,
     quality_hook: QualityHookSlot,
+    /// The application PCM processing seam both media loops offer their frames to (`M-54`).
+    taps: Arc<Taps>,
 }
 
 impl Shared {
@@ -934,6 +942,7 @@ impl Shared {
     }
 
     fn with_stop(local_addr: SocketAddr, discards: Arc<DiscardMeters>, stop: Arc<Stop>) -> Self {
+        let taps = Arc::new(Taps::new(Arc::clone(&discards)));
         Self {
             sent: Arc::new(AtomicU64::new(0)),
             received: Arc::new(AtomicU64::new(0)),
@@ -951,6 +960,7 @@ impl Shared {
             muted: Arc::new(AtomicBool::new(false)),
             keypresses: Arc::new(watch::Sender::new(0u64)),
             quality_hook: Arc::new(std::sync::RwLock::new(None)),
+            taps,
         }
     }
 
@@ -1578,6 +1588,7 @@ impl MediaSession {
                 stop: Arc::clone(&shared.stop),
                 encoding: prepared.encoding,
                 discards: Arc::clone(&shared.discards),
+                taps: Arc::clone(&shared.taps),
             },
         ));
         let (clips_tx, playback_owner) = spawn_playback_queue(&outgoing_tx, &shared.stop);
@@ -1603,6 +1614,7 @@ impl MediaSession {
                 stop: Arc::clone(&shared.stop),
                 decoding: prepared.decoding,
                 discards: Arc::clone(&shared.discards),
+                taps: Arc::clone(&shared.taps),
             },
         ));
 
@@ -1666,6 +1678,7 @@ impl MediaSession {
             browser_ingress: None,
             owners: Mutex::new(owners),
             retired: Mutex::new(Vec::new()),
+            taps: shared.taps,
             #[cfg(all(test, feature = "dtls"))]
             browser_profile_tasks: None,
             #[cfg(all(test, feature = "dtls"))]
@@ -1731,6 +1744,7 @@ impl MediaSession {
                     stop: Arc::clone(&shared.stop),
                     encoding: prepared.encoding,
                     discards: Arc::clone(&shared.discards),
+                    taps: Arc::clone(&shared.taps),
                 },
             ),
         ));
@@ -1760,6 +1774,7 @@ impl MediaSession {
                     stop: Arc::clone(&shared.stop),
                     decoding: prepared.decoding,
                     discards: Arc::clone(&shared.discards),
+                    taps: Arc::clone(&shared.taps),
                 },
             ),
         ));
@@ -1792,6 +1807,7 @@ impl MediaSession {
             browser_ingress: Some(ingress),
             owners: Mutex::new(owners),
             retired: Mutex::new(Vec::new()),
+            taps: shared.taps,
             #[cfg(all(test, feature = "dtls"))]
             browser_profile_tasks: Some(profile_tasks),
             #[cfg(all(test, feature = "dtls"))]
@@ -1945,6 +1961,10 @@ impl MediaSession {
         replacement.set_muted(muted);
         replacement.set_relay(relay);
         replacement.set_rtcp_quality_hook(quality_hook);
+        // Attachments belong to the call, not to a worker generation, so a re-INVITE must not make
+        // an application re-attach. Carried before the swap: the retired generation's `Drop` closes
+        // whatever its registry still holds, and it must find nothing.
+        replacement.taps.adopt(&self.taps);
         let previous = std::mem::replace(self, replacement);
         self.retired.get_mut().push(previous);
         self.reap_retired().await;
@@ -2570,9 +2590,38 @@ impl MediaSession {
         tokio::time::sleep(self.packet_duration).await;
     }
 
+    /// Attach a bounded PCM processor to one direction of this call.
+    ///
+    /// The one call-audio tap (`M-54`, `docs/specs/call-audio-seam.md`): local speech and
+    /// deterministic call-audio analysis both ride it rather than adding a second. The returned
+    /// handle is the sole consumer of its own bounded queue, converts to the requested format with
+    /// the shared linear-PCM resampler (`M-43`), and detaches when it is dropped.
+    ///
+    /// A processor that stops reading loses its own oldest frames under the seam's documented loss
+    /// policy and is told so by a discontinuity on the next frame it receives. It can never delay
+    /// RTP decode, RTP encode, playback or capture.
+    ///
+    /// Attachments survive a [`Self::reconfigure`]; the first frame of the new generation carries a
+    /// [`crate::processing::DiscontinuityKind::Realign`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProcessingError::UnsupportedConversion`] when the requested format is outside the
+    /// linear-PCM boundary, [`ProcessingError::QueueCapacity`] for a queue depth outside its
+    /// domain, [`ProcessingError::TooManyProcessors`] at the per-session ceiling, and
+    /// [`ProcessingError::SessionStopped`] once the session has stopped. Every refusal leaves the
+    /// call exactly as it was.
+    pub fn attach_processor(&self, request: Processing) -> Result<PcmProcessor, ProcessingError> {
+        if self.is_stopped() {
+            return Err(ProcessingError::SessionStopped);
+        }
+        self.taps.attach(request, self.audio_rate())
+    }
+
     /// Stop the session and release its socket.
     pub fn stop(&self) {
         self.stop.stop();
+        self.taps.close();
     }
 
     /// Stop and join every worker owned by this session.
@@ -2581,6 +2630,7 @@ impl MediaSession {
     /// leaves the current handle owned, and a later call resumes the same drain.
     pub async fn shutdown(&self) {
         self.stop.stop();
+        self.taps.close();
         if let Some(ingress) = &self.browser_ingress {
             crate::browser::lock_ingress(ingress).close();
         }
@@ -2620,6 +2670,10 @@ impl Drop for MediaSession {
         // A session that outlives its call keeps a socket and two tasks alive. On a server
         // taking calls all day that is the difference between steady and unbounded.
         self.stop.stop();
+        // Attachments complete rather than idle: a consumer parked on `recv` learns the call is
+        // over from the seam instead of from a timeout. A retired generation's registry is already
+        // empty, because `reconfigure` moved it to the replacement.
+        self.taps.close();
         if let Some(ingress) = &self.browser_ingress {
             crate::browser::lock_ingress(ingress).close();
         }
@@ -2635,12 +2689,14 @@ fn delivery<'a>(
     encoded: &'a mpsc::Sender<Encoded>,
     relay: &'a AtomicBool,
     discards: &'a DiscardMeters,
+    taps: &'a Taps,
 ) -> Delivery<'a> {
     Delivery {
         audio,
         encoded,
         relay,
         discards,
+        taps,
     }
 }
 
@@ -2880,6 +2936,8 @@ struct Sending {
     /// Constructed before this worker is spawned, so startup cannot fail inside the task.
     encoding: Encoding,
     discards: Arc<DiscardMeters>,
+    /// Where transmitted audio is offered to attached processors (`M-54`).
+    taps: Arc<Taps>,
 }
 
 // This is the single owner of the RTP send sequence, codec, SRTP context, pacing and their discard
@@ -2897,7 +2955,9 @@ async fn send_loop(socket: Arc<UdpSocket>, mut outgoing: mpsc::Receiver<Frame>, 
         stop,
         mut encoding,
         discards,
+        taps,
     } = sending;
+    let audio_rate = config.audio_rate();
     let mut clock = SendClock::new();
     // One context, owned by this loop. SRTP keeps a rollover counter and a replay window per
     // stream, and a context behind a lock would put a mutex in the packet path for state exactly
@@ -2926,6 +2986,14 @@ async fn send_loop(socket: Arc<UdpSocket>, mut outgoing: mpsc::Receiver<Frame>, 
         // sequence number, the send counters and the sender report's octet count have been moved
         // by it. See [`gated`].
         let frame = gated(frame, &muted, config.samples_per_packet());
+
+        // The outbound tap (`M-54`, `docs/specs/call-audio-seam.md` §3): after the mute gate, so a
+        // muted call is not reported as transmitting, and before encoding, so a processor sees the
+        // samples rather than the codec's opinion of them. It never awaits, so no processor can
+        // delay this packet.
+        if let Frame::Audio { samples, .. } = &frame {
+            taps.offer(AudioDirection::Outbound, audio_rate, samples);
+        }
 
         let (packet, advance) = match &frame {
             Frame::Audio { samples, .. } => {
@@ -3265,6 +3333,8 @@ struct Inbound {
     /// Constructed before this worker is spawned, so startup cannot fail inside the task.
     decoding: Decoding,
     discards: Arc<DiscardMeters>,
+    /// Where received audio is offered to attached processors (`M-54`).
+    taps: Arc<Taps>,
 }
 
 /// Split a datagram arriving on a port that carries media three ways (RFC 5764 §5.1.2).
@@ -3588,6 +3658,7 @@ async fn receive_loop(mut input: ReceiveInput, inbound: Inbound) {
         stop,
         mut decoding,
         discards,
+        taps,
     } = inbound;
     let mut buffer = match config.jitter_max_depth {
         Some(max) => JitterBuffer::adaptive(config.jitter_depth, max),
@@ -3641,7 +3712,7 @@ async fn receive_loop(mut input: ReceiveInput, inbound: Inbound) {
             ReceivedDatagram::Silence => {
                 // Silence. Release what is held rather than holding it against a packet that is
                 // not coming — otherwise the last `depth - 1` packets of every clip are lost.
-                let to = delivery(&incoming, &encoded, &relay, &discards);
+                let to = delivery(&incoming, &encoded, &relay, &discards, &taps);
                 if !flush(
                     &mut buffer,
                     &to,
@@ -3729,6 +3800,7 @@ async fn receive_loop(mut input: ReceiveInput, inbound: Inbound) {
                     encoded: &encoded,
                     relay: &relay,
                     discards: &discards,
+                    taps: &taps,
                 },
                 &mut decoding,
                 &digits,
@@ -4118,6 +4190,7 @@ struct Delivery<'a> {
     encoded: &'a mpsc::Sender<Encoded>,
     relay: &'a AtomicBool,
     discards: &'a DiscardMeters,
+    taps: &'a Taps,
 }
 
 async fn deliver(
@@ -4194,8 +4267,19 @@ async fn deliver(
         to.discards
             .opus_decode_failures
             .fetch_add(1, Ordering::Relaxed);
+        // Audio the far end sent that never became a frame is exactly the seam's `Loss`
+        // (`docs/specs/call-audio-seam.md` §7). Its span is this session's packetisation, which is
+        // all a refused payload can truthfully say about how much audio it was carrying.
+        to.taps
+            .note_loss(AudioDirection::Inbound, config.samples_per_packet() as u64);
         return true;
     };
+
+    // The inbound tap (`M-54`, `docs/specs/call-audio-seam.md` §3): the jitter buffer's output,
+    // after decode, so a processor observes the played order rather than the arrival order. It
+    // never awaits, so a stalled processor cannot hold up this loop or the packet behind it.
+    to.taps
+        .offer(AudioDirection::Inbound, config.audio_rate(), &samples);
 
     tokio::select! {
         () = stop.wait() => false,
@@ -5485,11 +5569,13 @@ mod tests {
         let (encoded, _encoded_rx) = mpsc::channel(1);
         let relay = AtomicBool::new(false);
         let discards = Arc::new(DiscardMeters::default());
+        let taps = Taps::new(Arc::clone(&discards));
         let delivery = Delivery {
             audio: &audio,
             encoded: &encoded,
             relay: &relay,
             discards: &discards,
+            taps: &taps,
         };
         let (digits_tx, mut digits_rx) = mpsc::channel(32);
         let digits = Keypresses {
@@ -5642,11 +5728,13 @@ mod tests {
         let (encoded, _encoded_rx) = mpsc::channel(1);
         let relay = AtomicBool::new(false);
         let discards = Arc::new(DiscardMeters::default());
+        let taps = Taps::new(Arc::clone(&discards));
         let delivery = Delivery {
             audio: &audio,
             encoded: &encoded,
             relay: &relay,
             discards: &discards,
+            taps: &taps,
         };
         let (digits_tx, _digits_rx) = mpsc::channel(32);
         let arrivals = Arc::new(watch::Sender::new(0));

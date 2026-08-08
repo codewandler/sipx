@@ -26,7 +26,9 @@
 //! **Supported**: `MediaSession` and the RTP/RTCP plumbing under it — binding, symmetric RTP, the
 //! pacing clock, SRTP keyed from SDES, quality statistics — plus [`ice`], whose gathering and
 //! selected-pair driver are consumed by `sipx-call`, and [`dtls`]'s protocol, key-derivation and
-//! handshake surface, which `sipx-call` selects for explicit DTLS-SRTP policy (`M-28`).
+//! handshake surface, which `sipx-call` selects for explicit DTLS-SRTP policy (`M-28`). [`processing`]
+//! is the one call-audio tap, specified in `docs/specs/call-audio-seam.md` (`M-54`); local speech
+//! and deterministic call-audio analysis both ride it rather than adding a second.
 //!
 //! **Experimental**:
 //!
@@ -42,6 +44,7 @@ pub mod conference;
 mod counters;
 pub mod dtls;
 pub mod ice;
+pub mod processing;
 pub mod session;
 
 pub use bridge::Bridge;
@@ -49,6 +52,10 @@ pub use conference::{Conference, ConferenceError};
 pub use counters::MediaDiscardCounts;
 pub use dtls::{Arriving, Handshake, Profile, Role};
 pub use ice::IcePath;
+pub use processing::{
+    AudioDirection, Discontinuity, DiscontinuityKind, PcmFrame, PcmProcessor, Processing,
+    ProcessingError,
+};
 #[cfg(feature = "dtls")]
 pub use session::DtlsStartError;
 pub use session::{
