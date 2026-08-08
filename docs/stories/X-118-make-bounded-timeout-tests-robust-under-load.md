@@ -61,6 +61,14 @@ weakening what they assert.
   timing ones, and needs a different fix — a probe that observes release without competing for the
   port, or one that tolerates losing the race without changing the assertion's meaning.
 
+- 2026-08-08: attempted the port-race half and backed it out. A bounded retry is the right shape —
+  a bind conflict is environmental and the join barrier would still be asserted on every attempt
+  that actually ran — but the four sections of
+  `register::tests::every_exit_joins_the_endpoint_before_the_terminal_record` capture no output, so
+  detecting "the command lost the bind" means restructuring each section to capture its report
+  before it can be retried. That is the story's real work rather than a helper, and a helper with no
+  call sites is dead code that reads as progress. Left unstarted rather than half-mechanised.
+
 ## Notes
 
 - This matters more now: concurrent implementors are the normal working mode, so a load-sensitive

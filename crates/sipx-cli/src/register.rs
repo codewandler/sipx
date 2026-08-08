@@ -173,7 +173,9 @@ pub(crate) async fn run(options: RegisterOptions, format: Format) -> Exit {
                 // budget already spent would refuse the refresh instead of bounding it.
                 let woken = match wake_report(&mut agent, &aor, &attempt).await {
                     Ok(woken) => woken,
-                    Err(error) => return report_failure(format, export, &handle, &error).await,
+                    Err(error) => {
+                        return report_failure(format, export, &handle, &error, &options.aor).await;
+                    }
                 };
                 if !options.keep_alive {
                     return report_joined(format, export, &handle, woken).await;
@@ -187,12 +189,12 @@ pub(crate) async fn run(options: RegisterOptions, format: Format) -> Exit {
             // rather than through `keep_registered`, which would register a second time for the
             // binding this invocation has just recorded.
             let Err(error) = agent.keep_registered_from(lease, attempt.limit).await;
-            report_failure(format, export, &handle, &error).await
+            report_failure(format, export, &handle, &error, &options.aor).await
         }
         Err(error @ sipx_ua::Error::AttemptTimeout { .. }) => {
             report_attempt_timeout(format, export, &handle, &attempt, &aor, &error).await
         }
-        Err(error) => report_failure(format, export, &handle, &error).await,
+        Err(error) => report_failure(format, export, &handle, &error, &options.aor).await,
     }
 }
 
@@ -465,6 +467,7 @@ async fn report_failure(
     export: crate::counters::Export,
     handle: &sipx_transport::Handle,
     error: &sipx_ua::Error,
+    aor: &str,
 ) -> Exit {
     let exit = match error {
         sipx_ua::Error::Rejected { status, .. } => Exit::for_status(*status),
@@ -487,6 +490,10 @@ async fn report_failure(
     let report = crate::destination::with_attempts(
         Report::new()
             .text("status", exit.as_str())
+            // `aor` on every outcome, not only the ones that reached a registrar. A script that
+            // reads it to know *which* registration a record is about had to branch on success
+            // first, which is a shape no consumer should have to learn (`P-28`).
+            .text("aor", aor.to_owned())
             .text("error", error.to_string()),
         match error {
             sipx_ua::Error::ConnectionFailed { attempts, .. } => Some(*attempts),

@@ -3024,6 +3024,57 @@ async fn through_nameserver(
 /// "no such name", a nameserver that never answers, and a name that resolves to a port nothing
 /// accepts are three different problems with three different fixes, and a phone that reports them
 /// identically sends the operator to the wrong one.
+/// Every `register` outcome names the registration it is about (`P-28`).
+///
+/// The success report has always carried `aor`. A failure did not, so a script reading it to tell
+/// one scheduled check from another had to branch on success before it could look — and the record
+/// it most needs to identify is the one that failed.
+#[tokio::test]
+async fn every_register_outcome_names_its_address_of_record() {
+    let registrar = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("the fixture registrar binds");
+    let address = registrar.local_addr().expect("the fixture has an address");
+    let refusing = tokio::spawn(async move {
+        let (request, source) = next_register(&registrar, "a REGISTER to refuse").await;
+        let field = |name: &str| header_line(&request, name);
+        let response = format!(
+            "SIP/2.0 404 Not Found\r\n{}\r\n{}\r\n{}\r\n{}\r\n{}\r\nContent-Length: 0\r\n\r\n",
+            field("Via"),
+            field("To"),
+            field("From"),
+            field("Call-ID"),
+            field("CSeq"),
+        );
+        registrar
+            .send_to(response.as_bytes(), source)
+            .await
+            .expect("refuses");
+    });
+
+    let output = sipx()
+        .args([
+            "register",
+            "sip:alice@example.com",
+            "--target",
+            &address.to_string(),
+            "--timeout",
+            "5",
+            "--json",
+        ])
+        .output()
+        .await
+        .expect("register runs");
+    refusing.await.expect("the fixture task joins");
+
+    let rendered = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        rendered.contains("\"aor\""),
+        "a refused registration does not name its own address of record, so a consumer cannot tell \
+         which scheduled check the record belongs to: {rendered}"
+    );
+}
+
 #[tokio::test]
 async fn a_named_registrar_tells_resolution_failure_timeout_and_connection_failure_apart() {
     let _scenario = process_scenario().await;
