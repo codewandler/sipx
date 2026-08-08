@@ -696,7 +696,7 @@ impl SessionDescription {
     ///
     /// # This is not a round trip
     ///
-    /// [`parse`](crate::parse) builds a *view* over the lines it was given, and this renders that
+    /// [`parse()`](crate::parse()) builds a *view* over the lines it was given, and this renders that
     /// view — it does not reproduce the bytes it came from. A description that arrived on the wire
     /// and is written back out here loses, silently:
     ///
