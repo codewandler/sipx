@@ -3159,6 +3159,64 @@ async fn every_register_outcome_names_its_address_of_record() {
     );
 }
 
+/// Every `dial` outcome names the peer it called (`P-28`).
+///
+/// The same gap as `register`'s `aor`, found by `scripts/check-outcome-parity.py` rather than by
+/// somebody reading the module: the answered record has always carried `peer` and the refused one
+/// carried only `status` and `error`. A script placing calls in a loop had to branch on success
+/// before it could tell which call a record belonged to — and the record it most needs to place is
+/// the one that failed.
+#[tokio::test]
+async fn every_dial_outcome_names_the_peer_it_called() {
+    let _scenario = process_scenario().await;
+    let (handle, mut incoming) = bind(TransportConfig::new(
+        "127.0.0.1:0".parse().expect("a local address"),
+    ))
+    .await
+    .expect("binds");
+    let address = handle.local_addr();
+    let refusing = tokio::spawn(async move {
+        let invite = incoming.recv().await.expect("the INVITE arrives");
+        let refusal = sipx_sip::build::ResponseBuilder::to_request(
+            &invite.request,
+            StatusCode::new(486).expect("valid"),
+            "Busy Here",
+        )
+        .expect("builds")
+        .set_header(
+            &HeaderName::To,
+            bytes::Bytes::from(format!("<sip:bob@{address}>;tag=parity")),
+        )
+        .expect("valid")
+        .build();
+        handle.respond(&invite.key, refusal).await.expect("refuses");
+    });
+
+    let uri = format!("sip:bob@{address}");
+    let output = tokio::time::timeout(
+        Duration::from_secs(10),
+        sipx()
+            .args(["dial", &uri, "--timeout", "5", "--json"])
+            .output(),
+    )
+    .await
+    .expect("the refusal is bounded")
+    .expect("dial runs");
+    refusing.await.expect("the refusing peer finishes");
+
+    let rendered = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(6),
+        "486 is busy, which is the outcome this record has to identify: {rendered}"
+    );
+    assert!(
+        rendered.contains(&format!("\"peer\":\"{uri}\"")),
+        "a refused call does not name the peer it called, so a consumer cannot tell which call the \
+         record belongs to: {rendered}"
+    );
+}
+
 #[tokio::test]
 async fn a_named_registrar_tells_resolution_failure_timeout_and_connection_failure_apart() {
     let _scenario = process_scenario().await;

@@ -215,6 +215,10 @@ jobs:
       # percentage, a threshold appearing in either the checker or the job below, and an exclusion
       # the page claims that the tool never applied.
       - run: python3 scripts/test-coverage-report.py
+      # P-28: the parity checker reads Rust with a text scanner, so a chain shape it stops
+      # understanding makes it report agreement over nothing. Every rule is reversed on a
+      # fabricated crate, and its blind spot is asserted to be counted rather than disclaimed.
+      - run: python3 scripts/test-outcome-parity.py
 
   # X-66. A number, and deliberately nothing else built on it: no threshold, no ratchet, and no
   # failure when it drops. `docs/roadmap.md` rules out a v1 gate built on coverage — a percentage
@@ -353,6 +357,11 @@ jobs:
       # here, so a percentage edited by hand fails rather than shipping. This checks the rendering
       # and never the number — a measurement covering nothing at all passes.
       - run: ./scripts/coverage-report.py --check
+      # P-28: `register` carried `aor` on two of its four outcomes, so a script matching a record
+      # to the check that produced it had to branch on success first. This derives each command's
+      # field set from its report builders and fails when one outcome omits a field a sibling
+      # carries — the class, rather than the one instance that was noticed.
+      - run: ./scripts/check-outcome-parity.py --check
 
   # The documentation site. Built on every push and pull request so a broken link fails review
   # rather than the deployed page; published only from `main`.
