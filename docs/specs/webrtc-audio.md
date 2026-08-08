@@ -92,6 +92,17 @@ section, one ICE component and one cancellation owner equivalent. A remote descr
 one-section `a=group:BUNDLE` and `a=mid`; they add no second component and are ignored. sipx neither
 requires nor emits them.
 
+A remote description MAY likewise carry `a=extmap` and `a=extmap-allow-mixed`, and §9.4's captured
+offer does. **They are tolerated, they grant no authority, and the answer declines every one of them
+by omission.** That omission is the answer rather than an oversight: RFC 8285 §7 makes removing an
+`extmap` from the answer the way an answerer with no desire to receive the extension says so. sipx
+therefore neither refuses a profile over an offered header extension — the identifiers are the
+peer's own and cost this endpoint nothing — nor agrees to one, in either role. It emits no `a=extmap`
+of its own in an offer either, which under RFC 8285 §7 leaves it with no element identifier it is
+permitted to send. [media-runtime.md](media-runtime.md) §5 is the decision this implements and holds
+the argument; that section's safety case depends on this one's empty identifier table, so the two
+change together or not at all.
+
 The description MUST contain:
 
 | Element | Requirement |
@@ -205,6 +216,10 @@ session to G.711 while still claiming this profile.
   browser-audio call required ICE and fails when it cannot use it.
 - No early protected media. RTP, RTCP or DTLS from the provisional SDP address cannot nominate
   itself by arriving first.
+- No locally generated `a=extmap`, in an offer or an answer, and no RFC 8285 element authored by
+  this endpoint. An offered one is tolerated under §4.1 and declined by omission; it is not a
+  `ProfileError`. A peer may still send elements it offered (RFC 8285 §7 permits it), and what
+  becomes of one that reaches a bridge is [media-runtime.md](media-runtime.md) §5.
 
 The call framework's reliable-provisional media APIs are not entry points for this profile. They
 return the typed `Error::DtlsEarlyMedia` before binding a media component or sending an INVITE;
@@ -674,6 +689,10 @@ This contract does not include, and completion MUST NOT imply:
   tolerated only when the description already contains a complete usable candidate set; sipx does
   not promise or accept later candidate delivery in this profile.
 - arbitrary application codecs or optional Opus controls not implemented by `sipx-audio`.
+- negotiated RTP header extensions. No `urn:ietf:params:rtp-hdrext:ssrc-audio-level`, no
+  `sdes:mid`, no send-time or transport-wide feedback extension is agreed to or produced, however
+  many of them an offer carries. §4.1 and §4.5 state how such an offer is answered, and
+  [media-runtime.md](media-runtime.md) §5.4 states what would have to change together to widen this.
 - a general claim of WebRTC compatibility. `M-51` may claim only the exact host or
   server-reflexive audio path its independent proof demonstrates.
 
@@ -685,6 +704,7 @@ an implementation does not widen them by accepting an attribute accidentally.
 | Contract | Owner | Evidence story |
 |---|---|---|
 | SDP grammar/profile validation, with no socket or clock | `sipx-sdp` | `M-46`, `M-49` |
+| offered `a=extmap` tolerated, declined by omission, never emitted | `sipx-sdp` | `M-82` |
 | named policy, offer/answer state and typed refusal | `sipx-call` | `M-49` |
 | `a=rtcp-mux` RTP/SRTCP distinction and setup roles | `sipx-sdp`, `sipx-rtp`, `sipx-media` | `M-46` |
 | one component, queues, nominated-peer binding, DTLS and atomic key install | `sipx-media` | `M-50` |

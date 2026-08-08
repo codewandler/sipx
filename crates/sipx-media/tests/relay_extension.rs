@@ -40,6 +40,15 @@ const ARRIVAL_BOUND: Duration = Duration::from_secs(10);
 /// failure here is about the relay and not about parsing.
 const EXTENSION: [u8; 8] = [0xBE, 0xDE, 0x00, 0x01, 0x10, 0xAA, 0x00, 0x00];
 
+/// The same element data under a **different identifier**, which is what the other leg would have
+/// numbered it (`M-82`).
+///
+/// RFC 8285 §4.2's one-byte form packs an element as `(id << 4) | (len - 1)`, so `0x10` is
+/// identifier 1 over one octet and `0x20` is identifier 2 over the same octet. Only the identifier
+/// differs from [`EXTENSION`], which is what makes a comparison between the two a comparison of
+/// numbering and of nothing else.
+const OTHER_NUMBERING: [u8; 8] = [0xBE, 0xDE, 0x00, 0x01, 0x20, 0xAA, 0x00, 0x00];
+
 /// The same shape with the length word wrong: nine words declared, one carried (`M-85`).
 ///
 /// Only a caller can build this. A relayed extension came through `Packet::decode`, which slices
@@ -58,6 +67,17 @@ fn arriving(sequence: u16) -> Bytes {
 
 /// The same, over a payload the caller chose.
 fn with_extension(sequence: u16, payload: Bytes) -> Bytes {
+    packet(sequence, payload, &EXTENSION)
+}
+
+/// The same, over an extension the caller chose, so a test can give the two legs different
+/// numbering (`M-82`).
+fn numbered(sequence: u16, extension: &'static [u8]) -> Bytes {
+    packet(sequence, Bytes::from_static(&PAYLOAD), extension)
+}
+
+/// One encoded packet from a peer, over both of the things a test here varies.
+fn packet(sequence: u16, payload: Bytes, extension: &'static [u8]) -> Bytes {
     let mut packet = Packet::new(
         Codec::Pcmu.payload_type(),
         sequence,
@@ -65,7 +85,7 @@ fn with_extension(sequence: u16, payload: Bytes) -> Bytes {
         0x0BAD_F00D,
         payload,
     );
-    packet.extension = Some(Bytes::from_static(&EXTENSION));
+    packet.extension = Some(Bytes::from_static(extension));
     packet.encode()
 }
 
@@ -145,6 +165,81 @@ async fn a_bridged_packet_reaches_the_far_side_with_its_extension() {
         "the payload boundary moved, so the extension was written over the media rather than \
          before it"
     );
+
+    bridge.close();
+}
+
+/// The two legs number the same element differently, and the bridge translates neither (`M-82`).
+///
+/// **This pins the decision rather than proving a fix.** It passes on the commit before `M-82` as
+/// well as after it, because `M-82` settled what the bridge already did rather than changing it.
+/// What it stops is the change nobody would notice going in: a later reading of the elements that
+/// renumbers one leg's identifiers into the other's. `docs/specs/media-runtime.md` §5 is the
+/// decision and the argument for it.
+///
+/// The disagreement is the point. Alice's session numbered this element 1 and Bob's numbered it 2,
+/// each for itself under RFC 8285 §7 — and sipx negotiated no `a=extmap` on either leg, so it holds
+/// no mapping that could relate the two numbers and cannot even see that they differ. Each far end
+/// is therefore handed the identifier its own sender wrote, which is the only rule that stays right
+/// for an RFC 3550 §5.3.1 extension whose 16-bit profile field is scoped by the profile rather than
+/// by a session.
+///
+/// Both directions at once, which the single-direction `M-79` test does not reach: a renumbering
+/// bridge would have to get *one* of them wrong.
+#[tokio::test]
+async fn neither_leg_is_renumbered_when_the_two_disagree_about_an_identifier() {
+    let (left, alice, left_addr) = leg().await;
+    let (right, bob, right_addr) = leg().await;
+
+    let bridge = Bridge::connect(Arc::new(left), Arc::new(right));
+    assert!(
+        !bridge.is_transcoding(),
+        "two µ-law legs are passed through, which is the path under test"
+    );
+
+    // A short burst in each direction, for the reason the neighbouring test gives: the relay is a
+    // chain of sockets and tasks, and turning on the very first datagram would assert about
+    // scheduling.
+    for sequence in 1..=4 {
+        alice
+            .send_to(&numbered(sequence, &EXTENSION), left_addr)
+            .await
+            .expect("Alice sends");
+        bob.send_to(&numbered(sequence, &OTHER_NUMBERING), right_addr)
+            .await
+            .expect("Bob sends");
+    }
+
+    let at_bob = next_packet(&bob, "the bridge relayed nothing towards Bob").await;
+    assert_eq!(
+        at_bob.extension.as_deref(),
+        Some(EXTENSION.as_slice()),
+        "Bob was handed an identifier Alice did not write, so the bridge invented a reading of an \
+         element neither leg negotiated a meaning for"
+    );
+    assert_eq!(
+        at_bob.payload.as_ref(),
+        PAYLOAD.as_slice(),
+        "the payload boundary moved on the way to Bob"
+    );
+
+    let at_alice = next_packet(&alice, "the bridge relayed nothing towards Alice").await;
+    assert_eq!(
+        at_alice.extension.as_deref(),
+        Some(OTHER_NUMBERING.as_slice()),
+        "Alice was handed an identifier Bob did not write, so the reverse direction renumbers"
+    );
+    assert_eq!(
+        at_alice.payload.as_ref(),
+        PAYLOAD.as_slice(),
+        "the payload boundary moved on the way to Alice"
+    );
+
+    // The two assertions above are also what says nothing of this endpoint's own rode along: each
+    // extension is exactly its sender's eight octets and nothing more. sipx originated no
+    // `a=extmap` on either leg, so under RFC 8285 §7 it has no identifier it may send, and the
+    // forwarded element being the only element on the packet is why the two numberings never have
+    // to be told apart.
 
     bridge.close();
 }

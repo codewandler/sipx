@@ -26,8 +26,23 @@
 //! session assigns for itself in an SDP `extmap`, so a relay between two sessions that had agreed
 //! *different* numbers would have to renumber — and sipx negotiates no `extmap` at all. There is
 //! therefore no mapping here to translate between, and inventing a reading of the elements in
-//! order to rewrite them would be a guess with a wire effect. Whoever teaches sipx to negotiate
-//! `extmap` has to teach this module's `relay` about it in the same change.
+//! order to rewrite them would be a guess with a wire effect.
+//!
+//! `M-82` settled that rather than leaving it open, and `docs/specs/media-runtime.md` §5 carries
+//! the argument and its limits. Two of its steps decide this module's behaviour. sipx originates
+//! no `a=extmap` on either leg, so under RFC 8285 §7 it has no identifier it may send and a
+//! relayed element is the only element on the outgoing packet — nothing here ever has to tell two
+//! numberings apart. And a far end that negotiated none either ignores the element (RFC 8285 §5
+//! makes the out-of-band mapping the definitive indication an extension is present) or skips the
+//! whole extension by its length word, which is RFC 3550 §5.3.1's stated design goal: the
+//! mechanism "is designed so that the header extension may be ignored by other interoperating
+//! implementations that have not been extended."
+//!
+//! The limit worth carrying at this seam: **forwarding is a decision about meaning and not about
+//! disclosure.** The element crosses two dialogs, so a measurement about one call's endpoint is
+//! delivered to the other call's; §5.3 records why that is accepted. And the day sipx originates
+//! an `a=extmap` on either leg, the first step above fails — so whoever teaches sipx to negotiate
+//! one has to teach this module's `relay` to map identifiers in the same change.
 //!
 //! Three cases carry nothing across, each a decision rather than a gap:
 //!

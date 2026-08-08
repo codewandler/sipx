@@ -301,6 +301,57 @@ fn completed_native_browser_shape_validates_and_answers_with_the_required_inters
         .expect("generated required intersection validates");
 }
 
+/// An offer's `a=extmap:` lines are answered by omitting them, and that omission is the answer
+/// (`M-82`).
+///
+/// **This pins the profile's position rather than proving a fix.** It passes on the commit before
+/// `M-82` as well as after it: the generators have always built an answer out of local facts rather
+/// than by echoing the offer, so no `a=extmap` could reach one. What `M-82` added is the statement
+/// that this is a decision — `docs/specs/webrtc-audio.md` §4.1 and §4.5 — and this test is what
+/// stops it being undone by an implementation that starts echoing attributes it does not act on.
+///
+/// RFC 8285 §7 makes the omission the answerer's way of declining: an answerer with no desire to
+/// receive an extension removes its `extmap` from the answer. So the profile does not refuse the
+/// offer over it — the identifiers are the peer's own and grant nothing here — and it does not
+/// agree to it either.
+///
+/// The offerer half matters more than it looks. Because sipx originates no `a=extmap` anywhere,
+/// RFC 8285 §7's "only extensions that appeared with an identifier in the valid range in SDP
+/// originated by the sender can be sent" leaves sipx with no element of its own to put on a packet.
+/// That empty table on every leg is the precondition for `docs/specs/media-runtime.md` §5's
+/// decision not to translate a bridged identifier.
+#[test]
+fn an_offer_carrying_extmap_is_answered_by_omitting_it_rather_than_by_refusing_it() {
+    assert!(
+        NATIVE_BROWSER_OFFER.contains("a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level\r\n")
+            && NATIVE_BROWSER_OFFER.contains("a=extmap-allow-mixed\r\n"),
+        "the fixture no longer carries the offered extensions this test is about"
+    );
+
+    let offered = parse(NATIVE_BROWSER_OFFER).expect("native offer parses");
+    validate(&offered, BrowserAudioRole::Offerer)
+        .expect("offered header extensions do not cost the peer the profile");
+
+    let answered = answer(&offered, &answer_local()).expect("native offer is answerable");
+    let rendered = answered.to_string_sdp();
+    assert!(
+        !rendered.contains("a=extmap"),
+        "the answer agreed to an element identifier sipx neither implements nor maps:\n{rendered}"
+    );
+    validate_answer(&offered, &answered, SetupCapabilities::both())
+        .expect("an answer that declines every extension is still a complete answer");
+
+    // And nothing sipx authors first offers one, which is what leaves the identifier table empty
+    // on every leg.
+    assert!(
+        !offer(&offer_local())
+            .expect("complete offer")
+            .to_string_sdp()
+            .contains("a=extmap"),
+        "sipx offered an element identifier, so a bridged leg can now collide with one of its own"
+    );
+}
+
 /// A native browser answering O1 retains all five mappings but may advertise trickle, carry the
 /// muxed RTCP placeholder, and rely on RFC 4733's absent-fmtp DTMF default.
 #[test]
