@@ -636,8 +636,32 @@ impl UserAgent {
     /// registrar's grant defines both deadlines: the first attempt starts at `refresh_after`, and
     /// the retry divides what remains before `granted`. A second failure returns rather than
     /// creating an unbounded retry loop.
+    ///
+    /// For a caller that has *already* registered, [`UserAgent::keep_registered_from`] continues
+    /// from the lease it is holding instead of establishing a second one.
     pub async fn keep_registered(&mut self) -> Result<std::convert::Infallible> {
-        let mut lease = self.register().await?;
+        let lease = self.register().await?;
+        self.keep_registered_from(lease, None).await
+    }
+
+    /// Keep a binding that is already recorded, refreshing before `lease` expires.
+    ///
+    /// [`UserAgent::keep_registered`] begins by registering, so a caller that reaches it holding a
+    /// granted lease sends a second REGISTER for a binding the registrar recorded moments earlier:
+    /// one redundant registration per client, which across a fleet is a doubled registration load
+    /// and a sequence number advanced for nothing. This is the entry point for that caller, and
+    /// the refresh schedule from there on is identical.
+    ///
+    /// `budget` bounds each refresh the way [`UserAgent::register_within`] bounds an initial
+    /// attempt; `None` leaves them to the client transaction's own 64·T1 schedule (RFC 3261
+    /// §17.1.2.2). A caller holding a deadline over its first attempt holds one over every attempt
+    /// after it — a refresh is the same exchange with the same registrar — and one left on the
+    /// transaction's schedule can still be waiting when the lease it exists to renew has lapsed.
+    pub async fn keep_registered_from(
+        &mut self,
+        mut lease: Lease,
+        budget: Option<Duration>,
+    ) -> Result<std::convert::Infallible> {
         loop {
             let granted_at = tokio::time::Instant::now();
             tracing::info!(
@@ -646,7 +670,7 @@ impl UserAgent {
                 "registered"
             );
             tokio::time::sleep(lease.refresh_after).await;
-            match self.register().await {
+            match self.refresh(budget).await {
                 Ok(refreshed) => lease = refreshed,
                 Err(first_error) => {
                     // A failed transaction may itself consume most of the safety margin. Count
@@ -666,9 +690,17 @@ impl UserAgent {
                         "registration refresh failed; retrying within the granted lease"
                     );
                     tokio::time::sleep(retry_after).await;
-                    lease = self.register().await?;
+                    lease = self.refresh(budget).await?;
                 }
             }
+        }
+    }
+
+    /// One binding refresh, under whatever deadline the caller stated over its attempts.
+    async fn refresh(&mut self, budget: Option<Duration>) -> Result<Lease> {
+        match budget {
+            Some(budget) => self.register_within(budget).await,
+            None => self.register().await,
         }
     }
 
