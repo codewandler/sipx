@@ -505,6 +505,7 @@ jobs:
         with:
           tool: wasmtime
       - run: ./scripts/check-wasm-kernel.sh
+      - run: ./scripts/check-browser-binding.sh
 
   fixed-sleep:
     name: fixed-sleep rule
