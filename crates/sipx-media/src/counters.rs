@@ -40,6 +40,13 @@ pub struct MediaDiscardCounts {
     /// Frames an attached PCM processor lost under the seam's bounded-queue policy
     /// (`docs/specs/call-audio-seam.md` §6).
     pub processor_frames_lost: u64,
+    /// Decoded frames shed from the application's inbound queue under §4.3's time bound.
+    ///
+    /// The number that says an application is reading slower than the far end is talking. Every
+    /// other counter here describes something the network or a codec did; this one describes the
+    /// application, and it is the one to read before concluding that added delay came from the
+    /// media path.
+    pub inbound_frames_shed: u64,
     /// RTP packets the jitter buffer refused because their play-out slot had already gone.
     ///
     /// The audible failure the buffer exists to prevent, and the one number that says the depth
@@ -83,6 +90,7 @@ impl MediaDiscardCounts {
             self.ice_redundant_candidates,
             self.ice_gathering_foreign_datagrams,
             self.processor_frames_lost,
+            self.inbound_frames_shed,
             self.jitter_late,
             self.jitter_duplicates,
             self.jitter_concealed,
@@ -110,6 +118,7 @@ pub(crate) struct DiscardMeters {
     pub(crate) ice_redundant_candidates: AtomicU64,
     pub(crate) ice_gathering_foreign_datagrams: AtomicU64,
     pub(crate) processor_frames_lost: AtomicU64,
+    pub(crate) inbound_frames_shed: AtomicU64,
     pub(crate) jitter_late: AtomicU64,
     pub(crate) jitter_duplicates: AtomicU64,
     pub(crate) jitter_concealed: AtomicU64,
@@ -139,6 +148,7 @@ impl DiscardMeters {
                 .ice_gathering_foreign_datagrams
                 .load(Ordering::Relaxed),
             processor_frames_lost: self.processor_frames_lost.load(Ordering::Relaxed),
+            inbound_frames_shed: self.inbound_frames_shed.load(Ordering::Relaxed),
             jitter_late: self.jitter_late.load(Ordering::Relaxed),
             jitter_duplicates: self.jitter_duplicates.load(Ordering::Relaxed),
             jitter_concealed: self.jitter_concealed.load(Ordering::Relaxed),
