@@ -161,7 +161,7 @@ playback worker. A discard during gathering therefore remains visible after the 
 session rather than being reset to zero at the ownership transition.
 
 The snapshot counts each consequence separately: codec encode and decode failures; SRTP and SRTCP
-unprotect failures; RTP packets SRTP refused to protect; caller-supplied header extensions that
+unprotect failures; caller-supplied header extensions that
 could not be written onto the packet they were handed with; packets from a foreign SSRC; completed
 DTMF digits refused by the
 application queue; unknown RTP payload types; playback completion reports with no listener; ICE
@@ -175,33 +175,59 @@ An ICE output naming no bound socket has no counter: it is structurally unreacha
 base the agent can name was created from the exact socket vector the driver owns. The site carries
 that reason instead of a field permanently stuck at zero.
 
-**The SRTCP protect-error branch has no counter; SRTP's does, and the difference is where the bytes
-come from.** Both fail only on a header shorter than the transform can read. `Rtcp::encode_compound`
-builds every octet of a report out of this session's own state — SSRC, CNAME, counters — and always
-emits at least the eight octets `protect_rtcp` requires, so nothing a caller or a peer does reaches
-that branch; it carries its reason rather than a field permanently stuck at zero.
+**Neither protect-error branch has a counter, and since `M-85` the reason is the same one.** Both
+`protect` and `protect_rtcp` fail on a header the transform cannot read, and neither encoder in
+front of them can build one. `Rtcp::encode_compound` builds every octet of a report out of this
+session's own state — SSRC, CNAME, counters — and always emits at least the eight octets
+`protect_rtcp` requires. `Packet::encode` always emits the twelve-octet fixed header, caps the CSRC
+count at the fifteen its nibble can name, and writes an extension only when its length word agrees
+with the bytes behind it (§4.4). Each site carries that reason rather than a field permanently
+stuck at zero. Both still drop the packet — sending it in the clear would defeat the encryption the
+far end negotiated. Authentication failures on *unprotect* are reachable from network input and are
+counted separately.
 
-`Packet::encode` no longer supports the same claim, and this spec asserted it until `M-81`. `M-79`
-made `Encoded::extension` public, which is enough: an extension whose embedded length word claims
-more 32-bit words than it carries is written verbatim with the X bit set, the header SRTP then
-computes is longer than the whole packet, and `protect` refuses it. The packet MUST be dropped —
-sending it in the clear would defeat the encryption the far end negotiated — and the drop MUST
-increment `srtp_protect_failures`. It is caller-induced rather than attacker-induced: a relayed
-extension was bounds-checked against its packet by `Packet::decode`, and counting this weakens
-nothing about what SRTP authenticates or encrypts. Authentication failures on unprotect are
-reachable from network input and are counted separately.
+**That is `M-90`'s decision, and it reverses `M-81`'s.** `M-79` made `Encoded::extension` public
+and nothing validated it: an extension whose embedded length word claimed more 32-bit words than it
+carried was written verbatim with the X bit set, the header SRTP computed was longer than the whole
+packet, `protect` refused it, and the packet was dropped with nothing counting it. `M-81` published
+`srtp_protect_failures` for that drop and was right to: it was reachable from a caller and it cost
+the call a packet. `M-85` then closed the route at `Packet::encode`, one boundary earlier, where
+the extension can be dropped and the payload still sent (§4.4). What was left was a published field
+nothing could move — the shape the paragraphs above and this one reject — so the field and its
+increment were removed before `1.0.0` froze them.
 
-**`M-85` then closed that route rather than only counting it** (§4.4). `Packet::encode` writes no
-extension whose length word disagrees with its bytes, so no packet it produces has a header the
-transform cannot read, and `srtp_protect_failures` should now read zero for as long as that holds.
-The counter and its increment stay: it is published; `protect` has cipher-level failure paths no
-argument in this document closes; and a value above zero is now a precise statement — something
-inside this crate handed the transform a packet it could not read.
+**What an operator reads instead is `malformed_extensions_dropped`**: the same caller mistake, at
+the boundary that keeps the media. Zero there means no caller on this session built an extension
+that disagreed with its own length word; there is no second number for the same mistake, and never
+a number for the transform refusing a packet. If the log line `dropping a packet SRTP could not
+protect` ever appears, it is a defect inside this stack rather than anything a peer or an
+application did, and it should be filed as one.
 
-The lesson is about the shape of the excuse rather than about SRTP. "Unreachable because of what
-the caller can be" is a claim with an expiry date, and publishing one field made this one false
-without touching either site. Where a reason rests on the absence of a public constructor, whoever
-adds one owns the reason.
+`protect` was re-examined as a function rather than as a branch before the field went, because
+"unreachable" had been a claim about the packet layer and not about the transform. It fails four
+ways and a session can produce none of them. Two are the header refusals above. The third is key
+material of the wrong length, guarded inside `keystream` and `aead_seal` because a length check in
+another function is not a guarantee those may rely on — but `SrtpContext::new` measures the master
+key and salt against the profile and derives the session key and salt at the profile's own lengths,
+so the guard has nothing to catch. The fourth is an AEAD plaintext over RFC 7714 §10's `P_MAX` of
+2^36 - 32 octets, four orders of magnitude past any datagram. There is no key to exhaust on the way
+either: RFC 3711 §9.2's master-key packet lifetime is not enforced here and `SrtpError` carries no
+variant for it, so a long call reaches no limit that would make this branch fire. Any of the four
+firing would be a defect in this stack, not an event on the call.
+
+**The lesson is about the shape of the excuse rather than about SRTP, and it cuts both ways.**
+"Unreachable because of what the caller can be" is a claim with an expiry date: publishing one
+field made `M-81`'s version of it false without either site changing a line. So the reason a branch
+carries no counter is a **test** here and not a paragraph —
+`crates/sipx-rtp/tests/srtp_protect_header.rs` protects every packet `Packet::encode` can be made
+to produce, over the adversarial extensions and over-long CSRC lists a caller can reach it with,
+and fails the day one of them is refused. Whoever makes the branch reachable owns restoring its
+counter, and `MediaDiscardCounts` is exhaustive, so restoring one after `1.0.0` costs a major
+release. That asymmetry is real and was weighed against keeping the field as insurance; it lost,
+because the same insurance argument would keep a field for every branch that might one day become
+reachable, and a snapshot whose fields cannot be read as facts about the call is worth less than
+one field's worth of foresight. It is also why this was settled before the freeze rather than
+after it.
 
 Every discard site MUST either increment exactly one counter or carry a `// discard: <reason>` on
 the site explaining why no counter can truthfully reach it. A source-enumeration test enforces that
@@ -376,10 +402,11 @@ and this measured behaviour is the record. One refusal at `Packet::encode` cover
 is the main reason it sits there rather than in the SRTP branch.
 
 `malformed_extensions_dropped` is the only field in the snapshot that counts **metadata** rather
-than media, so a rise in it — and in `total()` — is not evidence that any audio was lost. Like
-`srtp_protect_failures` it describes the application on this side: an extension that arrived over
-the network was bounds-checked when its packet was decoded, so only an `Encoded` built by hand can
-move it.
+than media, so a rise in it — and in `total()` — is not evidence that any audio was lost. It
+describes the application on this side: an extension that arrived over the network was
+bounds-checked when its packet was decoded, so only an `Encoded` built by hand can move it. Since
+`M-90` it is also the only field that moves for this mistake — the SRTP protect failure `M-81`
+counted one boundary later is unreachable from here and no longer published (§4).
 
 ## 5. Test vectors
 
@@ -407,9 +434,12 @@ move it.
 | D2 | one RTP packet using neither the negotiated nor a known static payload type | no audio is delivered and `unknown_payload_type = 1` |
 | D3 | one packet after a different SSRC has established the stream | no stream state moves and `foreign_ssrc = 1` |
 | D4 | a source discard is added without a nearby counter increment or `// discard:` reason | the media discard enumeration test fails with its file and line |
-| D16 | `send_encoded` on each SRTP profile with an extension declaring nine words over eight octets, on a 160-octet payload | no window of 16 identical payload octets anywhere in the datagram; the far end decrypts the full 160-octet payload and no extension; `malformed_extensions_dropped = 1` and `srtp_protect_failures = 0` |
+| D16 | `send_encoded` on each SRTP profile with an extension declaring nine words over eight octets, on a 160-octet payload | no window of 16 identical payload octets anywhere in the datagram; the far end decrypts the full 160-octet payload and no extension; the whole snapshot is `malformed_extensions_dropped = 1` and every other published field zero |
 | D17 | D16 on a plain leg | the packet arrives with its full payload and no extension; `malformed_extensions_dropped = 1` |
 | D18 | D16 with the length word declaring 255 words instead — `M-81`'s fixture, which runs past the packet | the same result as D16: the packet is no longer lost, and the transform is never handed it |
+| D19 | every packet `Packet::encode` produces from an adversarial extension or a CSRC list longer than the count nibble, protected under each SRTP profile | `protect` accepts all of them; a refusal means the send loop's protect-error branch is reachable from a caller again and §4 owes it a counter |
+| D20 | a hand-assembled packet whose extension length word runs past its end, and packets of 0 to 11 octets, protected under each profile | `SrtpError::TooShort` in every case — the refusal `Packet::encode` keeps out of reach still exists |
+| D21 | a `MediaDiscardCounts` with one distinct bit set in each published field | `total()` is the saturated pattern over exactly those bits: every field summed once, none omitted and none summed twice |
 | D10 | G.711 at 20 ms, depth 1; sequences 1, 2 and 4 arrive | four packets of audio are delivered, the third being silence, and `jitter_concealed = 1` |
 | D11 | G.711 at 20 ms, depth 1; sequences 1 and 400 arrive | twelve packets of audio — two carried, ten concealed — and `jitter_concealed = 10`; the rest of the gap is reported only as RFC 3550 loss |
 | D12 | depth 2; sequences 1, 2, 3, then 1 again and 3 again | `jitter_late = 1` and `jitter_duplicates = 1`; neither copy is played |
