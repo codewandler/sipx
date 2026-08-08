@@ -62,20 +62,26 @@ impl Attempt {
     pub(crate) fn limit(&self) -> Duration {
         self.limit.unwrap_or_default()
     }
+}
 
-    /// One invitation's options, funded from what the budget has left right now.
-    ///
-    /// `None` is a budget with nothing left in it, which ends a candidate pass rather than
-    /// starting an invitation nothing would bound. The pass is where a per-phase deadline is
-    /// easiest to miss: handing each candidate the *stated* value turns a name with three
-    /// addresses into three times the number the caller typed, and `register`'s pass is funded
-    /// this way inside the library for exactly that reason (`T-41`).
-    pub(crate) fn fund(&self, options: &sipx_call::DialOptions) -> Option<sipx_call::DialOptions> {
-        match self.remaining() {
-            Some(remaining) if remaining.is_zero() => None,
-            Some(remaining) => Some(options.clone().with_timeout(remaining)),
-            None => Some(options.clone()),
-        }
+/// One candidate's invitation options, bounded by what the serial pass has left for it.
+///
+/// The pass is where a per-phase deadline is easiest to miss: handing each candidate the *stated*
+/// value turns a name with three addresses into three times the number the caller typed, and
+/// `register`'s pass is funded this way inside the library for exactly that reason (`T-41`).
+///
+/// The remainder is handed in rather than read from an [`Attempt`] here, because
+/// `sipx_transport::destination::walk` owns the clock over the pass: it subtracts what the earlier
+/// candidates spent and refuses to start one there is nothing left for, so a second reading beside
+/// it would be a second accounting of the same budget (`P-29`). `None` is a caller that stated no
+/// deadline, which leaves each candidate its own expiry.
+pub(crate) fn funded(
+    options: &sipx_call::DialOptions,
+    remaining: Option<Duration>,
+) -> sipx_call::DialOptions {
+    match remaining {
+        Some(remaining) => options.clone().with_timeout(remaining),
+        None => options.clone(),
     }
 }
 
@@ -146,38 +152,35 @@ mod tests {
         );
     }
 
-    /// The candidate pass is funded the same way, and an empty budget ends it rather than
-    /// producing an invitation nothing would bound.
+    /// The candidate pass is funded the same way: each candidate is bounded by what the pass has
+    /// left when it is tried, and a caller that stated no deadline still gets none.
+    ///
+    /// Whether a spent budget starts a further candidate at all is the pass's question rather than
+    /// this module's — `sipx_transport::destination::walk` ends with `Unreached::Expired` before it
+    /// calls back — which is why nothing here has to describe a remainder of zero.
     #[test]
-    fn a_candidate_is_funded_from_the_remainder_and_an_empty_budget_funds_none() {
+    fn a_candidate_is_funded_from_the_remainder_the_pass_has_left() {
         let options = sipx_call::DialOptions::new(
             "<sip:sipx@127.0.0.1>",
             std::net::IpAddr::from([127, 0, 0, 1]),
         );
 
         let attempt = running_for(Duration::from_secs(2), Duration::from_secs(5));
-        let funded = attempt
-            .fund(&options)
-            .expect("a budget with something left");
-        let timeout = funded.timeout.expect("the candidate is bounded");
+        let bounded = funded(&options, attempt.remaining());
+        let timeout = bounded.timeout.expect("the candidate is bounded");
         assert!(
             timeout <= Duration::from_secs(3) && timeout > Duration::from_millis(2_900),
             "each candidate is bounded by the remainder, not by the stated deadline: {timeout:?}"
         );
 
         assert!(
-            running_for(Duration::from_secs(6), Duration::from_secs(5))
-                .fund(&options)
-                .is_none(),
-            "a spent budget funds no further candidate"
-        );
-        assert!(
-            running_for(Duration::from_secs(6), Duration::ZERO)
-                .fund(&options)
-                .expect("no deadline was stated")
-                .timeout
-                .is_none(),
-            "and a caller that stated no deadline still gets none"
+            funded(
+                &options,
+                running_for(Duration::from_secs(6), Duration::ZERO).remaining()
+            )
+            .timeout
+            .is_none(),
+            "a caller that stated no deadline still gets none"
         );
     }
 }

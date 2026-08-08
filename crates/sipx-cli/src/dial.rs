@@ -201,10 +201,9 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
         .await
         {
             Ok(dialing) => dialing,
-            Err(Unreachable {
-                error: sipx_call::Error::Cancelled(cancellation),
-                ..
-            }) if !cancellation.timed_out => {
+            Err(crate::destination::Unreached::Answered(sipx_call::Error::Cancelled(
+                cancellation,
+            ))) if !cancellation.timed_out => {
                 return report_pending_interrupt(
                     format,
                     export,
@@ -217,12 +216,13 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
                 .await;
             }
             Err(failure) => {
+                let (error, attempts) = unreached(failure);
                 return report_failure(
                     format,
                     export,
                     &handle,
-                    &failure.error,
-                    failure.attempts(),
+                    &error,
+                    attempts,
                     &attempt,
                     &mut progress,
                 )
@@ -330,10 +330,9 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
         .await
         {
             Ok(call) => call,
-            Err(Unreachable {
-                error: sipx_call::Error::Cancelled(cancellation),
-                ..
-            }) if !cancellation.timed_out => {
+            Err(crate::destination::Unreached::Answered(sipx_call::Error::Cancelled(
+                cancellation,
+            ))) if !cancellation.timed_out => {
                 return report_pending_interrupt(
                     format,
                     export,
@@ -346,12 +345,13 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
                 .await;
             }
             Err(failure) => {
+                let (error, attempts) = unreached(failure);
                 return report_failure(
                     format,
                     export,
                     &handle,
-                    &failure.error,
-                    failure.attempts(),
+                    &error,
+                    attempts,
                     &attempt,
                     &mut progress,
                 )
@@ -509,83 +509,101 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
 /// what it attempted is the caller's to report. `sipx-ua` carries the same pair in
 /// `Error::ConnectionFailed` for the same reason from the other side: there the pass *is* the
 /// library's.
-struct Unreachable {
-    error: sipx_call::Error,
-    attempts: crate::destination::Attempts,
-}
+type Unreachable = crate::destination::Unreached<sipx_call::Error>;
 
-impl Unreachable {
-    /// What the report says about the pass, if the failure came from walking one at all.
-    ///
-    /// A refusal or a response deadline stopped the pass on its first candidate and is a statement
-    /// about the peer that answered, not about how many addresses the name has; counting those
-    /// would put a number beside a failure the number does not describe.
-    fn attempts(&self) -> Option<crate::destination::Attempts> {
-        matches!(self.error, sipx_call::Error::Transport(_)).then_some(self.attempts)
+/// The interrupt one pass hands to each candidate in turn.
+///
+/// The shared pass takes an `FnMut`, so anything the per-candidate future borrows has to outlive
+/// the closure rather than live inside it — and this is a `Pin<&mut dyn Future>` that can only be
+/// reborrowed by whoever holds it. A fresh `Stop::wait()` per candidate would avoid the borrow and
+/// lose the thing it exists for: `tokio`'s signal streams are not retroactive, so a SIGINT
+/// delivered between two candidates would be observed by neither. The lock never contends —
+/// `walk` finishes one candidate before starting the next — so this is a reborrow point and not
+/// synchronisation.
+type Interrupt<'a> = tokio::sync::Mutex<Pin<&'a mut (dyn Future<Output = ()> + Send)>>;
+
+/// What one candidate's outcome tells the pass to do next.
+///
+/// Only a concrete transport failure moves to the next RFC 3263 candidate. SIP refusals and
+/// response deadlines belong to the transaction that was sent, are the far end speaking for the
+/// name every address stands for, and are never rewritten as routing retries.
+fn attempted<T>(
+    outcome: Result<T, sipx_call::Error>,
+) -> crate::destination::Attempted<T, sipx_call::Error> {
+    match outcome {
+        Ok(reached) => crate::destination::Attempted::Reached(reached),
+        Err(error @ sipx_call::Error::Transport(_)) => {
+            crate::destination::Attempted::Unreachable(error)
+        }
+        Err(error) => crate::destination::Attempted::Answered(error),
     }
 }
 
-/// Try only concrete transport failures on the next RFC 3263 candidate. SIP refusals and response
-/// deadlines belong to the transaction that was sent and are never rewritten as routing retries.
+/// The error and pass depth a failed walk reports.
+///
+/// `Expired` is a deadline and not a statement about the addresses it never reached, so it exits
+/// the way `register`'s and `peers`' expired passes do — as "nothing answered in time" — while
+/// still carrying how far it got. The counts are absent, never zero, for the two endings no pass
+/// produced: an empty list, and an answer from the far end.
+fn unreached(outcome: Unreachable) -> (sipx_call::Error, Option<crate::destination::Attempts>) {
+    let attempts = outcome.attempts();
+    let error = match outcome {
+        crate::destination::Unreached::Nothing | crate::destination::Unreached::Expired { .. } => {
+            sipx_call::Error::NoResponse
+        }
+        crate::destination::Unreached::Unreachable { last, .. }
+        | crate::destination::Unreached::Answered(last) => last,
+    };
+    (error, attempts)
+}
+
+/// Walk the candidates for a confirmed call, under the budget the whole attempt has left.
 async fn dial_candidates(
     handle: &sipx_transport::Handle,
     candidates: &[sipx_transport::Target],
     to: &Uri,
     options: &sipx_call::DialOptions,
     attempt: &crate::budget::Attempt,
-    mut interrupted: Pin<&mut (dyn Future<Output = ()> + Send)>,
+    interrupted: Pin<&mut (dyn Future<Output = ()> + Send)>,
 ) -> Result<(Call, sipx_transport::Target), Unreachable> {
-    let mut attempts = crate::destination::Attempts::over(candidates.len());
-    let mut last_transport = None;
-    for target in candidates.iter().take(crate::destination::MAX_ATTEMPTS) {
-        let Some(funded) = attempt.fund(options) else {
-            break;
-        };
-        // Counted after the budget check, so `candidates_attempted` stays what it promises: how
-        // many were tried, never how many there were. A pass a deadline ended early leaves
-        // candidates it never reached, and counting those would rule out addresses nothing ruled
-        // out.
-        attempts.attempt();
-        match sipx_call::dial_until(handle, target.clone(), to, &funded, interrupted.as_mut()).await
-        {
-            Ok(call) => return Ok((call, target.clone())),
-            Err(error @ sipx_call::Error::Transport(_)) => last_transport = Some(error),
-            Err(error) => return Err(Unreachable { error, attempts }),
+    let interrupt: Interrupt<'_> = tokio::sync::Mutex::new(interrupted);
+    crate::destination::walk(candidates, attempt.remaining(), |target, remaining| {
+        let funded = crate::budget::funded(options, remaining);
+        let target = target.clone();
+        let interrupt = &interrupt;
+        async move {
+            let mut stop = interrupt.lock().await;
+            let placed =
+                sipx_call::dial_until(handle, target.clone(), to, &funded, stop.as_mut()).await;
+            attempted(placed.map(|call| (call, target)))
         }
-    }
-    Err(Unreachable {
-        error: last_transport.unwrap_or(sipx_call::Error::NoResponse),
-        attempts,
     })
+    .await
 }
 
+/// The same walk for an early-media call, which reaches an early dialog rather than a confirmed one.
 async fn dial_early_candidates(
     handle: &sipx_transport::Handle,
     candidates: &[sipx_transport::Target],
     to: &Uri,
     options: &sipx_call::DialOptions,
     attempt: &crate::budget::Attempt,
-    mut interrupted: Pin<&mut (dyn Future<Output = ()> + Send)>,
+    interrupted: Pin<&mut (dyn Future<Output = ()> + Send)>,
 ) -> Result<(sipx_call::Dialing, sipx_transport::Target), Unreachable> {
-    let mut attempts = crate::destination::Attempts::over(candidates.len());
-    let mut last_transport = None;
-    for target in candidates.iter().take(crate::destination::MAX_ATTEMPTS) {
-        let Some(funded) = attempt.fund(options) else {
-            break;
-        };
-        attempts.attempt();
-        match sipx_call::dial_early_until(handle, target.clone(), to, &funded, interrupted.as_mut())
-            .await
-        {
-            Ok(dialing) => return Ok((dialing, target.clone())),
-            Err(error @ sipx_call::Error::Transport(_)) => last_transport = Some(error),
-            Err(error) => return Err(Unreachable { error, attempts }),
+    let interrupt: Interrupt<'_> = tokio::sync::Mutex::new(interrupted);
+    crate::destination::walk(candidates, attempt.remaining(), |target, remaining| {
+        let funded = crate::budget::funded(options, remaining);
+        let target = target.clone();
+        let interrupt = &interrupt;
+        async move {
+            let mut stop = interrupt.lock().await;
+            let placed =
+                sipx_call::dial_early_until(handle, target.clone(), to, &funded, stop.as_mut())
+                    .await;
+            attempted(placed.map(|dialing| (dialing, target)))
         }
-    }
-    Err(Unreachable {
-        error: last_transport.unwrap_or(sipx_call::Error::NoResponse),
-        attempts,
     })
+    .await
 }
 
 /// Play, send digits and record for the duration of the call.

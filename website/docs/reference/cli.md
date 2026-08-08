@@ -342,6 +342,21 @@ signal otherwise. A run that reaches a configured bound is `completed`; a cleanl
 stop is `interrupted`. An internal worker or media error is `failed`/exit 1 and retains its
 actionable reason; it is never relabeled as an operator interruption.
 
+A named target with several addresses behind it is walked in order, one at a time, until one
+accepts — the same serial pass `dial`, `register` and `peers` make, under `--timeout` as the bound
+over all of a call's addresses together rather than each. When calls fail to connect, the summary
+says how far the deepest of those passes got, in the same two fields the other commands use:
+
+| Field | Meaning |
+|---|---|
+| `candidates_attempted` | How many candidates the deepest failed pass tried, in order |
+| `candidates_resolved` | How many resolution produced, attempted or not |
+
+Every admitted call walks the same resolved list, so the deepest pass is what answers "was every
+address tried?"; equal numbers mean nothing behind that name accepted. Both are `null` — never zero
+— for a run in which no call's pass ended without reaching something, because zero would describe a
+pass that ran and got nowhere.
+
 ## `sipx load-responder`
 
 Answer a finite, machine-driven signalling load:
@@ -602,6 +617,13 @@ correlated `scenario.command.refused` events without corrupting later frames. Th
 a later command succeeded. A clean empty stream is an explicit completed no-op. Duplicate IDs are
 refused, and each ID is bounded to 128 UTF-8 bytes.
 
+A named `dial` target with several addresses is walked in order under that frame's own
+`timeout_ms`, one at a time, until one accepts — the same serial pass the other outbound commands
+make. A refusal that came from such a pass carries `candidates_attempted` and `candidates_resolved`
+beside its `message`, with the meanings given for `dial` above, so a driver that scripts both reads
+one vocabulary. Refusals no pass produced — a malformed frame, a name that did not resolve, a call
+the far end declined — carry neither.
+
 ## Exit codes
 
 Scripts branch on the exit code, not on parsing prose:
@@ -646,8 +668,8 @@ scenario details extend the `event` object and do not define a second envelope.
 | Contract | Producer | Required structural fields |
 |---|---|---|
 | `sipx.devices.v1` | `device` | `schema`, `devices`, `id`, `name`, `input`, `output` |
-| `sipx.load.v1` | `load` | `schema`, `status`, `stop_signal`, `reason`, `mode`, `seed`, `target`, `limits`, `rate`, `concurrency`, `calls`, `duration_ms`, `call_duration_ms`, `setup_timeout_ms`, `cleanup_ms`, `outcomes`, `attempted`, `connected`, `rejected`, `timed_out`, `failed`, `peak_concurrency`, `response_codes`, `setup_ms`, `p50`, `p95`, `p99`, `media`, `snapshots`, `packets_lost`, `mean_loss`, `mean_jitter_ms`, `mean_mos` |
+| `sipx.load.v1` | `load` | `schema`, `status`, `stop_signal`, `reason`, `mode`, `seed`, `target`, `candidates_attempted`, `candidates_resolved`, `limits`, `rate`, `concurrency`, `calls`, `duration_ms`, `call_duration_ms`, `setup_timeout_ms`, `cleanup_ms`, `outcomes`, `attempted`, `connected`, `rejected`, `timed_out`, `failed`, `peak_concurrency`, `response_codes`, `setup_ms`, `p50`, `p95`, `p99`, `media`, `snapshots`, `packets_lost`, `mean_loss`, `mean_jitter_ms`, `mean_mos` |
 | `sipx.comparative-load.ready.v1` | `load_responder_readiness` | `active`, `address`, `events`, `limits`, `pid`, `role`, `schema`, `stderr_bytes`, `stdout_bytes`, `transport` |
 | `sipx.load-responder.v1` | `load_responder` | `active_dialogs`, `active_high_water`, `admitted`, `calls`, `cancelled`, `cleanup_ms`, `completed`, `count`, `counts`, `dialog_duration_ms`, `dispatcher_routes`, `duration_ms`, `endpoint_transactions`, `established`, `failed`, `invalid_messages`, `invitations`, `latency_ms`, `limits`, `max_active`, `maximum`, `mode`, `owned_tasks`, `p50`, `p95`, `p99`, `post_drain`, `reason`, `rejected`, `responses`, `schema`, `seed`, `setup`, `status`, `stop_signal`, `teardown` |
-| `sipx.app.v1` | `scenario` | `contract`, `seq`, `at`, `call`, `event`, `id`, `leg`, `direction`, `state`, `from`, `to`, `headers`, `media`, `encrypted`, `on_hold`, `muted`, `legs`, `bridged`, `tags`, `type`, `command`, `message` |
+| `sipx.app.v1` | `scenario` | `contract`, `seq`, `at`, `call`, `event`, `id`, `leg`, `direction`, `state`, `from`, `to`, `headers`, `media`, `encrypted`, `on_hold`, `muted`, `legs`, `bridged`, `tags`, `type`, `command`, `message`, `candidates_attempted`, `candidates_resolved` |
 <!-- END cli-json-contracts -->

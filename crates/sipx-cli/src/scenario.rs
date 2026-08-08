@@ -180,14 +180,18 @@ impl Actor {
                         return self.finish_stream().await;
                     }
                 }
-                Err(message) => self.refuse(Some(&id), &message),
+                Err(refusal) => self.refused(Some(&id), &refusal),
             }
         }
     }
 
     fn refuse(&mut self, id: Option<&str>, message: &str) {
+        self.refused(id, &Refusal::stated(message));
+    }
+
+    fn refused(&mut self, id: Option<&str>, refusal: &Refusal) {
         self.stream_failed = true;
-        self.output.error(&self.snapshot, id, message);
+        self.output.error(&self.snapshot, id, refusal);
     }
 
     async fn finish_stream(&mut self) -> Exit {
@@ -204,7 +208,7 @@ impl Actor {
         }
     }
 
-    async fn command(&mut self, command: &str, value: &Value) -> Result<bool, String> {
+    async fn command(&mut self, command: &str, value: &Value) -> Result<bool, Refusal> {
         match command {
             "dial" => self.dial(value).await?,
             "accept" => self.accept().await?,
@@ -220,29 +224,33 @@ impl Actor {
             "hangup" => self.hangup().await?,
             "wait_for" => self.wait_for(value).await?,
             "shutdown" => return Ok(true),
-            other => return Err(format!("unknown command: {other}")),
+            other => return Err(Refusal::stated(format!("unknown command: {other}"))),
         }
         Ok(false)
     }
 
-    async fn dial(&mut self, value: &Value) -> Result<(), String> {
+    async fn dial(&mut self, value: &Value) -> Result<(), Refusal> {
         if self.call.is_some() || self.pending.is_some() {
-            return Err("a call or invitation is already active".to_owned());
+            return Err(Refusal::stated("a call or invitation is already active"));
         }
         let target_text = match (
             optional_non_empty_string(value, "uri")?,
             optional_non_empty_string(value, "target")?,
         ) {
             (Some(_), Some(_)) => {
-                return Err("dial.uri and dial.target cannot both be present".to_owned());
+                return Err(Refusal::stated(
+                    "dial.uri and dial.target cannot both be present",
+                ));
             }
             (Some(uri), None) | (None, Some(uri)) => uri,
-            (None, None) => return Err("uri must be a non-empty string".to_owned()),
+            (None, None) => return Err(Refusal::stated("uri must be a non-empty string")),
         };
         let to = Uri::parse(Bytes::from(target_text.to_owned()))
             .map_err(|_| format!("not a SIP URI: {target_text}"))?;
         if to.scheme().is_secure() && !self.transport.kind().is_secure() {
-            return Err("a sips: target requires tls or wss; no downgrade is permitted".to_owned());
+            return Err(Refusal::stated(
+                "a sips: target requires tls or wss; no downgrade is permitted",
+            ));
         }
         // Read before the lookup, because the lookup is funded from it: this command's own
         // deadline, or the process default when the frame does not carry one. `P-29` — every phase
@@ -265,9 +273,9 @@ impl Actor {
             .map_err(|error| error.to_string())?
             .clone();
         if attempt.spent() {
-            return Err(format!(
+            return Err(Refusal::stated(format!(
                 "the {timeout:?} deadline was spent finding the target; no invitation was placed"
-            ));
+            )));
         }
         let target_addr = target.addr;
         let media_address: IpAddr =
@@ -293,27 +301,28 @@ impl Actor {
                 options = options.with_header(crate::header::parse(raw)?);
             }
         }
-        let mut last_transport = None;
-        let mut connected = None;
-        for candidate in candidates.iter().take(crate::destination::MAX_ATTEMPTS) {
-            let Some(options) = attempt.fund(&options) else {
-                break;
-            };
-            match sipx_call::dial(&self.handle, candidate.clone(), &to, &options).await {
-                Ok(call) => {
-                    connected = Some(call);
-                    break;
+        // `P-31`'s serial pass, taken from the library rather than written a fifth time. What stays
+        // this command's is the classification below — only a transport failure is this address's
+        // and moves to the next; anything the far end says is the name's answer — and the budget
+        // the pass is funded from, which is the frame's own and not a copy of it per address.
+        let handle = &self.handle;
+        let uri = &to;
+        let outcome =
+            crate::destination::walk(&candidates, attempt.remaining(), |candidate, remaining| {
+                let funded = crate::budget::funded(&options, remaining);
+                let candidate = candidate.clone();
+                async move {
+                    match sipx_call::dial(handle, candidate, uri, &funded).await {
+                        Ok(call) => crate::destination::Attempted::Reached(call),
+                        Err(error @ sipx_call::Error::Transport(_)) => {
+                            crate::destination::Attempted::Unreachable(error)
+                        }
+                        Err(error) => crate::destination::Attempted::Answered(error),
+                    }
                 }
-                Err(error @ sipx_call::Error::Transport(_)) => last_transport = Some(error),
-                Err(error) => return Err(error.to_string()),
-            }
-        }
-        let mut call = connected.ok_or_else(|| {
-            last_transport.map_or_else(
-                || "no target candidate was attempted".to_owned(),
-                |error| error.to_string(),
-            )
-        })?;
+            })
+            .await;
+        let mut call = outcome.map_err(|unreached| unreached_dial(unreached, timeout))?;
         self.events = call.events();
         self.snapshot = Snapshot::outbound(
             format!("scenario-{}", self.next_call),
@@ -834,6 +843,57 @@ impl Snapshot {
     }
 }
 
+/// Turn a `dial` pass that reached nothing into the refusal the driver reads.
+///
+/// `timeout` is the frame's own deadline, restated as the caller gave it: an expired pass is a fact
+/// about that budget and not about the addresses it never reached, so it is named as one rather
+/// than reported as the last address's refusal. The counts are absent, never zero, for the two
+/// endings no pass produced — an empty list, and an answer from the far end.
+fn unreached_dial(
+    outcome: crate::destination::Unreached<sipx_call::Error>,
+    timeout: Duration,
+) -> Refusal {
+    let attempts = outcome.attempts();
+    let message = match outcome {
+        // `first` above already refused an empty list, so nothing reaches this today.
+        crate::destination::Unreached::Nothing => "no target candidate was attempted".to_owned(),
+        crate::destination::Unreached::Expired { .. } => {
+            format!("the {timeout:?} deadline was spent before any address of the target answered")
+        }
+        crate::destination::Unreached::Unreachable { last, .. }
+        | crate::destination::Unreached::Answered(last) => last.to_string(),
+    };
+    Refusal { message, attempts }
+}
+
+/// Why one command was refused, and how far a candidate pass got when one produced the refusal.
+///
+/// Every other refusal in this actor is a sentence and nothing more, which is why `From<String>`
+/// exists: the commands that validate their own frame keep returning what they always returned, and
+/// only `dial` — the one command that walks a list of addresses — has more to say than the message.
+struct Refusal {
+    /// What to tell the driver reading the stream.
+    message: String,
+    /// How far the serial pass got, when the refusal came from one.
+    attempts: Option<crate::destination::Attempts>,
+}
+
+impl Refusal {
+    /// A refusal no candidate pass produced — validation, or the lookup that precedes one.
+    fn stated(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            attempts: None,
+        }
+    }
+}
+
+impl From<String> for Refusal {
+    fn from(message: String) -> Self {
+        Self::stated(message)
+    }
+}
+
 #[derive(Default)]
 struct Output {
     seq: u64,
@@ -849,13 +909,17 @@ impl Output {
         );
     }
 
-    fn error(&mut self, snapshot: &Snapshot, id: Option<&str>, message: &str) {
-        self.event(
-            snapshot,
-            "scenario.command.refused",
-            id,
-            BTreeMap::from([("message", Value::String(message.to_owned()))]),
-        );
+    fn error(&mut self, snapshot: &Snapshot, id: Option<&str>, refusal: &Refusal) {
+        let mut details = BTreeMap::new();
+        details.insert("message", Value::String(refusal.message.clone()));
+        // `T-41`: both numbers or neither, under the field names every other command uses, so a
+        // driver that scripts `dial` and this actor does not have to learn two vocabularies. Absent
+        // rather than zero where no pass ran — zero would describe a pass that got nowhere.
+        if let Some(attempts) = refusal.attempts {
+            details.insert("candidates_attempted", Value::from(attempts.attempted()));
+            details.insert("candidates_resolved", Value::from(attempts.resolved()));
+        }
+        self.event(snapshot, "scenario.command.refused", id, details);
     }
 
     fn stream(&mut self, snapshot: &Snapshot, failed: bool, message: Option<&str>) {
