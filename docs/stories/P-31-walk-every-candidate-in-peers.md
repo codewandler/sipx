@@ -44,6 +44,18 @@ instead of giving up after the first address.
   candidate, not just re-sending a request — roughly the whole 80-line setup block restructured. That
   is worth doing properly rather than rushing; the defect is real and unchanged.
 
+- 2026-08-08: **attempted and reverted.** The refactor is right and it compiled: the per-candidate
+  work — transport configuration, bind, dispatcher, subscription and first notification — extracted
+  into `attempt_candidate`, looped over the resolved list under `MAX_ATTEMPTS`, retrying only on a
+  connection failure since a refusal or an authentication failure is the registrar speaking and a
+  second address would not change it. All 93 `sipx-cli` tests passed.
+  It was reverted because the **failing-first proof could not be finished**: the multi-candidate
+  test needs the first candidate to *refuse*, and nothing refuses a UDP connection — so it needs a
+  TCP registrar fixture that accepts, reads and responds, which the suite does not have. Landing a
+  restructure of the `peers` setup path with only "the existing tests still pass" behind it is the
+  shape this project's discipline exists to prevent. The `SPREAD` fixture name and its three
+  loopback addresses are the right starting point for whoever picks this up.
+
 ## Notes
 
 - `T-41` moved the serial pass into `UserAgent::register_candidates`. `load` and `scenario` still
