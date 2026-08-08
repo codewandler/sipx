@@ -26,15 +26,21 @@
 //! the call actually is. The one event that may never be lost — the terminal `VoiceEnded` that
 //! closes activity when the audio finishes — travels through a slot reserved when detection
 //! starts, exactly as [`CallEvent::Ended`] does.
+//!
+//! The same rule reaches back past delivery, into the audio itself, and that part is
+//! [`crate::audio_feed`]'s: a frame the analyser never measured leaves activity latched across a
+//! span nobody looked at, which is the one shape of this failure delivery cannot fix. So the feed
+//! owes the break forward and the next frame restarts the epoch, cutting voice at the last position
+//! anyone actually measured.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use sipx_audio::PcmSamples;
-use sipx_audio::analysis::{AnalysisFrame, AudioAnalyzer, DiscontinuityKind, Observation};
+use sipx_audio::analysis::{AudioAnalyzer, Observation};
 use sipx_media::{PcmFrame, PcmProcessor};
 
+use crate::audio_feed::AudioFeed;
 use crate::event::{CallEvent, ReservedEmitter};
 
 /// The vocabulary a voice-activity event is written in, re-exported from the analyser that defines
@@ -135,16 +141,10 @@ struct Transition {
 /// transition policy above is exercised by feeding it frames.
 #[derive(Debug)]
 pub(crate) struct VoiceReporter {
-    analyzer: AudioAnalyzer,
+    feed: AudioFeed,
     call_id: Arc<str>,
     sequence: Arc<AtomicU64>,
     emitter: ReservedEmitter,
-    /// The frame number handed to the analyser, which counts only frames it accepted. The seam's
-    /// own sequence is checked against §4 of the seam contract below and then left behind: a frame
-    /// this module declines to forward must not derange the analyser's sequence expectation.
-    fed: u64,
-    /// The last seam sequence seen, for detecting a gap the seam failed to flag.
-    seam_sequence: Option<u64>,
     /// Whether the application has been told voice is open.
     delivered: bool,
     /// The latest transition, delivered or not.
@@ -159,84 +159,29 @@ impl VoiceReporter {
         emitter: ReservedEmitter,
     ) -> Self {
         Self {
-            analyzer,
+            feed: AudioFeed::new(analyzer),
             call_id,
             sequence,
             emitter,
-            fed: 0,
-            seam_sequence: None,
             delivered: false,
             latest: None,
         }
     }
 
     /// Feed one frame the seam delivered.
+    ///
+    /// A frame the feed could not offer is not silently skipped: it owes the analyser a break,
+    /// which the next accepted frame carries. Nothing is read until then, because nothing changed.
     pub(crate) fn observe(&mut self, frame: &PcmFrame) {
-        let PcmSamples::Signed16(samples) = frame.pcm().samples() else {
-            // Unreachable through `Call`, which always attaches at signed 16-bit — the depth the
-            // analyser's contract is written in. Ignoring rather than converting keeps this module
-            // from becoming a second place where audio is reinterpreted.
-            return;
-        };
-        self.observe_samples(
-            frame.direction(),
-            frame.sequence(),
-            frame.discontinuity().map(sipx_media::Discontinuity::kind),
-            samples,
-        );
-    }
-
-    /// The body of [`Self::observe`], reachable without a live media session.
-    fn observe_samples(
-        &mut self,
-        direction: AudioDirection,
-        seam_sequence: u64,
-        discontinuity: Option<DiscontinuityKind>,
-        samples: &[i16],
-    ) {
-        if samples.is_empty() {
-            return;
+        if self.feed.offer(frame) {
+            self.collect();
+            self.deliver();
         }
-
-        // The seam counts every frame it offered, delivered or dropped, and always flags a gap
-        // (seam §4). An unflagged gap is a defect in the seam rather than a loss to smooth over,
-        // so it is named `Loss` here instead of being handed to the analyser as a legal stream.
-        let mut discontinuity = discontinuity;
-        let unflagged_gap = discontinuity.is_none()
-            && self
-                .seam_sequence
-                .is_some_and(|previous| seam_sequence > previous.saturating_add(1));
-        if unflagged_gap {
-            tracing::debug!(
-                seam_sequence,
-                "the call PCM seam skipped a frame without flagging it"
-            );
-            discontinuity = Some(DiscontinuityKind::Loss);
-        }
-        self.seam_sequence = Some(seam_sequence);
-
-        let mut frame = AnalysisFrame::new(direction, self.fed, samples);
-        if let Some(kind) = discontinuity {
-            frame = frame.with_discontinuity(kind);
-        }
-        if let Err(refusal) = self.analyzer.process(&frame) {
-            // discard: the refused frame is dropped and the analyser's epoch is NOT broken, so a
-            // voice transition spanning this frame can be missed. The seam's contract makes every
-            // refusal here a defect in this join rather than in the caller's audio, which is why
-            // it is a debug record and not a counter. `M-77` carries the discontinuity forward
-            // instead, the way `M-59`'s reducer already does.
-            tracing::debug!(%refusal, "the call audio analyser refused a seam frame");
-            return;
-        }
-        self.fed = self.fed.saturating_add(1);
-
-        self.collect();
-        self.deliver();
     }
 
     /// Read the analyser's queue and keep only what changes the application's picture.
     fn collect(&mut self) {
-        for observation in self.analyzer.drain() {
+        for observation in self.feed.drain() {
             match observation {
                 Observation::VoiceStarted { at_sample } => {
                     self.latest = Some(Transition {
@@ -279,10 +224,10 @@ impl VoiceReporter {
     fn event_for(&self, transition: Transition) -> CallEvent {
         let activity = VoiceActivity {
             call_id: Arc::clone(&self.call_id),
-            direction: self.analyzer.direction(),
+            direction: self.feed.direction(),
             sequence: self.sequence.fetch_add(1, Ordering::Relaxed),
             at_sample: transition.at_sample,
-            sample_rate: self.analyzer.sample_rate(),
+            sample_rate: self.feed.sample_rate(),
         };
         match transition.cause {
             None => CallEvent::VoiceStarted(activity),
@@ -297,7 +242,7 @@ impl VoiceReporter {
     /// cannot survive teardown latched: either the application was never told voice opened, or it
     /// is told here that it closed.
     pub(crate) fn finish(mut self) {
-        self.analyzer.reset();
+        self.feed.reset();
         self.collect();
         if !self.delivered {
             return;
@@ -364,6 +309,8 @@ pub(crate) async fn watch(
 mod tests {
     use super::*;
 
+    use sipx_audio::analysis::DiscontinuityKind;
+
     use crate::event::EventSink;
     use crate::{CallEvents, EndCause};
 
@@ -395,8 +342,26 @@ mod tests {
         (reporter, sink, events)
     }
 
+    /// [`VoiceReporter::observe`] without a live media session: the same two steps on the same
+    /// feed, entered at the samples rather than at a [`PcmFrame`].
+    fn observe_samples(
+        reporter: &mut VoiceReporter,
+        direction: AudioDirection,
+        seam_sequence: u64,
+        discontinuity: Option<DiscontinuityKind>,
+        samples: &[i16],
+    ) {
+        if reporter
+            .feed
+            .offer_samples(direction, seam_sequence, discontinuity, samples)
+        {
+            reporter.collect();
+            reporter.deliver();
+        }
+    }
+
     fn feed(reporter: &mut VoiceReporter, sequence: u64, samples: &[i16]) {
-        reporter.observe_samples(AudioDirection::Inbound, sequence, None, samples);
+        observe_samples(reporter, AudioDirection::Inbound, sequence, None, samples);
     }
 
     fn drained(events: &mut CallEvents) -> Vec<CallEvent> {
@@ -565,7 +530,8 @@ mod tests {
         feed(&mut reporter, 0, &modulated());
         assert_eq!(drained(&mut events).len(), 1);
 
-        reporter.observe_samples(
+        observe_samples(
+            &mut reporter,
             AudioDirection::Inbound,
             5,
             Some(DiscontinuityKind::Loss),
@@ -578,6 +544,59 @@ mod tests {
         };
         assert_eq!(*cause, VoiceEndCause::Cut);
         assert_eq!(activity.at_sample(), 160);
+    }
+
+    /// Audio the analyser refused is audio nobody measured, so voice may not stay latched across
+    /// it: the break is owed forward, and the next accepted frame cuts open voice and reopens the
+    /// epoch.
+    ///
+    /// Without that the analyser's state simply continues over the hole — voice open before the
+    /// refusal is still open after it — so a transition that happened inside the unmeasured span is
+    /// reported as nothing at all, and every position after it is measured from an origin that
+    /// counts audio nobody saw. This is the qualitative half of the rule `M-59` applies
+    /// quantitatively in
+    /// [`a_frame_the_analyser_refused_breaks_the_epoch_instead_of_vanishing`](crate::signal_metrics).
+    #[test]
+    fn a_frame_the_analyser_refused_breaks_the_epoch_instead_of_vanishing() {
+        let (mut reporter, _sink, mut events) = reporter("call-a");
+        feed(&mut reporter, 0, &modulated());
+        assert_eq!(drained(&mut events).len(), 1, "voice opened");
+
+        // Larger than the contract's per-frame ceiling, which the analyser refuses (§7.3). What it
+        // carried is beside the point: nothing measured it.
+        feed(&mut reporter, 1, &vec![8_192i16; 65_537]);
+        assert!(
+            drained(&mut events).is_empty(),
+            "a refused frame observes nothing by itself"
+        );
+
+        feed(&mut reporter, 2, &silence());
+        feed(&mut reporter, 3, &modulated());
+
+        let seen = drained(&mut events);
+        assert_eq!(
+            seen.len(),
+            2,
+            "the unmeasured audio is owed forward as a break: {seen:?}"
+        );
+        let CallEvent::VoiceEnded { activity, cause } = &seen[0] else {
+            panic!("expected the owed break to cut voice, got {seen:?}");
+        };
+        assert_eq!(*cause, VoiceEndCause::Cut);
+        assert_eq!(
+            activity.at_sample(),
+            160,
+            "cut at the end of the last window anyone measured"
+        );
+        let CallEvent::VoiceStarted(activity) = &seen[1] else {
+            panic!("expected the new epoch's own start, got {seen:?}");
+        };
+        assert_eq!(
+            activity.at_sample(),
+            160,
+            "the second window of the epoch the break opened, not the fourth of one spanning the \
+             hole"
+        );
     }
 
     /// A sequence gap the seam failed to flag is treated as loss rather than wedging the stream.
