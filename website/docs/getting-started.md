@@ -28,8 +28,8 @@ cargo install --git https://github.com/codewandler/sipx \
 
 ### Prebuilt release binaries
 
-Release candidates and stable releases starting with `v1.0.0-rc.2` also attach an exact native
-archive and SPDX bill of materials for each supported target:
+Release candidates and stable releases, from the first published candidate onward, also attach an
+exact native archive and SPDX bill of materials for each supported target:
 
 | Machine | Target and archive suffix |
 |---|---|
@@ -60,7 +60,7 @@ portable executables deliberately contain no optional native features. Use the e
 above when you need `device-audio`, `opus` or `dtls`; the archive's `build-manifest.json` and SPDX
 sidecar record that distinction.
 
-Confirm which version was installed. This documentation build covers <!-- BEGIN generated:workspace-version -->1.0.0-rc.2<!-- END generated:workspace-version -->:
+Confirm which version was installed. This documentation build covers <!-- BEGIN generated:workspace-version -->1.0.0-rc.3<!-- END generated:workspace-version -->:
 
 ```console
 $ sipx version

@@ -18,7 +18,7 @@ transfer, and carry real audio from a Rust library or a shell command.
 
 </div>
 
-> **Status: <!-- BEGIN generated:workspace-version -->1.0.0-rc.2<!-- END generated:workspace-version -->.** This is the current public prerelease. `main` can move ahead of
+> **Status: <!-- BEGIN generated:workspace-version -->1.0.0-rc.3<!-- END generated:workspace-version -->.** This is the current public prerelease. `main` can move ahead of
 > the release tag. Public APIs are not frozen;
 > Supported APIs receive migration notes when they break, while Experimental APIs may change or be
 > removed without one. Start with the exact registry install below when reproducibility matters.
@@ -66,7 +66,7 @@ deployment shape.
 
 ## Try the CLI
 
-The <!-- BEGIN generated:release-tag -->v1.0.0-rc.2<!-- END generated:release-tag --> prerelease needs
+The <!-- BEGIN generated:release-tag -->v1.0.0-rc.3<!-- END generated:release-tag --> prerelease needs
 Rust <!-- BEGIN generated:msrv -->1.88<!-- END generated:msrv --> or newer:
 
 ```sh

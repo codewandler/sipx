@@ -11,7 +11,7 @@
     "status": "not_measured"
    },
    "as_responder": {
-    "run": "runs/056391cbff0d7d2345a61a11c93e15b3",
+    "run": "runs/51f0db51f180a0491ff22e0e8951548e",
     "status": "measured"
    },
    "id": "sipx",
@@ -26,7 +26,7 @@
     "status": "not_measured"
    },
    "as_responder": {
-    "run": "runs/7727ebd39ccb7ab31c8ed8b82796fa1a",
+    "run": "runs/d62cd0c6a36bb6349c76601145d9e0cf",
     "status": "measured"
    },
    "id": "sipgo",
@@ -36,7 +36,7 @@
    }
   }
  ],
- "evaluated_at": "2026-08-05",
+ "evaluated_at": "2026-08-08",
  "schema": "sipx.comparative-load.dataset.v1",
  "scope": {
   "not_inferred": [

@@ -1,0 +1,117 @@
+{
+ "build": {
+  "argv_sha256": "d1067dc7f668b3d127307f11c4c9667d59ae7ea1954925e463ae90eeecd8ffec",
+  "artifact_sha256": "b1991dcc3a509382d6602783ca1b07fe54385ea3ff599fd5e1927f1e1860e7ea",
+  "endpoint_id": "sipgo",
+  "revision": "769e4bc958376e2363566c8f7042202b410becdc",
+  "role": "responder"
+ },
+ "cleanup": {
+  "admission_stopped": true,
+  "descendant_pipe_eof": true,
+  "elapsed_ms": 15,
+  "escalation": "none",
+  "leader_status": 0,
+  "process_group_exited": true,
+  "zero_state_observed": true
+ },
+ "counts": {
+  "active_high_water": 1,
+  "completed": 1920,
+  "established": 1920,
+  "offered": 1920,
+  "request_retransmissions": 0,
+  "response_retransmissions": 0
+ },
+ "errors": {
+  "admission_refused": 0,
+  "cleanup_timeout": 0,
+  "evidence_overflow": 0,
+  "internal_error": 0,
+  "invalid_message": 0,
+  "process_crash": 0,
+  "rejected": 0,
+  "transaction_timeout": 0,
+  "transport_error": 0
+ },
+ "latency_ms": {
+  "setup": {
+   "count": 1920,
+   "max": 30,
+   "p50": 0,
+   "p95": 0,
+   "p99": 3
+  },
+  "teardown": {
+   "count": 1920,
+   "max": 9,
+   "p50": 0,
+   "p95": 0,
+   "p99": 1
+  }
+ },
+ "machine": {
+  "architecture": "x86_64",
+  "clock": "CLOCK_MONOTONIC",
+  "logical_cpus": 20,
+  "memory_bytes": 67321196544,
+  "os": "Linux 6.6.144-3-MANJARO"
+ },
+ "post_drain": {
+  "active_dialogs": 0,
+  "endpoint_tasks": 0,
+  "retained_events": 0,
+  "timers": 0,
+  "transactions": 0
+ },
+ "profile": {
+  "contract_sha256": "b7920e49c8c3a2ecc37fd22b03572f7d3853c9655908e26e244335de1bbe9f1f",
+  "event_bytes": 67108864,
+  "events": 65536,
+  "maximum_active": 8192,
+  "provisional_policy": "trying_100",
+  "stderr_bytes": 16777216,
+  "stdout_bytes": 16777216,
+  "t1_ms": 500,
+  "t2_ms": 4000,
+  "t4_ms": 5000,
+  "transport": "udp"
+ },
+ "resources": {
+  "cpu_system_ms": 210,
+  "cpu_user_ms": 460,
+  "descriptor_high_water": 6,
+  "endpoint_active_high_water": 2,
+  "peak_rss_bytes": 39505920,
+  "sample_interval_ms": 1000,
+  "task_thread_high_water": 24,
+  "unsupported_resources": []
+ },
+ "responses": {
+  "final": {
+   "200": 3840
+  },
+  "provisional": {
+   "100": 1920
+  }
+ },
+ "run": {
+  "direction": {
+   "driver": "profile-driver",
+   "index": 0,
+   "responder": "sipgo"
+  },
+  "drain_ms": 50,
+  "elapsed_ms": 70226,
+  "measurement_ms": 60000,
+  "rate_index": 0,
+  "rate_per_second": 32,
+  "repetition": 3,
+  "run_id": "d62cd0c6a36bb6349c76601145d9e0cf",
+  "seed": 4,
+  "started_utc": "2026-08-08T08:22:11Z",
+  "warmup_ms": 10000
+ },
+ "schema": "sipx.comparative-load.result.v1",
+ "status": "passed"
+}

@@ -6,7 +6,7 @@ description: Release highlights and adoption notes for the sipx 1.0.0-rc.3 relea
 # What's new
 
 <!-- BEGIN generated:release-heading -->
-## 1.0.0-rc.2 — 2026-08-05
+## 1.0.0-rc.3 — 2026-08-08
 <!-- END generated:release-heading -->
 
 RC.3 is the second published release candidate. It answers two independent external sweeps of the
