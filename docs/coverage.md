@@ -23,11 +23,11 @@ bounds it, by naming the code no test reaches at all.
 
 | Counter | Covered | Total | Reached |
 |---|---|---|---|
-| Lines | 53341 | 61480 | 86.76% |
-| Branches | 6217 | 8827 | 70.43% |
-| Functions | 6201 | 6965 | 89.03% |
+| Lines | 53459 | 61596 | 86.79% |
+| Branches | 6222 | 8831 | 70.46% |
+| Functions | 6220 | 6984 | 89.06% |
 
-Measured on 2026-08-08 at commit `6f10b909a5dbd1424d67bb8c90fcf1db8594ef85`, with
+Measured on 2026-08-08 at commit `1f9bbeda31d6d58715046e61ce273640638808cf`, with
 `cargo-llvm-cov 0.8.7` on `rustc 1.99.0-nightly (26ae60a9e 2026-07-28)`.
 **The figure describes that commit and not necessarily `HEAD`**: measuring costs an
 instrumented rebuild of the workspace and a full run of the suite, so it is taken
@@ -52,14 +52,14 @@ column is the count that actually answers *what does this suite not reach*.
 | `sipx-app-protocol` | 86.32% | 74.34% | 90.77% | 322 |
 | `sipx-audio` | 87.89% | 91.76% | 76.43% | 147 |
 | `sipx-call` | 84.91% | 62.96% | 90.93% | 1804 |
-| `sipx-cli` | 77.76% | 64.87% | 73.77% | 1408 |
-| `sipx-media` | 90.69% | 73.72% | 92.21% | 788 |
+| `sipx-cli` | 77.77% | 64.86% | 74.69% | 1394 |
+| `sipx-media` | 90.70% | 73.72% | 92.23% | 788 |
 | `sipx-rtp` | 94.71% | 91.75% | 87.40% | 73 |
 | `sipx-sdp` | 95.29% | 82.58% | 93.33% | 90 |
 | `sipx-sip` | 93.84% | 80.85% | 94.47% | 371 |
 | `sipx-testkit` | 90.83% | 72.92% | 91.04% | 241 |
-| `sipx-transport` | 89.82% | 73.97% | 90.97% | 708 |
-| `sipx-ua` | 86.45% | 64.64% | 91.11% | 575 |
+| `sipx-transport` | 89.88% | 74.13% | 89.92% | 718 |
+| `sipx-ua` | 86.48% | 64.64% | 91.23% | 577 |
 | `sipx-wasm` | 81.68% | 59.86% | 89.24% | 375 |
 
 ## What the measurement excludes
@@ -87,7 +87,7 @@ tests themselves and said so; this is what closed it (`X-116`):
 |---|---|
 | `#[cfg_attr(coverage_nightly, coverage(off))]` | an inline `#[cfg(test)] mod` is test code in the middle of a source file, which no filename pattern can reach; this removes it from the instrumentation instead, so it leaves the figure for the same reason `/tests/` does |
 
-Every `#[cfg(test)] mod` under `crates/*/src/` carries it — 161 of them at the commit above — and **no file is named**
+Every `#[cfg(test)] mod` under `crates/*/src/` carries it — 164 of them at the commit above — and **no file is named**
 anywhere. The rule is one syntactic scan, applied by
 `./scripts/coverage-report.py --annotate` and verified by `--check`, so a test module added tomorrow either
 carries the exclusion or fails an implementor's gate. A list of annotated files would rot

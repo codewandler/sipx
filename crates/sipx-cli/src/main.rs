@@ -40,6 +40,7 @@ mod header;
 /// The join-barrier probe the long-running commands' tests share. Test-only: it exists to observe
 /// the endpoint socket, and nothing the binary does needs to ask that question.
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::expect_used, clippy::panic)]
 mod join_probe;
 mod load;

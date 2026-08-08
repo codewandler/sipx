@@ -11,7 +11,7 @@
     "--json",
     "--summary-only"
   ],
-  "commit": "6f10b909a5dbd1424d67bb8c90fcf1db8594ef85",
+  "commit": "1f9bbeda31d6d58715046e61ce273640638808cf",
   "crates": {
     "sipx-app": {
       "branches": {
@@ -71,16 +71,16 @@
     },
     "sipx-cli": {
       "branches": {
-        "covered": 554,
-        "total": 854
+        "covered": 550,
+        "total": 848
       },
       "functions": {
-        "covered": 481,
-        "total": 652
+        "covered": 475,
+        "total": 636
       },
       "lines": {
-        "covered": 4922,
-        "total": 6330
+        "covered": 4876,
+        "total": 6270
       }
     },
     "sipx-media": {
@@ -89,12 +89,12 @@
         "total": 1054
       },
       "functions": {
-        "covered": 970,
-        "total": 1052
+        "covered": 973,
+        "total": 1055
       },
       "lines": {
-        "covered": 7676,
-        "total": 8464
+        "covered": 7687,
+        "total": 8475
       }
     },
     "sipx-rtp": {
@@ -155,16 +155,16 @@
     },
     "sipx-transport": {
       "branches": {
-        "covered": 716,
-        "total": 968
+        "covered": 725,
+        "total": 978
       },
       "functions": {
-        "covered": 635,
-        "total": 698
+        "covered": 651,
+        "total": 724
       },
       "lines": {
-        "covered": 6248,
-        "total": 6956
+        "covered": 6378,
+        "total": 7096
       }
     },
     "sipx-ua": {
@@ -173,12 +173,12 @@
         "total": 936
       },
       "functions": {
-        "covered": 410,
-        "total": 450
+        "covered": 416,
+        "total": 456
       },
       "lines": {
-        "covered": 3667,
-        "total": 4242
+        "covered": 3690,
+        "total": 4267
       }
     },
     "sipx-wasm": {
@@ -225,22 +225,22 @@
       "why": "an inline `#[cfg(test)] mod` is test code in the middle of a source file, which no filename pattern can reach; this removes it from the instrumentation instead, so it leaves the figure for the same reason `/tests/` does"
     }
   ],
-  "test_modules_excluded": 161,
+  "test_modules_excluded": 164,
   "tool": "cargo-llvm-cov",
   "tool_version": "cargo-llvm-cov 0.8.7",
   "toolchain": "rustc 1.99.0-nightly (26ae60a9e 2026-07-28)",
   "totals": {
     "branches": {
-      "covered": 6217,
-      "total": 8827
+      "covered": 6222,
+      "total": 8831
     },
     "functions": {
-      "covered": 6201,
-      "total": 6965
+      "covered": 6220,
+      "total": 6984
     },
     "lines": {
-      "covered": 53341,
-      "total": 61480
+      "covered": 53459,
+      "total": 61596
     }
   }
 }
