@@ -166,6 +166,18 @@ impl std::fmt::Debug for Session {
     }
 }
 
+/// The `use_srtp` extension value: profile names, strongest first, colon-separated.
+///
+/// The separator is OpenSSL's own list syntax for this option and is not RFC 5764's — §4.1.1 puts
+/// the two-byte identifiers on the wire, and the library maps the names to them.
+fn offered_profiles() -> String {
+    Profile::strongest_first()
+        .into_iter()
+        .map(Profile::as_str)
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
 impl Session {
     /// Prepare a handshake with `peer`, presenting `identity`.
     ///
@@ -197,10 +209,12 @@ impl Session {
         let mut context = SslContext::builder(SslMethod::dtls())?;
         context.set_certificate(&identity.certificate)?;
         context.set_private_key(&identity.key)?;
-        // RFC 5764 §4.1.1: the profiles this endpoint will accept, in preference order. Only the
-        // one `sipx-rtp` can actually perform — offering more would be agreeing to a transform
-        // this stack cannot apply.
-        context.set_tlsext_use_srtp(Profile::Aes128CmHmacSha1_80.as_str())?;
+        // RFC 5764 §4.1.1: the profiles this endpoint will accept, **in preference order**, which
+        // here is strongest first. Only the ones `sipx-rtp` can actually perform — offering more
+        // would be agreeing to a transform this stack cannot apply. The list is derived from the
+        // one place that holds it rather than written out again, so it cannot come to disagree
+        // with what `keys_from_exported` is prepared to key.
+        context.set_tlsext_use_srtp(&offered_profiles())?;
         // The peer's certificate is *requested* and not validated by OpenSSL, because there is
         // nothing for it to validate against: RFC 5763 §5 expects a self-signed certificate, and
         // what authenticates it is the fingerprint from the SDP. `super::establish` performs that
@@ -251,8 +265,10 @@ impl Handshake for Session {
     }
 
     fn profile(&self) -> Option<Profile> {
-        let name = self.stream.as_ref()?.ssl().selected_srtp_profile()?.name();
-        (name == Profile::Aes128CmHmacSha1_80.as_str()).then_some(Profile::Aes128CmHmacSha1_80)
+        // Matched back by name rather than trusted: a profile this stack cannot key is `None`
+        // here, and `super::establish` turns that into `Error::NoProfile` instead of exporting
+        // material for a transform nothing can apply.
+        Profile::parse(self.stream.as_ref()?.ssl().selected_srtp_profile()?.name())
     }
 
     fn export(&self, len: usize) -> Result<Vec<u8>, Self::Error> {

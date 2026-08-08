@@ -63,6 +63,12 @@ openssl = "0.10"
 # their contents through timing.
 aes = "0.8"
 ctr = "0.9"
+# SRTP's AEAD transforms (RFC 7714): AES-GCM for AEAD_AES_128_GCM and AEAD_AES_256_GCM. The same
+# RustCrypto family as `aes` and `ctr` above and pinned to the 0.10 line deliberately, because it
+# builds on `aes` 0.8 — a newer line would put a second copy of AES in the tree for no behavioural
+# gain. Default features off: `getrandom` is not wanted in a crate that never generates a nonce of
+# its own (RFC 7714 §8.1 derives every IV from the packet index and the salt).
+aes-gcm = { version = "0.10.3", default-features = false, features = ["aes", "alloc"] }
 hmac = "0.12"
 sha1 = "0.10"
 subtle = "2"

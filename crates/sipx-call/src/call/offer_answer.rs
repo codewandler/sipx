@@ -113,11 +113,16 @@ pub(crate) fn offer_from(capabilities: &Capabilities) -> SessionDescription {
     // The key, and the protocol that matches it. Offering `a=crypto` under `RTP/AVP` asks for a
     // stream that is encrypted and declared not to be; offering `RTP/SAVP` with no key asks for
     // encryption with nothing to key it. Both come from the same place, so neither can drift.
-    if let Some(crypto) = &capabilities.crypto {
+    if !capabilities.crypto.is_empty() {
         capabilities.protocol().clone_into(&mut audio.protocol);
-        audio
-            .attributes
-            .push(sipx_sdp::Attribute::valued("crypto", crypto.to_value()));
+        // One line per suite, in the order the capabilities hold them — which is strongest first.
+        // RFC 4568 §5.1.1 reads that order as preference, and it agrees with the rule the answer
+        // applies whether or not the far end honours it.
+        for crypto in &capabilities.crypto {
+            audio
+                .attributes
+                .push(sipx_sdp::Attribute::valued("crypto", crypto.to_value()));
+        }
     }
     // The same rule for DTLS-SRTP, with the fingerprint in place of the key: `UDP/TLS/RTP/SAVP`
     // and an `a=fingerprint` come from one place so a stream cannot claim one and carry the
@@ -265,12 +270,18 @@ pub(crate) fn srtp_keys(
 /// `None` unless *both* are present. One key is not a session: a stream keyed at one end only
 /// is a stream the other end cannot read, and treating a half-offer as success would produce a
 /// call that connects and carries silence.
+///
+/// `ours` is the whole capability list, and the half taken from it is the one whose **suite**
+/// matches what [`sipx_sdp::answer`] accepted — not the first entry. Since `M-41` this side
+/// offers several, and keying with the wrong one produces a well-formed stream nobody can read.
 pub(crate) fn srtp_keys_answering(
-    ours: Option<&sipx_sdp::crypto::Crypto>,
+    ours: &[sipx_sdp::crypto::Crypto],
     theirs: Option<sipx_sdp::crypto::Crypto>,
 ) -> Option<sipx_media::SrtpKeys> {
-    let (ours, theirs) = (ours?, theirs?);
+    let theirs = theirs?;
+    let ours = ours.iter().find(|mine| mine.suite == theirs.suite)?;
     Some(sipx_media::SrtpKeys {
+        profile: sipx_media::transform_of(theirs.suite),
         local: (ours.master_key().to_vec(), ours.master_salt().to_vec()),
         remote: (theirs.master_key().to_vec(), theirs.master_salt().to_vec()),
     })

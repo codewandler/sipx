@@ -2,8 +2,8 @@
 id: X-93
 title: Make protected release evidence faster without weakening it
 pillar: Build
-status: backlog
-priority:
+status: ready
+priority: 33
 design: docs/specs/release-workflow.md
 epic: conformance
 areas: [release, ci]

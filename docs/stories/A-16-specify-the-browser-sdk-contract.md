@@ -2,8 +2,8 @@
 id: A-16
 title: Specify the browser SDK contract
 pillar: Application
-status: ready
-priority: 20
+status: done
+priority:
 design: docs/designs/browser-sdk.md
 epic: browser-sdk
 areas: [browser, wasm, javascript, m15]
@@ -35,7 +35,7 @@ browser package or demo turns an accidental interface into a promise.
       wrong fingerprints, insecure signalling, cross-origin isolation and leaked media tracks.
 - [x] The current vision and public fit boundary are updated only if the accepted contract would
       actually contradict them; otherwise the native-WebRTC boundary is stated explicitly.
-- [ ] `./scripts/gate.py` is green.
+- [x] `./scripts/gate.py` is green.
 
 ## Progress
 
@@ -47,3 +47,13 @@ browser package or demo turns an accidental interface into a promise.
   so the vision's WebRTC non-goal is stated in the spec (§1.1) rather than amended.
 - The design doc now names the spec as the contract of record. Implementation is `S-41`, `T-33`,
   `M-52`, `A-17`, `A-18`, `X-100`, which cite the spec's vector IDs.
+- 2026-08-08: **already delivered; closed without re-implementation.** `docs/specs/browser-sdk.md`
+  (834 lines) was written by `3686d03` on 2026-08-05, which ticked seven of eight acceptance rows
+  and wrote this log — but never ran `/track:done`, so the status stayed `backlog`. The rc.5
+  wave-selection pass ranked on the `status:` field alone and re-promoted it to `ready`, and it was
+  dispatched to an implementor, who correctly refused to write a second spec: §11's evidence map
+  binds `S-41`, `T-33`, `M-52`, `A-17`, `A-18` and `X-100` to specific section and `BSDK-*` vector
+  IDs, and the spec itself forbids a child story restating its boundaries. The remaining gate row is
+  satisfied — the spec is documentation-only and `./scripts/gate.py` has run green since, including
+  37 steps at `3b22cec` for the rc.3 cut.
+

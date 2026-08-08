@@ -1,11 +1,12 @@
 # Design: media security profiles
 
-**Status:** proposed · **Pillar:** Media · **Epic:** `media-security-profiles` · **Stories:** M-41
+**Status:** implemented by `M-41` · **Pillar:** Media · **Epic:** `media-security-profiles` ·
+**Stories:** M-41 · **Spec:** [srtp.md](../specs/srtp.md)
 
 ## Why
 
 sipx implements exactly one SRTP protection profile:
-`AES_CM_128_HMAC_SHA1_80` (`crates/sipx-rtp/src/srtp.rs`). It is correct, checked against the
+`AES_CM_128_HMAC_SHA1_80` (`crates/sipx-rtp/src/srtp/mod.rs`). It is correct, checked against the
 RFC 3711 Appendix B vectors, authenticates before it decrypts, and is the profile every SIP peer
 can be assumed to support. As a floor it is the right choice.
 
@@ -62,3 +63,20 @@ it cannot key, is worse than not offering it.
   obtained and the check that proves they were not hand-edited.
 - Whether `AEAD_AES_256_GCM` earns its place, or `128` alone closes the practical gap, is a call
   the story makes with evidence rather than a decision this design pre-empts.
+
+## What `M-41` settled
+
+- **The tag length audit found nothing to change.** The MTU refusal is RFC 3261 §18.1.1 signalling
+  sizing on a different socket, no buffer anywhere was derived from an SRTP overhead figure, and
+  nothing outside `sipx-rtp` referenced `TAG_LEN`. Recorded in `docs/specs/srtp.md` §12.11 so the
+  absence is a finding rather than a silence.
+- **Both AEAD profiles ship.** RFC 7714 §12: "Any implementation of AES-GCM SRTP MUST support both
+  `AEAD_AES_128_GCM` and `AEAD_AES_256_GCM`." Shipping one would have been a conformance claim the
+  spec could not make, for a saving of one branch on the key length.
+- **The vectors are machine-extractable**, though not as an archive: RFC 7714 embeds none, so
+  `scripts/import-rfc7714-corpus.sh` slices §16 and §17 out of the RFC editor's text and `--check`
+  re-slices and diffs. `docs/specs/srtp.md` §10.7.
+- **One parameter is still unpinned**: RFC 7714 publishes no KDF vector, so the master-salt
+  alignment in the AEAD key derivation rests on a reading rather than on a number. Stated in the
+  spec (§4.3, §12.10) with the interoperability consequence spelled out, and left to a story whose
+  evidence has to come from an independent implementation.

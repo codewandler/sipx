@@ -41,16 +41,28 @@ M14 retains the actual comparative run.
 M15 separately tracks the audio-only browser SDK, WASM kernel, browser-native WebRTC adapter and
 public demo.
 
-**The post-`rc.2` wave is implemented but not yet closed or published.** `main` stands 61 commits
-ahead of `origin/main`, carrying the fourteen external-review fixes, bounded endpoint resolution, the
-call-module split, the shipped-verb guides and the two M16 spec gates. Twenty-nine of those stories
-hold exactly one open acceptance row — the integrated gate plus derived regeneration — deliberately
-deferred to one shared boundary rather than run per story; three more (`S-49`, `S-50`, `S-51`) hold
-none and are closeable on sight. The selected wave produces that boundary: the in-flight remainders
-(`M-44`, `T-39`, `M-70`, `M-57`, `A-25`) land, then `X-112` takes the gate green and reconciles every
-derived artifact, `X-113` writes the changelog boundary and closes the wave, and `A-38` cuts
-`1.0.0-rc.3`. Stable `1.0` is not in this wave: its predicate on independent application use is still
-unmet.
+**`1.0.0-rc.3` is cut.** The post-`rc.2` wave closed as one boundary: thirty-one stories, a green
+37-step gate, and both comparative-load directions re-measured after a schema change invalidated the
+retained pair. `A-10`, `M-57`, `M-70` and `T-39` stayed open with their remaining work stated rather
+than closed to tidy the count. Push and registry publication are deliberately unrun, so `A-38`'s
+publication rows remain open.
+
+**Waves are ranked by `priority`, in blocks.** `rc.4` is `M-54`, `P-25`, `X-66`, `T-39`, `M-41`,
+`A-39` and `M-45`; `M-70` was held out of it because its remaining proof needs the hosted runner's
+browser and `gate.py` declares `browser-audio` CI-only. **`rc.5` is priorities 11-21** and runs on
+the `wave/rc5` branch so it does not disturb an in-flight release cut. **`rc.6` is priorities 22-31**
+— every one of those stories came out of an implementor handoff or a readiness audit rather than the
+original backlog: `M-72` (RFC 7714 publishes no KDF vector, so a wrong salt placement leaves two sipx
+endpoints interoperating only with each other while every round-trip test passes), `X-115`, `P-27`,
+`P-28`, `T-40`, `T-41`, `X-116`, `X-117`, `M-73` and `X-118`. `X-119` and `X-93` follow at 32-33,
+after `X-114` gives the gate a clock — that story's baseline currently exists only as prose inside
+its own file.
+
+**Two rules this backlog learned the hard way.** A story implemented but never closed is invisible to
+wave selection, which ranks on `status:` alone — that is how `A-16` was re-dispatched three days
+after it shipped, and `X-115` exists to catch it. And a gap found while implementing belongs in a
+story before the handoff report scrolls away; the `library-parity` epic exists because the same gap
+appeared twice before anyone named it.
 
 **ID prefixes** — `S` SIP core · `T` transport · `U` user agent · `M` media · `C` call framework ·
 `P` phone CLI · `A` application SDK/release · `X` cross-cutting (build, CI, test infrastructure).
@@ -62,6 +74,7 @@ unmet.
 - [A-10 — Publish the stable crate set and diagnostic CLI artifacts](A-10-publish-the-stable-crates-and-cli.md) · Application · promote the public beta only after every v1 predicate; stable archives and SBOM live here
 - [A-38 — Publish and verify the second release candidate](A-38-publish-and-verify-rc3.md) · Application · after X-113 · the post-rc.2 wave as one immutable prerelease · no stable-1.0 claim widens
 - [A-39 — Build the speech provider contract skeleton](A-39-build-the-speech-provider-contract-skeleton.md) · Application · A-25 specified it and nothing implements it · the registry, session types and selection order every later speech story needs
+- [M-41 — Negotiate AEAD SRTP protection profiles](M-41-negotiate-aead-srtp-protection-profiles.md) · Media · RFC 7714 · one profile shipped today · AEAD-only peers cannot negotiate media with sipx at all · follow-up
 - [M-54 — Expose bounded call PCM processing and resampling](M-54-expose-bounded-call-pcm-processing.md) · Media · after A-25 and M-43 · shared seam for local speech and deterministic analysis
 - [M-57 — Specify deterministic real-time call-audio processing](M-57-specify-real-time-call-audio-processor.md) · Media · M16 spec gate · sans-I/O bounded frame processor using M-54's shared seam
 - [M-70 — Accept multiplexed browser offers with unused component candidates](M-70-accept-multiplexed-browser-offers-with-unused-component-candidates.md) · Media · external review finding 9 · a second browser engine reaches SDP then fails the multiplexed profile
@@ -76,7 +89,7 @@ _The measure of this stack's reach is what can be built on it **without writing 
 
 ### browser audio SDK
 _Beta.4 proves that sipx can interoperate with a browser audio endpoint, but it does not let a web_
-- [A-16 — Specify the browser SDK contract](A-16-specify-the-browser-sdk-contract.md) · Application · M15 admission and spec gate · audio-only WASM SIP with browser-owned WebRTC
+- [S-41 — Export the sans-I/O session kernel to WebAssembly](S-41-export-the-sans-io-session-kernel-to-wasm.md) · Signalling · after A-16 · deterministic Rust state machine with host bytes, timers and entropy
 
 ### real-time call-audio analysis
 _Applications need small, predictable facts about live audio even when no speech model is enabled:_
@@ -85,6 +98,11 @@ _Applications need small, predictable facts about live audio even when no speech
 
 ### Conformance
 - [X-114 — Instrument gate step timings](X-114-instrument-gate-step-timings.md) · Build · X-93's baseline exists only as prose in its own story · gate.py has no clock at all, so nothing can be shown to have got faster
+- [X-115 — Catch implemented but unclosed stories](X-115-catch-implemented-but-unclosed-stories.md) · Build · A-16 was fully delivered, left at status backlog, then re-selected into a wave and dispatched to an implementor
+- [X-116 — Measure coverage without counting inline test modules](X-116-measure-coverage-without-inline-test-modules.md) · Build · the published 90% line figure is flattered because unit tests live inside src/ and path exclusion cannot reach them
+- [X-117 — Make the generated reports discoverable](X-117-make-the-generated-reports-discoverable.md) · Build · coverage, comparison, compliance and maturity are all reachable only by knowing their path
+- [X-119 — Pace registry publication within its rate limit](X-119-pace-registry-publication-within-its-rate-limit.md) · Build · split out of X-93 · the 429 pacing row shares nothing with the rest of that story
+- [X-93 — Make protected release evidence faster without weakening it](X-93-make-protected-release-evidence-faster.md) · Build · measure cache and preflight changes against the 12m37 cold beta gate · follow-up
 
 ### demand-led capability work
 _sipx's backlog has been derived from RFCs, from our own review findings, and from what the design_
@@ -92,19 +110,39 @@ _sipx's backlog has been derived from RFCs, from our own review findings, and fr
 
 ### Reliable diagnostic automation
 - [P-26 — Cover resolution in every command deadline](P-26-cover-resolution-in-every-command-deadline.md) · Phone · dial --timeout starts its clock after resolution · a slow name can spend the resolver's eight seconds before the invitation is even sent
+- [P-27 — Make every command exit a join barrier](P-27-make-every-command-exit-a-join-barrier.md) · Phone · P-25 added the join on register's deadline path only · every other exit still reports before its work is observably finished
+- [P-28 — Report the same fields across every outcome](P-28-report-the-same-fields-across-every-outcome.md) · Phone · register's success report carries aor and its failure report does not, so no script can match on it across both
+- [P-29 — Fund every phase from one process budget](P-29-fund-every-phase-from-one-process-budget.md) · Phone · P-26 bounded resolution BY the deadline rather than subtracting it FROM the deadline, so the worst case is two phases of the stated value
+- [P-30 — Bound the first NOTIFY in a registrar subscription](P-30-bound-the-first-notify-in-a-registrar-subscription.md) · Phone · peers --registrar waits Timer N — 64*T1, 32 seconds — with no operator control · the dominant unbounded wait once resolution is bounded
 
 ### Edge / B2BUA
 _A programmable SIP and media edge — transports, endpoints and routes, with dialog bridging and_
 - [C-7 — Couple two dialogs without terminating media](C-7-off-media-coupling.md) · Signalling · RFC 7092 §3.1.3 · transparent SDP mapping · split from C-1
+
+### Bounded endpoint resolution
+- [T-41 — Report the candidates a connection failure attempted](T-41-report-the-candidates-a-connection-failure-attempted.md) · Transport · the spec's ConnectionFailed promises how many candidates were attempted; only the last error reaches the operator
+
+### Library Parity
+- [T-40 — Expose the bounded resolver to library consumers](T-40-expose-the-bounded-resolver-to-library-consumers.md) · Transport · T-38/T-39 built bounded resolution inside sipx-cli · the public guide still tells applications to resolve the proxy themselves
 
 ### local live-call speech
 _A live call on a machine with a local accelerator should be able to transcribe received speech and_
 - [A-40 — Drive speech sessions asynchronously](A-40-drive-speech-sessions-asynchronously.md) · Application · A-39 built the contract, not the shell that runs it · owns §10's three driver-side vectors, which cannot run until it exists
 - [A-28 — Isolate speech data and resources with no default retention](A-28-isolate-speech-data-and-resources.md) · Application · after A-25 · gates provider delivery · explicit opt-in for retention or off-host processing
 
+### Media
+_Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
+- [M-74 — Guard public data enums against exhaustive matching](M-74-guard-public-data-enums-against-exhaustive-matching.md) · Media · the non_exhaustive check only matches enums whose name ends in Error, so MediaProfile, IcePolicy, Keying and RtcpMode are unguarded
+- [M-75 — Preserve RTP header extensions on re-encode](M-75-preserve-rtp-header-extensions-on-re-encode.md) · Media · extensions are parsed on receive and silently dropped when a packet is re-encoded · harmless for audio today, a correctness trap for any relay
+
 ### media security profiles
 _sipx implements exactly one SRTP protection profile:_
-- [M-41 — Negotiate AEAD SRTP protection profiles](M-41-negotiate-aead-srtp-protection-profiles.md) · Media · RFC 7714 · one profile shipped today · AEAD-only peers cannot negotiate media with sipx at all · follow-up
+- [M-72 — Prove the AEAD SRTP key derivation against an independent peer](M-72-prove-the-aead-srtp-key-derivation-against-a-peer.md) · Media · RFC 7714 publishes no KDF vector · a wrong salt placement makes two sipx endpoints interoperate with each other and nobody else, and every round-trip test still passes
+- [M-73 — Align the DTLS profile names with the IANA registry](M-73-align-the-dtls-profile-names-with-the-registry.md) · Media · the counter-mode DTLS profile carries OpenSSL's spelling rather than the registry's; M-41 added registry-correct names beside it
+
+### supported test surfaces
+_The workspace has seeded links, virtual time and call fixtures, but downstream applications have no_
+- [X-118 — Make bounded-timeout tests robust under load](X-118-make-bounded-timeout-tests-robust-under-load.md) · Build · a CANCEL test that passes in isolation timed out under three concurrent gate runs · a flaky red is worse than a slow one
 
 ### Video
 - [M-40 — Decide whether video belongs in sipx](M-40-decide-whether-video-belongs-in-sipx.md) · Media · post-beta admission gate; the current vision says video is a non-goal, so no implementation precedes this decision
@@ -126,7 +164,6 @@ _Beta.4 proves that sipx can interoperate with a browser audio endpoint, but it 
 - [A-17 — Generate and package the browser SDK](A-17-generate-and-package-the-browser-sdk.md) · Application · after S-41, T-33 and M-52 · generated ABI types plus small handwritten ergonomic layer
 - [A-18 — Publish a runnable browser-audio demo](A-18-publish-a-runnable-browser-audio-demo.md) · Application · after A-17 · static public demo for register, dial, answer and non-silent audio
 - [M-52 — Adapt browser-native WebRTC audio](M-52-adapt-browser-native-webrtc-audio.md) · Media · after A-16 · reuse beta.4 profile through RTCPeerConnection, do not implement WebRTC in WASM
-- [S-41 — Export the sans-I/O session kernel to WebAssembly](S-41-export-the-sans-io-session-kernel-to-wasm.md) · Signalling · after A-16 · deterministic Rust state machine with host bytes, timers and entropy
 - [T-33 — Bind browser WebSocket signalling](T-33-bind-browser-websocket-signalling.md) · Transport · after A-16 and S-41 · browser owns I/O, WASM core consumes bytes
 - [X-100 — Prove the packaged browser SDK](X-100-prove-the-packaged-browser-sdk.md) · Build · M15 exit · clean consumer, supported browser matrix, both SIP roles and fail-closed negatives
 
@@ -136,9 +173,6 @@ _Applications need small, predictable facts about live audio even when no speech
 - [M-60 — Calibrate and adapt audio-activity thresholds deterministically](M-60-calibrate-audio-activity-thresholds.md) · Media · after M-58 and M-59 · bounded adaptation with observable reset and limits
 - [M-61 — Harden call-audio analysis against adversarial input](M-61-harden-call-audio-analysis.md) · Media · after M-57 · hostile audio, bounded resources, cross-call isolation and no retention
 - [X-106 — Measure call-audio analysis accuracy and resource cost](X-106-measure-call-audio-analysis.md) · Build · after M-58 through M-61 · versioned corpus, error rates, event latency, CPU and memory
-
-### Conformance
-- [X-93 — Make protected release evidence faster without weakening it](X-93-make-protected-release-evidence-faster.md) · Build · measure cache and preflight changes against the 12m37 cold beta gate · follow-up
 
 ### custom call-audio DSP
 _Applications need to shape live call audio without forking the media runtime: ordinary gain and_
@@ -195,6 +229,7 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [A-13 — Explain how sipx was built on the public documentation site](A-13-explain-how-sipx-was-built.md) · Application · before A-12; evidence-led development narrative, not an internal story dump
 - [A-14 — Publish 1.0.0-beta.3 from latest main](A-14-publish-beta3-from-latest-main.md) · Application · new immutable prerelease from latest main; beta.2 remains untouched
 - [A-15 — Publish and verify 1.0.0-beta.4](A-15-publish-beta4.md) · Application · beta.4 capstone · immutable tag, exact registry consumer, installed Opus CLI, Pages and GitHub prerelease
+- [A-16 — Specify the browser SDK contract](A-16-specify-the-browser-sdk-contract.md) · Application · M15 admission and spec gate · audio-only WASM SIP with browser-owned WebRTC
 - [A-19 — Specify the OpenAI realtime bridge](A-19-specify-the-openai-realtime-bridge.md) · Application · spec before code — every later story in the epic derives its tests from this document's vectors
 - [A-20 — A WSS client for non-SIP peers](A-20-a-wss-client-for-non-sip-peers.md) · Application · independent of A-19 — a general RFC 6455 client over the existing TLS policy, no vendor knowledge
 - [A-21 — Build a deterministic realtime peer](A-21-build-a-deterministic-realtime-peer.md) · Application · starts when A-19's spec lands — the peer implements the spec's other side, vector by vector

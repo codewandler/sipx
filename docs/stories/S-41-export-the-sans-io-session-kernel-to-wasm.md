@@ -2,8 +2,8 @@
 id: S-41
 title: Export the sans-I/O session kernel to WebAssembly
 pillar: Signalling
-status: backlog
-priority: 14
+status: ready
+priority: 20
 design: docs/designs/browser-sdk.md
 epic: browser-sdk
 areas: [sipx-sip, sipx-sdp, sipx-ua, wasm, m15]
