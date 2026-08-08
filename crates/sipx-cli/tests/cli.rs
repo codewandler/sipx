@@ -3024,6 +3024,78 @@ async fn through_nameserver(
 /// "no such name", a nameserver that never answers, and a name that resolves to a port nothing
 /// accepts are three different problems with three different fixes, and a phone that reports them
 /// identically sends the operator to the wrong one.
+/// A registrar that accepts the subscription and never notifies is bounded (`P-30`).
+///
+/// Before this the wait was the event client's Timer N — 64·T1, thirty-two seconds — which `peers`
+/// stated nowhere and no caller could change. Once `P-26` bounded resolution, that inherited
+/// schedule was the longest thing this command could do without saying so.
+#[tokio::test]
+async fn a_silent_registrar_does_not_hold_peers_for_timer_n() {
+    let registrar = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("the fixture registrar binds");
+    let address = registrar.local_addr().expect("the fixture has an address");
+    // Accept the SUBSCRIBE and then say nothing at all, which is the shape Timer N was covering.
+    let accepting = tokio::spawn(async move {
+        let mut buffer = [0_u8; 4096];
+        if let Ok((read, from)) = registrar.recv_from(&mut buffer).await {
+            let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+            let field = |name: &str| header_line(&request, name);
+            // A 200 to SUBSCRIBE establishes a dialog, so it needs a To tag and a Contact; without
+            // them the subscription refuses the response as malformed and never reaches the wait
+            // this test is about.
+            let to = field("To");
+            let to = if to.contains(";tag=") {
+                to.to_string()
+            } else {
+                format!("{to};tag=fixture0001")
+            };
+            let response = format!(
+                "SIP/2.0 200 OK\r\n{}\r\n{}\r\n{}\r\n{}\r\n{}\r\nContact: <sip:registrar@{}>\r\nExpires: 60\r\nContent-Length: 0\r\n\r\n",
+                field("Via"),
+                to,
+                field("From"),
+                field("Call-ID"),
+                field("CSeq"),
+                address,
+            );
+            let _ = registrar.send_to(response.as_bytes(), from).await;
+        }
+        // Deliberately no NOTIFY.
+        tokio::time::sleep(Duration::from_secs(60)).await;
+    });
+
+    let started = std::time::Instant::now();
+    let output = sipx()
+        .args([
+            "peers",
+            "--registrar",
+            "sip:alice@example.com",
+            "--target",
+            &address.to_string(),
+            "--expires",
+            "60",
+            "--json",
+        ])
+        .output()
+        .await
+        .expect("peers runs");
+    let elapsed = started.elapsed();
+    accepting.abort();
+
+    let rendered = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        elapsed < Duration::from_secs(30),
+        "peers waited {elapsed:?} for a first notification, which is Timer N rather than a bound \
+         this command states: {rendered}"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(5),
+        "a registrar that accepts and never notifies is a timeout: {rendered}"
+    );
+}
+
 /// Every `register` outcome names the registration it is about (`P-28`).
 ///
 /// The success report has always carried `aor`. A failure did not, so a script reading it to tell

@@ -303,11 +303,34 @@ async fn discover(options: &PeersOptions, registrar: &str) -> Result<Vec<Peer>, 
     result
 }
 
+/// How long to wait for the registrar's first NOTIFY before giving up (`P-30`).
+///
+/// Without this the wait is the event client's Timer N — 64·T1, thirty-two seconds — which the
+/// command states nowhere and the caller cannot change. Once `P-26` bounded resolution, that
+/// inherited schedule became the longest thing `peers` could do without saying so. Twenty seconds
+/// matches `register`'s default attempt deadline, so the two commands answer on the same clock.
+const FIRST_NOTIFY: Duration = Duration::from_secs(20);
+
 async fn observe(
     subscription: &mut EventSubscription<RegistrationSnapshot>,
     watch: Duration,
 ) -> Result<EventNotification<RegistrationSnapshot>, (Exit, String)> {
-    let first = next_snapshot(subscription).await?;
+    let first = match tokio::time::timeout(FIRST_NOTIFY, next_snapshot(subscription)).await {
+        Ok(result) => result?,
+        // Distinguished from `Termination::NoInitialNotify` — which is the *registrar* saying it
+        // will not notify — by naming the bound that expired. Both exit `Timeout`, because a
+        // script branching on the exit code must not have to know which clock ran out; the
+        // message is what tells them apart, exactly as `register`'s does.
+        Err(_) => {
+            return Err((
+                Exit::Timeout,
+                format!(
+                    "the registrar accepted the subscription but sent no notification within {}s",
+                    FIRST_NOTIFY.as_secs()
+                ),
+            ));
+        }
+    };
     if watch.is_zero() {
         return Ok(first);
     }
