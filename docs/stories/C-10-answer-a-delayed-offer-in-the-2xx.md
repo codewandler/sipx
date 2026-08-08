@@ -1,5 +1,5 @@
 ---
-id: C-9
+id: C-10
 title: Answer a delayed offer in the 2xx and its answer in the ACK
 pillar: Signalling
 status: backlog
@@ -61,3 +61,7 @@ carried by the ACK, so that RFC 3264 §5's delayed offer works for a peer that d
   as it arrives; this carrier needs that ACK held, and every failure path after it still has to
   send one.
 - `docs/specs/call-coupling.md` §6.3 records exactly what is refused today and why.
+
+- 2026-08-08: renumbered from `C-9` on filing. `C-9` was allocated in the same wave by `C-6`, for
+  carrying a bridge across a renegotiation. Only the id moved; this remains the endpoint-half story
+  that has to land before the `2xx`/ACK carrier can be relayed with a live proof behind it.
