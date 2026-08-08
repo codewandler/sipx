@@ -619,7 +619,11 @@ async fn report_pending_interrupt(
     let mut report = with_cancellation(
         Report::new()
             .text("status", "interrupted")
-            .text("ended_by", "interrupt"),
+            .text("ended_by", "interrupt")
+            // `peer` on every outcome, not only the ones that reached a call. The URI is what the
+            // caller typed, so it is knowable however the invitation ended, and a script matching
+            // a record to the call it placed should not have to branch on success first (`P-28`).
+            .text("peer", progress.peer()),
         &cancellation,
     );
     if let Some(signal) = process_stop.signal() {
@@ -660,6 +664,10 @@ async fn report_failure(
     let report = crate::destination::with_attempts(
         Report::new()
             .text("status", exit.as_str())
+            // The same field, for the same reason, on the record that most needs it: a refusal or
+            // a transport failure is exactly what a caller placing calls in a loop has to attach
+            // back to one of them (`P-28`).
+            .text("peer", progress.peer())
             .text("error", error.to_string()),
         attempts,
     );

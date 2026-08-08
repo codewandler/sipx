@@ -206,6 +206,11 @@ def gate_steps(msrv: str) -> list[Step]:
         # suite reverses all three ways it could: a typed percentage, a threshold quietly appearing,
         # and an exclusion listed on the page that the tool never applied.
         Step("coverage report tests", "gate", ("python3", "scripts/test-coverage-report.py")),
+        # P-28: the parity checker reads Rust with a text scanner, so a chain shape it stops
+        # understanding makes it report agreement over nothing — the same silence as every other
+        # checker in this cluster. Its suite reverses each rule on a fabricated crate and asserts
+        # the blind spot it cannot see is counted rather than merely disclaimed.
+        Step("outcome parity tests", "gate", ("python3", "scripts/test-outcome-parity.py")),
         Step(
             "provenance",
             "provenance",
@@ -288,6 +293,12 @@ def gate_steps(msrv: str) -> list[Step]:
         # is rendered from recorded counts, and rendering costs a JSON read. So the half that catches
         # a hand-edited percentage is here, where an implementor meets it before CI does.
         Step("coverage report", "docs", ("./scripts/coverage-report.py", "--check")),
+        # P-28: `P-25` gave `register`'s timeout record an `aor` and left its rejection without
+        # one, so a script had to branch on success before it could tell which registration a
+        # record was about. This derives each command's field set from its report builders and
+        # fails when one outcome omits a field a sibling carries. It reads source and builds
+        # nothing, which is why it is here beside the other static readers rather than in `test`.
+        Step("outcome parity", "docs", ("./scripts/check-outcome-parity.py", "--check")),
         Step("fmt", "fmt", ("cargo", "fmt", "--all", "--check")),
         Step(
             "clippy",

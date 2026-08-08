@@ -200,6 +200,9 @@ Report fields: `status`, `ended_by`, `peer`, `media_advertised`, `media_bound`, 
 `early_samples_recorded` to the terminal result. An explicit `--transport` also reports `requested_transport` and
 `negotiated_transport`; omitting it adds neither transport field, and `--tcp` remains the legacy
 alias rather than an explicit-selection report request.
+`status` and `peer` are on every outcome, not only the ones that reached a call: a refusal, a
+transport failure and an interrupt all name the URI that was dialled, so a script placing calls in
+a loop can attach any record back to the call it placed without branching on success first.
 `ended_by` is `duration`, `remote`, or `interrupt`; a locally originated BYE adds `bye_status` when
 its final response was observed. A supported process stop emits one `status: interrupted` terminal
 result with `stop_signal` after BYE and owned-work cleanup, and exits 0.
@@ -266,6 +269,10 @@ Remote BYE reports `ended_by: remote` only after its 200 response and media clea
 reports `ended_by: duration`; a supported process stop sends BYE, emits one
 `status: interrupted`, `ended_by: interrupt` result with `stop_signal` after cleanup, and exits 0.
 A locally originated BYE adds `bye_status` when its final response was observed.
+`--reject` and `--busy` answer without establishing a call and report `status: "refused"` with the
+`caller` and the `code` that was sent, so a script tells a declined call from an answered one by
+the same field it reads on every other outcome. An interrupt that arrives before any INVITE reports
+`status: "interrupted"` and names no caller, because none had arrived.
 
 `--profile browser-audio` is valid on both `dial` and `answer`. It cannot be combined with
 `--codec` or `--media-security`, because the named profile fixes those choices; `--ice host` and
