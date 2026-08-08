@@ -37,6 +37,13 @@ instead of giving up after the first address.
   reporting gap: `register` recovers from a dead first address and `peers` does not, against the
   same registrar.
 
+- 2026-08-08: **deferred out of rc.8 after reading the code.** Unlike `register`, which reuses one
+  endpoint across candidates, `peers` selects an address *before* it binds: the chosen transport
+  configures `TransportConfig`, which binds the endpoint, which the dispatcher and subscription are
+  built on. Walking candidates therefore means retrying bind, dispatch and the first NOTIFY per
+  candidate, not just re-sending a request — roughly the whole 80-line setup block restructured. That
+  is worth doing properly rather than rushing; the defect is real and unchanged.
+
 ## Notes
 
 - `T-41` moved the serial pass into `UserAgent::register_candidates`. `load` and `scenario` still

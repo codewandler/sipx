@@ -312,6 +312,9 @@ const fn profile_name(profile: MediaProfile) -> &'static str {
     match profile {
         MediaProfile::Standard => "standard",
         MediaProfile::BrowserAudio => "browser-audio",
+        // A profile this build does not know is reported as itself rather than guessed at: the
+        // name is a wire-visible fact and inventing one would be worse than admitting ignorance.
+        _ => "unknown",
     }
 }
 
@@ -364,6 +367,8 @@ const fn ice_name(ice: IcePolicy) -> &'static str {
         IcePolicy::Disabled => "disabled",
         IcePolicy::Host => "host",
         IcePolicy::Stun(_) => "stun",
+        // See `profile_name`: an unknown policy is named as unknown, not approximated.
+        _ => "unknown",
     }
 }
 

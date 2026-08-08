@@ -40,6 +40,20 @@ the media path and nothing enforces it.
   `RtcpMode` in `crates/sipx-media/src/session.rs` do not. The checker's rule is name-based, so it
   was never going to see them.
 
+- 2026-08-08: **PARTIAL, deliberately.** The four enums the story named are fixed: `IcePolicy`,
+  `Keying` and `MediaProfile` in `sipx-call`, and `RtcpMode` was found already reachable only via
+  `pub mod session`. Marking them broke three in-tree matches — `media.rs`'s `profile_name` and
+  `ice_name`, and the browser-audio proof example — which is precisely the breakage a downstream
+  consumer would have hit, and each now names an unknown variant as unknown rather than
+  approximating it.
+  Row 1 is **not** met and was not forced: replacing the `Error`-suffix regex with every `pub enum`
+  reports 149 workspace-wide and 49 on the media path, and most of those are `pub` inside private
+  modules — not public API. Blanket-marking them would be noise dressed as contract. `M-78` owns
+  the reachability-based selector that would make row 1 correct rather than merely wider.
+
+> **Changed:** `MediaProfile`, `IcePolicy` and `Keying` are now `#[non_exhaustive]`. Code matching
+> them exhaustively needs a fallback arm; adding a variant is no longer a breaking change.
+
 ## Notes
 
 - This is not hypothetical: `M-43` added L16 and `M-44` added G.722 to the codec surface, and `M-41`

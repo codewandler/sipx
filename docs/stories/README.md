@@ -105,6 +105,7 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 
 ### Media
 _Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
+- [M-78 — Guard public enums by reachability, not by name](M-78-guard-public-enums-by-reachability.md) · Media · widening the guard from Error-suffixed names to every pub enum reports 149 workspace-wide and 49 on the media path, most of them pub inside private modules
 - [M-74 — Guard public data enums against exhaustive matching](M-74-guard-public-data-enums-against-exhaustive-matching.md) · Media · the non_exhaustive check only matches enums whose name ends in Error, so MediaProfile, IcePolicy, Keying and RtcpMode are unguarded
 - [M-75 — Preserve RTP header extensions on re-encode](M-75-preserve-rtp-header-extensions-on-re-encode.md) · Media · extensions are parsed on receive and silently dropped when a packet is re-encoded · harmless for audio today, a correctness trap for any relay
 
@@ -114,8 +115,6 @@ _Everything above this layer inherits its correctness properties. SIP's genuinel
 
 ### supported test surfaces
 _The workspace has seeded links, virtual time and call fixtures, but downstream applications have no_
-- [X-123 — Scan nested modules for silent discards](X-123-scan-nested-modules-for-silent-discards.md) · Build · the discard guard reads one directory level, so every file X-67 moved into call/ and coupling/ has been unscanned since the split
-- [X-124 — Stop the gate leaving a default-feature binary](X-124-stop-the-gate-leaving-a-default-feature-binary.md) · Build · check-cli-reference builds sipx-cli with default features after the all-features test step, so every gate run ends by leaving a binary the next run's tests will spawn
 - [X-118 — Make bounded-timeout tests robust under load](X-118-make-bounded-timeout-tests-robust-under-load.md) · Build · a CANCEL test that passes in isolation timed out under three concurrent gate runs · a flaky red is worse than a slow one
 
 ## Blocked
@@ -489,6 +488,8 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [X-117 — Make the generated reports discoverable](X-117-make-the-generated-reports-discoverable.md) · Build · coverage, comparison, compliance and maturity are all reachable only by knowing their path
 - [X-121 — Refuse a stale uplifted binary](X-121-refuse-a-stale-uplifted-binary.md) · Build · a non-all-features cargo run leaves target/debug/sipx without device-audio, and a later all-features test spawns it without complaint
 - [X-122 — Make the browser proof assertions non-vacuous](X-122-make-the-browser-proof-assertions-non-vacuous.md) · Build · every negative carries the hash of its positive, so a mutation is refused on the binding alone and a test can pass without checking the field it names
+- [X-123 — Scan nested modules for silent discards](X-123-scan-nested-modules-for-silent-discards.md) · Build · the discard guard reads one directory level, so every file X-67 moved into call/ and coupling/ has been unscanned since the split
+- [X-124 — Stop the gate leaving a default-feature binary](X-124-stop-the-gate-leaving-a-default-feature-binary.md) · Build · check-cli-reference builds sipx-cli with default features after the all-features test step, so every gate run ends by leaving a binary the next run's tests will spawn
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

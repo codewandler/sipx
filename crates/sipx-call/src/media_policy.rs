@@ -259,6 +259,7 @@ impl Codecs {
 
 /// Whether an initial call exchange uses ICE (`docs/specs/ice.md` §13.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum IcePolicy {
     /// Emit no ICE attributes and start no connectivity-check worker.
     #[default]
@@ -271,6 +272,7 @@ pub enum IcePolicy {
 
 /// How the initial audio stream is keyed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum Keying {
     /// Preserve the compatibility behavior: SDES over protected signalling, plain RTP otherwise.
     #[default]
@@ -303,6 +305,7 @@ pub enum NegotiatedKeying {
 /// fail-closed one-stream profile in `docs/specs/webrtc-audio.md`; selecting it never authorizes
 /// fallback to the standard policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum MediaProfile {
     /// Ordinary SIP audio with independently selected codec, ICE, and keying policies.
     #[default]

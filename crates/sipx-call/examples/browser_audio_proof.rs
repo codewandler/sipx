@@ -295,6 +295,7 @@ fn positive_result(
     let media_profile = match call.media_profile() {
         MediaProfile::Standard => "standard",
         MediaProfile::BrowserAudio => "browser-audio",
+        _ => "unknown",
     };
     let negotiated_codec = match call.media().codec() {
         Codec::Pcmu => "pcmu",
