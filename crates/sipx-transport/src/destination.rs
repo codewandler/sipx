@@ -1,6 +1,6 @@
 //! Bounded outbound SIP destination resolution, for anything that places a request.
 //!
-//! [`crate::dns`] is the client and [`crate::resolve`] is the selection; this is the thing a
+//! [`crate::dns`] is the client and [`mod@crate::resolve`] is the selection; this is the thing a
 //! caller actually holds. It carries one nameserver client, one cache and one finite policy
 //! across every destination a process resolves, and turns a URI — with or without an explicit
 //! next hop — into the ordered candidate list RFC 3263 defines.
