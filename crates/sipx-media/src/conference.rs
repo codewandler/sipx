@@ -14,6 +14,24 @@
 //! A participant who has said nothing contributes silence, which is exactly right: the mix goes
 //! out on time and the quiet participant is simply quiet. The alternative — waiting for
 //! everyone — makes the whole conference as late as its worst connection.
+//!
+//! # The header extension a contributor arrived with
+//!
+//! It does not travel, and that is the decision rather than an omission (`M-79`). This is a mixer
+//! in the RFC 3550 §7.1 sense: the packet a participant receives is one this endpoint authored
+//! from the sum of the others, on its own SSRC and its own timeline, and it is not any
+//! contributor's packet. An RFC 8285 element describes the stream it arrived on — the level of
+//! *that* speaker, the identity of *that* stream — so putting it on a mix would attribute one
+//! participant's measurement to audio that is mostly somebody else's. With several contributors
+//! there is not even a rule that would pick whose to attach, and "whoever was loudest this tick"
+//! is a fiction the far end would read as fact.
+//!
+//! The drop is structural rather than a line of code that discards something: mixing works on
+//! samples, so the whole extension is already behind the decode by the time this module sees a
+//! participant's audio. Whoever gives a conference a pass-through path for the two-party case has
+//! to decide this question again, on purpose. [`super::bridge`] is the opposite case and does
+//! forward, because there the outgoing packet carries exactly the payload that arrived.
+//!
 //! **Experimental** (`A-8`): as with [`super::bridge`], real over sessions you own and not
 //! reachable from a `Call` (`C-6`).
 //!

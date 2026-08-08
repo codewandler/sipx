@@ -1270,6 +1270,9 @@ async fn pump_uplink(
         if encoded.payload_type != payload_type {
             continue;
         }
+        // The payload and nothing else. This bridge terminates RTP rather than relaying it — the
+        // far side is a speech provider over a WebSocket, not an RTP peer — so an arriving header
+        // extension has no packet to travel on and is dropped here on purpose (`M-79`).
         match uplink.try_send(encoded.payload) {
             Ok(()) => {}
             // §5.4: non-blocking admission, never a blocking send. A full uplink queue means the
@@ -1298,11 +1301,11 @@ async fn pump_downlink(
         // still owed to this task.
         let woken = downlink.ready.notified();
         if let Some(payload) = downlink.take(&meters) {
+            // Authored rather than relayed, so it carries no header extension (`M-79`): these
+            // bytes were synthesised by the provider and did not arrive on an RTP packet that
+            // could have qualified them.
             let delivered = audio
-                .send_encoded(Encoded {
-                    payload_type,
-                    payload,
-                })
+                .send_encoded(Encoded::new(payload_type, payload))
                 .await;
             if !delivered {
                 return;
