@@ -1,8 +1,8 @@
 ---
 id: M-71
 title: "Deliver negotiated DTMF receive events through scenario"
-pillar: "Media"
-status: in-progress
+pillar: Media
+status: done
 epic: media-interoperability
 areas: [sipx-rtp, sipx-call, sipx-cli]
 design: docs/designs/media-interoperability.md
@@ -33,7 +33,7 @@ automation boundary.
       scenario consumer cannot block RTP/RTCP work or grow an unbounded digit buffer.
 - [x] Call replacement, hold/resume and teardown reset receive state deliberately; events from a
       prior stream or call cannot leak into the next correlation scope.
-- [ ] Sender behavior, interrupt-on-digit playback, hold/resume controls, malformed-packet tests and
+- [x] Sender behavior, interrupt-on-digit playback, hold/resume controls, malformed-packet tests and
       the complete repository gate are green.
 
 ## Review evidence

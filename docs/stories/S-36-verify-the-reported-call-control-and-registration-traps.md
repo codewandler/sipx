@@ -2,8 +2,8 @@
 id: S-36
 title: Verify the reported call-control and registration traps
 pillar: Signalling
-status: in-progress
-priority: 14
+status: done
+priority:
 design: docs/designs/demand.md
 epic: demand
 areas: [sipx-call, sipx-ua, sipx-sdp]
@@ -46,7 +46,7 @@ linked from Progress.
 - [x] Every test names the RFC section it enforces in a comment on the test.
 - [x] Progress records, per item, whether it passed first time or revealed a defect. An item that
       passed first time is a result, not a non-event.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 - 2026-08-05: selected for the post-beta.7 foundations and field-hardening wave. Existing coverage

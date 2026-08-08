@@ -1,8 +1,8 @@
 ---
 id: M-69
 title: "Reject an unacceptable initial offer on the wire"
-pillar: "Media"
-status: in-progress
+pillar: Media
+status: done
 epic: media-interoperability
 areas: [sipx-call, sipx-cli]
 design: docs/designs/media-interoperability.md
@@ -33,7 +33,7 @@ reporting the local failure.
       retains the existing-dialog 488 behavior without ending working media.
 - [x] Failure to transmit the rejection is observable as a send failure and cannot increment a
       successful-response counter.
-- [ ] Byte-level response vectors, call/CLI process tests, counter/capture assertions and the
+- [x] Byte-level response vectors, call/CLI process tests, counter/capture assertions and the
       complete repository gate are green.
 
 ## Review evidence

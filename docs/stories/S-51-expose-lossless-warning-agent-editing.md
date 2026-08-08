@@ -2,8 +2,8 @@
 id: S-51
 title: Expose lossless Warning-agent editing
 pillar: Signalling
-status: in-progress
-priority: 3
+status: done
+priority:
 design: docs/specs/lossless-presentation-editing.md
 epic: sip-core
 areas: [sipx-sip, privacy]

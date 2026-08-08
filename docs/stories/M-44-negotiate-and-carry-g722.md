@@ -2,8 +2,8 @@
 id: M-44
 title: Negotiate and carry G.722
 pillar: Media
-status: in-progress
-priority: 16
+status: done
+priority:
 design: docs/designs/demand.md
 epic: demand
 areas: [sipx-audio, sipx-sdp, sipx-rtp]

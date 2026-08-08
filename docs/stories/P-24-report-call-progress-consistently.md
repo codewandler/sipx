@@ -1,8 +1,8 @@
 ---
 id: P-24
 title: "Report call progress consistently"
-pillar: "Phone"
-status: in-progress
+pillar: Phone
+status: done
 epic: diagnostic-automation
 areas: [sipx-cli]
 design: docs/designs/diagnostic-automation.md
@@ -32,7 +32,7 @@ roles without contaminating result stdout or multiplying per-call output beyond 
       retains its documented saturation, and no result schema changes merely to support logging.
 - [x] Remote hangup, refusal, timeout, interruption and internal failure each produce a truthful
       final progress event with no duplicate end when causes race.
-- [ ] Focused logging/process tests, README/help/reference wording and the complete repository gate
+- [x] Focused logging/process tests, README/help/reference wording and the complete repository gate
       are green.
 
 ## Review evidence

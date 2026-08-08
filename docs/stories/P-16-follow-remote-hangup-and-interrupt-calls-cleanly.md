@@ -1,8 +1,8 @@
 ---
 id: P-16
 title: "Follow remote hangup and interrupt calls cleanly"
-pillar: "Phone"
-status: in-progress
+pillar: Phone
+status: done
 epic: phone-lifecycle
 areas: [sipx-cli, sipx-call]
 design: docs/designs/phone-lifecycle.md
@@ -37,7 +37,7 @@ required SIP exchange, stop media, join owned work and emit one terminal result.
       exists. Calls rejected or ended before confirmation keep their existing public classification.
 - [x] After every terminal path, transport routes, dialog tasks, media workers and device workers
       owned by the command have reached zero before the result is emitted.
-- [ ] Text and JSON results, help/reference documentation, focused process tests and the complete
+- [x] Text and JSON results, help/reference documentation, focused process tests and the complete
       repository gate are green.
 
 ## Review evidence

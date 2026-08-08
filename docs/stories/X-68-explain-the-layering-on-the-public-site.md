@@ -2,8 +2,8 @@
 id: X-68
 title: Explain the layering on the public site
 pillar: Build
-status: in-progress
-priority: 13
+status: done
+priority:
 design: docs/designs/docs-depth.md
 epic: docs-depth
 areas: [website]
@@ -34,7 +34,7 @@ reading `AGENTS.md`.
       so a violation fails review against the non-negotiable rather than only against this page.
 - [x] It is reachable from the sidebar before the library guides, and `build-docs.sh` passes with no
       new entry in `WARNING_EXCEPTIONS`.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 - 2026-08-05: selected for the post-beta.7 foundations and field-hardening wave. The first

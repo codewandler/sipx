@@ -2,8 +2,8 @@
 id: X-69
 title: Guide every shipped call verb
 pillar: Build
-status: in-progress
-priority: 17
+status: done
+priority:
 design: docs/designs/docs-depth.md
 epic: docs-depth
 areas: [website, sipx-call]
@@ -31,7 +31,7 @@ indistinguishable from unbuilt work to a reader of the site.
 - [x] No sample is hand-written into Markdown. `sync-website.py --check` passes byte-exactly.
 - [x] `does-this-fit.md` links each claimed capability to its guide, so the fit list stops being the
       only place a feature is mentioned.
-- [ ] `build-docs.sh` passes with no new `WARNING_EXCEPTIONS` entry; `./scripts/gate.py` green.
+- [x] `build-docs.sh` passes with no new `WARNING_EXCEPTIONS` entry; `./scripts/gate.py` green.
 
 ## Progress
 - Seven guides added under `website/docs/guides/` — hold-and-resume, blind-transfer,

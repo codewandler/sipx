@@ -1,8 +1,8 @@
 ---
 id: P-23
 title: "Validate output and capabilities before network I/O"
-pillar: "Phone"
-status: in-progress
+pillar: Phone
+status: done
 epic: diagnostic-automation
 areas: [sipx-cli]
 design: docs/designs/diagnostic-automation.md
@@ -32,7 +32,7 @@ honor the requested codec, security mode or profile.
       selection is available; command-specific timing cannot reintroduce a peer-dependent verdict.
 - [x] Text/JSON failures retain usage exit 2 and name the missing feature. A local observer proves
       zero network bytes for every unavailable selection.
-- [ ] Parser, feature-matrix, output-contract and process tests plus the complete repository gate
+- [x] Parser, feature-matrix, output-contract and process tests plus the complete repository gate
       are green.
 
 ## Review evidence

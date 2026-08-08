@@ -1,8 +1,8 @@
 ---
 id: P-20
 title: "Preflight recording destinations before a call"
-pillar: "Phone"
-status: in-progress
+pillar: Phone
+status: done
 epic: diagnostic-automation
 areas: [sipx-cli]
 design: docs/designs/diagnostic-automation.md
@@ -33,7 +33,7 @@ on cancellation or failure.
       without discarding an already finalized recording or claiming the call never occurred.
 - [x] Cancellation, remote hangup, media failure and write failure leave no orphan temporary files
       or file handles. Paths derived from network data are never used.
-- [ ] Positive recording/audio tests, CLI docs, platform-focused tests and the complete repository
+- [x] Positive recording/audio tests, CLI docs, platform-focused tests and the complete repository
       gate are green.
 
 ## Review evidence

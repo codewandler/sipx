@@ -2,8 +2,8 @@
 id: M-43
 title: Carry linear PCM in and out without format assumptions
 pillar: Media
-status: in-progress
-priority: 15
+status: done
+priority:
 design: docs/designs/demand.md
 epic: demand
 areas: [sipx-audio, sipx-media, sipx-rtp]
@@ -39,7 +39,7 @@ any external audio consumer without sipx assuming 8 kHz µ-law everywhere.
 - [x] The boundary is reachable from the CLI and documented in a guide.
 - [x] `docs/rfc/registry.toml` updated in the same commit if the L16 row changes;
       `rfc-report.py --check` green.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 - 2026-08-05: selected after the S-36 signalling-trap sweep in the post-beta.7 foundations and

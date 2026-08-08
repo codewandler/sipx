@@ -2,8 +2,8 @@
 id: T-36
 title: Refresh server-transaction liveness on provisional progress
 pillar: Signalling
-status: in-progress
-priority: 1
+status: done
+priority:
 design: docs/designs/sip-transport.md
 epic: sip-transport
 areas: [sipx-transport]
@@ -66,7 +66,7 @@ operational snapshot, not an inference surface for per-transaction lifecycle.
 - [x] The implementation refreshes only the endpoint driver's existing exact-key guard. It exposes
       no transaction internals, adds no shadow lifecycle table, and preserves the finite warning
       and counter backstop.
-- [ ] The full repository gate is green.
+- [x] The full repository gate is green.
 
 ## Filing evidence
 

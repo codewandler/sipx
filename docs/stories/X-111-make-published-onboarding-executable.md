@@ -1,8 +1,8 @@
 ---
 id: X-111
 title: "Make published onboarding executable"
-pillar: "Build"
-status: in-progress
+pillar: Build
+status: done
 epic: published-adoption
 areas: [docs, release]
 design: docs/designs/published-adoption.md
@@ -31,7 +31,7 @@ site renderer as complete prose.
       exact complete sentence and version as visible text.
 - [x] A repository check scans generated markers for unsupported inline placement so the same
       renderer defect cannot move to another page.
-- [ ] Archived consumer, docs link/build, site rendering, package rehearsal and the complete
+- [x] Archived consumer, docs link/build, site rendering, package rehearsal and the complete
       repository gate are green.
 
 ## Review evidence

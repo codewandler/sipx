@@ -2,8 +2,8 @@
 id: X-67
 title: Split the call module along its seams
 pillar: Build
-status: in-progress
-priority: 20
+status: done
+priority:
 design:
 epic: depth
 areas: [sipx-call]
@@ -34,7 +34,7 @@ unrelated feature's neighbourhood.
       `RUSTDOCFLAGS=-D warnings`.
 - [x] Test modules move with their subject and keep their `#[allow]` annotations at module scope per
       `AGENTS.md`.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 - Split into six private submodules under `crates/sipx-call/src/call/` — `hold`, `ice`,

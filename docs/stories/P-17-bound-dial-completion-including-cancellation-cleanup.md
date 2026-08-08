@@ -1,8 +1,8 @@
 ---
 id: P-17
 title: "Bound dial completion including cancellation cleanup"
-pillar: "Phone"
-status: in-progress
+pillar: Phone
+status: done
 epic: phone-lifecycle
 areas: [sipx-cli, sipx-call]
 design: docs/designs/phone-lifecycle.md
@@ -34,7 +34,7 @@ post-timeout tail may not be hidden behind an error that names only the requeste
       configured invitation threshold alone was the process's elapsed bound when it was not.
 - [x] No fixed wall-clock wait substitutes for transaction completion or an owned-task join; any
       failure cap is classified with the repository's accepted inline reason.
-- [ ] Focused default/all-feature tests, CLI documentation and the complete repository gate are
+- [x] Focused default/all-feature tests, CLI documentation and the complete repository gate are
       green.
 
 ## Review evidence

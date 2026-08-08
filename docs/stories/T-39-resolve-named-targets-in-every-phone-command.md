@@ -1,7 +1,7 @@
 ---
 id: T-39
 title: "Resolve named targets in every phone command"
-pillar: "Transport"
+pillar: Transport
 status: in-progress
 epic: endpoint-resolution
 areas: [sipx-transport, sipx-cli]

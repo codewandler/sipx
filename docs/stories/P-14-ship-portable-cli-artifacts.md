@@ -2,8 +2,8 @@
 id: P-14
 title: Ship portable CLI artifacts
 pillar: Phone
-status: in-progress
-priority: 16
+status: done
+priority:
 design: docs/specs/release-artifacts.md
 epic: demand
 areas: [ci, sipx-cli]
@@ -33,7 +33,7 @@ Publish `sipx` binaries that run on the machines people have, without a runtime 
 - [x] Checksums are published alongside, and the documented install path in
       `website/docs/getting-started.md` covers the binary download as well as `cargo install`.
 - [x] The release rehearsal (`A-11`) covers these artifacts, so distribution stays reproducible.
-- [ ] `./scripts/gate.py` green; new CI jobs registered in `gate.py` or `NOT_RUN_LOCALLY` with a
+- [x] `./scripts/gate.py` green; new CI jobs registered in `gate.py` or `NOT_RUN_LOCALLY` with a
       reason so `gate.py --check` stays green.
 
 ## Progress

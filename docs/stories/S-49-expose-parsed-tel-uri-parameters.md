@@ -2,8 +2,8 @@
 id: S-49
 title: Expose parsed TEL URI parameters
 pillar: Signalling
-status: in-progress
-priority: 2
+status: done
+priority:
 design: docs/specs/uri-rewriting.md
 epic: sip-core
 areas: [sipx-sip, uri]

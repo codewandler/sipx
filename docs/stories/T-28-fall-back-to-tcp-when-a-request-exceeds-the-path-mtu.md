@@ -2,8 +2,8 @@
 id: T-28
 title: Fall back to TCP when a request exceeds the path MTU
 pillar: Transport
-status: in-progress
-priority: 15
+status: done
+priority:
 design: docs/designs/demand.md
 epic: demand
 areas: [sipx-transport]
@@ -37,7 +37,7 @@ requires.
       trap.
 - [x] `docs/rfc/registry.toml` RFC 3261 row and `docs/specs/sip-transport.md` updated in the same
       commit; `rfc-report.py --check` green.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 - 2026-08-05: selected as the first story in the post-beta.7 transport operations wave. The RFC

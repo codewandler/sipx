@@ -1,8 +1,8 @@
 ---
 id: T-38
 title: "Specify bounded SIP endpoint resolution"
-pillar: "Transport"
-status: in-progress
+pillar: Transport
+status: done
 epic: endpoint-resolution
 areas: [sipx-transport]
 design: docs/designs/endpoint-resolution.md
@@ -33,7 +33,7 @@ transport verification.
       unusable records, secure and cleartext choices, deadline expiry and cancellation.
 - [x] The spec states which policy is pure and which adapter in `sipx-transport` owns DNS and
       connection I/O, including how tests inject resolver results without external DNS.
-- [ ] RFC registry changes, if the supported behavior changes, are synchronized and the complete
+- [x] RFC registry changes, if the supported behavior changes, are synchronized and the complete
       repository gate is green.
 
 ## Review evidence

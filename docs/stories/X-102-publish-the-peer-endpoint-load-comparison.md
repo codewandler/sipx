@@ -2,8 +2,8 @@
 id: X-102
 title: Publish the peer endpoint load comparison
 pillar: Build
-status: in-progress
-priority: 3
+status: done
+priority:
 design: docs/designs/comparative-load.md
 epic: comparative-load
 areas: [load, comparison, website, m14]
@@ -35,7 +35,7 @@ conflating endpoint signalling with proxy or registrar workloads.
       those future benchmarks to sipx.clstr.
 - [x] Raw manifests, environment inventories, artifact hashes, commands, cleanup evidence and
       per-repetition records regenerate the internal and public reports.
-- [ ] Failing-first checker tests cover multi-endpoint rendering and reject incompatible runs;
+- [x] Failing-first checker tests cover multi-endpoint rendering and reject incompatible runs;
       comparison checks, website sync, provenance and the full gate are green.
 
 ## Progress

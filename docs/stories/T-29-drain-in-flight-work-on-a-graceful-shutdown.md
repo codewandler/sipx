@@ -2,8 +2,8 @@
 id: T-29
 title: Drain in-flight work on a graceful shutdown
 pillar: Transport
-status: in-progress
-priority: 16
+status: done
+priority:
 design: docs/designs/demand.md
 epic: demand
 areas: [sipx-transport, sipx-ua, sipx-call]
@@ -35,7 +35,7 @@ does not drop established calls and in-flight transactions.
 - [x] Drain composes with the existing `CancellationToken` and `TaskTracker` shutdown path rather
       than adding a parallel mechanism.
 - [x] Reachable from the CLI so it is testable from a shell, per vision principle 6.
-- [ ] `./scripts/gate.py` green, including `check-fixed-sleep.py`.
+- [x] `./scripts/gate.py` green, including `check-fixed-sleep.py`.
 
 ## Progress
 - 2026-08-05: selected in the post-beta.7 transport operations wave. The drain state table and a

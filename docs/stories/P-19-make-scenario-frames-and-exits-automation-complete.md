@@ -1,8 +1,8 @@
 ---
 id: P-19
 title: "Make scenario frames and exits automation-complete"
-pillar: "Phone"
-status: in-progress
+pillar: Phone
+status: done
 epic: diagnostic-automation
 areas: [sipx-cli, sipx-app-protocol]
 design: docs/designs/diagnostic-automation.md
@@ -35,7 +35,7 @@ discover the frame shape or required wait deadline.
       so one later success cannot hide an earlier unhandled refusal.
 - [x] An empty stream, duplicate IDs, missing finite wait deadline and unknown command have explicit
       typed outcomes and cannot panic, desynchronize later frames or create unbounded waits.
-- [ ] The scenario command remains bounded and cancellation-safe; focused protocol/process tests,
+- [x] The scenario command remains bounded and cancellation-safe; focused protocol/process tests,
       docs synchronization and the complete repository gate are green.
 
 ## Review evidence

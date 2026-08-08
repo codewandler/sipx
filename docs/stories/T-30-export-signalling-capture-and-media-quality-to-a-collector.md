@@ -2,8 +2,8 @@
 id: T-30
 title: Export signalling capture and media quality to a collector
 pillar: Transport
-status: in-progress
-priority: 17
+status: done
+priority:
 design: docs/designs/demand.md
 epic: demand
 areas: [sipx-transport, sipx-rtp]
@@ -35,7 +35,7 @@ hooks they can wire up rather than an exporter sipx chooses for them.
 - [x] **No metrics backend is bundled.** sipx emits; the application exports. The reasoning is
       recorded, since the requests arrived attached to one specific backend.
 - [x] Documented in a guide, with the redaction guarantee stated where the export is described.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 - 2026-08-05: selected in the post-beta.7 transport operations wave. Redaction, bounded failure

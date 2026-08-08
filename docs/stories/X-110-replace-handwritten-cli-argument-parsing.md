@@ -1,13 +1,13 @@
 ---
 id: X-110
 title: "Replace handwritten CLI argument parsing"
-pillar: "Build"
-status: in-progress
+pillar: Build
+status: done
 epic: diagnostic-automation
 areas: [sipx-cli, cli]
 design: docs/designs/diagnostic-automation.md
 note: "external review findings 4, 7 and 12 · replace the custom Args scanner and flag registries with one typed parser; preserve the shipped CLI contract"
-priority: 1
+priority:
 ---
 
 # Replace handwritten CLI argument parsing
@@ -38,7 +38,7 @@ forget a global list.
       input, a non-Unicode argument on Unix and one option shared across multiple commands.
 - [x] The generated CLI reference and public examples are synchronized from the parser-owned help;
       no second hand-written command/flag inventory remains in docs or tests.
-- [ ] Focused CLI tests, no-default/all-feature builds, strict Clippy, docs synchronization and the
+- [x] Focused CLI tests, no-default/all-feature builds, strict Clippy, docs synchronization and the
       complete repository gate are green.
 
 ## Progress

@@ -1,8 +1,8 @@
 ---
 id: P-18
 title: "Make the bounded load tools interoperate by default"
-pillar: "Phone"
-status: in-progress
+pillar: Phone
+status: done
 epic: diagnostic-automation
 areas: [sipx-cli]
 design: docs/designs/diagnostic-automation.md
@@ -33,7 +33,7 @@ success after one attempted call.
       result and an actionable message; an invalid local mode is refused before I/O with exit 2.
 - [x] An internal call/media worker error stops admission, cancels and joins owned calls, reports
       `failed`, exits nonzero and cannot be mislabeled as an operator interrupt.
-- [ ] Help, the CLI reference and bounded-load examples are generated/synchronized from the same
+- [x] Help, the CLI reference and bounded-load examples are generated/synchronized from the same
       mode contract. Focused load tests and the complete repository gate are green.
 
 ## Review evidence

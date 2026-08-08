@@ -1,8 +1,8 @@
 ---
 id: P-22
 title: "Handle supervisor termination consistently"
-pillar: "Phone"
-status: in-progress
+pillar: Phone
+status: done
 epic: phone-lifecycle
 areas: [sipx-cli]
 design: docs/designs/phone-lifecycle.md
@@ -32,7 +32,7 @@ emit the command's terminal record instead of invoking the platform's default im
       an orphan process group or duplicate a terminal report.
 - [x] Platform-specific signal support is feature-gated or typed rather than silently promised;
       unsupported platforms retain compile-tested cancellation through the library boundary.
-- [ ] Focused signal/process tests, help/reference documentation and the complete repository gate
+- [x] Focused signal/process tests, help/reference documentation and the complete repository gate
       are green.
 
 ## Review evidence

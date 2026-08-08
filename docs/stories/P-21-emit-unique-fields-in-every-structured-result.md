@@ -1,8 +1,8 @@
 ---
 id: P-21
 title: "Emit unique fields in every structured result"
-pillar: "Phone"
-status: in-progress
+pillar: Phone
+status: done
 epic: diagnostic-automation
 areas: [sipx-cli]
 design: docs/designs/diagnostic-automation.md
@@ -28,7 +28,7 @@ the deterministic field order and text/JSON fact parity scripts already rely on.
       object members recursively rather than relying on a JSON map parser's last-value behavior.
 - [x] Text output retains deterministic order and contains the same facts. Existing JSON field
       spelling and values are unchanged except for removal of the duplicate member.
-- [ ] The generated CLI JSON-contract table remains synchronized, strict duplicate-rejecting
+- [x] The generated CLI JSON-contract table remains synchronized, strict duplicate-rejecting
       consumers accept all fixtures, and the complete repository gate is green.
 
 ## Review evidence

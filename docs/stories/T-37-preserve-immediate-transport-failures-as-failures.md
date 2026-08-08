@@ -1,8 +1,8 @@
 ---
 id: T-37
 title: "Preserve immediate transport failures as failures"
-pillar: "Transport"
-status: in-progress
+pillar: Transport
+status: done
 epic: phone-lifecycle
 areas: [sipx-transport, sipx-cli]
 design: docs/designs/phone-lifecycle.md
@@ -33,7 +33,7 @@ from a reachable peer that stayed silent.
       the fix cannot classify all absence of a response as transport failure.
 - [x] TLS verification, WebSocket handshake and connection-refusal controls prove the mapping is by
       typed cause rather than elapsed-time heuristics or string matching.
-- [ ] No automatic retry loop is added. Focused transport/call/CLI tests and the complete repository
+- [x] No automatic retry loop is added. Focused transport/call/CLI tests and the complete repository
       gate are green.
 
 ## Review evidence

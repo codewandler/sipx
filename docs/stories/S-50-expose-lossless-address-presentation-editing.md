@@ -2,8 +2,8 @@
 id: S-50
 title: Expose lossless address-presentation editing
 pillar: Signalling
-status: in-progress
-priority: 3
+status: done
+priority:
 design: docs/specs/lossless-presentation-editing.md
 epic: sip-core
 areas: [sipx-sip, routing, privacy]

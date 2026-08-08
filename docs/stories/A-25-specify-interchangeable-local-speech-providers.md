@@ -2,8 +2,8 @@
 id: A-25
 title: Specify interchangeable local speech providers
 pillar: Application
-status: in-progress
-priority: 20
+status: done
+priority:
 design: docs/designs/local-speech.md
 epic: local-speech
 areas: [app-sdk, speech, audio, m16]
@@ -32,7 +32,7 @@ application code.
       and distinguishes them from SIP call failures.
 - [x] Conformance vectors cover a deterministic test provider, replacement ordering, backpressure,
       discontinuity, cancellation and terminal failure for both interfaces.
-- [ ] The public API review records which types can be extended compatibly and the full gate is green.
+- [x] The public API review records which types can be extended compatibly and the full gate is green.
 
 ## Progress
 

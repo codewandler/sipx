@@ -60,41 +60,10 @@ unmet.
 
 ## Now (in progress)
 - [A-10 — Publish the stable crate set and diagnostic CLI artifacts](A-10-publish-the-stable-crates-and-cli.md) · Application · promote the public beta only after every v1 predicate; stable archives and SBOM live here
-- [A-25 — Specify interchangeable local speech providers](A-25-specify-interchangeable-local-speech-providers.md) · Application · M16 spec gate · endpoint default and per-call override · local/offline by default
 - [A-38 — Publish and verify the second release candidate](A-38-publish-and-verify-rc3.md) · Application · after X-113 · the post-rc.2 wave as one immutable prerelease · no stable-1.0 claim widens
-- [M-43 — Carry linear PCM in and out without format assumptions](M-43-carry-linear-pcm-in-and-out-without-format-assumptions.md) · Media · four reported use cases resolve to one unopinionated PCM boundary · not an AI feature
-- [M-44 — Negotiate and carry G.722](M-44-negotiate-and-carry-g722.md) · Media · the only codec with real demand that sipx lacks · static PT 9 with the RFC 3551 clock-rate trap
 - [M-57 — Specify deterministic real-time call-audio processing](M-57-specify-real-time-call-audio-processor.md) · Media · M16 spec gate · sans-I/O bounded frame processor using M-54's shared seam
-- [M-69 — Reject an unacceptable initial offer on the wire](M-69-reject-an-unacceptable-initial-offer-on-the-wire.md) · Media · external review finding 3 · no-common-codec failure sends no final SIP response
 - [M-70 — Accept multiplexed browser offers with unused component candidates](M-70-accept-multiplexed-browser-offers-with-unused-component-candidates.md) · Media · external review finding 9 · a second browser engine reaches SDP then fails the multiplexed profile
-- [M-71 — Deliver negotiated DTMF receive events through scenario](M-71-deliver-negotiated-dtmf-receive-events-through-scenario.md) · Media · external review finding 10 · digits send successfully but no typed receive event arrives
-- [P-14 — Ship portable CLI artifacts](P-14-ship-portable-cli-artifacts.md) · Phone · the surveyed stack's most-engaged issue is a glibc failure · Rust makes this a build-matrix problem
-- [P-16 — Follow remote hangup and interrupt calls cleanly](P-16-follow-remote-hangup-and-interrupt-calls-cleanly.md) · Phone · external reviews findings 1–2/1,2,4 · confirmed calls do not drain ACK/BYE and interrupts emit no terminal record
-- [P-17 — Bound dial completion including cancellation cleanup](P-17-bound-dial-completion-including-cancellation-cleanup.md) · Phone · external review finding 8 · every configured timeout carries an unexplained two-second tail
-- [P-18 — Make the bounded load tools interoperate by default](P-18-make-the-bounded-load-tools-interoperate-by-default.md) · Phone · external review finding 5 · default load exits success after one unusable signalling-only call
-- [P-19 — Make scenario frames and exits automation-complete](P-19-make-scenario-frames-and-exits-automation-complete.md) · Phone · external review finding 6 · help disagrees with accepted NDJSON and total refusal still exits zero
-- [P-20 — Preflight recording destinations before a call](P-20-preflight-recording-destinations-before-a-call.md) · Phone · external review finding 13 · an uncreatable recording path is discovered only after the call ends
-- [P-21 — Emit unique fields in every structured result](P-21-emit-unique-fields-in-every-structured-result.md) · Phone · external review finding 14 · browser-audio emits media_profile twice
-- [P-22 — Handle supervisor termination consistently](P-22-handle-supervisor-termination-consistently.md) · Phone · follow-up external review finding 5 · load-responder handles SIGINT but loses cleanup and its summary on SIGTERM
-- [P-23 — Validate output and capabilities before network I/O](P-23-validate-output-and-capabilities-before-network-io.md) · Phone · follow-up external review finding 9 · version ignores JSON and unavailable media features are reported only after a peer answers
-- [P-24 — Report call progress consistently](P-24-report-call-progress-consistently.md) · Phone · follow-up external review finding 11 · answer and load do not emit the INFO progress promised for -v
-- [S-36 — Verify the reported call-control and registration traps](S-36-verify-the-reported-call-control-and-registration-traps.md) · Signalling · six field-reported failure modes · each becomes a passing test or a defect · cheap, high information
-- [S-49 — Expose parsed TEL URI parameters](S-49-expose-parsed-tel-uri-parameters.md) · Signalling · requested by sipx-clstr CX-18 — routing consumers must not split the raw RFC 3966 parameter tail
-- [S-50 — Expose lossless address-presentation editing](S-50-expose-lossless-address-presentation-editing.md) · Signalling · requested by sipx-clstr CX-17 — one atomic display-name and URI splice retaining all header parameters
-- [S-51 — Expose lossless Warning-agent editing](S-51-expose-lossless-warning-agent-editing.md) · Signalling · requested by sipx-clstr CX-17 — parser-owned warn-agent replacement retaining code and text
-- [T-28 — Fall back to TCP when a request exceeds the path MTU](T-28-fall-back-to-tcp-when-a-request-exceeds-the-path-mtu.md) · Transport · RFC 3261 §18.1.1 · sipx currently refuses where the RFC says switch transport
-- [T-29 — Drain in-flight work on a graceful shutdown](T-29-drain-in-flight-work-on-a-graceful-shutdown.md) · Transport · restart without dropping calls · labelled critical and never delivered by the surveyed stack
-- [T-30 — Export signalling capture and media quality to a collector](T-30-export-signalling-capture-and-media-quality-to-a-collector.md) · Transport · the two observability asks people maintained private forks for · hooks, not a bundled exporter
-- [T-36 — Refresh server-transaction liveness on provisional progress](T-36-refresh-server-transaction-liveness-on-provisional-progress.md) · Signalling · requested by sipx-clstr CX-19 · unanswered_limit currently measures from first handoff even while the application keeps reporting progress
-- [T-37 — Preserve immediate transport failures as failures](T-37-preserve-immediate-transport-failures-as-failures.md) · Transport · external review finding 11 · a refused connection is currently reported as a SIP timeout
-- [T-38 — Specify bounded SIP endpoint resolution](T-38-specify-bounded-sip-endpoint-resolution.md) · Transport · external review finding 2 · spec-first target derivation, DNS ordering, identity and deadlines
 - [T-39 — Resolve named targets in every phone command](T-39-resolve-named-targets-in-every-phone-command.md) · Transport · external review finding 2 · after T-38 · dial, register and scenario accept named targets without manual address injection
-- [X-67 — Split the call module along its seams](X-67-split-the-call-module-along-its-seams.md) · Build · call.rs is 6560 lines, ~6100 of them production · hold, transfer, session timers, re-INVITE and ICE restart in one file · follow-up
-- [X-68 — Explain the layering on the public site](X-68-explain-the-layering-on-the-public-site.md) · Build · sans-IO is the central design property and the site never states it · one page, one diagram · beta-1
-- [X-69 — Guide every shipped call verb](X-69-guide-every-shipped-call-verb.md) · Build · hold, transfer, DTMF, playback, recording and coupling all ship and appear only as bullets · follow-up
-- [X-102 — Publish the peer endpoint load comparison](X-102-publish-the-peer-endpoint-load-comparison.md) · Build · compare endpoint responder capacity under the neutral profile; leave proxy workloads to sipx.clstr
-- [X-110 — Replace handwritten CLI argument parsing](X-110-replace-handwritten-cli-argument-parsing.md) · Build · external review findings 4, 7 and 12 · replace the custom Args scanner and flag registries with one typed parser; preserve the shipped CLI contract
-- [X-111 — Make published onboarding executable](X-111-make-published-onboarding-executable.md) · Build · follow-up external review findings 6–7 · dependency snippets omit a used crate and the generated version renders truncated
 - [X-112 — Take the integrated gate green on main and reconcile derived artifacts](X-112-take-the-integrated-gate-green-on-main.md) · Build · the single deferred acceptance row 29 stories share · five steps are already proven red at the merge base
 - [X-113 — Record the post-rc.2 boundary and close the wave stories](X-113-record-the-post-rc2-boundary-and-close-the-wave.md) · Build · after X-112 · one changelog boundary, then every story whose acceptance actually holds closes
 
@@ -225,6 +194,7 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [A-21 — Build a deterministic realtime peer](A-21-build-a-deterministic-realtime-peer.md) · Application · starts when A-19's spec lands — the peer implements the spec's other side, vector by vector
 - [A-22 — Bridge a call to an OpenAI agent](A-22-bridge-a-call-to-an-openai-agent.md) · Application · integrates A-19–A-21 — the bridge component, its host configuration, and the one-command product path
 - [A-24 — Publish and verify 1.0.0-beta.5](A-24-publish-and-verify-beta5.md) · Application · published immutable beta · exact registry, CLI, Pages and prerelease evidence recorded
+- [A-25 — Specify interchangeable local speech providers](A-25-specify-interchangeable-local-speech-providers.md) · Application · M16 spec gate · endpoint default and per-call override · local/offline by default
 - [A-35 — Publish and verify 1.0.0-beta.6](A-35-publish-and-verify-beta6.md) · Application · published immutable beta · exact registry, CLI, Pages and prerelease evidence recorded
 - [A-36 — Publish and verify 1.0.0-beta.7](A-36-publish-and-verify-beta7.md) · Application · published immutable beta · exact registry, CLI, Pages and prerelease evidence recorded
 - [A-37 — Publish and verify the first release candidate](A-37-publish-and-verify-rc1.md) · Application · first release candidate · reviewed docs, exact registry packages and portable artifacts
@@ -271,6 +241,8 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [M-38 — Complete one browser-compatible WebRTC audio path](M-38-browser-compatible-webrtc-audio.md) · Media · epic tracker; reuse WSS, ICE, DTLS-SRTP and Opus, then prove their browser-audio composition
 - [M-39 — Close the packaged and independent-peer Opus proof](M-39-close-the-opus-product-proof.md) · Media · Opus is rate- and direction-correct through the CLI, normalized packages and an independent peer
 - [M-42 — Advertise a chosen address and latch RTP without ICE](M-42-advertise-a-chosen-address-and-latch-rtp-without-ice.md) · Media · the loudest unmet need in the surveyed ecosystem · most requesters are not doing ICE at all
+- [M-43 — Carry linear PCM in and out without format assumptions](M-43-carry-linear-pcm-in-and-out-without-format-assumptions.md) · Media · four reported use cases resolve to one unopinionated PCM boundary · not an AI feature
+- [M-44 — Negotiate and carry G.722](M-44-negotiate-and-carry-g722.md) · Media · the only codec with real demand that sipx lacks · static PT 9 with the RFC 3551 clock-rate trap
 - [M-46 — Multiplex RTCP and negotiate the DTLS setup role](M-46-multiplex-rtcp-and-negotiate-the-dtls-setup-role.md) · Media · RFC 5761 + RFC 4145 · both are hard blockers for browser interop · prerequisites for M-38
 - [M-47 — Reject replayed SRTCP with a separate replay window](M-47-reject-replayed-srtcp.md) · Media · known gap in srtp.md §12.2 · authenticate first, then reject a repeated SRTCP index without touching the SRTP window
 - [M-48 — Specify the browser-audio profile and state machine](M-48-specify-browser-audio-profile.md) · Media · beta.4 starts here · normative profile, ordering, downgrade refusals, resource bounds and byte-level vectors before code
@@ -278,6 +250,8 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [M-50 — Run ICE, DTLS, SRTP and SRTCP on one nominated component](M-50-run-browser-media-on-one-component.md) · Media · beta.4 critical path · one bounded owner, nominated-peer binding and no bind/drop/rebind race
 - [M-51 — Prove browser audio against an independent endpoint](M-51-prove-browser-audio.md) · Media · beta.4 product proof · both SIP roles, non-silent Opus both ways, immediate fingerprint and downgrade negatives
 - [M-53 — Ship a runnable RTP echo example](M-53-ship-a-runnable-rtp-echo-example.md) · Media · discovered by X-97 · exercise the public RTP receive/send seam without inventing a second media stack
+- [M-69 — Reject an unacceptable initial offer on the wire](M-69-reject-an-unacceptable-initial-offer-on-the-wire.md) · Media · external review finding 3 · no-common-codec failure sends no final SIP response
+- [M-71 — Deliver negotiated DTMF receive events through scenario](M-71-deliver-negotiated-dtmf-receive-events-through-scenario.md) · Media · external review finding 10 · digits send successfully but no typed receive event arrives
 - [P-1 — Build the CLI scaffold and machine-readable output](P-1-cli-scaffold-and-output.md) · Phone
 - [P-2 — Implement `sipx register`](P-2-cli-register.md) · Phone
 - [P-3 — Implement `sipx dial`](P-3-cli-dial.md) · Phone
@@ -290,7 +264,17 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [P-11 — Drive interactive call actions through a correlated NDJSON protocol](P-11-script-interactive-call-actions.md) · Phone · after P-8/P-9; includes validated custom headers and no sleep command
 - [P-12 — Run bounded call load from the diagnostic phone](P-12-run-bounded-call-load.md) · Phone · reuse X-4's load model; every run has finite admission and cleanup bounds
 - [P-13 — Prove the complete diagnostic phone from a shell](P-13-prove-the-diagnostic-phone.md) · Phone · executable proof complete; combined full gate green
+- [P-14 — Ship portable CLI artifacts](P-14-ship-portable-cli-artifacts.md) · Phone · the surveyed stack's most-engaged issue is a glibc failure · Rust makes this a build-matrix problem
 - [P-15 — Run a bounded call-load responder](P-15-run-a-bounded-call-load-responder.md) · Phone · late M13 after X-98 and X-75 · machine-ready signalling UAS with finite admission and cleanup
+- [P-16 — Follow remote hangup and interrupt calls cleanly](P-16-follow-remote-hangup-and-interrupt-calls-cleanly.md) · Phone · external reviews findings 1–2/1,2,4 · confirmed calls do not drain ACK/BYE and interrupts emit no terminal record
+- [P-17 — Bound dial completion including cancellation cleanup](P-17-bound-dial-completion-including-cancellation-cleanup.md) · Phone · external review finding 8 · every configured timeout carries an unexplained two-second tail
+- [P-18 — Make the bounded load tools interoperate by default](P-18-make-the-bounded-load-tools-interoperate-by-default.md) · Phone · external review finding 5 · default load exits success after one unusable signalling-only call
+- [P-19 — Make scenario frames and exits automation-complete](P-19-make-scenario-frames-and-exits-automation-complete.md) · Phone · external review finding 6 · help disagrees with accepted NDJSON and total refusal still exits zero
+- [P-20 — Preflight recording destinations before a call](P-20-preflight-recording-destinations-before-a-call.md) · Phone · external review finding 13 · an uncreatable recording path is discovered only after the call ends
+- [P-21 — Emit unique fields in every structured result](P-21-emit-unique-fields-in-every-structured-result.md) · Phone · external review finding 14 · browser-audio emits media_profile twice
+- [P-22 — Handle supervisor termination consistently](P-22-handle-supervisor-termination-consistently.md) · Phone · follow-up external review finding 5 · load-responder handles SIGINT but loses cleanup and its summary on SIGTERM
+- [P-23 — Validate output and capabilities before network I/O](P-23-validate-output-and-capabilities-before-network-io.md) · Phone · follow-up external review finding 9 · version ignores JSON and unavailable media features are reported only after a peer answers
+- [P-24 — Report call progress consistently](P-24-report-call-progress-consistently.md) · Phone · follow-up external review finding 11 · answer and load do not emit the INFO progress promised for -v
 - [S-1 — Specify the SIP message model and parser](S-1-sip-message-parser-specs.md) · Signalling · gates every other sip-core story
 - [S-2 — Implement SIP URIs, header names and header parameters](S-2-uri-and-header-primitives.md) · Signalling
 - [S-3 — Implement typed headers with verbatim passthrough](S-3-typed-headers.md) · Signalling
@@ -326,6 +310,7 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [S-33 — Decide what `sipx answer` should exit with when it heard no audio](S-33-sipx-answer-exits-zero-having-heard-nothing.md) · Signalling · found by X-40's implementor — the answerer reports `heard_audio: false` and still exits 0, so a script cannot distinguish a silent call from a good one by exit code
 - [S-34 — Reach STIR signing and verification from a live call](S-34-reach-stir-from-live-calls.md) · Signalling · M11 evidence gap left explicit by S-20 — the sans-I/O services exist, but no call selects them and no independent verifier has accepted their output
 - [S-35 — Accept an inbound subscription from a socket](S-35-accept-an-inbound-subscription-from-a-socket.md) · Signalling · RFC 6665 notifier is reachable from a live endpoint and shares the bounded subscription store
+- [S-36 — Verify the reported call-control and registration traps](S-36-verify-the-reported-call-control-and-registration-traps.md) · Signalling · six field-reported failure modes · each becomes a passing test or a defect · cheap, high information
 - [S-37 — Specify endpoint event-client behavior](S-37-specify-endpoint-event-client-behavior.md) · Signalling · spec before code · generic RFC 6665 client contract consumed by S-24
 - [S-38 — Place and maintain event subscriptions](S-38-place-and-maintain-event-subscriptions.md) · Signalling · after S-37 · reusable outbound SUBSCRIBE and NOTIFY tracking · S-24 is a consumer
 - [S-39 — Send and receive publications through an endpoint](S-39-send-and-receive-publications-through-an-endpoint.md) · Signalling · after S-37 · make the existing RFC 3903 compositor and entity tags wire-reachable
@@ -337,6 +322,9 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [S-46 — Type the Privacy header](S-46-type-the-privacy-header.md) · Signalling · RFC 3323 typed grammar needed by privacy and asserted-identity policy
 - [S-47 — Expose lossless nested URI editing](S-47-expose-lossless-nested-uri-editing.md) · Signalling · parser-owned request-line and address-list surgery for forwarding consumers
 - [S-48 — Expose lossless TEL URI subscriber editing](S-48-expose-lossless-tel-uri-subscriber-editing.md) · Signalling · public RFC 3966 split and parser-owned subscriber replacement for routing consumers
+- [S-49 — Expose parsed TEL URI parameters](S-49-expose-parsed-tel-uri-parameters.md) · Signalling · requested by sipx-clstr CX-18 — routing consumers must not split the raw RFC 3966 parameter tail
+- [S-50 — Expose lossless address-presentation editing](S-50-expose-lossless-address-presentation-editing.md) · Signalling · requested by sipx-clstr CX-17 — one atomic display-name and URI splice retaining all header parameters
+- [S-51 — Expose lossless Warning-agent editing](S-51-expose-lossless-warning-agent-editing.md) · Signalling · requested by sipx-clstr CX-17 — parser-owned warn-agent replacement retaining code and text
 - [T-1 — Specify the transport layer and the sans-IO driver contract](T-1-transport-spec.md) · Signalling · gates every other transport story
 - [T-2 — Implement the UDP transport and the loopback harness](T-2-udp-transport.md) · Signalling
 - [T-3 — Implement the TCP transport with connection pooling and reuse](T-3-tcp-transport-and-pool.md) · Signalling
@@ -362,10 +350,16 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [T-25 — Make pool eviction close the live connection it evicts](T-25-make-pool-eviction-close-the-live-connection-it-evicts.md) · Signalling · R-01 in the 2026-07-30 repository review — map removal drops the writer but leaves the socket task blocked on reads, so the configured pool bound is not a live-connection bound
 - [T-26 — Bound unauthenticated TLS and WebSocket handshakes](T-26-bound-unauthenticated-tls-and-websocket-handshakes.md) · Signalling · R-02 in the 2026-07-30 repository review — accepted stream handshakes are spawned before pool admission with no deadline or concurrency budget
 - [T-27 — Reject invalid endpoint runtime configuration before binding](T-27-reject-invalid-endpoint-runtime-configuration-before-binding.md) · Signalling · R-06 and the WebSocket part of R-07 in the 2026-07-30 repository review — zero public capacities panic and zero keepalive terminates the task
+- [T-28 — Fall back to TCP when a request exceeds the path MTU](T-28-fall-back-to-tcp-when-a-request-exceeds-the-path-mtu.md) · Transport · RFC 3261 §18.1.1 · sipx currently refuses where the RFC says switch transport
+- [T-29 — Drain in-flight work on a graceful shutdown](T-29-drain-in-flight-work-on-a-graceful-shutdown.md) · Transport · restart without dropping calls · labelled critical and never delivered by the surveyed stack
+- [T-30 — Export signalling capture and media quality to a collector](T-30-export-signalling-capture-and-media-quality-to-a-collector.md) · Transport · the two observability asks people maintained private forks for · hooks, not a bundled exporter
 - [T-31 — Reload the TLS server identity without restarting](T-31-reload-the-tls-server-identity-without-restarting.md) · Transport · validate then atomically swap new-handshake identity · established connections survive
 - [T-32 — Expose bounded endpoint observation and policy hooks](T-32-expose-bounded-endpoint-observation-and-policy-hooks.md) · Transport · typed lifecycle seams · bounded observation · no arbitrary post-key message mutation
 - [T-34 — Cancel an outgoing INVITE transaction from a forwarding element](T-34-cancel-an-outgoing-invite-transaction.md) · Signalling · requested by sipx-clstr PX-12 — one public operation must cancel the exact outgoing INVITE branch
 - [T-35 — Bind only the selected cleartext transports](T-35-bind-only-the-selected-cleartext-transports.md) · Signalling · requested by sipx-clstr FC-1 — a TCP-only endpoint must not open an undeclared UDP socket
+- [T-36 — Refresh server-transaction liveness on provisional progress](T-36-refresh-server-transaction-liveness-on-provisional-progress.md) · Signalling · requested by sipx-clstr CX-19 · unanswered_limit currently measures from first handoff even while the application keeps reporting progress
+- [T-37 — Preserve immediate transport failures as failures](T-37-preserve-immediate-transport-failures-as-failures.md) · Transport · external review finding 11 · a refused connection is currently reported as a SIP timeout
+- [T-38 — Specify bounded SIP endpoint resolution](T-38-specify-bounded-sip-endpoint-resolution.md) · Transport · external review finding 2 · spec-first target derivation, DNS ordering, identity and deadlines
 - [X-1 — Scaffold the Cargo workspace, lint policy, licensing and CI](X-1-workspace-scaffold.md) · Core
 - [X-2 — Import the RFC 4475 torture corpus and its harness](X-2-rfc4475-torture-corpus.md) · Core
 - [X-3 — Enforce the provenance policy in CI and pre-commit](X-3-provenance-gate.md) · Core
@@ -429,6 +423,9 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [X-63 — Default overload advertisement breaks an independent peer](X-63-default-overload-advertisement-breaks-an-independent-peer.md) · Signalling
 - [X-64 — Pin the malformed-input refusals with named tests](X-64-pin-the-malformed-input-refusals-with-named-tests.md) · Build · three recurring input classes · properties currently asserted by design, sampled by fuzzing, pinned by nothing · beta-1
 - [X-65 — Assert the branch and tag RNG is cryptographic](X-65-assert-the-branch-and-tag-rng-is-cryptographic.md) · Build · spec says cryptographic because a guessable branch is a response-injection primitive · nothing fails if it stops being · beta-1
+- [X-67 — Split the call module along its seams](X-67-split-the-call-module-along-its-seams.md) · Build · call.rs is 6560 lines, ~6100 of them production · hold, transfer, session timers, re-INVITE and ICE restart in one file · follow-up
+- [X-68 — Explain the layering on the public site](X-68-explain-the-layering-on-the-public-site.md) · Build · sans-IO is the central design property and the site never states it · one page, one diagram · beta-1
+- [X-69 — Guide every shipped call verb](X-69-guide-every-shipped-call-verb.md) · Build · hold, transfer, DTMF, playback, recording and coupling all ship and appear only as bullets · follow-up
 - [X-70 — Make the doc examples model the rules the workspace enforces](X-70-make-the-doc-examples-model-the-rules-the-workspace-enforces.md) · Build · the canonical dispatcher example teaches a detached spawn and an expect, both banned in library code · beta-2
 - [X-71 — Scope the provenance relaxation for comparison subjects](X-71-scope-the-provenance-relaxation-for-comparison-subjects.md) · Build · reverses non-negotiable 1 in one directory and supersedes X-47's site-neutrality clause · must land alone
 - [X-72 — Define the comparison data model and its checker](X-72-define-the-comparison-data-model-and-its-checker.md) · Build · JSON registry + confidence ladder + staleness · seeded with sipx's generated column only · blocked on X-71
@@ -447,7 +444,10 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [X-98 — Specify the neutral comparative load profile](X-98-specify-the-neutral-comparative-load-profile.md) · Build · late M13 dependency · signalling-only common workload, safe supervisor and stable result schema
 - [X-99 — Run and publish the comparative load result](X-99-run-and-publish-the-comparative-load-result.md) · Build · after M13, X-98 and P-15 · immutable builds, both directions, raw evidence before summary
 - [X-101 — Reconcile unpublished main with the public docs](X-101-reconcile-unpublished-main-with-public-docs.md) · Build · audit every shipped capability in origin/main..main against the public adoption surface and remove stale denials
+- [X-102 — Publish the peer endpoint load comparison](X-102-publish-the-peer-endpoint-load-comparison.md) · Build · compare endpoint responder capacity under the neutral profile; leave proxy workloads to sipx.clstr
 - [X-103 — Remove endpoint responder hot-path congestion](X-103-remove-endpoint-responder-hot-path-congestion.md) · Build · profile before tuning; exceed the current peer endpoint baseline without weakening correctness or cleanup
+- [X-110 — Replace handwritten CLI argument parsing](X-110-replace-handwritten-cli-argument-parsing.md) · Build · external review findings 4, 7 and 12 · replace the custom Args scanner and flag registries with one typed parser; preserve the shipped CLI contract
+- [X-111 — Make published onboarding executable](X-111-make-published-onboarding-executable.md) · Build · follow-up external review findings 6–7 · dependency snippets omit a used crate and the generated version renders truncated
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->
