@@ -182,7 +182,7 @@
       "ownership": "sipx",
       "status": "implemented",
       "confidence": "measured",
-      "implementation": ["crates/sipx-call/src/call.rs", "crates/sipx-call/src/dialog.rs"],
+      "implementation": ["crates/sipx-call/src/call/mod.rs", "crates/sipx-call/src/dialog.rs"],
       "evidence": [{"url": "https://github.com/restsend/rsipstack/tree/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/dialog", "note": "invitation, client-dialog and server-dialog modules"}]
     },
     {
@@ -202,7 +202,7 @@
       "ownership": "sipx",
       "status": "implemented",
       "confidence": "measured",
-      "implementation": ["crates/sipx-call/src/call.rs"],
+      "implementation": ["crates/sipx-call/src/call/mod.rs", "crates/sipx-call/src/call/reinvite.rs"],
       "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/dialog/client_dialog.rs", "note": "cancel, hangup and reinvite methods"}]
     },
     {
@@ -222,7 +222,7 @@
       "ownership": "sipx",
       "status": "implemented",
       "confidence": "measured",
-      "implementation": ["crates/sipx-ua/src/agent.rs", "crates/sipx-call/src/call.rs"],
+      "implementation": ["crates/sipx-ua/src/agent.rs", "crates/sipx-call/src/call/mod.rs"],
       "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/dialog/client_dialog.rs", "note": "OPTIONS operation"}]
     },
     {
@@ -242,7 +242,7 @@
       "ownership": "sipx",
       "status": "implemented",
       "confidence": "measured",
-      "implementation": ["crates/sipx-call/src/extension.rs", "crates/sipx-call/src/call.rs"],
+      "implementation": ["crates/sipx-call/src/extension.rs", "crates/sipx-call/src/call/mod.rs"],
       "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/dialog/client_dialog.rs", "note": "INFO dialog operation"}]
     },
     {
@@ -252,7 +252,7 @@
       "ownership": "sipx",
       "status": "implemented",
       "confidence": "measured",
-      "implementation": ["crates/sipx-call/src/extension.rs", "crates/sipx-call/src/call.rs"],
+      "implementation": ["crates/sipx-call/src/extension.rs", "crates/sipx-call/src/call/mod.rs"],
       "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/dialog/dialog.rs", "note": "generic dialog MESSAGE operation"}]
     },
     {
@@ -262,7 +262,7 @@
       "ownership": "sipx",
       "status": "implemented",
       "confidence": "measured",
-      "implementation": ["crates/sipx-call/src/extension.rs", "crates/sipx-call/src/call.rs"],
+      "implementation": ["crates/sipx-call/src/extension.rs", "crates/sipx-call/src/call/mod.rs"],
       "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/dialog/dialog.rs", "note": "generic dialog request method"}]
     },
     {
@@ -312,7 +312,7 @@
       "ownership": "sipx",
       "status": "implemented",
       "confidence": "measured",
-      "implementation": ["crates/sipx-call/src/snapshot.rs", "crates/sipx-call/src/call.rs"],
+      "implementation": ["crates/sipx-call/src/snapshot.rs", "crates/sipx-call/src/call/mod.rs"],
       "evidence": [{"url": "https://github.com/restsend/rsipstack/blob/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/src/dialog/dialog.rs", "note": "DialogSnapshot public type"}]
     },
     {
@@ -342,7 +342,7 @@
       "ownership": "sipx",
       "status": "implemented",
       "confidence": "measured",
-      "implementation": ["crates/sipx-call/src/call.rs", "crates/sipx-ua/src/agent.rs"],
+      "implementation": ["crates/sipx-call/src/call/mod.rs", "crates/sipx-ua/src/agent.rs"],
       "evidence": [{"url": "https://github.com/restsend/rsipstack/tree/5ba7d4a2537a3551d8f4f78cef828ee8b75bc9a5/examples/client", "note": "user-agent client example"}]
     },
     {
