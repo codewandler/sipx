@@ -741,6 +741,25 @@ pub struct Encoded {
     ///
     /// `None` for a payload this endpoint authored rather than relayed — see [`Encoded::new`],
     /// which is how such a payload should be built.
+    ///
+    /// **What these bytes have to be, and what happens when they are not** (`M-81`). RFC 3550
+    /// §5.3.1's shape: a two-octet profile field, a length in 32-bit words, then exactly that many
+    /// words. sipx interprets none of it, but the packet layer and SRTP both read that length
+    /// word, so an extension that disagrees with itself is not carried the way a well-formed one
+    /// is, and neither this field nor [`MediaSession::send_encoded`] validates it:
+    ///
+    /// - **Shorter than four octets**, so there is no length word at all:
+    ///   [`Packet::encode`](sipx_rtp::packet::Packet::encode) leaves the extension off and clears
+    ///   the X bit rather than writing a header the next reader would run off the end of. The
+    ///   payload goes out; the extension does not, and nothing counts that.
+    /// - **A length word claiming more words than follow**, so the header runs past the packet: on
+    ///   an encrypted leg SRTP refuses to protect it and the whole packet is dropped, counted as
+    ///   [`MediaDiscardCounts::srtp_protect_failures`]. On a plain leg it goes out as written and
+    ///   the far end is the one that rejects it.
+    ///
+    /// A relayed extension is well formed by construction —
+    /// [`Packet::decode`](sipx_rtp::packet::Packet::decode) bounds-checks it against the packet it
+    /// arrived on — so this is a constraint on an extension a caller builds itself.
     pub extension: Option<Bytes>,
 }
 
@@ -2394,8 +2413,15 @@ impl MediaSession {
 
     /// Put a payload on the wire exactly as given, bypassing the codec.
     ///
-    /// Whatever header extension the [`Encoded`] carries goes out on the same packet (`M-79`).
-    /// A caller authoring its own payload gets that right by construction with [`Encoded::new`].
+    /// A **well-formed** header extension on the [`Encoded`] goes out on the same packet (`M-79`).
+    /// Nothing here validates one: [`Encoded::extension`] states the shape the bytes have to have,
+    /// and what an extension that disagrees with itself costs — an encrypted leg loses the whole
+    /// packet to [`MediaDiscardCounts::srtp_protect_failures`], and a short one is left off the
+    /// packet by the encoder. A caller authoring its own payload gets all of that right by
+    /// construction with [`Encoded::new`].
+    ///
+    /// The answer is whether the frame was queued: `false` means this session has stopped. `true`
+    /// is not a claim that the packet reached the wire.
     pub async fn send_encoded(&self, encoded: Encoded) -> bool {
         self.outgoing
             .send(Frame::Encoded {
@@ -3227,8 +3253,18 @@ async fn send_loop(socket: Arc<UdpSocket>, mut outgoing: mpsc::Receiver<Frame>, 
                     // Sending it in the clear instead is not an option: the far end negotiated
                     // encryption and a cleartext packet is both unreadable to it and readable to
                     // everyone else.
-                    // discard: `Packet::encode` always makes the complete header `protect`
-                    // requires, so this error branch is structurally unreachable here.
+                    //
+                    // Counted rather than excused (`M-81`). This site used to say `Packet::encode`
+                    // always makes the complete header `protect` requires, and that stopped being
+                    // true when `M-79` made `Encoded::extension` public: an extension whose length
+                    // word claims more 32-bit words than it carries is written verbatim with the X
+                    // bit set, and the header SRTP then computes is longer than the whole packet.
+                    // Caller-induced rather than attacker-induced — a relayed extension was
+                    // bounds-checked by `Packet::decode` — but media lost on an encrypted leg all
+                    // the same, so it is a number and not a log line.
+                    discards
+                        .srtp_protect_failures
+                        .fetch_add(1, Ordering::Relaxed);
                     tracing::warn!(%error, "dropping a packet SRTP could not protect");
                     continue;
                 }
@@ -4228,6 +4264,11 @@ async fn rtcp_loop(
                 Err(error) => {
                     // discard: the compound encoder above always emits the eight-byte header
                     // `protect_rtcp` requires, so this error branch is structurally unreachable.
+                    // This is where the sibling RTP branch's premise died and this one's did not
+                    // (`M-81`): every octet of a report is built from this session's own state —
+                    // SSRC, CNAME, counters — and no public API hands bytes to `encode_compound`
+                    // the way `Encoded::extension` hands them to `Packet::encode`. A counter here
+                    // would be stuck at zero.
                     tracing::warn!(%error, "dropping a report SRTCP could not protect");
                     continue;
                 }

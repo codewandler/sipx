@@ -161,7 +161,8 @@ playback worker. A discard during gathering therefore remains visible after the 
 session rather than being reset to zero at the ownership transition.
 
 The snapshot counts each consequence separately: codec encode and decode failures; SRTP and SRTCP
-unprotect failures; packets from a foreign SSRC; completed DTMF digits refused by the
+unprotect failures; RTP packets SRTP refused to protect; packets from a foreign SSRC; completed
+DTMF digits refused by the
 application queue; unknown RTP payload types; playback completion reports with no listener; ICE
 driver datagrams and data-sent notes refused by its queue; renegotiation replies with no listener;
 ICE outputs failing to send; redundant server-reflexive candidates;
@@ -173,10 +174,26 @@ An ICE output naming no bound socket has no counter: it is structurally unreacha
 base the agent can name was created from the exact socket vector the driver owns. The site carries
 that reason instead of a field permanently stuck at zero.
 
-The SRTP and SRTCP protect-error branches likewise have no counters. Their only errors are short
-headers, while those branches receive bytes from `Packet::encode` and `Rtcp::encode_compound`, which
-always make complete headers. Authentication failures on unprotect are reachable from network input
-and are counted. This distinction avoids publishing protect counters structurally stuck at zero.
+**The SRTCP protect-error branch has no counter; SRTP's does, and the difference is where the bytes
+come from.** Both fail only on a header shorter than the transform can read. `Rtcp::encode_compound`
+builds every octet of a report out of this session's own state — SSRC, CNAME, counters — and always
+emits at least the eight octets `protect_rtcp` requires, so nothing a caller or a peer does reaches
+that branch; it carries its reason rather than a field permanently stuck at zero.
+
+`Packet::encode` no longer supports the same claim, and this spec asserted it until `M-81`. `M-79`
+made `Encoded::extension` public, which is enough: an extension whose embedded length word claims
+more 32-bit words than it carries is written verbatim with the X bit set, the header SRTP then
+computes is longer than the whole packet, and `protect` refuses it. The packet MUST be dropped —
+sending it in the clear would defeat the encryption the far end negotiated — and the drop MUST
+increment `srtp_protect_failures`. It is caller-induced rather than attacker-induced: a relayed
+extension was bounds-checked against its packet by `Packet::decode`, and counting this weakens
+nothing about what SRTP authenticates or encrypts. Authentication failures on unprotect are
+reachable from network input and are counted separately.
+
+The lesson is about the shape of the excuse rather than about SRTP. "Unreachable because of what
+the caller can be" is a claim with an expiry date, and publishing one field made this one false
+without touching either site. Where a reason rests on the absence of a public constructor, whoever
+adds one owns the reason.
 
 Every discard site MUST either increment exactly one counter or carry a `// discard: <reason>` on
 the site explaining why no counter can truthfully reach it. A source-enumeration test enforces that

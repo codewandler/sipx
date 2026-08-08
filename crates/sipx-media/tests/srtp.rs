@@ -16,7 +16,7 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use sipx_media::{Codec, Config, MediaPort, MediaSession, SrtpKeys};
+use sipx_media::{Codec, Config, Encoded, MediaPort, MediaSession, SrtpKeys};
 use sipx_rtp::srtp::Profile;
 use tokio::net::UdpSocket;
 
@@ -28,6 +28,19 @@ const EVERY_PROFILE: [Profile; 3] = Profile::STRONGEST_FIRST;
 /// How long a test here waits for a clip it played to arrive before calling it lost (`X-28`).
 /// A bound on failure rather than a window to measure in — see [`MediaSession::record_at_least`].
 const DELIVERY_BOUND: Duration = Duration::from_secs(10);
+
+/// How long "nothing left the socket" is given to be false before it is believed (`M-81`).
+const SILENCE: Duration = Duration::from_millis(400);
+
+/// A header extension whose embedded length word claims far more than it carries.
+///
+/// RFC 3550 §5.3.1's shape: a profile field (`0xBEDE`, RFC 8285's one-byte form), a length in
+/// 32-bit words, then that many words. Here the length says 255 words — 1020 octets — and four
+/// follow, so the header this describes runs past the end of any packet it is written onto.
+const OVERSTATED_EXTENSION: [u8; 8] = [0xBE, 0xDE, 0x00, 0xFF, 0x10, 0xAA, 0x00, 0x00];
+
+/// One packet's worth of µ-law at a constant amplitude, so a leak would be recognisable.
+const PAYLOAD: [u8; 160] = [0xD5; 160];
 
 /// A distinctive signal: µ-law encodes a constant amplitude to a constant byte, so a recognisable
 /// byte pattern appears verbatim in an *unencrypted* payload and cannot in an encrypted one.
@@ -251,6 +264,80 @@ async fn a_packet_under_the_wrong_key_is_refused() {
         assert!(
             heard.is_err(),
             "{profile:?}: a packet under the wrong key was played"
+        );
+
+        session.stop();
+    }
+}
+
+/// A packet SRTP cannot protect is dropped, and the drop is **counted** (`M-81`).
+///
+/// `docs/specs/media-runtime.md` §4 excused this branch from a counter while every packet the send
+/// loop protected was built inside the crate. `M-79` made [`Encoded::extension`] public, which is
+/// enough to reach it: `Packet::encode` writes a caller's extension verbatim and sets the X bit, so
+/// a length word that overstates its bytes makes the header SRTP computes longer than the whole
+/// packet and `protect` refuses it.
+///
+/// Dropping is the right consequence — sending it in the clear would hand the media to everyone on
+/// the path and to nobody at the far end, which negotiated encryption. What was wrong was that the
+/// drop moved nothing: one `warn!` and a lost packet on an encrypted leg, with no number an
+/// operator could read afterwards. Both halves are asserted here, because a counter that rises
+/// while the packet also goes out would be worse than either.
+#[tokio::test]
+async fn a_packet_srtp_cannot_protect_is_counted_rather_than_lost_silently() {
+    for profile in EVERY_PROFILE {
+        let peer = UdpSocket::bind("127.0.0.1:0").await.expect("binds");
+        let peer_addr = peer.local_addr().expect("has an address");
+        let port = MediaPort::bind("127.0.0.1:0".parse().expect("valid"))
+            .await
+            .expect("binds");
+
+        let (local_keys, _) = keys(profile);
+        let mut config = Config::new(peer_addr, Codec::Pcmu);
+        config.rtcp_interval = None;
+        config.srtp = Some(local_keys);
+        let session = port.start(config).expect("valid media setup");
+
+        // Exactly what a relay hands on, except that the extension is inconsistent with itself.
+        let mut encoded = Encoded::new(Codec::Pcmu.payload_type(), Bytes::from_static(&PAYLOAD));
+        encoded.extension = Some(Bytes::from_static(&OVERSTATED_EXTENSION));
+        assert!(
+            session.send_encoded(encoded).await,
+            "{profile:?}: the session took the frame"
+        );
+
+        // Ordered on the counter rather than on elapsed time: the send loop is another task, and
+        // a fixed wait would settle this on how busy the machine is (§4.1).
+        let deadline = tokio::time::Instant::now() + DELIVERY_BOUND;
+        while session.discard_counts().total() == 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{profile:?}: SRTP refused to protect the packet and it was dropped, and no \
+                 discard counter moved — the loss is invisible to an operator"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        let counted = session.discard_counts();
+        assert_eq!(
+            counted.srtp_protect_failures, 1,
+            "{profile:?}: the packet the transform refused is counted where §4 says it is"
+        );
+        assert_eq!(
+            counted.total(),
+            1,
+            "{profile:?}: one dropped packet moves exactly one counter"
+        );
+
+        // And it really was dropped: nothing reached the far end, in the clear or otherwise. The
+        // window defines silence — the assertion under it is negative, so load can only make it
+        // fail — and it opens after the counter has already risen, so the send loop is known to
+        // have finished with the frame.
+        let mut datagram = vec![0u8; 2048];
+        let leaked = tokio::time::timeout(SILENCE, peer.recv_from(&mut datagram)).await;
+        assert!(
+            leaked.is_err(),
+            "{profile:?}: a packet SRTP could not protect still reached the wire"
         );
 
         session.stop();
