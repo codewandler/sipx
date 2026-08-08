@@ -101,7 +101,25 @@ NOT_RUN_LOCALLY = {
     "deny": "runs as a packaged action against a freshly fetched advisory database, not local state",
     "deploy-site": "publishes what `site` built; there is nothing to verify",
     "device-linux": "the local all-feature suite runs the x86 vector; CI adds the arm64 release architecture",
-    "device-portable": "requires the macOS and Windows platform audio SDKs unavailable on a Linux gate host",
+    # X-125 measured this rather than assuming it, because the old reason — "requires the platform
+    # audio SDKs" — is true of *linking* and was false of the thing that actually went red: a `cfg`
+    # gate broader than its only caller's, which needs no SDK to notice and left both jobs red for
+    # a day while every local signal was green.
+    #
+    # What is reachable from a Linux host, on 2026-08-08: `cargo check --target
+    # x86_64-pc-windows-gnu` builds this workspace including `sipx-cli --features device-audio`,
+    # in about 20 s warm, and reproduces that failure exactly — so it is the `windows cross check`
+    # step below, and this job's Windows half is no longer only CI's to see. Both Apple targets
+    # fail in `ring`'s build script (`cc` cannot target Darwin: "unrecognized command-line option
+    # '-arch'"), long before any sipx code, and no cross C toolchain for Darwin exists on the gate
+    # host — so the `macos-15` half genuinely cannot run here.
+    #
+    # What stays CI's even for Windows: the MSVC environment (`target_env`), linking, and the
+    # platform audio SDK the `cargo check` above never reaches.
+    "device-portable": "the macos-15 half cannot be cross-built on a Linux host — both "
+    "apple-darwin targets die in ring's build script for want of a C compiler targeting Darwin — "
+    "and neither half's platform audio SDK or MSVC environment is available here; the Windows "
+    "half's cfg reachability is covered locally by the x86_64-pc-windows-gnu cross check",
     "browser-audio": "requires the hosted runner's matched native browser/WebDriver; the local gate runs its adversarial harness suite",
     "coverage": "an instrumented rebuild of the workspace and a second full run of the suite, for a "
     "number nothing gates on; the cheap half — rendering the page from the recorded counts and "
@@ -228,6 +246,18 @@ def gate_steps(msrv: str) -> list[Step]:
         # nothing ran it. Two sweeps declared the workspace clean and two violations landed in the
         # wave after the second one. Cheap, needs no toolchain, and reads `src/` as well as tests.
         Step("fixed sleeps", "fixed-sleep", ("./scripts/check-fixed-sleep.py", "--check")),
+        # X-125: `versioned_bytes` was gated on a feature while its only caller was gated on the
+        # feature *and* `target_os = "linux"`, so it was dead code everywhere else and
+        # `device audio compiles (macos-15)` and `(windows-2025)` were red for a day — while this
+        # gate and `check-features.sh` were both green, correctly, because on Linux the caller
+        # compiles and the helper is used. Nothing about that shape needs a platform SDK to see:
+        # it is two predicates and the lines that name the item. A second and a half over the
+        # workspace, and no toolchain at all.
+        Step("cfg reach", "gate", ("./scripts/check-cfg-callers.py", "--check")),
+        # And its suite, for the reason every checker in this cluster has one: a text reader that
+        # stops recognising a shape goes silent, and silence is indistinguishable from a clean
+        # workspace. Three of its fixtures are regressions it had while being written.
+        Step("cfg reach tests", "gate", ("python3", "scripts/test-cfg-callers.py")),
         # X-118: `scripts/contention-proof.py` is the only evidence in this repository that the
         # wall-clock-bounded CLI assertions hold on a busy machine, and it runs by hand because it
         # loads the box for minutes. What is here is the two cheap halves — its own suite, whose
@@ -346,6 +376,32 @@ def gate_steps(msrv: str) -> list[Step]:
             toolchain=msrv,
         ),
         Step("feature matrix", "features", ("./scripts/check-features.sh",)),
+        # X-125: the one non-Linux configuration this host can actually compile. `device-portable`
+        # checks the same crate and features on `macos-15` and `windows-2025`; neither runner is
+        # available here, and neither Apple target cross-builds — but `x86_64-pc-windows-gnu` does,
+        # in about 20 s warm, and it compiles every `target_os = "windows"` branch the MSVC job
+        # would. It reproduces the `cfg`-outlives-its-caller failure this story was filed for, so
+        # the two guards overlap deliberately: this one builds the configuration, `cfg reach`
+        # reads the ones that cannot be built at all.
+        #
+        # What it costs: the `x86_64-pc-windows-gnu` rustup target and a mingw-w64 C toolchain, for
+        # `ring`'s build script. Both are installed by the CI job; a gate host without them gets a
+        # cargo failure rather than a silent skip, which is this script's rule everywhere else.
+        Step(
+            "windows cross check",
+            "cross-windows",
+            (
+                "cargo",
+                "check",
+                "-p",
+                "sipx-cli",
+                "--all-targets",
+                "--features",
+                "device-audio",
+                "--target",
+                "x86_64-pc-windows-gnu",
+            ),
+        ),
         # X-120: `S-41` built this checker and nothing ran it, so the artifact claims —
         # no imports, the ABI export names, the size bound — were unenforced while the
         # kernel tests passed. 18s warm, so it belongs local rather than CI-only.

@@ -123,6 +123,31 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check -p sipx-cli --all-targets --features device-audio
 
+  # X-125. The same command as `device-portable`'s Windows leg, cross-compiled from Linux, and it
+  # exists so that an implementor's own gate can run it: the job above was red for a day over a
+  # `cfg` gated more broadly than its only caller, which is dead code on every non-Linux target and
+  # invisible to anything a Linux host builds.
+  #
+  # `x86_64-pc-windows-gnu` rather than the MSVC target the runner above uses, because MSVC cannot
+  # be cross-linked from here — `ring`'s build script looks for `lib.exe`. The gnu target compiles
+  # every `target_os = "windows"`, `windows` and `target_family = "windows"` branch the MSVC job
+  # does, which is the whole of what this catches; the MSVC environment itself stays that job's.
+  # Neither Apple target cross-builds at all (ring's C build cannot target Darwin), so `macos-15`
+  # has no local counterpart and `gate.py`'s NOT_RUN_LOCALLY entry records the measurement.
+  cross-windows:
+    name: windows cross check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # ring builds C for the target; the runner image is not guaranteed to carry the cross
+      # compiler, and a missing one fails inside cc-rs with a message about `-arch` rather than
+      # about a toolchain.
+      - run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64
+      - uses: dtolnay/rust-toolchain@stable
+      - run: rustup target add x86_64-pc-windows-gnu
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check -p sipx-cli --all-targets --features device-audio --target x86_64-pc-windows-gnu
+
   browser-audio:
     name: native browser audio proof
     runs-on: ubuntu-24.04
@@ -219,6 +244,14 @@ jobs:
       # understanding makes it report agreement over nothing. Every rule is reversed on a
       # fabricated crate, and its blind spot is asserted to be counted rather than disclaimed.
       - run: python3 scripts/test-outcome-parity.py
+      # X-125: the class of defect only the non-Linux jobs compile — a `cfg`-gated item whose gate
+      # is broader than the union of its callers' gates, and therefore dead code wherever those
+      # callers are compiled out. Here rather than in `cross-windows` because it needs no target
+      # and no toolchain, and because it reaches the macOS half that nothing local can build.
+      - run: ./scripts/check-cfg-callers.py --check
+      # Its suite, whose three regression fixtures are shapes this workspace contains and this
+      # reader was silent about while it was being written.
+      - run: python3 scripts/test-cfg-callers.py
 
   # X-66. A number, and deliberately nothing else built on it: no threshold, no ratchet, and no
   # failure when it drops. `docs/roadmap.md` rules out a v1 gate built on coverage — a percentage
