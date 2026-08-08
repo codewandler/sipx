@@ -2,7 +2,7 @@
 id: M-72
 title: Prove the AEAD SRTP key derivation against an independent peer
 pillar: Media
-status: ready
+status: in-progress
 priority: 22
 design: docs/designs/media-security-profiles.md
 epic: media-security-profiles
@@ -22,13 +22,13 @@ repository can write will catch it being wrong.
 
 ## Acceptance
 
-- [ ] One interop run establishes AEAD-GCM protected media with an implementation that did not
+- [x] One interop run establishes AEAD-GCM protected media with an implementation that did not
       learn its key derivation from sipx, and audio is verified as non-silent in both directions.
 - [ ] Both `AEAD_AES_128_GCM` and `AEAD_AES_256_GCM` are covered, over SDES and over DTLS-SRTP,
       because the two keying paths reach the derivation differently.
-- [ ] The peer, its exact revision and the negotiated profile are recorded as run evidence a
+- [x] The peer, its exact revision and the negotiated profile are recorded as run evidence a
       stranger can audit, in the shape `tests/interop/` already uses.
-- [ ] A failing-first negative proves the harness would actually catch a wrong derivation — for
+- [x] A failing-first negative proves the harness would actually catch a wrong derivation — for
       example a deliberately perturbed salt offset must fail the run, not merely log.
 - [ ] `./scripts/gate.py` green, with the interop job registered as a gate step or in
       `NOT_RUN_LOCALLY` with a reason.
@@ -41,6 +41,35 @@ repository can write will catch it being wrong.
   is wrong, two sipx endpoints interoperate with each other and with nobody else, and **every
   round-trip test in the tree still passes**, because both ends share the same mistake. This is the
   failure shape §12.1 already describes.
+
+- 2026-08-08: **the derivation is right for `AEAD_AES_256_GCM`, proved against a native browser
+  over DTLS-SRTP.** The peer that was missing turned out to be already in the tree: the `M-51`
+  harness in `tests/browser-audio/` runs a real browser, and in the `browser-answerer` role sipx is
+  the DTLS server and selects its strongest profile. That run negotiated `AEAD_AES_256_GCM` and
+  carried non-silent Opus both ways — the browser derived its own session keys from the RFC 5764
+  exporter block by its own reading of RFC 7714 §11, so agreement is not something sipx can arrange
+  with itself. `driver.py:251` had recorded the profile since `M-51` and asserted only that it was
+  non-empty, so the evidence existed and the claim did not.
+
+  What changed: the profile is checked against the registry rather than for non-emptiness, at least
+  one role must have keyed with AEAD-GCM or the run is refused, and the peer's exact revision is
+  captured from the WebDriver session's negotiated capabilities — the browser's own answer, not the
+  page's claim about itself. The run now emits `aead_key_derivation` naming the witness role, the
+  profile and the peer revision.
+
+  The negative is measured, not asserted. Right-aligning the master salt against octet 14 instead of
+  left-aligning it at octet 0 — the competing reading, and a no-op for the 14-octet counter-mode
+  salt — leaves RFC 3711 §B.3's KDF vector passing, every RFC 7714 transform vector passing, and
+  **all 448 tests of `sipx-rtp` and `sipx-media` passing**. The same tree fails the browser run in
+  the `AEAD_AES_256_GCM` role while the counter-mode role stays green in that same run.
+
+  Two of four combinations remain, and `tests/interop/` cannot close them today: the pinned peer is
+  **built without AEAD-GCM at all**. Measured twice — its SRTP module references no
+  `srtp_crypto_policy_set_aes_gcm_*`, and offered one `a=crypto` line at a time it answers `200 OK`
+  to `AES_CM_128_HMAC_SHA1_80` and `488 Not Acceptable Here` to both GCM suites. So
+  `a_real_peer_accepts_media_sipx_encrypted_with_sdes` has always been a counter-mode fact.
+  `AEAD_AES_128_GCM`, and both suites over SDES, need a SIP peer that is built with GCM and can be
+  made to *require* it; recorded in `tests/interop/README.md` and `docs/specs/srtp.md` §12.10.
 
 ## Notes
 

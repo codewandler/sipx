@@ -82,17 +82,29 @@ A role succeeds only when all of these are observed in that same run:
 1. WSS connected with subprotocol `sip` under the pinned identity;
 2. one audio transceiver negotiated Opus at 48 kHz;
 3. ICE reached `connected` or `completed`, and the statistics-selected candidate pair is nominated;
-4. DTLS is connected, the answer selected `active` or `passive`, and a non-empty SRTP profile is
-   reported;
+4. DTLS is connected, the answer selected `active` or `passive`, and the reported SRTP profile is
+   one the registry carries (`KNOWN_SRTP_PROFILES`) rather than merely non-empty;
 5. inbound and outbound RTP packet and byte counts are nonzero;
 6. the synthetic outbound track produced frames and the inbound track reports nonzero audio energy;
 7. INVITE, final response, ACK and BYE occurred in the role-correct order; and
 8. the sipx terminal object independently reports browser-audio, Opus, keyed media, the same role
-   and a nominated component-1 pair.
+   and a nominated component-1 pair; and
+9. the browser and its exact revision are recorded, from the WebDriver session's negotiated
+   capabilities rather than from the page under test, which can say anything about itself.
 
 The overall proof succeeds only after both ordinary roles and the unused-candidate compatibility
 case satisfy the list. Process exit without all facts is failure. A terminal result from only one
 role, or compatibility evidence not containing both offered components, is failure.
+
+**At least one role must have negotiated an AEAD-GCM profile** (`M-72`). RFC 7714 publishes no
+key-derivation vector, so the placement of its 96-bit master salt in the PRF input block rests on a
+reading of the spec; two sipx endpoints sharing a wrong reading interoperate with each other and
+with nobody else, and every round-trip test in the repository still passes. DTLS-SRTP hands both
+sides only a master key and salt, so each derives its own session keys — which makes this harness
+the one place that contradiction can surface. A run that quietly became counter-mode-only would
+keep passing while that claim evaporated, so it is refused instead. The run records the witness
+role, the profile, and the peer revision under `aead_key_derivation`; `docs/specs/srtp.md` §12.10
+holds the result and the combinations it leaves open.
 
 ## 5. Negative non-vacuity
 
