@@ -28,6 +28,11 @@ pub mod transparent;
 const DEFERRED_CAPACITY: usize = 16;
 
 /// One leg of a coupling.
+///
+/// Exhaustive by design: a coupling joins exactly two legs — that is what the word means here,
+/// and every rule in this module is written as "what one leg's event requires on its peer".
+/// Three parties are a conference, which `sipx-media` mixes and which names its participants
+/// rather than numbering them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Leg {
     /// The first leg supplied to the coupling.
@@ -73,6 +78,7 @@ impl<T> PerLeg<T> {
 
 /// Where an SDP offer legally arrived.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum OfferAxis {
     /// The initial INVITE.
     InitialInvite,
@@ -88,6 +94,7 @@ pub enum OfferAxis {
 
 /// What the offer/answer policy asks its I/O driver to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum OfferAction {
     /// Relay this offer to the peer leg.
     Relay {
@@ -118,6 +125,7 @@ impl NegotiationState {
 
 /// The action an inbound CANCEL has on the peer leg.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CancelAction {
     /// Cancel the peer's still-pending INVITE.
     CancelPeer,
@@ -129,6 +137,7 @@ pub enum CancelAction {
 
 /// What a final failure on one leg requires on its peer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FailureAction {
     /// Refuse the peer's still-pending INVITE with the same final status.
     RejectPeer {
@@ -264,6 +273,7 @@ impl CouplingState {
 
 /// Why the confirmed-dialog driver returned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CouplingEnd {
     /// One leg received and accepted a BYE.
     Bye(Leg),

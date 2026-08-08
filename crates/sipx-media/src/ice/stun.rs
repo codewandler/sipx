@@ -143,6 +143,9 @@ pub enum Error {
 }
 
 /// RFC 5389 §6's message class: the two bits that say request from response.
+///
+/// Exhaustive by design: §6 encodes the class in two bits of the message type, so there are four
+/// classes and arithmetic forbids a fifth without a different header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Class {
     /// A Binding Request. A connectivity check is one.
@@ -205,6 +208,7 @@ const fn split_type(raw: u16) -> (Class, u16) {
 /// `Unknown` — but it is reachable from a caller assembling a message by hand, and a second
 /// `MESSAGE-INTEGRITY` in a message is a message that authenticates as nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Attribute {
     /// `USERNAME` (RFC 5389 §15.3), in the direction [`Peering`] fixes.
     Username(String),
@@ -261,6 +265,10 @@ pub enum Attribute {
 /// The controlled arm has no `nominate`, and that is the point: §7.1.2 says "the controlled agent
 /// MUST NOT include the USE-CANDIDATE attribute in a Binding request", and a shape that cannot
 /// express it cannot send it by accident.
+///
+/// Exhaustive by design: it mirrors [`crate::ice::checklist::Role`], which §6.1.1 resolves to one
+/// of two values for every session. A third arm here would be a check carrying a role attribute
+/// no agent can hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RoleAttribute {
     /// `ICE-CONTROLLING`.

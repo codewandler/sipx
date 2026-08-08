@@ -346,7 +346,9 @@ async fn observe(
                 Some(EventSubscriptionEvent::State(StateChange::Terminated(reason))) => {
                     return Err(termination(&reason));
                 }
-                Some(EventSubscriptionEvent::State(_)) => {}
+                // A state change, or an event kind this build does not model: neither is a
+                // snapshot, so the window keeps waiting for one rather than ending early.
+                Some(_) => {}
                 None => return Err((Exit::Failed, "registrar subscription ended".to_owned())),
             },
         }
@@ -362,7 +364,8 @@ async fn next_snapshot(
             Some(EventSubscriptionEvent::State(StateChange::Terminated(reason))) => {
                 return Err(termination(&reason));
             }
-            Some(EventSubscriptionEvent::State(_)) => {}
+            // See above: anything that is not a snapshot leaves the loop waiting for one.
+            Some(_) => {}
             None => {
                 return Err((
                     Exit::Failed,

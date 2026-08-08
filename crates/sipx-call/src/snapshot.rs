@@ -1312,6 +1312,14 @@ fn decode_preference(value: u8) -> Result<crate::CodecPreference, DialogPersiste
     }
 }
 
+/// The id no reader accepts, written for a codec this build carries and has no id for.
+///
+/// [`Codec`] is `#[non_exhaustive]`, so a variant can arrive from `sipx-media` without a line in
+/// the table below. Persisting it as some other codec's id would restore a call running a format
+/// it never negotiated; persisting an id nothing decodes makes the restore fail typed, which is
+/// the direction the id table's own note about renumbering already chose.
+const UNKNOWN_CODEC_ID: u8 = u8::MAX;
+
 const fn codec_id(value: Codec) -> u8 {
     match value {
         Codec::Pcmu => 0,
@@ -1320,6 +1328,7 @@ const fn codec_id(value: Codec) -> u8 {
         Codec::Opus => 2,
         Codec::L16 => 3,
         Codec::G722 => 4,
+        _ => UNKNOWN_CODEC_ID,
     }
 }
 

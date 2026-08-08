@@ -107,7 +107,10 @@ pub(super) fn peer_ice_credentials(body: &[u8]) -> Option<sipx_sdp::ice::Credent
     let audio = description.media.first()?;
     match sipx_media::ice::negotiate(&description, audio) {
         IceNegotiation::Ice { credentials, .. } => Some(credentials),
-        IceNegotiation::Absent | IceNegotiation::Mismatch => None,
+        // Absent, Mismatch, and any outcome a later `sipx-media` reports: none of them is an ICE
+        // session with credentials to compare a restart against, and reading one as if it were
+        // would make the peer's next re-offer look like a restart of a session that never began.
+        _ => None,
     }
 }
 

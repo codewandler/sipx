@@ -263,6 +263,8 @@ impl Selection {
             NegotiatedKeying::Plain => "plain",
             NegotiatedKeying::Sdes => "sdes",
             NegotiatedKeying::DtlsSrtp => "dtls-srtp",
+            // See `profile_name`: an unknown mechanism is named as unknown, not approximated.
+            _ => "unknown",
         };
         let mut report = report
             .text("negotiated_codec", codec_name(call.media().codec()))
@@ -326,6 +328,8 @@ const fn component_state(state: ComponentState) -> &'static str {
         ComponentState::KeysInstalled => "keys-installed",
         ComponentState::Running => "running",
         ComponentState::Closed => "closed",
+        // See `profile_name`: an unknown state is named as unknown, not approximated.
+        _ => "unknown",
     }
 }
 
@@ -359,6 +363,8 @@ const fn codec_name(codec: Codec) -> &'static str {
         Codec::L16 => "l16",
         #[cfg(feature = "opus")]
         Codec::Opus => "opus",
+        // See `profile_name`: an unknown codec is named as unknown, not approximated.
+        _ => "unknown",
     }
 }
 
@@ -380,6 +386,8 @@ const fn path_name(path: IcePath) -> &'static str {
         IcePath::ServerReflexive => "server-reflexive",
         IcePath::PeerReflexive => "peer-reflexive",
         IcePath::Relayed => "relayed",
+        // See `profile_name`: an unknown path is named as unknown, not approximated.
+        _ => "unknown",
     }
 }
 

@@ -304,11 +304,15 @@ fn positive_result(
         Codec::L16 => "l16",
         #[cfg(feature = "opus")]
         Codec::Opus => "opus",
+        // See `media_profile` above: a value this build does not know is named as unknown rather
+        // than approximated, because this proof's output is evidence and not a summary.
+        _ => "unknown",
     };
     let negotiated_keying = match call.negotiated_keying() {
         NegotiatedKeying::Plain => "plain",
         NegotiatedKeying::Sdes => "sdes",
         NegotiatedKeying::DtlsSrtp => "dtls-srtp",
+        _ => "unknown",
     };
     let media_state = match component.state {
         ComponentState::IceChecking => "ice-checking",
@@ -317,6 +321,7 @@ fn positive_result(
         ComponentState::KeysInstalled => "keys-installed",
         ComponentState::Running => "running",
         ComponentState::Closed => "closed",
+        _ => "unknown",
     };
     Ok(json!({
         "status": "answered",

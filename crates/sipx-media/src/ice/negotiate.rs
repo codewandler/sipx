@@ -27,6 +27,7 @@ pub const ICE_MISMATCH: &str = "ice-mismatch";
 
 /// What a peer's description says about ICE for one stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Negotiation {
     /// No usable `a=candidate`: the peer is not doing ICE ([spec] §13.3).
     ///

@@ -21,6 +21,7 @@ use std::fmt;
 /// using them". A parser that accepted them would be offering a caller a value it is forbidden to
 /// act on, so they are rejected at the door instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum HashFunc {
     /// SHA-1. Accepted for interoperability with peers that still send it; not what sipx offers.
     Sha1,
@@ -182,6 +183,11 @@ impl Fingerprint {
 }
 
 /// Who opens the DTLS connection (RFC 4145 §4, used by RFC 5763 §5).
+///
+/// Exhaustive by design: §4 defines the `setup` attribute's value set as exactly these four
+/// tokens, and they cover the question completely — this end starts the handshake, waits for it,
+/// will decide later, or no connection is formed. A fifth token would be a new attribute, because
+/// a peer that has never heard of it must reject the description rather than negotiate around it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Setup {
     /// This endpoint will start the handshake — the DTLS **client**.

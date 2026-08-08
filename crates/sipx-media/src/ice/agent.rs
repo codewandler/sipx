@@ -53,6 +53,7 @@ const TRANSPORT: sipx_sdp::ice::Transport = sipx_sdp::ice::Transport::Udp;
 /// §14.3's RTO is per transaction: two checks sent one Ta apart have different retransmission
 /// intervals, since the number of outstanding checks changed between them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Timer {
     /// Ta: the pacing tick. One check leaves per tick, across the whole checklist set (§14.2).
     Ta,
@@ -69,6 +70,7 @@ pub enum Timer {
 
 /// Something that happened.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum Input {
     /// The far end's ICE parameters, from an offer or an answer.
     RemoteDescription {
@@ -125,6 +127,7 @@ pub enum Input {
 /// machines follow, so a retransmission timer can never start before the thing it retransmits has
 /// gone out.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Output {
     /// Put these bytes on the wire. The driver owns the socket.
     Send {

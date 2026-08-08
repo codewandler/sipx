@@ -140,6 +140,7 @@ impl Sdes {
 
 /// An RTCP packet.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Rtcp {
     /// A sender report.
     Sender(SenderReport),

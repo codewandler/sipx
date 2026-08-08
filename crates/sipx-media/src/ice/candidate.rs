@@ -112,6 +112,9 @@ pub struct LocalFoundation(pub u32);
 
 /// A remote candidate's foundation.
 ///
+/// Exhaustive by design: §7.3.1.3 gives a remote candidate no third provenance, and the paragraph
+/// below is why the two it does give cannot be one variant.
+///
 /// Two variants because a remote candidate has two provenances, and §7.3.1.3's is not expressible
 /// as an `a=candidate` foundation: a peer-reflexive remote candidate is learned from a check, not
 /// signalled, and its foundation is required to be "an arbitrary value, different from the
@@ -233,6 +236,11 @@ impl RemoteCandidate {
 
 /// §5.1.2.2's recommended type preference for a candidate of this type ([spec] §4's table).
 ///
+/// A candidate type this build has no table row for is preferred last, alongside a relayed one.
+/// §5.1.2.2 orders types by how direct the path they produce is, and a type nothing here knows
+/// how to gather or check has no claim to be tried before one that is known to work — so the
+/// unknown loses the tie rather than displacing a working path.
+///
 /// [spec]: https://github.com/codewandler/sipx/blob/main/docs/specs/ice.md
 #[must_use]
 pub const fn type_preference(kind: CandidateType) -> u8 {
@@ -240,7 +248,10 @@ pub const fn type_preference(kind: CandidateType) -> u8 {
         CandidateType::Host => HOST_PREFERENCE,
         CandidateType::PeerReflexive => PEER_REFLEXIVE_PREFERENCE,
         CandidateType::ServerReflexive => SERVER_REFLEXIVE_PREFERENCE,
-        CandidateType::Relayed => RELAYED_PREFERENCE,
+        // Relayed, and any type with no row here. One arm rather than two because they take the
+        // same value for the same reason: neither has a claim on being tried before a path that
+        // is known to work.
+        _ => RELAYED_PREFERENCE,
     }
 }
 

@@ -426,10 +426,9 @@ fn codec_format(rtpmap: &str) -> Option<(Codec, u32)> {
 /// rtpmap matches at most one of them. Preference order is the *offerer's*, and it is applied by
 /// [`negotiated`] walking `m=`'s format list.
 fn codec_named(rtpmap: &str) -> Option<Codec> {
-    carried()
-        .iter()
-        .copied()
-        .find(|&codec| sipx_sdp::rtpmap::same_format(rtpmap, offered_rtpmap(codec)))
+    carried().iter().copied().find(|&codec| {
+        offered_rtpmap(codec).is_some_and(|named| sipx_sdp::rtpmap::same_format(rtpmap, named))
+    })
 }
 
 /// Every codec sipx can run, and can therefore read out of an rtpmap.
@@ -460,14 +459,20 @@ fn carried() -> &'static [Codec] {
 /// audio actually is, so `opus/16000` is nothing we have however it is numbered. G.722's rtpmap
 /// spelling is `G722/8000` even though the audio is 16 kHz — RFC 3551 §4.5.2 preserves the
 /// historical clock on the wire, and a `G722/16000` spelling would name a format nobody has.
-const fn offered_rtpmap(codec: Codec) -> &'static str {
+///
+/// `None` for a codec with no spelling here, which is the same safe direction [`carried`] takes:
+/// a format sipx cannot name in an offer is a format no offer can select. [`Codec`] is
+/// `#[non_exhaustive]`, so that case is reachable from a `sipx-media` release this one has not
+/// been taught about, and guessing an rtpmap for it would offer a format sipx cannot run.
+const fn offered_rtpmap(codec: Codec) -> Option<&'static str> {
     match codec {
-        Codec::Pcmu => "PCMU/8000",
-        Codec::Pcma => "PCMA/8000",
-        Codec::G722 => "G722/8000",
-        Codec::L16 => "L16/44100/1",
+        Codec::Pcmu => Some("PCMU/8000"),
+        Codec::Pcma => Some("PCMA/8000"),
+        Codec::G722 => Some("G722/8000"),
+        Codec::L16 => Some("L16/44100/1"),
         #[cfg(feature = "opus")]
-        Codec::Opus => "opus/48000/2",
+        Codec::Opus => Some("opus/48000/2"),
+        _ => None,
     }
 }
 

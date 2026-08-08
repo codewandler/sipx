@@ -377,15 +377,20 @@ pub(crate) fn lines(candidates: &[LocalCandidate]) -> Vec<Candidate> {
 }
 
 /// The `raddr`/`rport` a candidate of this type carries (RFC 8839 §5.1).
+///
+/// A type with no rule here emits none. §5.1's `rel-addr` is optional in the grammar, so omitting
+/// it costs a peer a diagnostic; asserting that some address is the base of a candidate this build
+/// does not know how to gather would tell the peer something untrue about the path.
 fn related(candidate: &LocalCandidate) -> Option<RelatedAddress> {
     match candidate.gathered.kind {
-        CandidateType::Host => None,
         CandidateType::ServerReflexive | CandidateType::PeerReflexive | CandidateType::Relayed => {
             Some(RelatedAddress {
                 address: candidate.gathered.base_address.ip(),
                 port: candidate.gathered.base_address.port(),
             })
         }
+        // Host, which has no address behind it, and any type with no rule here.
+        _ => None,
     }
 }
 

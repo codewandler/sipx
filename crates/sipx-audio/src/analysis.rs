@@ -57,9 +57,9 @@ pub const MAX_FRAME_SAMPLES: usize = 65_536;
 
 /// Which side of the call an analyser observes (§3.1).
 ///
-/// Closed by design: a call has two audio directions, and a third would be a different contract
-/// rather than a new variant of this one. An analyser is bound to exactly one direction at
-/// construction and refuses the other's frames, which is what makes every vector in §11 a
+/// Exhaustive by design: a call has two audio directions, and a third would be a different
+/// contract rather than a new variant of this one. An analyser is bound to exactly one direction
+/// at construction and refuses the other's frames, which is what makes every vector in §11 a
 /// single-stream replay.
 ///
 /// This is also the seam's direction vocabulary — `sipx-media` re-exports this type rather than

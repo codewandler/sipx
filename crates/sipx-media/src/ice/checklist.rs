@@ -20,6 +20,10 @@ use super::candidate::{
 };
 
 /// Which end decides (§6.1.1).
+///
+/// Exhaustive by design: §6.1.1 resolves every session to exactly one controlling agent and one
+/// controlled agent, including the lite cases and the role conflict of §7.3.1.1. There is no
+/// third role for the resolution to produce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Role {
     /// Responsible for nominating the pairs that become the selected pairs.
@@ -68,6 +72,10 @@ impl Role {
 }
 
 /// A pair's state (§6.1.2.6).
+///
+/// Exhaustive by design: §6.1.2.6 names these five and the state machine in §7.2.5 moves pairs
+/// only between them. A sixth would be a state no RFC transition leads to or out of, so nothing
+/// could put a pair in it and nothing would know what to do with one that was.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PairState {
     /// No check sent, and none may be sent until the pair is unfrozen.
@@ -94,6 +102,10 @@ impl PairState {
 ///
 /// `Completed` and not `Succeeded`: §6.1.2.1 names the states and §7.2.5.4 calls the same state
 /// Succeeded in passing. The name that appears in the state definitions is the one used here.
+///
+/// Exhaustive by design: §6.1.2.1 defines a checklist as Running until it is Completed or Failed,
+/// and those two are the terminal outcomes of §7.2.5.4. There is nothing else for a checklist to
+/// be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ChecklistState {
     /// Neither Completed nor Failed yet. Checklists start here.

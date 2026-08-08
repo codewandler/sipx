@@ -43,6 +43,7 @@ const EVENTS: usize = 64;
 
 /// The candidate path an ICE-backed media session actually selected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum IcePath {
     /// The session did not negotiate ICE.
     Disabled,
