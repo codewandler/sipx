@@ -221,6 +221,11 @@ pub(crate) async fn run(command: LoadOptions, format: Format) -> Exit {
     let measurements = Arc::new(Mutex::new(Vec::<Measurement>::new()));
     let observed = Arc::clone(&measurements);
     let handle = Arc::new(handle);
+    // Held back from the workload closure, which owns every clone the admitted calls are placed
+    // through: without one reference kept outside it there is nothing left to shut the endpoint
+    // down with once the plan finishes, and the summary below would be a record of work that had
+    // only been dropped rather than joined.
+    let endpoint = Arc::clone(&handle);
     let to = Arc::new(to);
     let signalling_from = Arc::new(signalling_from);
     let options = Arc::new(options);
@@ -285,6 +290,11 @@ pub(crate) async fn run(command: LoadOptions, format: Format) -> Exit {
 
     signal_task.abort();
     let _ = signal_task.await;
+    // The summary is this command's terminal record, so nothing it started may still be running
+    // when a harness reads it. `Handle::shutdown` is the endpoint's own cleanup barrier: every
+    // transaction and timer the admitted calls left behind is cancelled and waited on, which is a
+    // causal join rather than the incidental teardown that dropping the last handle would be.
+    endpoint.shutdown().await;
     let signal_failure = process_stop.failure();
     let measurements = match measurements.lock() {
         Ok(values) => values.clone(),
@@ -956,6 +966,52 @@ mod tests {
             panic!("load command expected");
         };
         options
+    }
+
+    /// `P-27`: `load`'s summary is its terminal record, and nothing this invocation started may
+    /// still be running when a harness reads it.
+    ///
+    /// A regression guard rather than the story's failing-first test, and worth saying which:
+    /// before `P-27` `run` never shut the endpoint down on any path, but it dropped the last
+    /// handle and then awaited the signal task, so the driver had in fact noticed and released
+    /// the socket by the time the summary was printed. This probe cannot tell an incidental
+    /// teardown from a join, so it passed then and passes now. What `P-27` changed is the
+    /// guarantee: the shutdown is ordered before the summary and waits on the endpoint's own
+    /// cleanup barrier, instead of depending on an await that happens to be there.
+    ///
+    /// One admitted call against a black hole is enough: the plan is bounded, the summary is
+    /// printed, and the probe asks what is left. `crate::join_probe` explains the timing.
+    #[tokio::test]
+    async fn the_summary_joins_the_endpoint_before_it_is_printed() {
+        let black_hole = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("binds");
+        let peer = black_hole.local_addr().expect("has an address");
+        let local = crate::join_probe::free_local();
+        let arguments = raw(&[
+            "load",
+            &format!("sip:load@{peer}"),
+            "--rate",
+            "1",
+            "--concurrency",
+            "1",
+            "--calls",
+            "1",
+            "--timeout",
+            "1",
+            "--local",
+            &local.to_string(),
+        ]);
+
+        let exit = run(command(&arguments), Format::Json).await;
+
+        crate::join_probe::assert_released(local, "load summary");
+        assert_eq!(
+            exit.code(),
+            Exit::Success.code(),
+            "an admitted call that nothing answered is a measured outcome, not an internal failure"
+        );
+        drop(black_hole);
     }
 
     #[test]

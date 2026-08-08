@@ -223,6 +223,8 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
         };
         let early_recorded = if early_media {
             let Some(session) = dialing.media() else {
+                drop(dialing);
+                handle.shutdown().await;
                 return fail(
                     format,
                     Exit::Failed,

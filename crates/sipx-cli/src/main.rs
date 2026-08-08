@@ -37,6 +37,11 @@ mod destination;
 mod device;
 mod dial;
 mod header;
+/// The join-barrier probe the long-running commands' tests share. Test-only: it exists to observe
+/// the endpoint socket, and nothing the binary does needs to ask that question.
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
+mod join_probe;
 mod load;
 mod load_responder;
 mod load_responder_readiness;

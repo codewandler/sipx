@@ -398,8 +398,16 @@ attempt owned, so the stated deadline is never presented as the whole of the ela
 Those fields are what keep a deadline distinguishable from a registrar that answered: a refusal
 exits `rejected` (3) or `unauthorized` (4) with its SIP status, and a connection nothing accepted
 exits `failed` (1) with the transport cause, neither of them waiting for the deadline. `--keep-alive`
-refreshes after a bounded attempt succeeds — the deadline bounds the attempt, not the lifetime of a
-registration being kept — and `--wake`'s binding refresh is a second attempt bounded the same way.
+refreshes after a bounded attempt succeeds — the deadline bounds each attempt, not the lifetime of a
+registration being kept, so every refresh is bounded by it too and one invocation registers once
+rather than twice — and `--wake`'s binding refresh is a second attempt bounded the same way.
+
+Whichever way it ends, the record that ends a command is written after the work behind it has been
+joined: the endpoint is shut down, its transactions and timers are cancelled and waited on, and only
+then is the result printed. So a script that reads `--counters`, closes a `--capture` or reuses the
+`--local` port the moment it has the result is not racing anything this invocation left running.
+Under `--keep-alive` and `--wake` the registration line is progress rather than the last word, and
+the barrier belongs to the line that ends the run.
 
 Combinations that cannot work are usage errors (exit 2), never parsed and dropped: half a push
 pair, `--push-param` alone, `--wake` without the push flags, `--instance` without `--outbound`,
