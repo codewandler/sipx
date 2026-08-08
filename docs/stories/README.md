@@ -95,6 +95,7 @@ _Beta.4 proves that sipx can interoperate with a browser audio endpoint, but it 
 
 ### real-time call-audio analysis
 _Applications need small, predictable facts about live audio even when no speech model is enabled:_
+- [M-77 — Carry a refused frame forward in voice detection](M-77-carry-a-refused-frame-forward-in-voice-detection.md) · Media · a frame the analyser refuses vanishes without breaking the epoch, so a voice transition spanning it can be missed
 - [M-58 — Detect voice activity with typed call events](M-58-detect-voice-activity.md) · Media · after M-57 and M-54 · start, end and hangover through CallEvent and SDK
 - [M-59 — Report call signal level clipping and silence metrics](M-59-report-call-signal-metrics.md) · Media · after M-57 and M-54 · signal content only, distinct from M-10 network quality
 
