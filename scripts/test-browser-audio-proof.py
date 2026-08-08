@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import importlib.util
+import inspect
 import json
 import os
 import pathlib
@@ -15,6 +17,7 @@ import sys
 import tempfile
 import time
 import unittest
+from typing import Any, NamedTuple
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -140,6 +143,160 @@ def negative(name: str, role: str, digest: str) -> dict:
     }
 
 
+@contextlib.contextmanager
+def validator_blind_to(messages: tuple[str, ...]):
+    """Run the block against a validator that ignores exactly the named refusals.
+
+    This is the stub every non-vacuity claim in this suite is measured against. A test that
+    mutates a fact and asserts a refusal proves nothing unless the refusal came from the check
+    it names, so each such test is re-run here with that check — and only that check — removed.
+    If the test still passes blind, the mutation was being refused by something else and the
+    assertion was reading as coverage without buying any.
+    """
+    ignored = frozenset(messages)
+    original = DRIVER.require
+
+    def blind(condition: bool, message: str) -> None:
+        if message in ignored:
+            return
+        original(condition, message)
+
+    DRIVER.require = blind
+    try:
+        yield
+    finally:
+        DRIVER.require = original
+
+
+#: Each fact `test_every_positive_fact_is_asserted` mutates, the value it mutates it to, and the
+#: exact refusals the validator owes that fact. The messages are what `validator_blind_to` removes
+#: to prove the assertion is load-bearing.
+POSITIVE_FACTS: tuple[tuple[str, str, Any, tuple[str, ...]], ...] = (
+    ("codec", "mime_type", "audio/PCMU", ("selected codec is not Opus",)),
+    ("security", "dtls_state", "connecting", ("DTLS is not connected",)),
+    (
+        "security",
+        "srtp_profile",
+        "",
+        ("the negotiated SRTP profile is not a name the registry carries",),
+    ),
+    ("candidate_pair", "nominated", False, ("candidate pair is not nominated",)),
+    ("candidate_pair", "component", 2, ("browser-audio selected another ICE component",)),
+    ("media", "inbound_packets", 0, ("inbound_packets must be positive",)),
+    ("media", "received_audio_energy", 0, ("received audio energy must be positive",)),
+    (
+        "sip",
+        "order",
+        ["invite", "final", "ack", "bye"],
+        ("SIP lifecycle evidence is incomplete",),
+    ),
+    (
+        "sip",
+        "order",
+        ["invite", "ack", "final", "bye", "bye-final"],
+        ("SIP lifecycle is out of order",),
+    ),
+)
+
+
+#: How a test is recognised as making a claim about the validator. Named here rather than written
+#: inline, so that the coverage test quoting them does not make the coverage test itself look like
+#: one of the assertions it is counting.
+VALIDATOR_PROBES = ("self.assert_refused(", "DRIVER.validate_proof(")
+
+
+class Audited(NamedTuple):
+    """One assertion this suite makes about `validate_proof`, and how it is shown to be load-bearing.
+
+    `refusals` are the exact messages `validator_blind_to` removes. `blind` is what the named test
+    must then do: `AssertionError` — the default and the clean case — means the blind validator
+    accepted the mutated evidence, so the removed check was the only thing refusing it. Any other
+    exception records that removing the check leaves the validator unable to finish at all, which
+    is a weaker shape of the same conclusion and is spelled out where it applies.
+
+    A row with no `refusals` records an assertion no stub can reach, and `claim` says why. An empty
+    row is a judgement on the record rather than an omission.
+    """
+
+    test: str
+    claim: str
+    refusals: tuple[str, ...] = ()
+    blind: type[BaseException] = AssertionError
+
+
+#: The audit. `test_every_proof_assertion_is_non_vacuous` walks it, and
+#: `test_the_audit_covers_every_assertion_about_the_validator` refuses to let a new assertion about
+#: the validator skip the audit by omission.
+PROOF_ASSERTIONS: tuple[Audited, ...] = (
+    Audited(
+        "test_complete_two_role_proof_is_accepted",
+        "complete evidence is accepted, and the result names both roles; asserts a result rather "
+        "than a refusal, so no removed check can make it pass",
+    ),
+    Audited(
+        "test_unused_candidate_compatibility_evidence_is_mandatory_and_exact",
+        "the compatibility offer carries exactly components 1 and 2",
+        ("compatibility offer did not contain exactly components 1 and 2",),
+    ),
+    Audited(
+        "test_one_role_cannot_be_called_complete",
+        "a missing role is not a complete proof; the evidence file is absent, so there is no "
+        "check to remove — only a read that cannot succeed",
+    ),
+    Audited(
+        "test_malformed_and_oversized_evidence_fail_closed",
+        "evidence past the byte cap is refused",
+        (f"evidence exceeds {DRIVER.MAX_EVIDENCE_BYTES} bytes",),
+    ),
+    Audited(
+        "test_malformed_and_oversized_evidence_fail_closed",
+        "malformed JSON is refused; unparseable bytes yield no evidence to judge, so there is no "
+        "check whose removal would admit them",
+    ),
+    *(
+        Audited("test_every_positive_fact_is_asserted", f"{section}.{field} is asserted", messages)
+        for section, field, _, messages in POSITIVE_FACTS
+    ),
+    Audited(
+        "test_a_counter_mode_only_proof_does_not_prove_the_aead_derivation",
+        "a run in which no role keyed with AEAD-GCM is not a proof of the AEAD derivation. "
+        "Removing the requirement does not admit such a run: it leaves `validate_proof` with no "
+        "witness to name, so the record it would have to publish cannot be built at all",
+        ("no role negotiated an AEAD-GCM profile, so the AEAD key derivation is unproven",),
+        IndexError,
+    ),
+    Audited(
+        "test_the_negotiated_profile_must_be_a_name_the_registry_carries",
+        "the SRTP profile is a name the RFC 5764 registry carries",
+        ("the negotiated SRTP profile is not a name the registry carries",),
+    ),
+    Audited(
+        "test_the_peer_and_its_exact_revision_are_recorded",
+        "the peer browser and its revision are recorded",
+        (
+            "peer evidence must be an object",
+            "peer browser name must be a non-empty string",
+            "peer browser revision must be a non-empty string",
+        ),
+    ),
+    Audited(
+        "test_negatives_are_bound_to_validated_positive_and_layer",
+        "a negative is bound to the positive it was recorded against",
+        ("FingerprintMismatch negative is not bound to its validated positive evidence",),
+    ),
+    Audited(
+        "test_negatives_are_bound_to_validated_positive_and_layer",
+        "a negative failed at the layer it claims",
+        ("fingerprint negative did not reach DTLS verification",),
+    ),
+    Audited(
+        "test_the_two_ends_must_report_the_same_reversed_pair",
+        "the browser's local candidate is sipx's nominated remote",
+        ("browser local candidate differs from sipx nominated remote",),
+    ),
+)
+
+
 class BrowserAudioProofTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="sipx-browser-proof-")
@@ -174,14 +331,35 @@ class BrowserAudioProofTest(unittest.TestCase):
         with self.assertRaises(DRIVER.ProofError):
             DRIVER.validate_proof(directory or self.directory, PIN)
 
+    def assert_test_needs(self, row: Audited) -> None:
+        """Fail unless the audited test fails against a validator blind to the refusals it names.
+
+        The test is re-run in its own fixture rather than inspected, so what is measured is the
+        assertion as it actually executes. `assert_refused` raises `AssertionError` when the blind
+        validator accepts the mutated evidence, which is the outcome proving the removed check was
+        the only thing refusing it; `row.blind` records where that outcome is something else.
+        """
+        case = type(self)(row.test)
+        case.setUp()
+        try:
+            with validator_blind_to(row.refusals), self.assertRaises(
+                row.blind,
+                msg=f"{row.test} still passes against a validator blind to {row.refusals!r}",
+            ):
+                getattr(case, row.test)()
+        finally:
+            case.tearDown()
+
     def rebind_negatives(self) -> None:
         """Re-derive each negative's binding digest from the evidence now on disk.
 
         Every negative carries the SHA-256 of the positive it was recorded against, so *any*
         edit to a role's evidence makes `validate_proof` refuse on that binding alone. A test
         that mutated a field and stopped there would be refused whatever the validator did with
-        the field under test, and would pass against a validator that ignored it entirely —
-        which is how the first draft of the three tests below passed at the merge base.
+        the field under test, and would pass against a validator that ignored it entirely.
+
+        So every test that mutates a role's evidence calls this, and `PROOF_ASSERTIONS` is where
+        that is checked rather than trusted.
         """
         for name in ("FingerprintMismatch", "NoNominatedPair", "WeakerMedia"):
             role = "browser-offerer" if name == "FingerprintMismatch" else "browser-answerer"
@@ -220,30 +398,52 @@ class BrowserAudioProofTest(unittest.TestCase):
         target = self.directory / "browser-offerer/browser.json"
         target.write_text("{", encoding="utf-8")
         self.assert_refused()
-        target.write_bytes(b" " * (DRIVER.MAX_EVIDENCE_BYTES + 1))
+        # Valid evidence, padded past the cap — the file still parses to exactly what setUp wrote,
+        # so the cap is the only thing standing between it and acceptance. A pad of whitespace
+        # alone would be refused by the JSON parser whatever the cap did, and the assertion would
+        # read as coverage of a limit nobody had shown was enforced.
+        padded = json.dumps(browser("browser-offerer"))
+        padded += " " * (DRIVER.MAX_EVIDENCE_BYTES + 1 - len(padded))
+        target.write_text(padded, encoding="utf-8")
+        self.assertGreater(target.stat().st_size, DRIVER.MAX_EVIDENCE_BYTES)
         self.assert_refused()
 
+    def test_every_proof_assertion_is_non_vacuous(self) -> None:
+        """Every assertion in the audit fails against a validator blind to the check it names."""
+        for row in PROOF_ASSERTIONS:
+            if not row.refusals:
+                continue
+            with self.subTest(test=row.test, claim=row.claim):
+                self.assert_test_needs(row)
+
+    def test_the_audit_covers_every_assertion_about_the_validator(self) -> None:
+        """No test may reach `validate_proof` without a row in the audit.
+
+        An assertion left out of `PROOF_ASSERTIONS` is one nobody has shown can fail, which is
+        the state this whole file exists to make impossible to reach quietly.
+        """
+        audited = {row.test for row in PROOF_ASSERTIONS}
+        reaching = {
+            name
+            for name in dir(type(self))
+            if name.startswith("test_")
+            and any(
+                probe in inspect.getsource(getattr(type(self), name))
+                for probe in VALIDATOR_PROBES
+            )
+        }
+        self.assertEqual(reaching, audited)
+
     def test_every_positive_fact_is_asserted(self) -> None:
-        mutations = (
-            ("codec", "mime_type", "audio/PCMU"),
-            ("security", "dtls_state", "connecting"),
-            ("security", "srtp_profile", ""),
-            ("candidate_pair", "nominated", False),
-            ("candidate_pair", "component", 2),
-            ("media", "inbound_packets", 0),
-            ("media", "received_audio_energy", 0),
-        )
         original = browser("browser-offerer")
         target = self.directory / "browser-offerer/browser.json"
-        for section, field, value in mutations:
-            changed = copy.deepcopy(original)
-            changed[section][field] = value
-            target.write_text(json.dumps(changed), encoding="utf-8")
-            self.assert_refused()
-        changed = copy.deepcopy(original)
-        changed["sip"]["order"].remove("bye-final")
-        target.write_text(json.dumps(changed), encoding="utf-8")
-        self.assert_refused()
+        for section, field, value, _ in POSITIVE_FACTS:
+            with self.subTest(section=section, field=field):
+                changed = copy.deepcopy(original)
+                changed[section][field] = value
+                target.write_text(json.dumps(changed), encoding="utf-8")
+                self.rebind_negatives()
+                self.assert_refused()
 
     def test_a_counter_mode_only_proof_does_not_prove_the_aead_derivation(self) -> None:
         """M-72: the run must refuse to call itself a proof when no role keyed with AEAD-GCM.
@@ -268,8 +468,13 @@ class BrowserAudioProofTest(unittest.TestCase):
 
         Presence alone is satisfied by any non-empty value, including a placeholder, so the
         evidence would survive the harness losing track of what was negotiated.
+
+        The offerer role carries the mutation because it is the one no other assertion constrains
+        to a set of profiles. An unregistered name in the answerer is refused by M-72's AEAD
+        witness requirement as well, so this suite would keep passing with registry membership
+        unchecked — the assertion would name a field it had stopped deciding anything about.
         """
-        target = self.directory / "browser-answerer/browser.json"
+        target = self.directory / "browser-offerer/browser.json"
         original = json.loads(target.read_text(encoding="utf-8"))
         for value in ("profile", "AEAD_AES_192_GCM", "aead_aes_256_gcm"):
             changed = copy.deepcopy(original)
@@ -319,6 +524,7 @@ class BrowserAudioProofTest(unittest.TestCase):
         changed = sipx("browser-answerer")
         changed["nominated_remote"] = "192.0.2.99:40000"
         target.write_text(json.dumps(changed), encoding="utf-8")
+        self.rebind_negatives()
         self.assert_refused()
 
     def make_certificate(self) -> tuple[pathlib.Path, str]:
