@@ -192,7 +192,10 @@ def graph_problems(default_graph: str, opus_graph: str) -> list[str]:
 def help_problems(output: str) -> list[str]:
     """Require the packaged process to reach the real root command help."""
 
-    if "USAGE:\n    sipx <COMMAND> [OPTIONS]" not in output:
+    # X-110 replaced the handwritten argument scanner, and the typed parser prints global options
+    # ahead of the command. This assertion exists to prove the packaged process *reached* root help,
+    # not to pin word order, so it tracks the parser's current line.
+    if "USAGE:\n    sipx [OPTIONS] [COMMAND]" not in output:
         return ["clean packaged Opus CLI emitted no root help usage"]
     return []
 

@@ -79,7 +79,7 @@ class FeatureBoundary(unittest.TestCase):
         self.assertTrue(proof.graph_problems("opus v0.3\n", "opus v0.3\n"))
 
     def test_root_help_must_come_from_the_running_binary(self) -> None:
-        self.assertEqual([], proof.help_problems("USAGE:\n    sipx <COMMAND> [OPTIONS]\n"))
+        self.assertEqual([], proof.help_problems("USAGE:\n    sipx [OPTIONS] [COMMAND]\n"))
         self.assertTrue(proof.help_problems("finished compiling sipx-cli"))
 
 
