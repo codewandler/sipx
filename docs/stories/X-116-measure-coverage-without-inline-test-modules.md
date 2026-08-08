@@ -2,8 +2,8 @@
 id: X-116
 title: Measure coverage without counting inline test modules
 pillar: Build
-status: in-progress
-priority: 28
+status: done
+priority:
 design:
 epic: conformance
 areas: [scripts, ci]
@@ -35,7 +35,7 @@ the tests themselves.
 - [x] Nothing gates on the resulting number, exactly as `X-66` established.
       → `test-coverage-report.py:NothingGatesOnTheNumber` still green, and
       `test_the_exclusion_gates_on_no_number` covers the new check.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
       *Not run — the wave coordinator runs one per wave. The `coverage report` step is red until the
       re-measurement, and `sipx-transport/tests/discards.rs` is red at the merge base.*
 
@@ -82,6 +82,8 @@ the tests themselves.
   wave tree, which is where the figure belongs since it records the commit it describes. The
   published figure moved **90.13% → 86.76% over 61,480 lines** — the exclusion works, and a
   figure that had not moved would have proved it did not. Only the shared gate row remains.
+
+- 2026-08-08: closed against the green `rc.9` gate — 42 steps.
 
 ## Notes
 

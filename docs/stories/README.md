@@ -75,7 +75,6 @@ appeared twice before anyone named it.
 - [A-38 — Publish and verify the second release candidate](A-38-publish-and-verify-rc3.md) · Application · after X-113 · the post-rc.2 wave as one immutable prerelease · no stable-1.0 claim widens
 - [M-70 — Accept multiplexed browser offers with unused component candidates](M-70-accept-multiplexed-browser-offers-with-unused-component-candidates.md) · Media · external review finding 9 · a second browser engine reaches SDP then fails the multiplexed profile
 - [M-72 — Prove the AEAD SRTP key derivation against an independent peer](M-72-prove-the-aead-srtp-key-derivation-against-a-peer.md) · Media · RFC 7714 publishes no KDF vector · a wrong salt placement makes two sipx endpoints interoperate with each other and nobody else, and every round-trip test still passes
-- [X-116 — Measure coverage without counting inline test modules](X-116-measure-coverage-without-inline-test-modules.md) · Build · the published 90% line figure is flattered because unit tests live inside src/ and path exclusion cannot reach them
 
 ## Next (ready — take the top one unless the user named a story)
 
@@ -479,6 +478,7 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [X-113 — Record the post-rc.2 boundary and close the wave stories](X-113-record-the-post-rc2-boundary-and-close-the-wave.md) · Build · after X-112 · one changelog boundary, then every story whose acceptance actually holds closes
 - [X-114 — Instrument gate step timings](X-114-instrument-gate-step-timings.md) · Build · X-93's baseline exists only as prose in its own story · gate.py has no clock at all, so nothing can be shown to have got faster
 - [X-115 — Catch implemented but unclosed stories](X-115-catch-implemented-but-unclosed-stories.md) · Build · A-16 was fully delivered, left at status backlog, then re-selected into a wave and dispatched to an implementor
+- [X-116 — Measure coverage without counting inline test modules](X-116-measure-coverage-without-inline-test-modules.md) · Build · the published 90% line figure is flattered because unit tests live inside src/ and path exclusion cannot reach them
 - [X-117 — Make the generated reports discoverable](X-117-make-the-generated-reports-discoverable.md) · Build · coverage, comparison, compliance and maturity are all reachable only by knowing their path
 - [X-120 — Run the WASM kernel checks in CI](X-120-run-the-wasm-kernel-checks-in-ci.md) · Build · check-wasm-kernel.sh exists and is green but nothing runs it · the artifact checks — no imports, export names, size bound — are unenforced
 - [X-121 — Refuse a stale uplifted binary](X-121-refuse-a-stale-uplifted-binary.md) · Build · a non-all-features cargo run leaves target/debug/sipx without device-audio, and a later all-features test spawns it without complaint
