@@ -32,15 +32,25 @@ a second syntax with no way to read `Cargo.toml` or `ci.yml`, and a cargo alias 
 anything that is not cargo — the gate is half shell scripts. A Python entry point keeps the step
 list, the drift check and the version derivation in one file, which is the property that makes
 the drift check worth having: there is nowhere for a step to exist unchecked.
+
+The clock (X-114) is the third layer of the same idea. `X-93` asks for this gate to be made faster
+without weakening it, and the baseline it argues from existed as prose in `X-93` and nowhere else —
+so "the gate got faster" could not be contradicted. Every step is timed now, the run prints them
+ordered by cost, and the numbers land in a machine-readable record beside the build they describe.
+See "The clock" below for the rule that instrumentation lives under: nothing gates on a duration.
 """
 
 import argparse
+import datetime
+import json
+import math
 import os
 import pathlib
 import re
 import shutil
 import subprocess
 import sys
+import time
 import tomllib
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -952,6 +962,438 @@ def infrastructure_report(step: str, evidence: str, why: str, free: int, require
 
 
 # --------------------------------------------------------------------------------------------
+# The clock
+# --------------------------------------------------------------------------------------------
+#
+# X-114. `X-93` proposes making protected release evidence faster, and argues from a baseline —
+# `12m37`, `6m41`, `13m19` — that appears in no release record, no review and no changelog. It is
+# prose inside `X-93` itself, because this script counted steps and free disk and never once looked
+# at a clock. A claim nothing can contradict is not evidence, and "which steps should we stop
+# running" cannot be answered by a gate that does not know what its steps cost.
+#
+# Three rules shape what is here, and each is a defect this repository has already paid for.
+#
+# **Nothing gates on a duration.** `X-66` refuses to put a threshold on coverage because a
+# threshold turns a measurement into a target; a deadline on the gate would be answered by
+# splitting a step, not by making anything faster. So there is no limit here, no comparison against
+# a previous run, and no way for the clock to change what the gate exits — including when the
+# record cannot be written at all.
+#
+# **A duration with no context is not comparable to another one.** The commit decides how much
+# there was to build, the CPU count decides how much of it happened at once, and the state of the
+# build cache decides whether anything was built. All three are recorded, and a record missing one
+# is reported rather than published.
+#
+# **"Cold" stopped being a two-valued answer.** An empty `target/` used to mean every crate was
+# compiled in this run. With `sccache` — or anything else — named in `RUSTC_WRAPPER`, an empty
+# `target/` means compilation may be served from a cache this run did not fill, at a fraction of
+# the cost. Recording that as `cold` is how a change to nobody's code gets read as a speed-up, so
+# the wrapper is recorded and the state it produces is spelled differently.
+
+#: What one run's timings are called. Written under the build directory: it is gitignored,
+#: disposable, and already the place things about this machine's build live. Deliberately not a
+#: committed document — a timing is a fact about one machine at one moment, and a committed one
+#: would need a staleness rule to stay true, which the story rules out in as many words. `--timings`
+#: puts a record somewhere durable when one is being kept on purpose.
+TIMINGS_NAME = "gate-timings.json"
+
+#: The rule the whole section lives under, printed with every summary. It is the reason the
+#: measurement is allowed to exist, so it is not decoration a later edit can quietly drop —
+#: `coverage-report.py` carries its disclaimers on the page for the same reason.
+NO_THRESHOLD = "Nothing here gates on a duration: a slow run is never a failed run."
+
+#: What happened to a step, and what each answer means for the duration beside it.
+OUTCOME_GREEN = "green"
+OUTCOME_RED = "red"
+OUTCOME_NOT_A_RESULT = "not a result"
+OUTCOME_NOT_STARTED = "not started"
+
+OUTCOMES = {
+    OUTCOME_GREEN: "the step ran and found nothing, so its duration is what a clean run costs",
+    OUTCOME_RED: "the step ran and found something; a step that fails early is cheaper than the "
+    "same step passing, so its duration is not a clean-run figure",
+    OUTCOME_NOT_A_RESULT: "the step disclaimed its own run — it timed whatever it did before "
+    "giving up, which is not the cost of checking anything",
+    OUTCOME_NOT_STARTED: "the run ended before this step, so it has no duration at all; it is "
+    "listed anyway, because a row missing from the table is a gate that looks smaller than it is",
+}
+
+#: How much of the build this run did not have to do. Three values rather than two: see the module
+#: comment above for why `RUSTC_WRAPPER` made that necessary.
+CACHE_COLD = "cold"
+CACHE_COLD_WRAPPED = "cold target, warm compiler cache"
+CACHE_WARM = "warm"
+
+CACHE_STATES = {
+    CACHE_COLD: "the build directory held nothing and no wrapper stood in front of rustc, so "
+    "every crate this run needed was compiled during it",
+    CACHE_COLD_WRAPPED: "the build directory held nothing, but a compiler cache stood in front of "
+    "rustc and could serve objects this run never compiled — not comparable with a `cold` figure",
+    CACHE_WARM: "the build directory already held artifacts, so an unknown fraction of the "
+    "compilation was skipped and the figure is a lower bound on a fresh checkout",
+}
+
+#: Durations are recorded to the millisecond, so two figures that describe the same run agree to
+#: well inside this. Anything larger is a step dropped from the list or a duration edited by hand.
+SUM_TOLERANCE_SECONDS = 0.01
+
+
+def human_duration(seconds: float) -> str:
+    """Minutes and seconds past a minute, because that is the unit `X-93`'s baseline is argued in."""
+    if seconds >= 60:
+        minutes, rest = divmod(int(round(seconds)), 60)
+        return f"{minutes}m{rest:02d}s"
+    return f"{seconds:.1f}s"
+
+
+def _is_duration(value: object) -> bool:
+    """A real, finite, non-negative number of seconds — and `True` is not one of those."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return math.isfinite(value) and value >= 0
+
+
+class Timing(NamedTuple):
+    """One step's cost, and what happened to it while it was being paid."""
+
+    name: str
+    seconds: float
+    outcome: str
+
+
+def compiler_wrapper(environment: dict[str, str]) -> str:
+    """Whatever cargo has been told to run instead of `rustc`, or `""`.
+
+    Both spellings, because either one changes what a cold build directory costs and a machine that
+    sets only the workspace-scoped variable would otherwise be recorded as unwrapped.
+    """
+    for name in ("RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER"):
+        value = environment.get(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
+#: Things that live in the build directory and are not a build. `CACHEDIR.TAG` is written when
+#: cargo creates the directory and describes no compilation at all; the timings file is this
+#: script's own output, and counting it would make every run after the first report a warm cache on
+#: a checkout that has never compiled anything — instrumentation changing what it measures.
+NOT_A_BUILD_ARTIFACT = frozenset({"CACHEDIR.TAG", TIMINGS_NAME})
+
+
+def target_has_artifacts(target: pathlib.Path) -> bool:
+    """Whether the build directory already holds something this run will not have to build."""
+    try:
+        return any(entry.name not in NOT_A_BUILD_ARTIFACT for entry in target.iterdir())
+    except OSError:
+        return False
+
+
+def cache_state(target_is_warm: bool, wrapper: str) -> tuple[str, str]:
+    """How much of the build was already paid for, and the sentence that says so.
+
+    Kept free of I/O so the interesting case — a cold build directory behind a compiler cache — can
+    be asserted without arranging one on a real machine.
+    """
+    name = pathlib.PurePath(wrapper).name if wrapper else ""
+    if target_is_warm:
+        also = f", with `{name}` in front of rustc as well" if name else ""
+        return (
+            CACHE_WARM,
+            f"the build directory already held artifacts before this run{also}, so an unknown "
+            f"fraction of the compilation was skipped",
+        )
+    if name:
+        return (
+            CACHE_COLD_WRAPPED,
+            f"the build directory was empty, but `{name}` stood in front of rustc, so compilation "
+            f"could be served from a cache this run did not fill — this figure is not comparable "
+            f"with a `{CACHE_COLD}` one taken before the wrapper existed",
+        )
+    return (
+        CACHE_COLD,
+        "the build directory was empty and nothing stood in front of rustc, so every crate this "
+        "run needed was compiled during it",
+    )
+
+
+def head_commit() -> str:
+    """The commit the timings describe, or `""` if this is not a checkout.
+
+    Full object name rather than the short one: `806d460` and `806d4602b00…` are the same commit
+    spelled two ways, and only the long one can be resolved without this repository in front of you.
+    """
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True, check=False
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def load_average() -> float | None:
+    """The machine's one-minute load when the run started, or `None` where there is no such number.
+
+    Not decoration. This project routinely runs several implementor gates at once, so the CPU count
+    on its own says how many cores exist rather than how many this run had — and two figures taken
+    at loads of 1 and 12 are not the same measurement however identical their context looks.
+    """
+    try:
+        return round(os.getloadavg()[0], 2)
+    except (OSError, AttributeError):
+        return None
+
+
+def timing_record(
+    steps: list[Step],
+    measured: list[Timing],
+    wall_clock: float,
+    commit: str,
+    cache: tuple[str, str],
+    wrapper: str,
+) -> dict:
+    """One run, as the document a later run can be held against.
+
+    `measured` is in step order and holds one entry per step the run *started*, so pairing is
+    positional: everything past its end is a step the run never reached, and those are written down
+    rather than left out.
+    """
+    state, why = cache
+    rows: list[dict] = []
+    for index, step in enumerate(steps):
+        if index >= len(measured):
+            rows.append({"name": step.name, "outcome": OUTCOME_NOT_STARTED})
+            continue
+        timing = measured[index]
+        rows.append(
+            {"name": step.name, "seconds": round(timing.seconds, 3), "outcome": timing.outcome}
+        )
+    return {
+        "commit": commit,
+        "measured_at": datetime.date.today().isoformat(),
+        "host": {"cpu_count": os.cpu_count() or 0, "load_average": load_average()},
+        "cache": {"state": state, "why": why, "compiler_wrapper": wrapper},
+        # Two figures, deliberately. The steps run one after another today, so the sum sits just
+        # under the wall clock and the gap is this script's own work; the moment a step fans out
+        # the sum goes above it. One number could not tell anybody that had happened.
+        "wall_clock_seconds": round(wall_clock, 3),
+        "measured_seconds": round(sum(row["seconds"] for row in rows if "seconds" in row), 3),
+        "steps": rows,
+    }
+
+
+def timing_problems(record: object) -> list[str]:
+    """Everything wrong with a timing record, as sentences naming the step.
+
+    The case this exists for is a step whose duration is missing or unreadable. Filtering one out
+    of the arithmetic — which is what a comprehension that skips what it cannot parse does — leaves
+    a total that is short by however long that step took and looks entirely plausible, and nobody
+    sanity-checks a duration by eye. So the row is named, and the sum is checked against the rows
+    the way `coverage-report.py` checks its per-crate table against its workspace one.
+    """
+    if not isinstance(record, dict):
+        return ["the timing record is not an object"]
+    problems: list[str] = []
+
+    commit = record.get("commit")
+    if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+        problems.append(
+            f"commit is {commit!r} rather than a full git object name, so nothing says which tree "
+            f"these durations describe and they cannot be compared with another run's"
+        )
+    measured_at = record.get("measured_at")
+    if not isinstance(measured_at, str) or not measured_at:
+        problems.append("measured_at is missing")
+    else:
+        try:
+            datetime.date.fromisoformat(measured_at)
+        except ValueError:
+            problems.append(f"measured_at {measured_at!r} is not an ISO YYYY-MM-DD date")
+
+    host = record.get("host")
+    if not isinstance(host, dict):
+        problems.append("host is missing, so the machine these durations came from is unrecorded")
+    else:
+        cpus = host.get("cpu_count")
+        if isinstance(cpus, bool) or not isinstance(cpus, int) or cpus < 1:
+            problems.append(
+                f"host.cpu_count is {cpus!r} rather than a positive count; how many cores the run "
+                f"had decides the figure as much as the code does"
+            )
+        load = host.get("load_average")
+        if load is not None and not _is_duration(load):
+            problems.append(f"host.load_average is {load!r} rather than a number")
+
+    cache = record.get("cache")
+    if not isinstance(cache, dict):
+        problems.append("cache is missing, so nothing says how much of the build was already done")
+    else:
+        state = cache.get("state")
+        if state not in CACHE_STATES:
+            problems.append(
+                f"cache.state is {state!r}, which is none of {', '.join(sorted(CACHE_STATES))}; a "
+                f"duration is only comparable with one taken in the same state"
+            )
+        why = cache.get("why")
+        if not isinstance(why, str) or not why.strip():
+            problems.append("cache.why says nothing, so the state above is a word with no evidence")
+        if not isinstance(cache.get("compiler_wrapper"), str):
+            problems.append(
+                "cache.compiler_wrapper is missing; whether anything stood in front of rustc is "
+                "what decides whether a cold build directory means a cold build"
+            )
+
+    for field_name in ("wall_clock_seconds", "measured_seconds"):
+        if not _is_duration(record.get(field_name)):
+            problems.append(f"{field_name} is {record.get(field_name)!r} rather than a duration")
+
+    steps = record.get("steps")
+    if not isinstance(steps, list) or not steps:
+        problems.append("steps is missing, so the record times nothing")
+        return problems
+
+    total = 0.0
+    readable = True
+    for index, entry in enumerate(steps):
+        where = f"step {index + 1}"
+        if not isinstance(entry, dict):
+            problems.append(f"{where} is not an object")
+            readable = False
+            continue
+        name = entry.get("name")
+        if not isinstance(name, str) or not name.strip():
+            problems.append(f"{where} has no name, so its duration belongs to nothing")
+            readable = False
+            name = where
+        outcome = entry.get("outcome")
+        if outcome not in OUTCOMES:
+            problems.append(
+                f"`{name}` records outcome {outcome!r}, which is none of "
+                f"{', '.join(repr(known) for known in OUTCOMES)}"
+            )
+            readable = False
+        seconds = entry.get("seconds")
+        if outcome == OUTCOME_NOT_STARTED:
+            if seconds is not None:
+                problems.append(f"`{name}` never started and still carries a duration")
+                readable = False
+            continue
+        if not _is_duration(seconds):
+            problems.append(
+                f"`{name}` has no readable duration ({seconds!r}); dropping it would leave a total "
+                f"short by however long it took, which is a number nobody can catch by eye"
+            )
+            readable = False
+            continue
+        total += seconds
+
+    recorded = record.get("measured_seconds")
+    if readable and _is_duration(recorded) and abs(total - recorded) > SUM_TOLERANCE_SECONDS:
+        problems.append(
+            f"the steps sum to {total:.3f}s and measured_seconds says {recorded}; a step has been "
+            f"dropped from the list or a duration edited, and the published figure is not this run"
+        )
+    return problems
+
+
+def timing_report(record: dict) -> str:
+    """The run's own summary: every step, most expensive first, and the two totals.
+
+    Ordered by cost because the question this answers is which steps to stop running, and forty
+    rows in run order is a log. Steps with no readable duration keep their row and say so — a table
+    the reader can count is a table that has to hold every step.
+    """
+    # Renders whatever it is given rather than raising: a malformed record has to reach a reader as
+    # `timing_problems`' sentences, and a traceback out of the renderer would replace them.
+    steps = record.get("steps")
+    rows = [entry for entry in steps if isinstance(entry, dict)] if isinstance(steps, list) else []
+    names = [str(entry.get("name", "?")) for entry in rows] or ["?"]
+    width = max(max(len(name) for name in names), len("sum of the steps above"))
+
+    timed: list[dict] = []
+    untimed: list[dict] = []
+    for entry in rows:
+        (timed if _is_duration(entry.get("seconds")) else untimed).append(entry)
+    total = sum(float(entry["seconds"]) for entry in timed)
+    wall = record.get("wall_clock_seconds")
+
+    lines = [
+        f"\033[1m=== timings\033[0m  {len(rows)} steps, "
+        f"{human_duration(wall) if _is_duration(wall) else '?'} wall clock"
+    ]
+    for entry in sorted(timed, key=lambda entry: -float(entry["seconds"])):
+        seconds = float(entry["seconds"])
+        share = f"{100.0 * seconds / total:.0f}%" if total > 0 else "—"
+        outcome = entry.get("outcome")
+        marker = "" if outcome == OUTCOME_GREEN else f"  ({outcome})"
+        lines.append(
+            f"  {str(entry.get('name')):<{width}}  {human_duration(seconds):>8}  "
+            f"{share:>4}{marker}"
+        )
+    for entry in untimed:
+        lines.append(
+            f"  {str(entry.get('name')):<{width}}  {'—':>8}  "
+            f"{'':>4}  ({entry.get('outcome', 'unrecorded')})"
+        )
+
+    lines.append(f"  {'':<{width}}  {'-' * 8}")
+    lines.append(
+        f"  {'sum of the steps above':<{width}}  {human_duration(total):>8}  "
+        f"across {len(timed)} of {len(rows)} steps"
+    )
+    if _is_duration(wall):
+        gap = float(wall) - total
+        lines.append(
+            f"  {'total wall clock':<{width}}  {human_duration(float(wall)):>8}  "
+            + (
+                f"{human_duration(gap)} of it outside the steps — this script's own work"
+                if gap >= 0
+                else f"the steps sum to {human_duration(-gap)} more than the run took, so some of "
+                f"them overlapped"
+            )
+        )
+    lines.extend(_timing_context(record))
+    lines.append(f"  {NO_THRESHOLD}")
+    return "\n".join(lines)
+
+
+def _timing_context(record: dict) -> list[str]:
+    """What decides whether these durations may be compared with another run's.
+
+    Left-aligned rather than hung under the duration column: it is prose about the whole run, and
+    a paragraph indented to a table's third column is read as a row.
+    """
+    commit = record.get("commit") or "an unknown commit"
+    host = record.get("host") if isinstance(record.get("host"), dict) else {}
+    cache = record.get("cache") if isinstance(record.get("cache"), dict) else {}
+    load = host.get("load_average")
+    return [
+        f"  context   {commit[:12]} · {host.get('cpu_count', '?')} CPUs"
+        + (f" · load {load}" if load is not None else "")
+        + f" · cache: {cache.get('state', '?')}",
+        f"            {cache.get('why', '')}",
+    ]
+
+
+def write_timings(path: pathlib.Path, record: dict) -> str | None:
+    """Write the record, and say what went wrong instead of raising.
+
+    A gate that turned red because it could not write its own instrumentation would be worse than
+    a gate with none: the exit code is a claim about the tree, and an unwritable directory is a
+    claim about the machine. So the caller prints this and returns whatever the steps decided.
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # `ensure_ascii=False`: the reasons carry em dashes, and a record whose sentences are half
+        # `—` is a document nobody reads, which is most of what it is for.
+        path.write_text(
+            json.dumps(record, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+    except OSError as problem:
+        return f"the timings could not be written to {path}: {problem}"
+    return None
+
+
+# --------------------------------------------------------------------------------------------
 # Running it
 # --------------------------------------------------------------------------------------------
 
@@ -999,8 +1441,8 @@ def run_step(step: Step, environment: dict[str, str]) -> tuple[int, tuple[str, s
     return process.wait(), evidence
 
 
-def run(steps: list[Step]) -> int:
-    """Run every step, then say which failed.
+def run(steps: list[Step], timings: pathlib.Path | None = None) -> int:
+    """Run every step, then say which failed and what each one cost.
 
     Every step, not up to the first failure: the point of the gate is to be told everything that
     is wrong in one pass, and a gate that stops early is a gate people run once and then work
@@ -1018,11 +1460,43 @@ def run(steps: list[Step]) -> int:
     something else *is* red the gate exits `EXIT_RED`, because the tree demonstrably is wrong and
     saying "not a result" there would tell an implementor to re-run instead of to look, which is
     the disease X-34 named rather than the cure.
+
+    Every step is timed (X-114), including the ones that fail and the ones that disclaim, and the
+    summary is printed before the verdict so the verdict stays the last thing on the screen. The
+    clock never decides anything: `measured` is written and reported, and the value returned here
+    comes from `failed` and `disclaimed` exactly as it did before there was a clock.
     """
     environment = dict(os.environ)
     for key, value in parse_workflow_env(WORKFLOW.read_text()).items():
         environment.setdefault(key, value)
     target = target_directory(environment)
+    if timings is None:
+        timings = target / TIMINGS_NAME
+
+    # Sampled before the first step, because the first step is what makes a cold build directory
+    # stop being one.
+    wrapper = compiler_wrapper(environment)
+    cache = cache_state(target_has_artifacts(target), wrapper)
+    commit = head_commit()
+    measured: list[Timing] = []
+    started = time.monotonic()
+
+    def report_timings() -> None:
+        """Print what the run cost and write it down. Returns nothing, and changes nothing."""
+        if not measured:
+            return
+        record = timing_record(steps, measured, time.monotonic() - started, commit, cache, wrapper)
+        print()
+        print(timing_report(record), flush=True)
+        # Checked against the record it just wrote, so a step this script failed to time is a
+        # sentence here rather than a row missing from the table.
+        for problem in timing_problems(record):
+            print(f"  the timing record is incomplete: {problem}", file=sys.stderr, flush=True)
+        complaint = write_timings(timings, record)
+        if complaint is None:
+            print(f"  recorded to {timings}", flush=True)
+        else:
+            print(f"  {complaint}", file=sys.stderr, flush=True)
 
     free = free_bytes(target)
     print(
@@ -1039,6 +1513,7 @@ def run(steps: list[Step]) -> int:
     for step in steps:
         free = free_bytes(target)
         if free < FLOOR_FREE_BYTES:
+            report_timings()
             return stop_without_a_result(
                 step.name,
                 f"{human(free)} free with `{step.name}` still to run, below the "
@@ -1049,21 +1524,35 @@ def run(steps: list[Step]) -> int:
                 failed,
             )
         print(f"\n\033[1m=== {step.name}\033[0m  {' '.join(step.command)}", flush=True)
+        # One entry per step this loop starts, appended in step order — `timing_record` pairs them
+        # positionally, so every path out of the body below has to add exactly one.
+        step_started = time.monotonic()
         if step.toolchain:
             toolchain = missing_toolchain_problem(installed_toolchains(), step.toolchain)
             if toolchain is not None:
                 print(f"  {toolchain}", file=sys.stderr, flush=True)
                 failed.append((step.name, "the toolchain it needs is not installed"))
+                measured.append(
+                    Timing(step.name, time.monotonic() - step_started, OUTCOME_RED)
+                )
                 continue
         code, evidence = run_step(step, environment)
+        elapsed = time.monotonic() - step_started
         if code == 0:
+            measured.append(Timing(step.name, elapsed, OUTCOME_GREEN))
             continue
         if evidence is not None:
+            measured.append(Timing(step.name, elapsed, OUTCOME_NOT_A_RESULT))
+            report_timings()
             return stop_without_a_result(step.name, *evidence, free_bytes(target), failed)
         if step.not_a_result and code == STEP_NOT_A_RESULT:
             disclaimed.append((step.name, step.not_a_result))
+            measured.append(Timing(step.name, elapsed, OUTCOME_NOT_A_RESULT))
             continue
         failed.append((step.name, f"exit {code}"))
+        measured.append(Timing(step.name, elapsed, OUTCOME_RED))
+
+    report_timings()
 
     print()
     if disclaimed:
@@ -1109,6 +1598,16 @@ def main() -> int:
         help="verify the gate still matches ci.yml, and run nothing",
     )
     parser.add_argument("--list", action="store_true", help="print the steps and their CI jobs")
+    parser.add_argument(
+        "--timings",
+        type=pathlib.Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            f"where to write this run's step timings "
+            f"(default: {TIMINGS_NAME} in the build directory, which `cargo clean` removes)"
+        ),
+    )
     args = parser.parse_args()
 
     if args.check:
@@ -1116,7 +1615,7 @@ def main() -> int:
     steps = gate_steps(msrv_toolchain())
     if args.list:
         return show(steps)
-    return run(steps)
+    return run(steps, timings=args.timings)
 
 
 if __name__ == "__main__":
