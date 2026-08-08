@@ -62,3 +62,12 @@ inference until the exact SDP vector is captured by this story.
   offered components 1 and 2, a component-one mux answer, one nominated pair, DTLS keys and
   protected audio. All 14 adversarial harness self-tests pass; the real browser run, derived RFC
   report regeneration and complete repository gate remain deliberately deferred to push time.
+
+- 2026-08-08: **held out of the rc.4 wave — its remaining proof cannot be produced locally.** The
+  open row needs the independent browser session that produced the original offer shape to reach
+  nomination against the fix, and `scripts/gate.py` declares `browser-audio` NOT_RUN_LOCALLY:
+  "requires the hosted runner's matched native browser/WebDriver; the local gate runs its
+  adversarial harness suite". What ships today is a byte-pinned SDP vector, filtered validation, a
+  call-layer mutation proof and the adversarial harness suite — interoperation with that engine
+  remains an inference from the captured vector rather than an observed browser call, and the rc.3
+  release notes say exactly that. Closing this needs a hosted CI run, not an implementor.
