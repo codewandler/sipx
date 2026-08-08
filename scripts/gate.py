@@ -95,7 +95,7 @@ NOT_RUN_LOCALLY = {
     "browser-audio": "requires the hosted runner's matched native browser/WebDriver; the local gate runs its adversarial harness suite",
     "coverage": "an instrumented rebuild of the workspace and a second full run of the suite, for a "
     "number nothing gates on; the cheap half — rendering the page from the recorded counts and "
-    "comparing it — is the `coverage report` step above",
+    "comparing it — is the `coverage report` step in `gate_steps`",
 }
 
 #: Run commands that are runner provisioning rather than checks. Kept deliberately short: every

@@ -118,7 +118,6 @@ DEFAULT_OUT = ROOT / "target" / "coverage"
 
 JSON_NAME = "coverage.json"
 LCOV_NAME = "coverage.lcov"
-HTML_DIR = "html"
 
 #: The short form CI appends to its run summary, so the number is published somewhere a reader of
 #: the run meets it rather than only inside a downloadable archive.
