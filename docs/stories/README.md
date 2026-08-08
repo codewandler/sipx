@@ -41,6 +41,17 @@ M14 retains the actual comparative run.
 M15 separately tracks the audio-only browser SDK, WASM kernel, browser-native WebRTC adapter and
 public demo.
 
+**The post-`rc.2` wave is implemented but not yet closed or published.** `main` stands 61 commits
+ahead of `origin/main`, carrying the fourteen external-review fixes, bounded endpoint resolution, the
+call-module split, the shipped-verb guides and the two M16 spec gates. Twenty-nine of those stories
+hold exactly one open acceptance row — the integrated gate plus derived regeneration — deliberately
+deferred to one shared boundary rather than run per story; three more (`S-49`, `S-50`, `S-51`) hold
+none and are closeable on sight. The selected wave produces that boundary: the in-flight remainders
+(`M-44`, `T-39`, `M-70`, `M-57`, `A-25`) land, then `X-112` takes the gate green and reconciles every
+derived artifact, `X-113` writes the changelog boundary and closes the wave, and `A-38` cuts
+`1.0.0-rc.3`. Stable `1.0` is not in this wave: its predicate on independent application use is still
+unmet.
+
 **ID prefixes** — `S` SIP core · `T` transport · `U` user agent · `M` media · `C` call framework ·
 `P` phone CLI · `A` application SDK/release · `X` cross-cutting (build, CI, test infrastructure).
 
@@ -49,9 +60,23 @@ public demo.
 
 ## Now (in progress)
 - [A-10 — Publish the stable crate set and diagnostic CLI artifacts](A-10-publish-the-stable-crates-and-cli.md) · Application · promote the public beta only after every v1 predicate; stable archives and SBOM live here
+- [A-25 — Specify interchangeable local speech providers](A-25-specify-interchangeable-local-speech-providers.md) · Application · M16 spec gate · endpoint default and per-call override · local/offline by default
 - [A-37 — Publish and verify the first release candidate](A-37-publish-and-verify-rc1.md) · Application · first release candidate · reviewed docs, exact registry packages and portable artifacts
 - [M-43 — Carry linear PCM in and out without format assumptions](M-43-carry-linear-pcm-in-and-out-without-format-assumptions.md) · Media · four reported use cases resolve to one unopinionated PCM boundary · not an AI feature
+- [M-57 — Specify deterministic real-time call-audio processing](M-57-specify-real-time-call-audio-processor.md) · Media · M16 spec gate · sans-I/O bounded frame processor using M-54's shared seam
+- [M-69 — Reject an unacceptable initial offer on the wire](M-69-reject-an-unacceptable-initial-offer-on-the-wire.md) · Media · external review finding 3 · no-common-codec failure sends no final SIP response
+- [M-70 — Accept multiplexed browser offers with unused component candidates](M-70-accept-multiplexed-browser-offers-with-unused-component-candidates.md) · Media · external review finding 9 · a second browser engine reaches SDP then fails the multiplexed profile
+- [M-71 — Deliver negotiated DTMF receive events through scenario](M-71-deliver-negotiated-dtmf-receive-events-through-scenario.md) · Media · external review finding 10 · digits send successfully but no typed receive event arrives
 - [P-14 — Ship portable CLI artifacts](P-14-ship-portable-cli-artifacts.md) · Phone · the surveyed stack's most-engaged issue is a glibc failure · Rust makes this a build-matrix problem
+- [P-16 — Follow remote hangup and interrupt calls cleanly](P-16-follow-remote-hangup-and-interrupt-calls-cleanly.md) · Phone · external reviews findings 1–2/1,2,4 · confirmed calls do not drain ACK/BYE and interrupts emit no terminal record
+- [P-17 — Bound dial completion including cancellation cleanup](P-17-bound-dial-completion-including-cancellation-cleanup.md) · Phone · external review finding 8 · every configured timeout carries an unexplained two-second tail
+- [P-18 — Make the bounded load tools interoperate by default](P-18-make-the-bounded-load-tools-interoperate-by-default.md) · Phone · external review finding 5 · default load exits success after one unusable signalling-only call
+- [P-19 — Make scenario frames and exits automation-complete](P-19-make-scenario-frames-and-exits-automation-complete.md) · Phone · external review finding 6 · help disagrees with accepted NDJSON and total refusal still exits zero
+- [P-20 — Preflight recording destinations before a call](P-20-preflight-recording-destinations-before-a-call.md) · Phone · external review finding 13 · an uncreatable recording path is discovered only after the call ends
+- [P-21 — Emit unique fields in every structured result](P-21-emit-unique-fields-in-every-structured-result.md) · Phone · external review finding 14 · browser-audio emits media_profile twice
+- [P-22 — Handle supervisor termination consistently](P-22-handle-supervisor-termination-consistently.md) · Phone · follow-up external review finding 5 · load-responder handles SIGINT but loses cleanup and its summary on SIGTERM
+- [P-23 — Validate output and capabilities before network I/O](P-23-validate-output-and-capabilities-before-network-io.md) · Phone · follow-up external review finding 9 · version ignores JSON and unavailable media features are reported only after a peer answers
+- [P-24 — Report call progress consistently](P-24-report-call-progress-consistently.md) · Phone · follow-up external review finding 11 · answer and load do not emit the INFO progress promised for -v
 - [S-36 — Verify the reported call-control and registration traps](S-36-verify-the-reported-call-control-and-registration-traps.md) · Signalling · six field-reported failure modes · each becomes a passing test or a defect · cheap, high information
 - [S-49 — Expose parsed TEL URI parameters](S-49-expose-parsed-tel-uri-parameters.md) · Signalling · requested by sipx-clstr CX-18 — routing consumers must not split the raw RFC 3966 parameter tail
 - [S-50 — Expose lossless address-presentation editing](S-50-expose-lossless-address-presentation-editing.md) · Signalling · requested by sipx-clstr CX-17 — one atomic display-name and URI splice retaining all header parameters
@@ -60,31 +85,22 @@ public demo.
 - [T-29 — Drain in-flight work on a graceful shutdown](T-29-drain-in-flight-work-on-a-graceful-shutdown.md) · Transport · restart without dropping calls · labelled critical and never delivered by the surveyed stack
 - [T-30 — Export signalling capture and media quality to a collector](T-30-export-signalling-capture-and-media-quality-to-a-collector.md) · Transport · the two observability asks people maintained private forks for · hooks, not a bundled exporter
 - [T-36 — Refresh server-transaction liveness on provisional progress](T-36-refresh-server-transaction-liveness-on-provisional-progress.md) · Signalling · requested by sipx-clstr CX-19 · unanswered_limit currently measures from first handoff even while the application keeps reporting progress
+- [T-37 — Preserve immediate transport failures as failures](T-37-preserve-immediate-transport-failures-as-failures.md) · Transport · external review finding 11 · a refused connection is currently reported as a SIP timeout
+- [T-38 — Specify bounded SIP endpoint resolution](T-38-specify-bounded-sip-endpoint-resolution.md) · Transport · external review finding 2 · spec-first target derivation, DNS ordering, identity and deadlines
+- [T-39 — Resolve named targets in every phone command](T-39-resolve-named-targets-in-every-phone-command.md) · Transport · external review finding 2 · after T-38 · dial, register and scenario accept named targets without manual address injection
+- [X-67 — Split the call module along its seams](X-67-split-the-call-module-along-its-seams.md) · Build · call.rs is 6560 lines, ~6100 of them production · hold, transfer, session timers, re-INVITE and ICE restart in one file · follow-up
 - [X-68 — Explain the layering on the public site](X-68-explain-the-layering-on-the-public-site.md) · Build · sans-IO is the central design property and the site never states it · one page, one diagram · beta-1
+- [X-69 — Guide every shipped call verb](X-69-guide-every-shipped-call-verb.md) · Build · hold, transfer, DTMF, playback, recording and coupling all ship and appear only as bullets · follow-up
 - [X-102 — Publish the peer endpoint load comparison](X-102-publish-the-peer-endpoint-load-comparison.md) · Build · compare endpoint responder capacity under the neutral profile; leave proxy workloads to sipx.clstr
 - [X-110 — Replace handwritten CLI argument parsing](X-110-replace-handwritten-cli-argument-parsing.md) · Build · external review findings 4, 7 and 12 · replace the custom Args scanner and flag registries with one typed parser; preserve the shipped CLI contract
+- [X-111 — Make published onboarding executable](X-111-make-published-onboarding-executable.md) · Build · follow-up external review findings 6–7 · dependency snippets omit a used crate and the generated version renders truncated
 
 ## Next (ready — take the top one unless the user named a story)
 
-### Reliable diagnostic automation
-- [P-18 — Make the bounded load tools interoperate by default](P-18-make-the-bounded-load-tools-interoperate-by-default.md) · Phone · external review finding 5 · default load exits success after one unusable signalling-only call
-- [P-19 — Make scenario frames and exits automation-complete](P-19-make-scenario-frames-and-exits-automation-complete.md) · Phone · external review finding 6 · help disagrees with accepted NDJSON and total refusal still exits zero
-- [P-20 — Preflight recording destinations before a call](P-20-preflight-recording-destinations-before-a-call.md) · Phone · external review finding 13 · an uncreatable recording path is discovered only after the call ends
-- [P-21 — Emit unique fields in every structured result](P-21-emit-unique-fields-in-every-structured-result.md) · Phone · external review finding 14 · browser-audio emits media_profile twice
-
-### Bounded endpoint resolution
-- [T-38 — Specify bounded SIP endpoint resolution](T-38-specify-bounded-sip-endpoint-resolution.md) · Transport · external review finding 2 · spec-first target derivation, DNS ordering, identity and deadlines
-- [T-39 — Resolve named targets in every phone command](T-39-resolve-named-targets-in-every-phone-command.md) · Transport · external review finding 2 · after T-38 · dial, register and scenario accept named targets without manual address injection
-
-### Media interoperability closure
-- [M-69 — Reject an unacceptable initial offer on the wire](M-69-reject-an-unacceptable-initial-offer-on-the-wire.md) · Media · external review finding 3 · no-common-codec failure sends no final SIP response
-- [M-70 — Accept multiplexed browser offers with unused component candidates](M-70-accept-multiplexed-browser-offers-with-unused-component-candidates.md) · Media · external review finding 9 · a second browser engine reaches SDP then fails the multiplexed profile
-- [M-71 — Deliver negotiated DTMF receive events through scenario](M-71-deliver-negotiated-dtmf-receive-events-through-scenario.md) · Media · external review finding 10 · digits send successfully but no typed receive event arrives
-
-### Phone call lifecycle closure
-- [P-16 — Follow remote hangup and interrupt calls cleanly](P-16-follow-remote-hangup-and-interrupt-calls-cleanly.md) · Phone · external review finding 1 · confirmed calls outlive remote BYE and interrupts emit no terminal record
-- [P-17 — Bound dial completion including cancellation cleanup](P-17-bound-dial-completion-including-cancellation-cleanup.md) · Phone · external review finding 8 · every configured timeout carries an unexplained two-second tail
-- [T-37 — Preserve immediate transport failures as failures](T-37-preserve-immediate-transport-failures-as-failures.md) · Transport · external review finding 11 · a refused connection is currently reported as a SIP timeout
+### Release
+- [X-112 — Take the integrated gate green on main and reconcile derived artifacts](X-112-take-the-integrated-gate-green-on-main.md) · Build · the single deferred acceptance row 29 stories share · five steps are already proven red at the merge base
+- [X-113 — Record the post-rc.2 boundary and close the wave stories](X-113-record-the-post-rc2-boundary-and-close-the-wave.md) · Build · after X-112 · one changelog boundary, then every story whose acceptance actually holds closes
+- [A-38 — Publish and verify the second release candidate](A-38-publish-and-verify-rc3.md) · Application · after X-113 · the post-rc.2 wave as one immutable prerelease · no stable-1.0 claim widens
 
 ## Blocked
 - [M-16 — Implement ICE](M-16-ice.md) · Media · epic tracker · split into M-19 … M-24 · spec is docs/specs/ice.md, written first
@@ -115,7 +131,6 @@ _Beta.4 proves that sipx can interoperate with a browser audio endpoint, but it 
 ### real-time call-audio analysis
 _Applications need small, predictable facts about live audio even when no speech model is enabled:_
 - [A-29 — Publish a runnable live call-audio analysis example](A-29-publish-call-audio-analysis-example.md) · Application · M16 analysis exit after X-106 · no model or special hardware required
-- [M-57 — Specify deterministic real-time call-audio processing](M-57-specify-real-time-call-audio-processor.md) · Media · M16 spec gate · sans-I/O bounded frame processor using M-54's shared seam
 - [M-58 — Detect voice activity with typed call events](M-58-detect-voice-activity.md) · Media · after M-57 and M-54 · start, end and hangover through CallEvent and SDK
 - [M-59 — Report call signal level clipping and silence metrics](M-59-report-call-signal-metrics.md) · Media · after M-57 and M-54 · signal content only, distinct from M-10 network quality
 - [M-60 — Calibrate and adapt audio-activity thresholds deterministically](M-60-calibrate-audio-activity-thresholds.md) · Media · after M-58 and M-59 · bounded adaptation with observable reset and limits
@@ -142,16 +157,9 @@ _sipx's backlog has been derived from RFCs, from our own review findings, and fr
 - [M-44 — Negotiate and carry G.722](M-44-negotiate-and-carry-g722.md) · Media · the only codec with real demand that sipx lacks · static PT 9 with the RFC 3551 clock-rate trap
 - [M-45 — Hold incoming audio in a jitter buffer](M-45-hold-incoming-audio-in-a-jitter-buffer.md) · Media · two independent field reports of seconds of added delay · characterise the current buffer before changing it
 
-### Depth
-- [X-67 — Split the call module along its seams](X-67-split-the-call-module-along-its-seams.md) · Build · call.rs is 6560 lines, ~6100 of them production · hold, transfer, session timers, re-INVITE and ICE restart in one file · follow-up
-
 ### Endpoint discovery
 _sipx can call any endpoint you can already name, and cannot help you name one. `sipx dial` takes a_
 - [P-6 — Dial a peer by name](P-6-dial-a-peer-by-name.md) · Phone · needs P-5 — `sipx dial alice` where alice came out of `sipx peers`
-
-### documentation depth
-_The published site (`website/`, `X-11`–`X-13`) is strong where it is machine-checked: a CLI_
-- [X-69 — Guide every shipped call verb](X-69-guide-every-shipped-call-verb.md) · Build · hold, transfer, DTMF, playback, recording and coupling all ship and appear only as bullets · follow-up
 
 ### Edge / B2BUA
 _A programmable SIP and media edge — transports, endpoints and routes, with dialog bridging and_
@@ -162,7 +170,6 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 
 ### local live-call speech
 _A live call on a machine with a local accelerator should be able to transcribe received speech and_
-- [A-25 — Specify interchangeable local speech providers](A-25-specify-interchangeable-local-speech-providers.md) · Application · M16 spec gate · endpoint default and per-call override · local/offline by default
 - [A-26 — Emit speech-recognition events through the application SDK](A-26-emit-speech-recognition-sdk-events.md) · Application · after C-3, C-5, A-25, M-54 and M-55 · ordered utterance and provider lifecycle
 - [A-27 — Control synthesized call speech through the application SDK](A-27-control-synthesized-call-speech.md) · Application · after A-25, M-17, M-56 and M-58 · bounded playback, cancellation and activity-aware ducking
 - [A-28 — Isolate speech data and resources with no default retention](A-28-isolate-speech-data-and-resources.md) · Application · after A-25 · gates provider delivery · explicit opt-in for retention or off-host processing
