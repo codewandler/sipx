@@ -223,6 +223,14 @@ def gate_steps(msrv: str) -> list[Step]:
         # nothing ran it. Two sweeps declared the workspace clean and two violations landed in the
         # wave after the second one. Cheap, needs no toolchain, and reads `src/` as well as tests.
         Step("fixed sleeps", "fixed-sleep", ("./scripts/check-fixed-sleep.py", "--check")),
+        # X-118: `scripts/contention-proof.py` is the only evidence in this repository that the
+        # wall-clock-bounded CLI assertions hold on a busy machine, and it runs by hand because it
+        # loads the box for minutes. What is here is the two cheap halves — its own suite, whose
+        # subject is the distinction between "proven" and "measured nothing", and the name
+        # resolution, because the way that proof rots silently is a renamed test: `--exact` then
+        # matches nothing and cargo exits 0.
+        Step("contention proof tests", "gate", ("python3", "scripts/test-contention-proof.py")),
+        Step("contention proof", "gate", ("./scripts/contention-proof.py", "--check")),
         # X-56: the RFC corpora are recovered from the RFC rather than transcribed, and each
         # importer's `--check` re-recovers and diffs it against the tree — the only thing that can
         # tell a fixture edited by hand from the RFC's own bytes, since the suites read whatever is

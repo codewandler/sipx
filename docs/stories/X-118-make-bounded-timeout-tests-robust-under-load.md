@@ -24,7 +24,7 @@ weakening what they assert.
 - [x] `interrupting_a_pending_dial_cancels_without_manufacturing_a_bye` and every sibling asserting
       a wall-clock bound either use a controllable clock or state a tolerance derived from the
       machine, not a fixed number tuned on an idle box.
-- [ ] A failing-first proof runs the suite under deliberate CPU contention and shows the assertion
+- [x] A failing-first proof runs the suite under deliberate CPU contention and shows the assertion
       surviving, while a genuinely unbounded operation still fails it.
 - [x] `check-fixed-sleep.py` stays green — this must not become a sleep.
 - [ ] `./scripts/gate.py` green.
@@ -85,3 +85,29 @@ weakening what they assert.
 
 - This matters more now: concurrent implementors are the normal working mode, so a load-sensitive
   test produces reds nobody caused and everybody has to investigate.
+
+- 2026-08-08: **the contention claim is now measured rather than assumed, and it was true.**
+  `scripts/contention-proof.py` loads the box with two CPU burners per core, runs the three bounded
+  CLI assertions this story collected, and — in the same run — runs a control that waits on
+  `std::future::pending` under the same bound and therefore cannot pass. Both halves are read: a run
+  whose control does not go red is reported **inconclusive**, not proven, because a harness that
+  cannot fail is green for the same reason an empty suite is. That distinction is the script's whole
+  product and its suite (11 tests) is about nothing else.
+  **Failing-first, on the real thing.** The first run at 40 burners on 20 cores:
+  `contention proof: failed — the control failed as it must ... and under that load these bounded
+  assertions failed too: interrupting_a_waiting_answerer_reports_after_listener_cleanup`.
+  So the flakiness this story was filed about was real, and separate from the two deterministic
+  causes (`X-121`/`X-124`'s stale binary, and the port race fixed above).
+  **The fix is a tolerance derived from the machine, which is what the first acceptance row asked
+  for.** `tests/support/machine.rs` measures what starting one `sipx version` process costs on
+  *this* box, medians five samples, and divides by the at-rest cost to get a scale clamped to 1..=12.
+  All 96 process-wait bounds in `tests/cli.rs` now read `bound(Duration::from_secs(n))`. Nothing
+  asserted after a wait changed; the only outcome the scale converts is a timeout, on a machine
+  measured to need it, and the ceiling keeps a genuinely unbounded operation reported as one.
+  Second run, same load: `contention proof: proven — 3 bounded assertions held under the load, in
+  the same run where the control was reported red`.
+  **One bound was deliberately left unscaled.** `dial`'s 12-second assertion at `cli.rs:7225`
+  separates our 3 s schedule from the transaction's 32 s, and its existing comment already reasons
+  that load can only push it up so a starved run fails there rather than passing wrongly. Scaling it
+  to 144 s would destroy that discrimination. Left as written, and now recorded as a decision.
+  `check-fixed-sleep.py` stays green at 43 of 43; the gate is 44 steps and `--check` reports parity.

@@ -29,6 +29,8 @@ use tokio::sync::{Semaphore, SemaphorePermit};
 
 mod support;
 
+use support::machine::bound;
+
 /// One real command-line scenario at a time in this test binary.
 ///
 /// A scenario may and usually does run several `sipx` processes concurrently. Running every
@@ -155,7 +157,7 @@ async fn start_answerer_on(
     let stdout = child.stdout.take().expect("piped");
     let mut lines = BufReader::new(stdout).lines();
 
-    let listening = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+    let listening = tokio::time::timeout(bound(Duration::from_secs(10)), lines.next_line())
         .await
         .expect("no timeout")
         .expect("a line")
@@ -213,7 +215,7 @@ async fn exits_cleanly(
     answerer: &mut tokio::process::Child,
     complaint: &str,
 ) -> std::process::ExitStatus {
-    let status = tokio::time::timeout(Duration::from_secs(30), answerer.wait())
+    let status = tokio::time::timeout(bound(Duration::from_secs(30)), answerer.wait())
         .await
         .expect("the answerer exits rather than hanging")
         .expect("waits");
@@ -453,7 +455,7 @@ async fn dph_1_every_released_transport_carries_a_loopback_command_call() {
         if matches!(transport, "tls" | "wss") {
             dialer.args(["--tls-ca", &ca, "--tls-server-name", "sipx.test"]);
         }
-        let output = tokio::time::timeout(Duration::from_secs(15), dialer.output())
+        let output = tokio::time::timeout(bound(Duration::from_secs(15)), dialer.output())
             .await
             .unwrap_or_else(|_| panic!("{transport} dial is bounded"))
             .expect("dial runs");
@@ -472,7 +474,7 @@ async fn dph_1_every_released_transport_carries_a_loopback_command_call() {
             "{transport}: {stdout}"
         );
 
-        let answered = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+        let answered = tokio::time::timeout(bound(Duration::from_secs(10)), lines.next_line())
             .await
             .unwrap_or_else(|_| panic!("{transport} answer is bounded"))
             .expect("reads answer report")
@@ -653,7 +655,7 @@ async fn an_unacceptable_initial_offer_is_refused_488_before_answer_teardown() {
     let caller_error = String::from_utf8_lossy(&caller.stderr);
 
     let answer_error = drain_stderr(&mut answerer).await;
-    let answer_status = tokio::time::timeout(Duration::from_secs(5), answerer.wait())
+    let answer_status = tokio::time::timeout(bound(Duration::from_secs(5)), answerer.wait())
         .await
         .expect("answer teardown is bounded")
         .expect("answerer exits");
@@ -761,7 +763,7 @@ async fn diagnostic_phone_opus_is_rate_and_direction_correct() {
         "{dial_report}"
     );
 
-    let answer_report = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+    let answer_report = tokio::time::timeout(bound(Duration::from_secs(10)), lines.next_line())
         .await
         .expect("answer report is bounded")
         .expect("reads answer report")
@@ -853,7 +855,7 @@ async fn diagnostic_phone_selects_l16_and_resamples_wav_input() {
         "{dial_report}"
     );
 
-    let answer_report = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+    let answer_report = tokio::time::timeout(bound(Duration::from_secs(10)), lines.next_line())
         .await
         .expect("answer report is bounded")
         .expect("reads answer report")
@@ -1038,7 +1040,7 @@ async fn explicit_plain_and_sdes_report_what_the_tls_calls_actually_negotiated()
             dial_report.contains(&format!("\"negotiated_media_security\":\"{negotiated}\"")),
             "{dial_report}"
         );
-        let answer_report = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+        let answer_report = tokio::time::timeout(bound(Duration::from_secs(10)), lines.next_line())
             .await
             .expect("answer report is bounded")
             .expect("reads answer report")
@@ -1106,7 +1108,7 @@ async fn dph_5_explicit_dtls_srtp_negotiates_and_carries_audio() {
         "{dial_report}"
     );
 
-    let answer_report = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+    let answer_report = tokio::time::timeout(bound(Duration::from_secs(10)), lines.next_line())
         .await
         .expect("answer report is bounded")
         .expect("reads answer report")
@@ -1181,7 +1183,7 @@ async fn browser_audio_profile_runs_both_cli_roles_and_reports_nominated_facts()
         "{offerer} / {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let answerer_report = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+    let answerer_report = tokio::time::timeout(bound(Duration::from_secs(10)), lines.next_line())
         .await
         .expect("answerer report is bounded")
         .expect("reads answerer report")
@@ -1431,7 +1433,7 @@ async fn dph_6_stun_ice_reports_and_carries_audio_on_a_server_reflexive_pair() {
         "{dial_report}"
     );
 
-    let answer_report = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+    let answer_report = tokio::time::timeout(bound(Duration::from_secs(10)), lines.next_line())
         .await
         .expect("answer report is bounded")
         .expect("reads answer report")
@@ -1592,7 +1594,7 @@ async fn dph_12_wav_and_virtual_device_carry_the_same_clip() {
     listing
         .env("ALSA_CONFIG_PATH", &alsa_path)
         .args(["devices", "--json"]);
-    let listing = tokio::time::timeout(Duration::from_secs(10), listing.output())
+    let listing = tokio::time::timeout(bound(Duration::from_secs(10)), listing.output())
         .await
         .expect("device enumeration is bounded")
         .expect("device enumeration runs");
@@ -1645,7 +1647,7 @@ async fn dph_12_wav_and_virtual_device_carry_the_same_clip() {
         String::from_utf8_lossy(&wav_output.stdout),
         String::from_utf8_lossy(&wav_output.stderr)
     );
-    let _ = tokio::time::timeout(Duration::from_secs(10), wav_lines.next_line())
+    let _ = tokio::time::timeout(bound(Duration::from_secs(10)), wav_lines.next_line())
         .await
         .expect("WAV answer report is bounded")
         .expect("reads WAV answer report")
@@ -1672,7 +1674,7 @@ async fn dph_12_wav_and_virtual_device_carry_the_same_clip() {
         "5",
         "--json",
     ]);
-    let device_output = tokio::time::timeout(Duration::from_secs(15), command.output())
+    let device_output = tokio::time::timeout(bound(Duration::from_secs(15)), command.output())
         .await
         .expect("device call is bounded")
         .expect("device dial runs");
@@ -1696,7 +1698,7 @@ async fn dph_12_wav_and_virtual_device_carry_the_same_clip() {
             "{counter}: {device_report}"
         );
     }
-    let _ = tokio::time::timeout(Duration::from_secs(10), device_lines.next_line())
+    let _ = tokio::time::timeout(bound(Duration::from_secs(10)), device_lines.next_line())
         .await
         .expect("device answer report is bounded")
         .expect("reads device answer report")
@@ -1744,7 +1746,7 @@ async fn dph_12_wav_and_virtual_device_carry_the_same_clip() {
         "5",
         "--json",
     ]);
-    let output = tokio::time::timeout(Duration::from_secs(15), command.output())
+    let output = tokio::time::timeout(bound(Duration::from_secs(15)), command.output())
         .await
         .expect("output-device call is bounded")
         .expect("output-device dial runs");
@@ -1758,7 +1760,7 @@ async fn dph_12_wav_and_virtual_device_carry_the_same_clip() {
         report.contains("\"audio_output_device\":\"alsa:sipx_dph12\""),
         "{report}"
     );
-    let _ = tokio::time::timeout(Duration::from_secs(10), output_lines.next_line())
+    let _ = tokio::time::timeout(bound(Duration::from_secs(10)), output_lines.next_line())
         .await
         .expect("output answer report is bounded")
         .expect("reads output answer report")
@@ -1827,10 +1829,11 @@ async fn recording_destinations_are_preflighted_before_network_io() {
             .find(|value| value.ends_with("heard.wav"))
             .expect("case names its requested path");
         let requested = requested.strip_prefix("wav:").unwrap_or(requested);
-        let output = tokio::time::timeout(Duration::from_secs(5), sipx().args(&case).output())
-            .await
-            .expect("preflight refusal is bounded")
-            .expect("command runs");
+        let output =
+            tokio::time::timeout(bound(Duration::from_secs(5)), sipx().args(&case).output())
+                .await
+                .expect("preflight refusal is bounded")
+                .expect("command runs");
         let complaint = String::from_utf8_lossy(&output.stderr);
         assert_eq!(output.status.code(), Some(2), "{case:?}: {complaint}");
         assert!(complaint.contains(requested), "{case:?}: {complaint}");
@@ -1910,7 +1913,7 @@ async fn register_selects_every_released_transport() {
         };
         let registrar = handle.clone();
         let serving = tokio::spawn(async move {
-            let request = tokio::time::timeout(Duration::from_secs(10), incoming.recv())
+            let request = tokio::time::timeout(bound(Duration::from_secs(10)), incoming.recv())
                 .await
                 .expect("REGISTER is bounded")
                 .expect("REGISTER arrives");
@@ -1957,7 +1960,7 @@ async fn register_selects_every_released_transport() {
         ) {
             command.args(["--tls-ca", &ca, "--tls-server-name", "sipx.test"]);
         }
-        let output = tokio::time::timeout(Duration::from_secs(15), command.output())
+        let output = tokio::time::timeout(bound(Duration::from_secs(15)), command.output())
             .await
             .unwrap_or_else(|_| panic!("{name} registration is bounded"))
             .expect("register runs");
@@ -2020,11 +2023,13 @@ async fn register_advertises_this_client_in_via_and_contact() {
         .expect("spawns");
 
     let mut buf = vec![0u8; 65_535];
-    let (length, source) =
-        tokio::time::timeout(Duration::from_secs(10), registrar.recv_from(&mut buf))
-            .await
-            .expect("a REGISTER arrives")
-            .expect("reads");
+    let (length, source) = tokio::time::timeout(
+        bound(Duration::from_secs(10)),
+        registrar.recv_from(&mut buf),
+    )
+    .await
+    .expect("a REGISTER arrives")
+    .expect("reads");
     let request = String::from_utf8_lossy(&buf[..length]).into_owned();
     let _ = child.kill().await;
 
@@ -2083,11 +2088,13 @@ async fn next_register(
     expected: &str,
 ) -> (String, std::net::SocketAddr) {
     let mut buf = vec![0u8; 65_535];
-    let (length, source) =
-        tokio::time::timeout(Duration::from_secs(10), registrar.recv_from(&mut buf))
-            .await
-            .unwrap_or_else(|_| panic!("{expected}"))
-            .expect("reads");
+    let (length, source) = tokio::time::timeout(
+        bound(Duration::from_secs(10)),
+        registrar.recv_from(&mut buf),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("{expected}"))
+    .expect("reads");
     let request = String::from_utf8_lossy(&buf[..length]).into_owned();
     assert!(request.starts_with("REGISTER"), "{expected}: {request}");
     (request, source)
@@ -2300,7 +2307,7 @@ async fn timed_register(arguments: &[&str], json: bool) -> (std::process::Output
         command.arg("--json");
     }
     let started = std::time::Instant::now();
-    let output = tokio::time::timeout(Duration::from_secs(15), command.output())
+    let output = tokio::time::timeout(bound(Duration::from_secs(15)), command.output())
         .await
         .expect("the stated deadline bounds the attempt")
         .expect("register runs");
@@ -2426,8 +2433,11 @@ async fn keep_alive_registers_once_per_invocation() {
     // A sixty-second lease is refreshed with margin to spare, tens of seconds from here. Anything
     // arriving in the next few seconds is a second registration rather than a refresh.
     let mut buffer = vec![0u8; 65_535];
-    let followed =
-        tokio::time::timeout(Duration::from_secs(3), registrar.recv_from(&mut buffer)).await;
+    let followed = tokio::time::timeout(
+        bound(Duration::from_secs(3)),
+        registrar.recv_from(&mut buffer),
+    )
+    .await;
     let _ = child.kill().await;
     if let Ok(Ok((length, _))) = followed {
         panic!(
@@ -2475,7 +2485,7 @@ async fn keep_alive_refreshes_are_bounded_by_the_stated_deadline() {
     // The refresh arrives and is swallowed: only the command's own deadline can end it.
     let (_refresh, _) = next_register(&registrar, "a refresh REGISTER arrives").await;
 
-    let output = tokio::time::timeout(Duration::from_secs(20), child.wait_with_output())
+    let output = tokio::time::timeout(bound(Duration::from_secs(20)), child.wait_with_output())
         .await
         .expect("the stated deadline bounds a refresh as well as the initial attempt")
         .expect("register runs");
@@ -2728,7 +2738,7 @@ async fn dial_and_register_through_a_loopback_hostname() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let answered = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+    let answered = tokio::time::timeout(bound(Duration::from_secs(10)), lines.next_line())
         .await
         .expect("answer report is bounded")
         .expect("reads answer report")
@@ -2757,14 +2767,16 @@ async fn dial_and_register_through_a_loopback_hostname() {
         .spawn()
         .expect("register spawns");
     let mut bytes = vec![0u8; 65_535];
-    let (length, source) =
-        tokio::time::timeout(Duration::from_secs(10), registrar.recv_from(&mut bytes))
-            .await
-            .expect("named REGISTER is bounded")
-            .expect("REGISTER arrives");
+    let (length, source) = tokio::time::timeout(
+        bound(Duration::from_secs(10)),
+        registrar.recv_from(&mut bytes),
+    )
+    .await
+    .expect("named REGISTER is bounded")
+    .expect("REGISTER arrives");
     let request = String::from_utf8_lossy(&bytes[..length]).into_owned();
     answer_register(&registrar, &request, source).await;
-    let output = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
+    let output = tokio::time::timeout(bound(Duration::from_secs(10)), child.wait_with_output())
         .await
         .expect("register exits")
         .expect("register output");
@@ -3014,7 +3026,7 @@ async fn through_nameserver(
     }
     // A failure bound: a resolution or attempt deadline that stopped being obeyed hangs this
     // assertion rather than the job it runs in.
-    tokio::time::timeout(Duration::from_secs(25), command.output())
+    tokio::time::timeout(bound(Duration::from_secs(25)), command.output())
         .await
         .expect("a named attempt is bounded")
         .expect("the command runs")
@@ -3624,7 +3636,7 @@ async fn scenario_through_nameserver(dns: &Nameserver, script: &str) -> std::pro
     drop(stdin);
     // A failure bound: a resolution deadline that stopped being obeyed hangs this assertion rather
     // than the job it runs in.
-    tokio::time::timeout(Duration::from_secs(25), child.wait_with_output())
+    tokio::time::timeout(bound(Duration::from_secs(25)), child.wait_with_output())
         .await
         .expect("a named dial is bounded")
         .expect("scenario exits")
@@ -3745,7 +3757,7 @@ async fn dial_plays_a_file_and_records_the_far_end() {
         "{caller_out}"
     );
 
-    let answered = tokio::time::timeout(Duration::from_secs(25), lines.next_line())
+    let answered = tokio::time::timeout(bound(Duration::from_secs(25)), lines.next_line())
         .await
         .expect("no timeout")
         .expect("a line")
@@ -3842,7 +3854,7 @@ async fn a_completed_silent_call_is_success_for_dial_and_answer() {
     assert_eq!(caller_json["samples_recorded"], 0, "{caller_report}");
     assert_eq!(caller_json["heard_audio"], false, "{caller_report}");
 
-    let answer_report = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+    let answer_report = tokio::time::timeout(bound(Duration::from_secs(10)), lines.next_line())
         .await
         .expect("the answer report is bounded")
         .expect("reads answer stdout")
@@ -4137,7 +4149,7 @@ async fn authenticated_dial(from_environment: bool) {
     } else {
         command.args(["--password", PASSWORD]);
     }
-    let output = tokio::time::timeout(Duration::from_secs(15), command.output())
+    let output = tokio::time::timeout(bound(Duration::from_secs(15)), command.output())
         .await
         .expect("the authenticated dial is bounded")
         .expect("dial runs");
@@ -4335,7 +4347,7 @@ async fn default_load_pair_completes_the_requested_signalling_workload() {
     let stdout = responder.stdout.take().expect("stdout is piped");
     let mut lines = BufReader::new(stdout).lines();
     let ready: serde_json::Value = serde_json::from_str(
-        &tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        &tokio::time::timeout(bound(Duration::from_secs(5)), lines.next_line())
             .await
             .expect("readiness is bounded")
             .expect("readiness can be read")
@@ -4377,7 +4389,7 @@ async fn default_load_pair_completes_the_requested_signalling_workload() {
         signal_interrupt(responder.id().expect("responder process id")).await;
     }
     let responder_summary: serde_json::Value = serde_json::from_str(
-        &tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+        &tokio::time::timeout(bound(Duration::from_secs(10)), lines.next_line())
             .await
             .expect("responder summary is bounded")
             .expect("responder summary can be read")
@@ -4385,7 +4397,7 @@ async fn default_load_pair_completes_the_requested_signalling_workload() {
     )
     .expect("responder summary JSON");
     let complaint = drain_stderr(&mut responder).await;
-    let responder_status = tokio::time::timeout(Duration::from_secs(5), responder.wait())
+    let responder_status = tokio::time::timeout(bound(Duration::from_secs(5)), responder.wait())
         .await
         .expect("responder exit is bounded")
         .expect("responder exits");
@@ -4452,7 +4464,7 @@ async fn start_mode_responder(
     let stdout = child.stdout.take().expect("stdout is piped");
     let mut lines = BufReader::new(stdout).lines();
     let ready = serde_json::from_str(
-        &tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        &tokio::time::timeout(bound(Duration::from_secs(5)), lines.next_line())
             .await
             .expect("readiness is bounded")
             .expect("readiness can be read")
@@ -4496,7 +4508,7 @@ async fn generated_media_load_pair_retains_the_rtp_workload() {
     let load: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("load summary JSON");
     let summary: serde_json::Value = serde_json::from_str(
-        &tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+        &tokio::time::timeout(bound(Duration::from_secs(10)), lines.next_line())
             .await
             .expect("responder summary is bounded")
             .expect("responder summary can be read")
@@ -4569,7 +4581,7 @@ async fn incompatible_explicit_load_modes_fail_before_dialog_admission() {
     let load: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("load summary JSON");
     let summary: serde_json::Value = serde_json::from_str(
-        &tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        &tokio::time::timeout(bound(Duration::from_secs(5)), lines.next_line())
             .await
             .expect("responder summary is bounded")
             .expect("responder summary can be read")
@@ -4667,7 +4679,7 @@ async fn an_internal_load_worker_error_is_failed_not_interrupted() {
             // no SDP answer. Serving that cleanup keeps this independent peer causally bounded.
             // A bound on failure: each pass completes on the next exact ACK/BYE network event.
             while let Ok(Some(request)) =
-                tokio::time::timeout(Duration::from_secs(5), incoming.recv()).await
+                tokio::time::timeout(bound(Duration::from_secs(5)), incoming.recv()).await
             {
                 if request.request.method == Method::Bye {
                     let response = sipx_sip::build::ResponseBuilder::to_request(
@@ -4760,7 +4772,7 @@ async fn bounded_load_responder_drives_readiness_through_zero_state() {
     let mut child = command.spawn().expect("responder starts");
     let stdout = child.stdout.take().expect("stdout is piped");
     let mut lines = BufReader::new(stdout).lines();
-    let ready_line = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+    let ready_line = tokio::time::timeout(bound(Duration::from_secs(5)), lines.next_line())
         .await
         .expect("readiness is bounded")
         .expect("readiness can be read")
@@ -4793,7 +4805,7 @@ async fn bounded_load_responder_drives_readiness_through_zero_state() {
         .await
         .expect("orphan BYE sends");
     assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), orphan_bye.final_response())
+        tokio::time::timeout(bound(Duration::from_secs(5)), orphan_bye.final_response())
             .await
             .expect("orphan BYE response is bounded")
             .expect("orphan BYE response")
@@ -4885,10 +4897,13 @@ async fn bounded_load_responder_drives_readiness_through_zero_state() {
         .send(invite, sipx_transport::Target::udp(address))
         .await
         .expect("INVITE sends");
-    let accepted = tokio::time::timeout(Duration::from_secs(5), invite_responses.final_response())
-        .await
-        .expect("answer is bounded")
-        .expect("INVITE final response");
+    let accepted = tokio::time::timeout(
+        bound(Duration::from_secs(5)),
+        invite_responses.final_response(),
+    )
+    .await
+    .expect("answer is bounded")
+    .expect("INVITE final response");
     assert_eq!(accepted.status.code(), 200);
     assert!(accepted.body().is_empty(), "signalling mode creates no SDP");
     let tagged_to = bytes::Bytes::copy_from_slice(
@@ -4943,13 +4958,16 @@ async fn bounded_load_responder_drives_readiness_through_zero_state() {
         )
         .await
         .expect("BYE sends");
-    let ended = tokio::time::timeout(Duration::from_secs(5), bye_responses.final_response())
-        .await
-        .expect("teardown is bounded")
-        .expect("BYE final response");
+    let ended = tokio::time::timeout(
+        bound(Duration::from_secs(5)),
+        bye_responses.final_response(),
+    )
+    .await
+    .expect("teardown is bounded")
+    .expect("BYE final response");
     assert_eq!(ended.status.code(), 200);
 
-    let summary_line = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+    let summary_line = tokio::time::timeout(bound(Duration::from_secs(5)), lines.next_line())
         .await
         .expect("summary follows cleanup")
         .expect("summary can be read")
@@ -4999,7 +5017,7 @@ async fn load_responder_never_completes_a_dialog_before_ack() {
     let stdout = child.stdout.take().expect("stdout is piped");
     let mut lines = BufReader::new(stdout).lines();
     let ready: serde_json::Value = serde_json::from_str(
-        &tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        &tokio::time::timeout(bound(Duration::from_secs(5)), lines.next_line())
             .await
             .expect("readiness is bounded")
             .expect("readiness can be read")
@@ -5033,7 +5051,7 @@ async fn load_responder_never_completes_a_dialog_before_ack() {
         200
     );
 
-    let bye = tokio::time::timeout(Duration::from_secs(5), incoming.recv())
+    let bye = tokio::time::timeout(bound(Duration::from_secs(5)), incoming.recv())
         .await
         .expect("cleanup BYE is bounded")
         .expect("cleanup BYE arrives");
@@ -5050,7 +5068,7 @@ async fn load_responder_never_completes_a_dialog_before_ack() {
         .expect("cleanup response sends");
 
     let summary: serde_json::Value = serde_json::from_str(
-        &tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        &tokio::time::timeout(bound(Duration::from_secs(5)), lines.next_line())
             .await
             .expect("summary is bounded")
             .expect("summary can be read")
@@ -5064,7 +5082,7 @@ async fn load_responder_never_completes_a_dialog_before_ack() {
     assert_eq!(summary["post_drain"]["active_dialogs"], 0);
 
     let complaint = drain_stderr(&mut child).await;
-    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+    let status = tokio::time::timeout(bound(Duration::from_secs(5)), child.wait())
         .await
         .expect("failed responder exits")
         .expect("status");
@@ -5101,7 +5119,7 @@ async fn generated_load_responder_records_a_valid_non_success_bye_final() {
     let stdout = child.stdout.take().expect("stdout is piped");
     let mut lines = BufReader::new(stdout).lines();
     let ready: serde_json::Value = serde_json::from_str(
-        &tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        &tokio::time::timeout(bound(Duration::from_secs(5)), lines.next_line())
             .await
             .expect("readiness is bounded")
             .expect("readiness can be read")
@@ -5143,7 +5161,7 @@ async fn generated_load_responder_records_a_valid_non_success_bye_final() {
     .await
     .expect("ACK sends");
 
-    let bye = tokio::time::timeout(Duration::from_secs(5), incoming.recv())
+    let bye = tokio::time::timeout(bound(Duration::from_secs(5)), incoming.recv())
         .await
         .expect("cleanup BYE is bounded")
         .expect("cleanup BYE arrives");
@@ -5160,7 +5178,7 @@ async fn generated_load_responder_records_a_valid_non_success_bye_final() {
         .expect("cleanup refusal sends");
 
     let summary: serde_json::Value = serde_json::from_str(
-        &tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        &tokio::time::timeout(bound(Duration::from_secs(5)), lines.next_line())
             .await
             .expect("summary is bounded")
             .expect("summary can be read")
@@ -5177,7 +5195,7 @@ async fn generated_load_responder_records_a_valid_non_success_bye_final() {
     assert_eq!(summary["post_drain"]["active_dialogs"], 0);
 
     let complaint = drain_stderr(&mut child).await;
-    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+    let status = tokio::time::timeout(bound(Duration::from_secs(5)), child.wait())
         .await
         .expect("failed responder exits")
         .expect("status");
@@ -5213,7 +5231,7 @@ async fn generated_load_responder_rejects_a_wrong_dialog_bye_final() {
     let stdout = child.stdout.take().expect("stdout is piped");
     let mut lines = BufReader::new(stdout).lines();
     let ready: serde_json::Value = serde_json::from_str(
-        &tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        &tokio::time::timeout(bound(Duration::from_secs(5)), lines.next_line())
             .await
             .expect("readiness is bounded")
             .expect("readiness can be read")
@@ -5277,7 +5295,7 @@ async fn generated_load_responder_rejects_a_wrong_dialog_bye_final() {
         400
     );
 
-    let bye = tokio::time::timeout(Duration::from_secs(5), incoming.recv())
+    let bye = tokio::time::timeout(bound(Duration::from_secs(5)), incoming.recv())
         .await
         .expect("cleanup BYE is bounded")
         .expect("cleanup BYE arrives");
@@ -5298,7 +5316,7 @@ async fn generated_load_responder_rejects_a_wrong_dialog_bye_final() {
         .expect("invalid final sends");
 
     let summary: serde_json::Value = serde_json::from_str(
-        &tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        &tokio::time::timeout(bound(Duration::from_secs(5)), lines.next_line())
             .await
             .expect("summary is bounded")
             .expect("summary can be read")
@@ -5316,7 +5334,7 @@ async fn generated_load_responder_rejects_a_wrong_dialog_bye_final() {
     assert_eq!(summary["post_drain"]["active_dialogs"], 0);
 
     let complaint = drain_stderr(&mut child).await;
-    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+    let status = tokio::time::timeout(bound(Duration::from_secs(5)), child.wait())
         .await
         .expect("failed responder exits")
         .expect("status");
@@ -5349,7 +5367,7 @@ async fn load_responder_reports_workers_aborted_at_the_cleanup_deadline() {
     let stdout = child.stdout.take().expect("stdout is piped");
     let mut lines = BufReader::new(stdout).lines();
     let ready: serde_json::Value = serde_json::from_str(
-        &tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        &tokio::time::timeout(bound(Duration::from_secs(5)), lines.next_line())
             .await
             .expect("readiness is bounded")
             .expect("readiness can be read")
@@ -5384,7 +5402,7 @@ async fn load_responder_reports_workers_aborted_at_the_cleanup_deadline() {
     );
 
     let summary: serde_json::Value = serde_json::from_str(
-        &tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        &tokio::time::timeout(bound(Duration::from_secs(5)), lines.next_line())
             .await
             .expect("cleanup deadline is bounded")
             .expect("summary can be read")
@@ -5398,7 +5416,7 @@ async fn load_responder_reports_workers_aborted_at_the_cleanup_deadline() {
     assert_eq!(summary["post_drain"]["active_dialogs"], 1);
 
     let complaint = drain_stderr(&mut child).await;
-    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+    let status = tokio::time::timeout(bound(Duration::from_secs(5)), child.wait())
         .await
         .expect("failed responder exits")
         .expect("status");
@@ -5602,7 +5620,7 @@ async fn load_responder_enforces_the_concurrent_dialog_ceiling() {
     let mut child = command.spawn().expect("responder starts");
     let stdout = child.stdout.take().expect("stdout is piped");
     let mut lines = BufReader::new(stdout).lines();
-    let ready_line = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+    let ready_line = tokio::time::timeout(bound(Duration::from_secs(5)), lines.next_line())
         .await
         .expect("readiness is bounded")
         .expect("readiness can be read")
@@ -5624,7 +5642,7 @@ async fn load_responder_enforces_the_concurrent_dialog_ceiling() {
         .send(first_request.clone(), sipx_transport::Target::udp(address))
         .await
         .expect("first INVITE sends");
-    let accepted = tokio::time::timeout(Duration::from_secs(5), first.final_response())
+    let accepted = tokio::time::timeout(bound(Duration::from_secs(5)), first.final_response())
         .await
         .expect("first answer is bounded")
         .expect("first final response");
@@ -5656,7 +5674,7 @@ async fn load_responder_enforces_the_concurrent_dialog_ceiling() {
         )
         .await
         .expect("second INVITE sends");
-    let refused = tokio::time::timeout(Duration::from_secs(5), second.final_response())
+    let refused = tokio::time::timeout(bound(Duration::from_secs(5)), second.final_response())
         .await
         .expect("overload answer is bounded")
         .expect("overload final response");
@@ -5676,7 +5694,7 @@ async fn load_responder_enforces_the_concurrent_dialog_ceiling() {
         .await
         .expect("BYE sends");
     assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), bye.final_response())
+        tokio::time::timeout(bound(Duration::from_secs(5)), bye.final_response())
             .await
             .expect("BYE response is bounded")
             .expect("BYE final response")
@@ -5685,7 +5703,7 @@ async fn load_responder_enforces_the_concurrent_dialog_ceiling() {
         200
     );
 
-    let summary_line = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+    let summary_line = tokio::time::timeout(bound(Duration::from_secs(5)), lines.next_line())
         .await
         .expect("summary follows drain")
         .expect("summary can be read")
@@ -5748,10 +5766,11 @@ async fn supported_process_stops_end_load_admission_and_cleanup() {
         let process = child.id().expect("load process id");
 
         let mut packet = [0u8; 4096];
-        let (length, _) = tokio::time::timeout(Duration::from_secs(5), peer.recv_from(&mut packet))
-            .await
-            .expect("the first admission is bounded")
-            .expect("the first INVITE arrives");
+        let (length, _) =
+            tokio::time::timeout(bound(Duration::from_secs(5)), peer.recv_from(&mut packet))
+                .await
+                .expect("the first admission is bounded")
+                .expect("the first INVITE arrives");
         assert!(
             packet
                 .get(..length)
@@ -5760,7 +5779,7 @@ async fn supported_process_stops_end_load_admission_and_cleanup() {
         );
 
         signal_process(process, argument, name).await;
-        let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
+        let output = tokio::time::timeout(bound(Duration::from_secs(5)), child.wait_with_output())
             .await
             .expect("interrupted cleanup is bounded")
             .expect("load exits");
@@ -5795,7 +5814,7 @@ async fn supervisor_termination_drains_load_responder_and_reports_once() {
         start_mode_responder("signalling", "100", "2").await;
     signal_interrupt(interactive.id().expect("responder process id")).await;
     let interactive_terminal =
-        tokio::time::timeout(Duration::from_secs(5), interactive_lines.next_line())
+        tokio::time::timeout(bound(Duration::from_secs(5)), interactive_lines.next_line())
             .await
             .expect("interactive terminal record is bounded")
             .expect("interactive terminal record can be read")
@@ -5835,7 +5854,7 @@ async fn supervisor_termination_drains_load_responder_and_reports_once() {
     let process = responder.id().expect("responder process id");
 
     signal_terminate(process).await;
-    let bye = tokio::time::timeout(Duration::from_secs(5), incoming.recv())
+    let bye = tokio::time::timeout(bound(Duration::from_secs(5)), incoming.recv())
         .await
         .expect("cleanup BYE is bounded")
         .expect("cleanup BYE arrives");
@@ -5843,7 +5862,7 @@ async fn supervisor_termination_drains_load_responder_and_reports_once() {
     signal_terminate(process).await;
     assert!(call.handle(&bye).await.expect("cleanup BYE is handled"));
 
-    let terminal = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+    let terminal = tokio::time::timeout(bound(Duration::from_secs(5)), lines.next_line())
         .await
         .expect("terminal record is bounded")
         .expect("terminal record can be read")
@@ -5858,7 +5877,7 @@ async fn supervisor_termination_drains_load_responder_and_reports_once() {
     assert_eq!(terminal["post_drain"]["owned_tasks"], 0);
 
     let complaint = drain_stderr(&mut responder).await;
-    let status = tokio::time::timeout(Duration::from_secs(5), responder.wait())
+    let status = tokio::time::timeout(bound(Duration::from_secs(5)), responder.wait())
         .await
         .expect("responder exit is bounded")
         .expect("responder exits");
@@ -5907,10 +5926,11 @@ async fn a_refusal_carries_a_to_tag() {
     // final one.
     let mut buf = vec![0u8; 65_535];
     let response = loop {
-        let (length, _) = tokio::time::timeout(Duration::from_secs(10), socket.recv_from(&mut buf))
-            .await
-            .expect("a response arrives")
-            .expect("reads");
+        let (length, _) =
+            tokio::time::timeout(bound(Duration::from_secs(10)), socket.recv_from(&mut buf))
+                .await
+                .expect("a response arrives")
+                .expect("reads");
         let response = String::from_utf8_lossy(&buf[..length]).into_owned();
         if !response.starts_with("SIP/2.0 1") {
             break response;
@@ -6017,7 +6037,7 @@ async fn run_scenario_stream(script: &str) -> std::process::Output {
         .await
         .expect("scenario script writes");
     drop(stdin);
-    tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
+    tokio::time::timeout(bound(Duration::from_secs(10)), child.wait_with_output())
         .await
         .expect("scenario stream is bounded")
         .expect("scenario exits")
@@ -6165,7 +6185,7 @@ async fn a_successful_scenario_reject_operation_is_not_a_failed_stream() {
     let stdout = child.stdout.take().expect("scenario stdout is piped");
     let mut lines = BufReader::new(stdout).lines();
     let ready: serde_json::Value = serde_json::from_str(
-        &tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        &tokio::time::timeout(bound(Duration::from_secs(5)), lines.next_line())
             .await
             .expect("readiness is bounded")
             .expect("readiness can be read")
@@ -6198,7 +6218,7 @@ async fn a_successful_scenario_reject_operation_is_not_a_failed_stream() {
         .await
         .expect("scenario script writes");
     drop(stdin);
-    let response = tokio::time::timeout(Duration::from_secs(5), refusal.final_response())
+    let response = tokio::time::timeout(bound(Duration::from_secs(5)), refusal.final_response())
         .await
         .expect("refusal is bounded")
         .expect("final refusal arrives");
@@ -6206,7 +6226,7 @@ async fn a_successful_scenario_reject_operation_is_not_a_failed_stream() {
 
     let mut output = vec![ready];
     // A bound on failure: each pass waits for the next exact output or EOF after shutdown.
-    while let Some(line) = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+    while let Some(line) = tokio::time::timeout(bound(Duration::from_secs(5)), lines.next_line())
         .await
         .expect("scenario output is bounded")
         .expect("scenario output can be read")
@@ -6257,7 +6277,7 @@ async fn scenario_waits_for_answer_then_sends_dtmf_and_hangs_up_in_causal_order(
         .write_all(script.as_bytes())
         .await
         .expect("script writes");
-    let output = tokio::time::timeout(Duration::from_secs(20), child.wait_with_output())
+    let output = tokio::time::timeout(bound(Duration::from_secs(20)), child.wait_with_output())
         .await
         .expect("scenario is bounded")
         .expect("scenario exits");
@@ -6321,7 +6341,7 @@ async fn two_scenarios_deliver_each_negotiated_digit_once_and_in_order() {
     let stdout = answerer.stdout.take().expect("answerer stdout is piped");
     let mut lines = BufReader::new(stdout).lines();
     let ready: serde_json::Value = serde_json::from_str(
-        &tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        &tokio::time::timeout(bound(Duration::from_secs(5)), lines.next_line())
             .await
             .expect("answerer readiness is bounded")
             .expect("answerer readiness can be read")
@@ -6391,11 +6411,12 @@ async fn two_scenarios_deliver_each_negotiated_digit_once_and_in_order() {
         .await
         .expect("caller script writes");
 
-    let caller_output = tokio::time::timeout(Duration::from_secs(20), caller.wait_with_output())
-        .await
-        .expect("calling scenario is bounded")
-        .expect("calling scenario exits");
-    let answer_status = tokio::time::timeout(Duration::from_secs(20), answerer.wait())
+    let caller_output =
+        tokio::time::timeout(bound(Duration::from_secs(20)), caller.wait_with_output())
+            .await
+            .expect("calling scenario is bounded")
+            .expect("calling scenario exits");
+    let answer_status = tokio::time::timeout(bound(Duration::from_secs(20)), answerer.wait())
         .await
         .expect("answering scenario is bounded")
         .expect("answering scenario exits");
@@ -6684,7 +6705,7 @@ async fn info_progress_stays_on_stderr_with_text_results() {
         "{stderr}"
     );
 
-    tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+    tokio::time::timeout(bound(Duration::from_secs(5)), lines.next_line())
         .await
         .expect("answer terminal is bounded")
         .expect("answer terminal can be read")
@@ -6725,7 +6746,7 @@ async fn digits_sent_by_the_caller_are_reported_by_the_answerer() {
         String::from_utf8_lossy(&caller.stderr)
     );
 
-    let answered = tokio::time::timeout(Duration::from_secs(25), lines.next_line())
+    let answered = tokio::time::timeout(bound(Duration::from_secs(25)), lines.next_line())
         .await
         .expect("no timeout")
         .expect("a line")
@@ -6770,7 +6791,7 @@ async fn a_shorter_dialer_ends_the_answerer_and_observes_its_bye_response() {
         String::from_utf8_lossy(&caller.stderr)
     );
 
-    let answer = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+    let answer = tokio::time::timeout(bound(Duration::from_secs(5)), lines.next_line())
         .await
         .expect("remote BYE ends the answerer before its local duration")
         .expect("answer result can be read")
@@ -6867,7 +6888,7 @@ async fn answer_stops_successful_invite_retransmission_after_ack() {
             .code(),
         200
     );
-    let terminal = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+    let terminal = tokio::time::timeout(bound(Duration::from_secs(5)), lines.next_line())
         .await
         .expect("remote hangup is bounded")
         .expect("terminal line can be read")
@@ -6919,7 +6940,7 @@ async fn terminating_a_confirmed_dialer_hangs_up_and_reports_once() {
     let child = command.spawn().expect("dialer starts");
     let process = child.id().expect("dialer process id");
 
-    let invitation = tokio::time::timeout(Duration::from_secs(5), incoming.recv())
+    let invitation = tokio::time::timeout(bound(Duration::from_secs(5)), incoming.recv())
         .await
         .expect("INVITE is bounded")
         .expect("INVITE arrives");
@@ -6931,7 +6952,7 @@ async fn terminating_a_confirmed_dialer_hangs_up_and_reports_once() {
     )
     .await
     .expect("peer answers");
-    let ack = tokio::time::timeout(Duration::from_secs(5), incoming.recv())
+    let ack = tokio::time::timeout(bound(Duration::from_secs(5)), incoming.recv())
         .await
         .expect("ACK is bounded")
         .expect("ACK arrives");
@@ -6939,14 +6960,14 @@ async fn terminating_a_confirmed_dialer_hangs_up_and_reports_once() {
     assert!(call.handle(&ack).await.expect("ACK is handled"));
 
     signal_terminate(process).await;
-    let bye = tokio::time::timeout(Duration::from_secs(5), incoming.recv())
+    let bye = tokio::time::timeout(bound(Duration::from_secs(5)), incoming.recv())
         .await
         .expect("interrupt BYE is bounded")
         .expect("interrupt BYE arrives");
     assert_eq!(bye.request.method, Method::Bye);
     assert!(call.handle(&bye).await.expect("BYE is handled"));
 
-    let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
+    let output = tokio::time::timeout(bound(Duration::from_secs(5)), child.wait_with_output())
         .await
         .expect("dialer cleanup is bounded")
         .expect("dialer exits");
@@ -6999,7 +7020,7 @@ async fn terminating_a_confirmed_answerer_hangs_up_and_reports_once() {
     .expect("peer serves the BYE");
     assert!(call.is_ended());
 
-    let terminal = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+    let terminal = tokio::time::timeout(bound(Duration::from_secs(5)), lines.next_line())
         .await
         .expect("answerer terminal record is bounded")
         .expect("terminal line can be read")
@@ -7022,7 +7043,7 @@ async fn interrupting_a_waiting_answerer_reports_after_listener_cleanup() {
     let (mut answerer, _address, mut lines) = start_answerer(&["-v"]).await;
     signal_interrupt(answerer.id().expect("answerer process id")).await;
 
-    let terminal = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+    let terminal = tokio::time::timeout(bound(Duration::from_secs(5)), lines.next_line())
         .await
         .expect("answerer terminal record is bounded")
         .expect("terminal line can be read")
@@ -7040,6 +7061,25 @@ async fn interrupting_a_waiting_answerer_reports_after_listener_cleanup() {
     assert!(progress.contains("cause=\"interrupted\""), "{progress}");
     assert!(!progress.contains("event=\"call.answered\""), "{progress}");
     exits_cleanly(&mut answerer, &progress).await;
+}
+
+/// The deliberate failure `scripts/contention-proof.py` runs to prove its own harness can fail.
+///
+/// It waits on a future that never completes, under the same five-second bound the CANCEL test
+/// below uses, so it has no way to pass. That is the point. A contention proof reporting "the
+/// bounded assertions stayed green on a loaded box" is worth nothing unless the same harness, in
+/// the same run, on the same box, reported a genuinely unbounded wait as red — otherwise green is
+/// indistinguishable from an assertion that could not fire, which is a failure this repository has
+/// shipped three times and believed each time.
+///
+/// `#[ignore]` keeps it out of every ordinary run; the proof invokes it by name with `--ignored`,
+/// and `--check` fails if either that attribute or the unbounded wait is edited away.
+#[tokio::test]
+#[ignore = "fails on purpose: the control for scripts/contention-proof.py"]
+async fn contention_control_an_unbounded_wait_is_still_reported() {
+    tokio::time::timeout(bound(Duration::from_secs(5)), std::future::pending::<()>())
+        .await
+        .expect("an unbounded wait is reported as one rather than waited out");
 }
 
 /// Before confirmation the same interrupt remains INVITE cancellation: CANCEL/487, never a BYE
@@ -7070,14 +7110,14 @@ async fn interrupting_a_pending_dial_cancels_without_manufacturing_a_bye() {
         .stderr(Stdio::piped());
     let child = command.spawn().expect("dialer starts");
     let process = child.id().expect("dialer process id");
-    let invitation = tokio::time::timeout(Duration::from_secs(5), incoming.recv())
+    let invitation = tokio::time::timeout(bound(Duration::from_secs(5)), incoming.recv())
         .await
         .expect("INVITE is bounded")
         .expect("INVITE arrives");
     assert_eq!(invitation.request.method, Method::Invite);
 
     signal_interrupt(process).await;
-    let cancel = tokio::time::timeout(Duration::from_secs(5), incoming.recv())
+    let cancel = tokio::time::timeout(bound(Duration::from_secs(5)), incoming.recv())
         .await
         .expect("CANCEL is bounded")
         .expect("CANCEL arrives");
@@ -7103,7 +7143,7 @@ async fn interrupting_a_pending_dial_cancels_without_manufacturing_a_bye() {
         .await
         .expect("INVITE response sends");
 
-    let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
+    let output = tokio::time::timeout(bound(Duration::from_secs(5)), child.wait_with_output())
         .await
         .expect("pending cleanup is bounded")
         .expect("dialer exits");
@@ -7234,7 +7274,7 @@ async fn a_refused_stream_connection_exits_failed_without_waiting_for_sip_timeou
         if json {
             command.arg("--json");
         }
-        let output = tokio::time::timeout(Duration::from_secs(5), command.output())
+        let output = tokio::time::timeout(bound(Duration::from_secs(5)), command.output())
             .await
             .expect("connection refusal is prompt")
             .expect("dial runs");
@@ -7653,26 +7693,27 @@ async fn place_a_call(
     );
 
     let mut stderr = answerer.stderr.take();
-    let (answerer_stdout, answerer_stderr) = tokio::time::timeout(Duration::from_secs(25), async {
-        tokio::join!(
-            async {
-                let mut written = Vec::new();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    written.push(line);
+    let (answerer_stdout, answerer_stderr) =
+        tokio::time::timeout(bound(Duration::from_secs(25)), async {
+            tokio::join!(
+                async {
+                    let mut written = Vec::new();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        written.push(line);
+                    }
+                    written
+                },
+                async {
+                    let mut complaint = Vec::new();
+                    if let Some(stderr) = stderr.as_mut() {
+                        let _ = tokio::io::AsyncReadExt::read_to_end(stderr, &mut complaint).await;
+                    }
+                    String::from_utf8_lossy(&complaint).into_owned()
                 }
-                written
-            },
-            async {
-                let mut complaint = Vec::new();
-                if let Some(stderr) = stderr.as_mut() {
-                    let _ = tokio::io::AsyncReadExt::read_to_end(stderr, &mut complaint).await;
-                }
-                String::from_utf8_lossy(&complaint).into_owned()
-            }
-        )
-    })
-    .await
-    .expect("the answerer closes its streams rather than holding them open");
+            )
+        })
+        .await
+        .expect("the answerer closes its streams rather than holding them open");
 
     // Scanned rather than taken from the head of the list: a sabotaged build that writes log records
     // to stdout would put one ahead of the result line, and that must fail the test that is *about*

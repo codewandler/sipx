@@ -169,6 +169,11 @@ jobs:
       - run: python3 scripts/test-pool-key.py
       - run: python3 scripts/test-audio-claims.py
       - run: python3 scripts/test-maturity.py
+      # X-118: the contention proof itself loads the box for minutes and runs by hand. These two are
+      # the cheap halves — its suite, and the name resolution that catches the one way it rots
+      # silently, a renamed test that `--exact` no longer matches while cargo still exits 0.
+      - run: python3 scripts/test-contention-proof.py
+      - run: ./scripts/contention-proof.py --check
       # A-11: exercise release ordering and the publication authority boundary without registry
       # credentials. Its fixtures prove that CI publication needs the tag and commit authorization.
       - run: python3 scripts/test-release.py
