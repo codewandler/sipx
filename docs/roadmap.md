@@ -946,6 +946,22 @@ packetization, feedback, congestion, timing and resource-safety obligations unde
 3550, RFC 4585, RFC 5104, RFC 6184, RFC 7741, RFC 7742, RFC 8834 and RFC 9429. `M-40` must resolve
 that complete cost before any implementation child becomes ready.
 
+### Library parity — `library-parity`
+
+The diagnostic phone is a consumer of this stack, not a privileged one — but twice now a capability
+has been built inside `sipx-cli` and stopped there, leaving library consumers told to do the work
+themselves. `T-38`/`T-39` specified and implemented bounded SIP target resolution, and
+`sipx_ua::Config` still takes an already-resolved address, so the integration guide instructs
+applications to resolve the outermost proxy on their own. `C-6` is the same shape in the call
+framework: two calls a host owns can be bridged from the CLI and not through the public API without
+`Arc<Mutex<Call>>` and raw ports.
+
+This epic is a standing check rather than a fixed list: when a story delivers a capability through
+the phone, the question is whether a library consumer can reach it, and the answer belongs in that
+story rather than here. What makes it worth naming is the v1 predicate on independent application
+use — an application nobody here wrote meets this stack through the library, not the CLI, so a
+capability that stops at the phone is invisible to the one predicate that cannot be self-proved.
+
 ### Endpoint discovery — `discovery` _(four stories)_
 
 sipx can call any endpoint you can already name, and cannot help you name one: `dial` takes a URI,
