@@ -1,6 +1,6 @@
 # Two-dialog call coupling
 
-**Status:** normative · **Stories:** C-1, C-7 · **Crates:** `sipx-call`, `sipx-sdp`, `sipx-media` ·
+**Status:** normative · **Stories:** C-1, C-7, C-8 · **Crates:** `sipx-call`, `sipx-sdp`, `sipx-media` ·
 **RFCs:** 3261, 3264, 3262, 3311, 7092
 
 ## 1. Scope
@@ -161,14 +161,65 @@ dialogs exactly as they were:
 | body is not a session description | `488`, `Error::Relay(RelayError::Malformed)` |
 | description carries no `m=` line | `488`, `RelayError::NoMedia` |
 | an accepted `m=` line has no address at either level | `488`, `RelayError::NoConnection` |
-| offerless initial INVITE, or offerless re-INVITE | `488`. Answering one means originating a description, which is the one thing this role has nothing to describe |
+| offerless re-INVITE | `488`. Answering one means originating a description, which is the one thing this role has nothing to describe |
+| offerless initial INVITE whose source does not offer `100rel` | `488`, `Error::Sdp`. Not a policy choice — see §6.3 |
 
 The lifecycle is the same `CouplingState`, not a second one: glare is refused **491** before
 anything is forwarded, a BYE on either leg is answered and then sent on the peer, a target final
 4xx/5xx becomes the source INVITE's own final response with the same status, and a CANCEL while
-the target INVITE is pending withdraws it. The target INVITE deliberately does not offer `100rel`
-(RFC 3262 §3), so no peer may put an offer in a reliable provisional: that carrier, and PRACK with
-it, needs a description this role does not author.
+the target INVITE is pending withdraws it.
+
+### 6.2 The early carriers (RFC 3262, RFC 3264 §5)
+
+`100rel` is **mirrored** from the source INVITE onto the target INVITE — `Supported` when the
+source supported it, `Require` as well when the source required it — and never asserted on its
+own. RFC 3262 §3 lets the target put a description in a reliable provisional only if the target
+INVITE says the extension is supported, and a description arriving there can be carried onward
+only if the source leg will accept a reliable provisional too. Claiming support the source never
+offered would leave this role holding a description with nowhere to put it. `Allow` on every
+message this role emits is `INVITE, ACK, BYE, CANCEL, UPDATE, PRACK`.
+
+A reliable provisional arriving on the target leg is relayed onto the source leg as a reliable
+provisional of this coupling's own, carrying the target endpoint's description under the §6.1
+mapping and nothing else of this element's making. Its status and reason are the target's own.
+
+| Condition | Rule |
+|---|---|
+| provisional carries no `RSeq`/`Require: 100rel` | Not relayed. RFC 3262 §5 permits a description only in a reliable provisional, so an unreliable one carries nothing this role negotiates |
+| retransmitted or out-of-order `RSeq` | Discarded, not acknowledged and not processed further (§4) |
+| a provisional this side sent is still unacknowledged | The new one is not relayed. §3 forbids numbering a second before the first is acknowledged; the target then retransmits and fails its own invitation, which is the honest end of a source leg that stopped acknowledging |
+| description does not map | Nothing reaches the source leg. The target invitation is withdrawn and the source INVITE receives `488` with the typed relay error |
+| source INVITE offered | The description is the **answer** (RFC 3264). The `InitialInvite` exchange completes, the target PRACK leaves immediately and carries no body (RFC 3262 §5) |
+| source INVITE was offerless | The description is the **delayed offer**. A `ReliableProvisional` exchange opens on leg two and the target PRACK is **held** |
+| provisional carries no description | Relayed as the progress it is, and PRACKed immediately |
+
+PRACK is correlated on both legs. On the source leg the match is §3's — same dialog, and an `RAck`
+naming the number this side allocated together with the source INVITE's own `CSeq` and method;
+one that matches nothing receives `481`, and a match stops the retransmission of the provisional
+it acknowledges. On the target leg this side is the UAC and sends the PRACK.
+
+| Source PRACK | Rule |
+|---|---|
+| no held target PRACK | `200`. The exchange, if any, settled in the provisional |
+| held target PRACK, PRACK carries a mappable answer | The answer is mapped and released in the target PRACK; the source PRACK receives `200` once that PRACK is accepted |
+| held target PRACK, PRACK carries no or an unmappable description | `488` on the source leg, the target leg is told nothing, and the coupling fails |
+
+The 2xx accepting the source invitation carries a description only when one is still owed. An
+exchange RFC 3262 §5 already settled in a reliable provisional is complete, and repeating it in
+the 2xx would be a renegotiation neither endpoint asked for; a 2xx with no description and no
+settled exchange is a target that never answered, which fails rather than confirms. A PRACK sent
+on the target leg while its dialog was early consumes a number in this side's sequence space, so
+the confirmed dialog inherits that number rather than restarting at the INVITE's (RFC 3261
+§12.2.1.1) — and the same for the source leg's record of the peer's numbering.
+
+### 6.3 Still refused
+
+An offerless initial INVITE whose source does not offer `100rel` is refused `488`. With no
+reliable provisional available, RFC 3264 leaves exactly one carrier for the delayed offer — the
+description in the `2xx` and its answer in the ACK — and this stack implements that shape on
+neither the answering nor the offering side, so there is nothing to relay it between. Relaying it
+would mean holding the target ACK across an unproven path; refusing it keeps the rule that this
+role never half-delivers a carrier. `C-9` is the story for the missing shape.
 
 ## 7. Test vectors
 
@@ -199,3 +250,6 @@ it, needs a description this role does not author.
 | T3 | unmappable description on a confirmed off-media leg | `488` on its source leg, nothing sent on the peer leg, and the next offer still relays |
 | T4 | `EarlyCoupling::dial` with no bridge attached, same source description | the target is offered sipx's own port — the negative control for T1 |
 | T5 | off-media leg: crossed offer, source CANCEL before the target answers, target 486 | 491 then the retry relayed; the target invitation receives CANCEL; 486 becomes the source INVITE's final response |
+| T6 | off-media leg: source INVITE offers and supports `100rel`; target answers it in a reliable 183 | the target INVITE carries `Supported: 100rel`; the source receives a reliable 183 naming the target endpoint's own port; the target PRACK carries no body; the source PRACK receives 200; the target's early session reaches the source endpoint's own socket before either leg is answered |
+| T7 | off-media leg: source offerless INVITE supporting `100rel`; target reliable 183 carries its own offer | the target INVITE is offerless; the source receives that offer in a reliable 183; no target PRACK leaves before the source PRACK; the target PRACK carries the source's answer with only `o=` replaced; the target's early session reaches the source endpoint's own socket |
+| T8 | off-media leg: target reliable 183 carries an unmappable description | no provisional carrying it reaches the source leg; the target invitation receives CANCEL; the source INVITE receives 488 with `Error::Relay` |
