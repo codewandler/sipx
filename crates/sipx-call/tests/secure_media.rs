@@ -169,6 +169,22 @@ async fn a_call_over_secure_signalling_encrypts_its_media() {
     );
     assert!(callee.is_encrypted(), "and so must the far end");
 
+    // `M-41`, end to end: the profile the two ends agreed on reaches the media session rather than
+    // being discarded at the keying seam, and what they agree on is the *strongest* both offered —
+    // not the interoperability floor, which is what a stack with one transform would have keyed
+    // and what a selection honouring the offer's order would still reach.
+    assert_eq!(
+        caller.media().srtp_profile(),
+        Some(sipx_rtp::srtp::Profile::AeadAes256Gcm),
+        "the caller keyed the strongest profile both ends offered (RFC 7714)"
+    );
+    assert_eq!(
+        callee.media().srtp_profile(),
+        caller.media().srtp_profile(),
+        "and both ends installed the same one; disagreeing here is a call that connects and \
+         carries silence"
+    );
+
     // And the encryption is real: audio crosses it.
     let tone: Vec<i16> = (0..8000).map(|_| 8000i16).collect();
     let (_played, heard) = tokio::join!(

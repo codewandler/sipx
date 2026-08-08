@@ -177,8 +177,9 @@ fn ba_sdp_n10_never_produces_installable_keys() {
 fn srtp_and_srtcp_replays_remain_separate_when_interleaved() {
     use sipx_rtp::{SrtpContext, SrtpError};
 
-    let mut sender = SrtpContext::new(&[0x11; 16], &[0x22; 14]).expect("sender keys");
-    let mut receiver = SrtpContext::new(&[0x11; 16], &[0x22; 14]).expect("receiver keys");
+    let profile = sipx_rtp::srtp::Profile::AesCm128HmacSha1_80;
+    let mut sender = SrtpContext::new(profile, &[0x11; 16], &[0x22; 14]).expect("sender keys");
+    let mut receiver = SrtpContext::new(profile, &[0x11; 16], &[0x22; 14]).expect("receiver keys");
     let media_plain = [
         0x80, 111, 0, 0, 0, 0, 0, 0, 0xca, 0xfe, 0xba, 0xbe, 1, 2, 3, 4,
     ];

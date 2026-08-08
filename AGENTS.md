@@ -92,8 +92,9 @@ Additional invariants enforced by the gate:
 - A fixed wall-clock duration may bound a failure or define silence, but may not substitute for a
   happens-before relation. If `check-fixed-sleep.py` reports a wait, wait for the event or classify
   the duration in an inline comment using one of the checker's accepted reasons.
-- RFC 4475 and RFC 5118 corpora are recovered from the RFC archives. Never edit their fixture bytes
-  by hand.
+- Every corpus under `crates/sipx-testkit/corpus/` is recovered from its RFC — the RFC 4475 and
+  RFC 5118 message archives, and RFC 7714's published AES-GCM vectors. Never edit their fixture
+  bytes by hand; each has an importer whose `--check` is a gate step.
 - `--all-features` is not a replacement for `./scripts/check-features.sh`; optional configurations
   must also compile with features disabled.
 

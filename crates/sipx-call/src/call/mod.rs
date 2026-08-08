@@ -4735,7 +4735,7 @@ impl Early {
         }
         let settled = Settled {
             negotiated,
-            srtp: srtp_keys_answering(capabilities.crypto.as_ref(), offer_crypto(offer)),
+            srtp: srtp_keys_answering(&capabilities.crypto, offer_crypto(offer)),
         };
         let media = match local_ice {
             Some(local) => port.start_with_ice(settled.media_config(), local)?,
@@ -4799,7 +4799,7 @@ impl Early {
         }
         let settled = Settled {
             negotiated,
-            srtp: srtp_keys_answering(self.capabilities.crypto.as_ref(), offer_crypto(offer)),
+            srtp: srtp_keys_answering(&self.capabilities.crypto, offer_crypto(offer)),
         };
         self.replace_media(settled).await.ok()?;
         Some(answer)
@@ -5272,7 +5272,7 @@ async fn answer_negotiated(
     // Our key from the answer we just built, theirs from the offer we were sent.
     let settled = Settled {
         negotiated,
-        srtp: srtp_keys_answering(capabilities.crypto.as_ref(), offer_crypto(&offer)),
+        srtp: srtp_keys_answering(&capabilities.crypto, offer_crypto(&offer)),
     };
     let to_with_tag = {
         let existing = incoming

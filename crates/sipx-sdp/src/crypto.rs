@@ -16,23 +16,44 @@
 
 use std::fmt;
 
-/// The crypto suite. Only the default SRTP transform is offered.
+/// The crypto suite — the SRTP transform an `a=crypto` line names.
 ///
-/// Deliberately not an open enum of every suite in the registry. sipx implements one transform;
-/// listing suites it cannot perform would produce an offer it could not honour, which is worse
-/// than a short list.
+/// Deliberately not an open enum of every suite in the registry. Every variant here is one
+/// `sipx-rtp` can actually perform, because listing a suite this stack cannot key produces an
+/// offer it cannot honour, which is worse than a short list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Suite {
-    /// AES-128 counter mode with an 80-bit HMAC-SHA1 tag.
+    /// AES-128 counter mode with an 80-bit HMAC-SHA1 tag (RFC 4568 §6.2).
+    ///
+    /// The interoperability floor. RFC 5764 §4.1.2 makes its DTLS-SRTP counterpart
+    /// mandatory-to-implement, so it stays offered however good the alternatives are.
     AesCm128HmacSha1_80,
+    /// AES-128 in Galois/Counter Mode with a 128-bit tag (RFC 7714 §14.1).
+    AeadAes128Gcm,
+    /// AES-256 in Galois/Counter Mode with a 128-bit tag (RFC 7714 §14.1).
+    AeadAes256Gcm,
 }
 
 impl Suite {
+    /// Every suite sipx can perform, **strongest first** — the order an offer lists them in.
+    ///
+    /// RFC 4568 §5.1.1 lets an offer carry several `a=crypto` lines and says the order expresses
+    /// preference. Ours is by strength, so a peer honouring the order and a peer ignoring it reach
+    /// the same place.
+    pub const STRONGEST_FIRST: [Self; 3] = [
+        Self::AeadAes256Gcm,
+        Self::AeadAes128Gcm,
+        Self::AesCm128HmacSha1_80,
+    ];
+
     /// The token as it appears in SDP.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::AesCm128HmacSha1_80 => "AES_CM_128_HMAC_SHA1_80",
+            Self::AeadAes128Gcm => "AEAD_AES_128_GCM",
+            Self::AeadAes256Gcm => "AEAD_AES_256_GCM",
         }
     }
 
@@ -41,14 +62,36 @@ impl Suite {
     pub fn parse(token: &str) -> Option<Self> {
         // Case-sensitive: RFC 4568 §9.2 defines these as tokens with fixed spelling, and a peer
         // that sends a different case is not offering this suite.
-        (token == Self::AesCm128HmacSha1_80.as_str()).then_some(Self::AesCm128HmacSha1_80)
+        Self::STRONGEST_FIRST
+            .into_iter()
+            .find(|suite| suite.as_str() == token)
+    }
+
+    /// How strong this suite is, for ranking one offer's lines against each other. Higher is
+    /// stronger.
+    ///
+    /// The ranking is `sipx-rtp`'s, not a second opinion: whichever transform is stronger there
+    /// is stronger here, because they are the same transform under two names.
+    #[must_use]
+    pub fn strength(self) -> u8 {
+        match self {
+            Self::AesCm128HmacSha1_80 => 1,
+            Self::AeadAes128Gcm => 2,
+            Self::AeadAes256Gcm => 3,
+        }
     }
 
     /// How many octets of master key and master salt it uses.
+    ///
+    /// RFC 4568 §6.2 for the counter-mode suite (128-bit key, 112-bit salt) and RFC 7714 §12,
+    /// Tables 2 and 3, for the AEAD ones (128- or 256-bit key, **96**-bit salt). The salt is the
+    /// number that differs and the one that is easy to carry over by accident.
     #[must_use]
     pub fn key_and_salt_len(self) -> (usize, usize) {
         match self {
             Self::AesCm128HmacSha1_80 => (16, 14),
+            Self::AeadAes128Gcm => (16, 12),
+            Self::AeadAes256Gcm => (32, 12),
         }
     }
 }
@@ -156,10 +199,17 @@ impl Crypto {
     /// only with peers that happen to have offered `1`, and fails with no diagnosis at the end
     /// that is wrong.
     ///
-    /// `None` when this side's key cannot be presented under the offered suite — a key of the
-    /// wrong length for the suite named would be a well-formed answer nobody can decrypt.
+    /// `None` when this side's key cannot be presented under the offered suite — a key generated
+    /// for a *different* transform, or one of the wrong length, would be a well-formed answer
+    /// nobody can decrypt. Both are checked, and the suite check is not redundant with the length
+    /// one: two suites can agree on how many octets they want and disagree on everything the
+    /// octets are used for, which is precisely the substitution the negotiation-truth rule in
+    /// `docs/designs/media-runtime-safety.md` forbids.
     #[must_use]
     pub fn accepting(&self, offered: &Self) -> Option<Self> {
+        if self.suite != offered.suite {
+            return None;
+        }
         let (key_len, salt_len) = offered.suite.key_and_salt_len();
         if self.key_and_salt.len() != key_len + salt_len {
             return None;

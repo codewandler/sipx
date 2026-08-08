@@ -55,44 +55,107 @@ pub fn classify(datagram: &[u8]) -> Arriving {
     }
 }
 
-/// An SRTP protection profile (RFC 5764 §4.1.2).
+/// An SRTP protection profile (RFC 5764 §4.1.2, RFC 7714 §14.2).
 ///
-/// Only the one sipx can perform. §4.1.2 defines four; the two `NULL` profiles encrypt nothing, and
-/// offering `AES128_CM_HMAC_SHA1_32` would mean an SRTP transform with a 32-bit tag that
-/// [`sipx_rtp::srtp`] does not implement. A profile list is a promise, so the list is short.
+/// Only the ones sipx can perform. RFC 5764 §4.1.2 registers four and RFC 7714 §14.2 adds two;
+/// the two `NULL` profiles encrypt nothing, and offering `AES128_CM_HMAC_SHA1_32` would mean an
+/// SRTP transform with a 32-bit tag that [`sipx_rtp::srtp`] does not implement. A profile list is
+/// a promise, so it holds exactly what [`sipx_rtp::srtp::Profile`] can key — and it is that type
+/// this maps onto, so the DTLS name and the transform cannot drift apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Profile {
     /// AES-128 counter mode, 80-bit HMAC-SHA1 tag — the same transform SDES negotiates.
+    ///
+    /// RFC 5764 §4.1.2 makes it mandatory to implement, so it is always in the offered list.
     Aes128CmHmacSha1_80,
+    /// RFC 7714's `AEAD_AES_128_GCM`, registered for DTLS-SRTP by §14.2.
+    AeadAes128Gcm,
+    /// RFC 7714's `AEAD_AES_256_GCM`, registered for DTLS-SRTP by §14.2.
+    AeadAes256Gcm,
 }
 
 impl Profile {
+    /// The `use_srtp` profile list this endpoint offers, **strongest first** (RFC 5764 §4.1.1).
+    ///
+    /// §4.1.1 has the client send its profiles "in preference order", and the server picks. The
+    /// order is by strength for the reason `sipx_sdp::crypto` gives for the SDES list: the
+    /// alternative is letting whatever ordering arrives decide the cipher.
+    ///
+    /// The list is derived from [`sipx_rtp::srtp::Profile::STRONGEST_FIRST`] rather than written
+    /// out, so the two keying paths cannot come to offer different transforms.
+    #[must_use]
+    pub fn strongest_first() -> Vec<Self> {
+        srtp::Profile::STRONGEST_FIRST
+            .into_iter()
+            .filter_map(Self::for_transform)
+            .collect()
+    }
+
+    /// The transform this profile names.
+    ///
+    /// The single point where a DTLS-SRTP profile becomes a cipher. Keeping it one function is
+    /// what makes "never install a different cipher under a negotiated identifier"
+    /// (`docs/designs/media-runtime-safety.md`) checkable rather than a habit.
+    #[must_use]
+    pub fn transform(self) -> srtp::Profile {
+        match self {
+            Self::Aes128CmHmacSha1_80 => srtp::Profile::AesCm128HmacSha1_80,
+            Self::AeadAes128Gcm => srtp::Profile::AeadAes128Gcm,
+            Self::AeadAes256Gcm => srtp::Profile::AeadAes256Gcm,
+        }
+    }
+
+    /// The DTLS-SRTP profile that names a transform, if one does.
+    #[must_use]
+    pub fn for_transform(transform: srtp::Profile) -> Option<Self> {
+        [
+            Self::Aes128CmHmacSha1_80,
+            Self::AeadAes128Gcm,
+            Self::AeadAes256Gcm,
+        ]
+        .into_iter()
+        .find(|profile| profile.transform() == transform)
+    }
+
     /// The name as the IANA registry and every DTLS API spell it.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Aes128CmHmacSha1_80 => "SRTP_AES128_CM_SHA1_80",
+            Self::AeadAes128Gcm => "SRTP_AEAD_AES_128_GCM",
+            Self::AeadAes256Gcm => "SRTP_AEAD_AES_256_GCM",
         }
     }
 
-    /// The two-byte value carried in the `use_srtp` extension (RFC 5764 §4.1.2).
+    /// The profile a `use_srtp` name selects, if it is one sipx can perform.
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::strongest_first()
+            .into_iter()
+            .find(|profile| profile.as_str() == name)
+    }
+
+    /// The two-byte value carried in the `use_srtp` extension (RFC 5764 §4.1.2, RFC 7714 §14.2).
     #[must_use]
     pub fn id(self) -> u16 {
         match self {
             Self::Aes128CmHmacSha1_80 => 0x0001,
+            Self::AeadAes128Gcm => 0x0007,
+            Self::AeadAes256Gcm => 0x0008,
         }
     }
 
     /// Master key and master salt lengths, in octets.
     ///
-    /// §4.1.2 states these in bits: a 128-bit key and a 112-bit salt. Fourteen octets of salt, not
-    /// sixteen — the value that is easy to get wrong, and getting it wrong produces a key schedule
-    /// that decrypts nothing with no error to say why.
+    /// Read off the transform rather than restated, because restating them is how the two come to
+    /// disagree. RFC 5764 §4.1.2 states the counter-mode pair in bits — a 128-bit key and a
+    /// **112**-bit salt, so fourteen octets and not sixteen — and RFC 7714 §14.2 states the AEAD
+    /// ones as a 128- or 256-bit key with a **96**-bit salt. Getting a salt length wrong produces
+    /// a key schedule that decrypts nothing with no error to say why.
     #[must_use]
     pub fn key_and_salt_len(self) -> (usize, usize) {
-        match self {
-            Self::Aes128CmHmacSha1_80 => (16, 14),
-        }
+        self.transform().key_and_salt_len()
     }
 
     /// How many octets to export from the handshake: `2 * (key + salt)` (RFC 5764 §4.2).
@@ -206,13 +269,18 @@ pub fn keys_from_exported(exported: &[u8], profile: Profile, role: Role) -> Resu
         Role::Client => (client_key, client_salt, server_key, server_salt),
         Role::Server => (server_key, server_salt, client_key, client_salt),
     };
+    // The profile travels with the material rather than being inferred downstream from how many
+    // octets arrived. Two profiles can agree on a key length and disagree on the transform, and
+    // a session that guessed would install a cipher the handshake never agreed to.
+    let transform = profile.transform();
     let material = crate::SrtpKeys {
+        profile: transform,
         local: (own_key.to_vec(), own_salt.to_vec()),
         remote: (peer_key.to_vec(), peer_salt.to_vec()),
     };
     Ok(Keys {
-        outbound: srtp::Context::new(own_key, own_salt)?,
-        inbound: srtp::Context::new(peer_key, peer_salt)?,
+        outbound: srtp::Context::new(transform, own_key, own_salt)?,
+        inbound: srtp::Context::new(transform, peer_key, peer_salt)?,
         material,
     })
 }
@@ -425,6 +493,113 @@ mod tests {
         assert_eq!(profile.exported_len(), 60, "2 * (16 + 14)");
         assert_eq!(profile.id(), 0x0001);
         assert_eq!(profile.as_str(), "SRTP_AES128_CM_SHA1_80");
+    }
+
+    /// RFC 7714 §14.2's registrations, spelled and numbered as IANA has them.
+    ///
+    /// The identifiers are the two octets that go on the wire; a transposed pair would agree on
+    /// nothing with a conformant peer and would look like a plain handshake failure.
+    #[test]
+    fn the_aead_profiles_carry_the_names_and_ids_rfc_7714_registers() {
+        assert_eq!(Profile::AeadAes128Gcm.as_str(), "SRTP_AEAD_AES_128_GCM");
+        assert_eq!(Profile::AeadAes128Gcm.id(), 0x0007);
+        assert_eq!(Profile::AeadAes128Gcm.key_and_salt_len(), (16, 12));
+        assert_eq!(Profile::AeadAes128Gcm.exported_len(), 56, "2 * (16 + 12)");
+
+        assert_eq!(Profile::AeadAes256Gcm.as_str(), "SRTP_AEAD_AES_256_GCM");
+        assert_eq!(Profile::AeadAes256Gcm.id(), 0x0008);
+        assert_eq!(Profile::AeadAes256Gcm.key_and_salt_len(), (32, 12));
+        assert_eq!(Profile::AeadAes256Gcm.exported_len(), 88, "2 * (32 + 12)");
+
+        for profile in Profile::strongest_first() {
+            assert_eq!(Profile::parse(profile.as_str()), Some(profile));
+        }
+        assert_eq!(
+            Profile::parse("SRTP_AES128_CM_SHA1_32"),
+            None,
+            "not keyable"
+        );
+    }
+
+    /// The offered list is strongest first **and** keeps RFC 5764 §4.1.2's mandatory profile.
+    ///
+    /// An endpoint that dropped `SRTP_AES128_CM_SHA1_80` to look modern would fail to key with
+    /// every peer that implements only what the RFC requires — which is most of them.
+    #[test]
+    fn the_offered_profile_list_is_strongest_first_and_keeps_the_floor() {
+        assert_eq!(
+            Profile::strongest_first(),
+            vec![
+                Profile::AeadAes256Gcm,
+                Profile::AeadAes128Gcm,
+                Profile::Aes128CmHmacSha1_80,
+            ]
+        );
+        assert!(
+            Profile::strongest_first().contains(&Profile::Aes128CmHmacSha1_80),
+            "RFC 5764 §4.1.2 makes it mandatory to implement"
+        );
+    }
+
+    /// Every offered profile names a transform `sipx-rtp` can key, and no two name the same one.
+    ///
+    /// A profile list is a promise. This is the promise checked rather than asserted: a name
+    /// offered on the wire that maps to nothing would be a handshake this side agreed to and then
+    /// could not honour, which is worse than not offering it.
+    #[test]
+    fn every_offered_profile_maps_to_a_transform_that_can_be_keyed() {
+        let mut transforms = Vec::new();
+        for profile in Profile::strongest_first() {
+            let transform = profile.transform();
+            assert_eq!(
+                Profile::for_transform(transform),
+                Some(profile),
+                "{profile:?} does not round-trip through its transform"
+            );
+            assert_eq!(
+                transform.key_and_salt_len(),
+                profile.key_and_salt_len(),
+                "{profile:?} states different lengths from the transform it names"
+            );
+            let (key_len, salt_len) = profile.key_and_salt_len();
+            srtp::Context::new(transform, &vec![0u8; key_len], &vec![0u8; salt_len])
+                .unwrap_or_else(|error| panic!("{profile:?} cannot be keyed: {error}"));
+            assert!(
+                !transforms.contains(&transform),
+                "{profile:?} is a duplicate"
+            );
+            transforms.push(transform);
+        }
+    }
+
+    /// The exported block splits and keys correctly under **every** profile, not only the one
+    /// the split was written for. §4.2's order is the same; the lengths are not.
+    #[test]
+    fn the_exported_block_keys_every_offered_profile() {
+        for profile in Profile::strongest_first() {
+            let exported: Vec<u8> = (0..profile.exported_len())
+                .map(|n| u8::try_from(n % 251).unwrap_or(0))
+                .collect();
+            let client = keys_from_exported(&exported, profile, Role::Client).expect("keys");
+            let server = keys_from_exported(&exported, profile, Role::Server).expect("keys");
+            assert_eq!(
+                client.material.profile,
+                profile.transform(),
+                "{profile:?}: the negotiated transform must travel with the keys"
+            );
+
+            let packet = [
+                0x80, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0xa0, 0xde, 0xad, 0xbe, 0xef, 0x11, 0x22,
+            ];
+            let mut protecting = client.outbound;
+            let mut unprotecting = server.inbound;
+            let protected = protecting.protect(&packet).expect("protects");
+            assert_eq!(
+                unprotecting.unprotect(&protected).expect("unprotects"),
+                packet,
+                "{profile:?}: the client's outbound key must be the server's inbound key"
+            );
+        }
     }
 
     /// §4.2's order: client key, server key, client salt, server salt. Keys first, then salts.

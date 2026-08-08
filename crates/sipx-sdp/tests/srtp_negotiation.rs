@@ -283,3 +283,66 @@ fn an_answer_that_echoes_the_tag_but_carries_no_key_is_refused() {
     };
     assert!(Crypto::verify_answer(std::slice::from_ref(&ours), Some(&keyless)).is_err());
 }
+
+/// RFC 7714 §14.1 registers `AEAD_AES_128_GCM` and `AEAD_AES_256_GCM` in RFC 4568's crypto-suite
+/// subregistry, with 16 + 12 and 32 + 12 octets of master key and salt respectively (§12, Tables 2
+/// and 3). A peer that offers only these is a peer sipx could not talk to at all.
+///
+/// Asserted through `as_str` and the decoded lengths rather than through a variant name, so the
+/// same test is legible before and after the suites exist.
+#[test]
+fn the_aead_suites_rfc7714_registers_are_read() {
+    for (token, key_len, salt_len, inline) in [
+        (
+            "AEAD_AES_128_GCM",
+            16,
+            12,
+            "AAECAwQFBgcICQoLDA0ODyAhIiMkJSYnKCkqKw==",
+        ),
+        (
+            "AEAD_AES_256_GCM",
+            32,
+            12,
+            "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh9AQUJDREVGR0hJSks=",
+        ),
+    ] {
+        let parsed = Crypto::parse(&format!("1 {token} inline:{inline}"))
+            .unwrap_or_else(|| panic!("RFC 7714 §14.1 registers {token}"));
+        assert_eq!(parsed.suite.as_str(), token);
+        assert_eq!(parsed.master_key().len(), key_len, "{token} master key");
+        assert_eq!(parsed.master_salt().len(), salt_len, "{token} master salt");
+    }
+}
+
+/// Selection is **by strength, never by peer order** — the rule `sipx_sip::auth::strongest`
+/// applies to digest algorithms, for the same reason. An `a=crypto` list is not integrity
+/// protected before the media is keyed, so an on-path attacker who reorders the lines picks the
+/// cipher; ranking by strength removes the lever.
+///
+/// The counter-mode suite is listed first here and must not win.
+#[test]
+fn a_weaker_suite_offered_first_does_not_win() {
+    let offered = parse(&offer(
+        "RTP/SAVP",
+        &[
+            "crypto:1 AES_CM_128_HMAC_SHA1_80 \
+             inline:d0RmdmcmVCspeEc3QGZiNWpVLFJhQX1cfHAwJSoj"
+                .to_owned(),
+            "crypto:2 AEAD_AES_128_GCM inline:AAECAwQFBgcICQoLDA0ODyAhIiMkJSYnKCkqKw==".to_owned(),
+            "crypto:3 AEAD_AES_256_GCM \
+             inline:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh9AQUJDREVGR0hJSks="
+                .to_owned(),
+        ],
+    ))
+    .expect("parses");
+
+    let chosen = offered.media[0]
+        .crypto()
+        .expect("a suite this side can perform");
+    assert_eq!(
+        chosen.suite.as_str(),
+        "AEAD_AES_256_GCM",
+        "the strongest suite offered must win regardless of the order the peer listed them in"
+    );
+    assert_eq!(chosen.tag, 3, "and its own tag travels back with it");
+}

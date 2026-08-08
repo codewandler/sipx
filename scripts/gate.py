@@ -204,12 +204,18 @@ def gate_steps(msrv: str) -> list[Step]:
         # nothing ran it. Two sweeps declared the workspace clean and two violations landed in the
         # wave after the second one. Cheap, needs no toolchain, and reads `src/` as well as tests.
         Step("fixed sleeps", "fixed-sleep", ("./scripts/check-fixed-sleep.py", "--check")),
-        # X-56: both RFC corpora are recovered from the RFC's own Appendix A archive rather than
-        # transcribed, and the importer's `--check` re-recovers it and diffs it against the tree —
-        # the only thing that can tell a fixture edited by hand from the RFC's own bytes, since the
-        # suites read whatever is in the directory and pass. The 4475 check ran only inside `fuzz`,
-        # which is in `NOT_RUN_LOCALLY`, so no local run covered it; the 5118 one ran nowhere.
+        # X-56: the RFC corpora are recovered from the RFC rather than transcribed, and each
+        # importer's `--check` re-recovers and diffs it against the tree — the only thing that can
+        # tell a fixture edited by hand from the RFC's own bytes, since the suites read whatever is
+        # in the directory and pass. The 4475 check ran only inside `fuzz`, which is in
+        # `NOT_RUN_LOCALLY`, so no local run covered it; the 5118 one ran nowhere.
         # A step each, so a red result names which corpus drifted.
+        #
+        # M-41 added a third. RFC 7714 embeds no archive to recover, so its importer slices the
+        # test-vector sections out of the RFC's text instead — same provenance claim, same
+        # `--check`, and the same reason for making it: an AES-GCM transform whose IV formation is
+        # wrong is self-consistent, so the RFC's own numbers are the only thing that can catch it,
+        # and a fixture nudged to agree with the implementation would erase exactly that.
         #
         # X-58: both steps have to reach `rfc-editor.org` to say anything at all, and a step that
         # could not reach it knows nothing about the corpus. So they disclaim rather than fail —
@@ -229,6 +235,13 @@ def gate_steps(msrv: str) -> list[Step]:
             ("./scripts/import-rfc5118-corpus.sh", "--check"),
             not_a_result="it could not reach the RFC editor, so it read nothing to compare the "
             "committed corpus against",
+        ),
+        Step(
+            "rfc 7714 corpus",
+            "corpus",
+            ("./scripts/import-rfc7714-corpus.sh", "--check"),
+            not_a_result="it could not reach the RFC editor, so it read nothing to compare the "
+            "committed vectors against",
         ),
         Step("rfc compliance", "docs", ("./scripts/rfc-report.py", "--check")),
         # X-24: the connection pool key was described in three specs and had been wrong in one of
