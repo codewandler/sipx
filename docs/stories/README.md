@@ -41,16 +41,28 @@ M14 retains the actual comparative run.
 M15 separately tracks the audio-only browser SDK, WASM kernel, browser-native WebRTC adapter and
 public demo.
 
-**The post-`rc.2` wave is implemented but not yet closed or published.** `main` stands 61 commits
-ahead of `origin/main`, carrying the fourteen external-review fixes, bounded endpoint resolution, the
-call-module split, the shipped-verb guides and the two M16 spec gates. Twenty-nine of those stories
-hold exactly one open acceptance row — the integrated gate plus derived regeneration — deliberately
-deferred to one shared boundary rather than run per story; three more (`S-49`, `S-50`, `S-51`) hold
-none and are closeable on sight. The selected wave produces that boundary: the in-flight remainders
-(`M-44`, `T-39`, `M-70`, `M-57`, `A-25`) land, then `X-112` takes the gate green and reconciles every
-derived artifact, `X-113` writes the changelog boundary and closes the wave, and `A-38` cuts
-`1.0.0-rc.3`. Stable `1.0` is not in this wave: its predicate on independent application use is still
-unmet.
+**`1.0.0-rc.3` is cut.** The post-`rc.2` wave closed as one boundary: thirty-one stories, a green
+37-step gate, and both comparative-load directions re-measured after a schema change invalidated the
+retained pair. `A-10`, `M-57`, `M-70` and `T-39` stayed open with their remaining work stated rather
+than closed to tidy the count. Push and registry publication are deliberately unrun, so `A-38`'s
+publication rows remain open.
+
+**Waves are ranked by `priority`, in blocks.** `rc.4` is `M-54`, `P-25`, `X-66`, `T-39`, `M-41`,
+`A-39` and `M-45`; `M-70` was held out of it because its remaining proof needs the hosted runner's
+browser and `gate.py` declares `browser-audio` CI-only. **`rc.5` is priorities 11-21** and runs on
+the `wave/rc5` branch so it does not disturb an in-flight release cut. **`rc.6` is priorities 22-31**
+— every one of those stories came out of an implementor handoff or a readiness audit rather than the
+original backlog: `M-72` (RFC 7714 publishes no KDF vector, so a wrong salt placement leaves two sipx
+endpoints interoperating only with each other while every round-trip test passes), `X-115`, `P-27`,
+`P-28`, `T-40`, `T-41`, `X-116`, `X-117`, `M-73` and `X-118`. `X-119` and `X-93` follow at 32-33,
+after `X-114` gives the gate a clock — that story's baseline currently exists only as prose inside
+its own file.
+
+**Two rules this backlog learned the hard way.** A story implemented but never closed is invisible to
+wave selection, which ranks on `status:` alone — that is how `A-16` was re-dispatched three days
+after it shipped, and `X-115` exists to catch it. And a gap found while implementing belongs in a
+story before the handoff report scrolls away; the `library-parity` epic exists because the same gap
+appeared twice before anyone named it.
 
 **ID prefixes** — `S` SIP core · `T` transport · `U` user agent · `M` media · `C` call framework ·
 `P` phone CLI · `A` application SDK/release · `X` cross-cutting (build, CI, test infrastructure).
@@ -90,6 +102,7 @@ _Applications need small, predictable facts about live audio even when no speech
 - [X-116 — Measure coverage without counting inline test modules](X-116-measure-coverage-without-inline-test-modules.md) · Build · the published 90% line figure is flattered because unit tests live inside src/ and path exclusion cannot reach them
 - [X-117 — Make the generated reports discoverable](X-117-make-the-generated-reports-discoverable.md) · Build · coverage, comparison, compliance and maturity are all reachable only by knowing their path
 - [X-119 — Pace registry publication within its rate limit](X-119-pace-registry-publication-within-its-rate-limit.md) · Build · split out of X-93 · the 429 pacing row shares nothing with the rest of that story
+- [X-93 — Make protected release evidence faster without weakening it](X-93-make-protected-release-evidence-faster.md) · Build · measure cache and preflight changes against the 12m37 cold beta gate · follow-up
 
 ### demand-led capability work
 _sipx's backlog has been derived from RFCs, from our own review findings, and from what the design_
@@ -153,9 +166,6 @@ _Applications need small, predictable facts about live audio even when no speech
 - [M-60 — Calibrate and adapt audio-activity thresholds deterministically](M-60-calibrate-audio-activity-thresholds.md) · Media · after M-58 and M-59 · bounded adaptation with observable reset and limits
 - [M-61 — Harden call-audio analysis against adversarial input](M-61-harden-call-audio-analysis.md) · Media · after M-57 · hostile audio, bounded resources, cross-call isolation and no retention
 - [X-106 — Measure call-audio analysis accuracy and resource cost](X-106-measure-call-audio-analysis.md) · Build · after M-58 through M-61 · versioned corpus, error rates, event latency, CPU and memory
-
-### Conformance
-- [X-93 — Make protected release evidence faster without weakening it](X-93-make-protected-release-evidence-faster.md) · Build · measure cache and preflight changes against the 12m37 cold beta gate · follow-up
 
 ### custom call-audio DSP
 _Applications need to shape live call audio without forking the media runtime: ordinary gain and_

@@ -3,7 +3,7 @@ id: M-73
 title: Align the DTLS profile names with the IANA registry
 pillar: Media
 status: ready
-priority: 28
+priority: 30
 design: docs/designs/media-security-profiles.md
 epic: media-security-profiles
 areas: [sipx-media, docs]

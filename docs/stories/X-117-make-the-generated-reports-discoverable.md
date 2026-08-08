@@ -3,7 +3,7 @@ id: X-117
 title: Make the generated reports discoverable
 pillar: Build
 status: ready
-priority: 27
+priority: 29
 design:
 epic: conformance
 areas: [docs, website]

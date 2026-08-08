@@ -3,7 +3,7 @@ id: P-27
 title: Make every command exit a join barrier
 pillar: Phone
 status: ready
-priority: 22
+priority: 24
 design:
 epic: diagnostic-automation
 areas: [sipx-cli]

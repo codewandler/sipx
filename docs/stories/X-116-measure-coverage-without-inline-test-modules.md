@@ -3,7 +3,7 @@ id: X-116
 title: Measure coverage without counting inline test modules
 pillar: Build
 status: ready
-priority: 26
+priority: 28
 design:
 epic: conformance
 areas: [scripts, ci]

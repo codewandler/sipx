@@ -3,7 +3,7 @@ id: T-40
 title: Expose the bounded resolver to library consumers
 pillar: Transport
 status: ready
-priority: 24
+priority: 26
 design: docs/designs/endpoint-resolution.md
 epic: library-parity
 areas: [sipx-transport, sipx-ua, docs]

@@ -3,7 +3,7 @@ id: T-41
 title: Report the candidates a connection failure attempted
 pillar: Transport
 status: ready
-priority: 25
+priority: 27
 design: docs/designs/endpoint-resolution.md
 epic: endpoint-resolution
 areas: [sipx-transport, sipx-cli]

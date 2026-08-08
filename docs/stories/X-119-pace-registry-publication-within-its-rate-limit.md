@@ -3,7 +3,7 @@ id: X-119
 title: Pace registry publication within its rate limit
 pillar: Build
 status: ready
-priority: 30
+priority: 32
 design:
 epic: conformance
 areas: [scripts, release]

@@ -3,7 +3,7 @@ id: X-118
 title: Make bounded-timeout tests robust under load
 pillar: Build
 status: ready
-priority: 29
+priority: 31
 design:
 epic: test-surfaces
 areas: [sipx-cli, ci]

@@ -3,7 +3,7 @@ id: X-115
 title: Catch implemented but unclosed stories
 pillar: Build
 status: ready
-priority: 21
+priority: 23
 design:
 epic: conformance
 areas: [scripts, docs]
