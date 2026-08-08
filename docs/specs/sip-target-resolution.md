@@ -35,6 +35,13 @@ Request-URI. The operation has two deliberately separate halves:
 No part of this subsystem adds I/O, a clock read or an async runtime to `sipx-sip` or `sipx-sdp`.
 Those crates continue to receive only values and fired-timer inputs.
 
+Which nameservers the adapter asks is configuration, not policy: the host's own unless a command
+adapter is told otherwise, in which case that source MUST be a value the operator can state — an
+address, optionally with a port — and MUST be refused rather than ignored when it cannot be read.
+An override that silently fell back would answer from a zone nobody asked about, which is
+indistinguishable from the failure it was set to diagnose. A literal target consults no resolver
+and therefore no configuration.
+
 ## 3. Values
 
 The public boundary is equivalent to these types. Rust names may differ only when the same
