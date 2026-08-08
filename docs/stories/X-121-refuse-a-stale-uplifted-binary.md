@@ -2,7 +2,7 @@
 id: X-121
 title: Refuse a stale uplifted binary
 pillar: Build
-status: ready
+status: in-progress
 priority: 3
 design:
 epic: test-surfaces
@@ -21,12 +21,12 @@ requires, instead of failing as though the feature were broken.
 
 ## Acceptance
 
-- [ ] A process test that spawns `target/debug/sipx` verifies the binary's compiled feature set
+- [x] A process test that spawns `target/debug/sipx` verifies the binary's compiled feature set
       before asserting on behaviour, and names the mismatch when it differs.
-- [ ] A failing-first test reproduces the trap: build without `--all-features`, then run an
+- [x] A failing-first test reproduces the trap: build without `--all-features`, then run an
       all-features process test, and prove the run reports a stale binary rather than an audio
       failure.
-- [ ] The mechanism is cheap enough to run per test process — `sipx version --json` already reports
+- [x] The mechanism is cheap enough to run per test process — `sipx version --json` already reports
       the build, so prefer reading it over rebuilding.
 - [ ] `./scripts/gate.py` green.
 
@@ -38,6 +38,31 @@ requires, instead of failing as though the feature were broken.
   did not re-uplift it, so the tests spawned a binary whose `sipx devices` answered "audio devices
   require a build with the device-audio feature". Removing the binary made the same command green
   (97 MB, 87 of 87 passing).
+
+- 2026-08-08: implemented on `impl/X-121` off `wave/rc7`. `sipx version --json` gained a `features`
+  array — it reported the version and *not* the build, so the mechanism the Acceptance assumed had
+  to be built before it could be read. `crates/sipx-cli/tests/support/uplift.rs` reads it once per
+  test binary (4.6 ms) and refuses a mismatch by name; all four `sipx-cli` test targets that spawn
+  the binary call it. Reproduced at the merge base: the seven named tests failed with `the address
+  line`, `typed setup failure` and a bare exit-code assertion, and now fail with the two feature
+  sets and `rm -f …/target/debug/sipx`. Caught in both directions — a binary *ahead* of the tests
+  is the same trap and had the same unreadable symptom.
+
+  **The producer is `scripts/check-cli-reference.py`**, whose `cargo build -p sipx-cli --quiet`
+  (line 231) is a default-features build; `gate.py` runs it at step "cli reference", *after* the
+  all-features "test" step, so every gate run ends by leaving a binary without `device-audio` at
+  `target/debug/sipx`. That is left as a finding, not fixed here: this story refuses the stale
+  binary, and pointing the check at `--all-features` changes what the public CLI reference is held
+  against. On cargo 1.97.0 a subsequent `cargo test --all-features` does re-uplift, so the observed
+  failure needs a run that does not rebuild the bin unit — a directly invoked test executable, or a
+  concurrent build sharing the directory. The guard does not depend on which.
+
+- [ ] `./scripts/gate.py` was not run: the wave coordinator runs one per wave. Verified instead —
+      `cargo test -p sipx-cli --all-features` (222 passing), the same suite with default features,
+      `cargo clippy -p sipx-cli --all-targets --all-features --no-deps -- -D warnings`,
+      `cargo fmt --all --check`, `./scripts/check-cli-reference.py --check`,
+      `./scripts/check-provenance.sh`, `./scripts/coverage-report.py --check`, and the six
+      `sipx-cli` feature combinations `check-features.sh` compiles.
 
 ## Notes
 
