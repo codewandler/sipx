@@ -3776,6 +3776,348 @@ async fn a_registrar_that_answers_at_no_address_reports_what_it_attempted() {
     );
 }
 
+/// The `load` summary, read strictly so a duplicated member is a failure rather than a silent
+/// last-one-wins.
+fn load_summary(output: &std::process::Output) -> serde_json::Value {
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let line = stdout
+        .lines()
+        .find(|line| line.starts_with('{'))
+        .unwrap_or_else(|| {
+            panic!(
+                "load prints its summary as one JSON object: {stdout} / {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+    support::strict_json::versioned("load", line)
+}
+
+/// `T-42`: a `load` run that reaches no address says how far down the candidate list it got.
+///
+/// This is the half of the defect that made the story more than a tidy-up. `load` walked the
+/// ordered list and counted nothing, so a run whose target has several addresses reported the same
+/// failure count whether one dead host refused or every address behind the name did — and a harness
+/// reading the summary had to know the zone before it could tell those apart. `register`, `dial` and
+/// `peers` have answered it in `candidates_attempted`/`candidates_resolved` since `T-41`, so a
+/// script that learned the pair from one of them reads it unchanged here.
+///
+/// Both workload modes, because they were two separate hand-rolled loops: the bodyless signalling
+/// driver and the generated-media dialler each walked the list on their own and each counted
+/// nothing.
+#[tokio::test]
+async fn a_load_run_that_reaches_no_address_reports_what_it_attempted() {
+    let _scenario = process_scenario().await;
+    let dns = fixture_nameserver().await;
+
+    // Reserved and released, so every address behind the name is a port nothing accepts on.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").expect("reserves a loopback port");
+    let refused = closed.local_addr().expect("reserved address").port();
+    drop(closed);
+
+    for mode in ["signalling", "generated-media"] {
+        let run = through_nameserver(
+            &dns,
+            &[
+                "load",
+                &format!("sip:load@{SPREAD}:{refused}"),
+                "--transport",
+                "tcp",
+                "--mode",
+                mode,
+                "--rate",
+                "1",
+                "--concurrency",
+                "1",
+                // Two, because a count bound is also an instruction to end the calls it owns: the
+                // last admitted call races the cleanup request it triggers, and a one-call run
+                // measures that race rather than the candidate pass.
+                "--calls",
+                "2",
+                "--timeout",
+                "5",
+            ],
+            true,
+        )
+        .await;
+        let summary = load_summary(&run);
+        assert_eq!(
+            summary["candidates_attempted"],
+            serde_json::json!(3),
+            "{mode}: every address behind the name was attempted, and the summary has to say so: \
+             {summary}"
+        );
+        assert_eq!(
+            summary["candidates_resolved"],
+            serde_json::json!(3),
+            "{mode}: attempted == resolved is what says the name is exhausted rather than the run \
+             cut short: {summary}"
+        );
+        // The retry classification is unchanged by the move: a refused connection is a measured
+        // outcome of the workload, not an internal failure that stops admission.
+        assert_eq!(
+            summary["outcomes"]["connected"],
+            serde_json::json!(0),
+            "{mode}: {summary}"
+        );
+        assert_eq!(
+            run.status.code(),
+            Some(0),
+            "{mode}: an admitted call that nothing accepted is a measured outcome: {summary}"
+        );
+    }
+}
+
+/// A peer that answers a bodyless INVITE over TCP and hangs up when asked, for `load --mode
+/// signalling`.
+///
+/// TCP for the reason [`notifying_registrar`] gives: the pass this fixture exists to prove needs a
+/// first candidate that *refuses*, and a datagram at a closed UDP port is merely unanswered.
+///
+/// It handles one connection and stays in its read loop afterwards: the driver sends INVITE, ACK
+/// and BYE on the same stream, and a fixture that closed after the 200 would turn the driver's tidy
+/// hang-up into a wait for a response nothing will send.
+async fn signalling_answerer(listener: tokio::net::TcpListener, address: std::net::SocketAddr) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let contact = format!("sip:load@{address};transport=tcp");
+    let Ok((mut stream, _)) = listener.accept().await else {
+        return;
+    };
+    let mut buffer: Vec<u8> = Vec::new();
+    let mut chunk = [0_u8; 2048];
+
+    loop {
+        let Ok(read) = stream.read(&mut chunk).await else {
+            return;
+        };
+        if read == 0 {
+            return;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+
+        while let Some(message) = take_message(&mut buffer) {
+            // ACK ends the three-way handshake and is answered by nothing (RFC 3261 §17.1.1.3).
+            if message.starts_with("ACK ") {
+                continue;
+            }
+            let invite = message.starts_with("INVITE ");
+            if !invite && !message.starts_with("BYE ") {
+                continue;
+            }
+            // A 200 to INVITE establishes a dialog, so it needs a To tag and a Contact; without
+            // them the driver cannot build the in-dialog BYE that ends the measurement.
+            let to = header_value(&message, "To");
+            let tagged = if to.contains(";tag=") {
+                to.to_owned()
+            } else {
+                format!("{to};tag=fixture0042")
+            };
+            let accepted = format!(
+                "SIP/2.0 200 OK\r\nVia: {}\r\nTo: {tagged}\r\nFrom: {}\r\nCall-ID: {}\r\n\
+                 CSeq: {}\r\n{}Content-Length: 0\r\n\r\n",
+                header_value(&message, "Via"),
+                header_value(&message, "From"),
+                header_value(&message, "Call-ID"),
+                header_value(&message, "CSeq"),
+                if invite {
+                    format!("Contact: <{contact}>\r\n")
+                } else {
+                    String::new()
+                },
+            );
+            if stream.write_all(accepted.as_bytes()).await.is_err() {
+                return;
+            }
+        }
+    }
+}
+
+/// `T-42`: `load` still walks past a dead first address to the one that answers.
+///
+/// The counting test above proves the pass reaches the end of the list; this proves it stops at the
+/// address that accepts, which is the other half of the classification the move must not change.
+/// Only a transport failure moves the pass on — an answer, of any kind, is the peer speaking for
+/// the name and ends it.
+///
+/// The name resolves to three loopback addresses and only the second one accepts, so a pass that
+/// stopped at the head of the list would report a refusal and connect nothing.
+#[tokio::test]
+async fn load_reaches_a_target_whose_first_address_is_dead() {
+    let _scenario = process_scenario().await;
+    let dns = fixture_nameserver().await;
+
+    // Reserved on the first `SPREAD` address and released, so the port is free on the second and
+    // refuses on the first — the dead head of the list this pass has to walk past.
+    let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("reserves a loopback port");
+    let port = probe.local_addr().expect("reserved address").port();
+    drop(probe);
+    let listener = tokio::net::TcpListener::bind(("127.0.0.2", port))
+        .await
+        .expect("the fixture peer binds the second address");
+    let address = listener.local_addr().expect("the fixture has an address");
+    let serving = tokio::spawn(signalling_answerer(listener, address));
+
+    let run = through_nameserver(
+        &dns,
+        &[
+            "load",
+            &format!("sip:load@{SPREAD}:{port}"),
+            "--transport",
+            "tcp",
+            "--rate",
+            "1",
+            "--concurrency",
+            "1",
+            // Two, for the reason the counting test above gives: the last admitted call races the
+            // cleanup its own admission requests, so only the earlier one measures the pass.
+            "--calls",
+            "2",
+            "--timeout",
+            "5",
+        ],
+        true,
+    )
+    .await;
+    serving.abort();
+
+    let summary = load_summary(&run);
+    assert!(
+        summary["outcomes"]["connected"]
+            .as_u64()
+            .is_some_and(|connected| connected >= 1),
+        "the peer answered at its second address: {summary}"
+    );
+    assert_eq!(
+        summary["candidates_attempted"],
+        serde_json::Value::Null,
+        "no connection failure ran a pass to report, and zero would read as a pass that got \
+         nowhere: {summary}"
+    );
+}
+
+/// `T-42`: a scenario `dial` that reaches no address says how far down the candidate list it got.
+///
+/// The actor walked the list and counted nothing, so the refusal a driver reads carried the last
+/// transport error and no way to tell one dead host from a name where every address is dead. The
+/// field names are `register`'s, because a driver that scripts both must not have to learn two.
+#[tokio::test]
+async fn a_scenario_dial_that_reaches_no_address_reports_what_it_attempted() {
+    let _scenario = process_scenario().await;
+    let dns = fixture_nameserver().await;
+
+    // Reserved and released, so every address behind the name is a port nothing accepts on.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").expect("reserves a loopback port");
+    let refused = closed.local_addr().expect("reserved address").port();
+    drop(closed);
+
+    let output = scenario_through_nameserver(
+        &dns,
+        &["--transport", "tcp"],
+        &format!(
+            "{{\"id\":\"dial-1\",\"command\":\"dial\",\"uri\":\"sip:bob@{SPREAD}:{refused}\",\
+             \"timeout_ms\":5000}}\n\
+             {{\"id\":\"shutdown-1\",\"command\":\"shutdown\"}}\n"
+        ),
+    )
+    .await;
+
+    let lines = scenario_lines(&output);
+    let refusal = lines
+        .iter()
+        .find(|line| {
+            line["event"]["type"] == "scenario.command.refused" && line["event"]["id"] == "dial-1"
+        })
+        .unwrap_or_else(|| panic!("the dial is refused: {lines:?}"));
+    assert_eq!(
+        refusal["event"]["candidates_attempted"],
+        serde_json::json!(3),
+        "every address behind the name was attempted, and the refusal has to say so: {refusal}"
+    );
+    assert_eq!(
+        refusal["event"]["candidates_resolved"],
+        serde_json::json!(3),
+        "attempted == resolved is what says the name is exhausted rather than the pass cut short: \
+         {refusal}"
+    );
+}
+
+/// `T-42`: `dial` and the scenario actor still walk past a dead first address to the one that
+/// answers.
+///
+/// Both take the shared pass in this story, and the classification it must preserve is the same
+/// one: a transport failure moves to the next address, anything the far end says ends the walk.
+/// The name resolves to three loopback addresses and only the second one accepts.
+#[tokio::test]
+async fn dial_and_scenario_reach_a_name_whose_first_address_is_dead() {
+    let _scenario = process_scenario().await;
+    let dns = fixture_nameserver().await;
+
+    for command in ["dial", "scenario"] {
+        // Reserved on the first `SPREAD` address and released, so the port is free on the second
+        // and refuses on the first — the dead head of the list this pass has to walk past.
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("reserves a loopback port");
+        let port = probe.local_addr().expect("reserved address").port();
+        drop(probe);
+        let (mut answerer, _address, _lines) = start_answerer_on(
+            None,
+            &format!("127.0.0.2:{port}"),
+            &["--transport", "tcp", "--duration", "1"],
+        )
+        .await;
+
+        let uri = format!("sip:bob@{SPREAD}:{port}");
+        let reached = if command == "dial" {
+            let called = through_nameserver(
+                &dns,
+                &[
+                    "dial",
+                    &uri,
+                    "--transport",
+                    "tcp",
+                    "--timeout",
+                    "10",
+                    "--duration",
+                    "1",
+                ],
+                true,
+            )
+            .await;
+            let stdout = String::from_utf8_lossy(&called.stdout).into_owned();
+            assert_eq!(
+                called.status.code(),
+                Some(0),
+                "the peer answered at its second address: {stdout} / {}",
+                String::from_utf8_lossy(&called.stderr)
+            );
+            stdout.contains("\"status\":\"answered\"")
+        } else {
+            let output = scenario_through_nameserver(
+                &dns,
+                &["--transport", "tcp"],
+                &format!(
+                    "{{\"id\":\"dial-1\",\"command\":\"dial\",\"uri\":\"{uri}\",\
+                     \"timeout_ms\":10000}}\n\
+                     {{\"id\":\"hangup-1\",\"command\":\"hangup\"}}\n\
+                     {{\"id\":\"shutdown-1\",\"command\":\"shutdown\"}}\n"
+                ),
+            )
+            .await;
+            let lines = scenario_lines(&output);
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "the peer answered at its second address: {lines:?}"
+            );
+            lines.iter().any(|line| {
+                line["event"]["type"] == "scenario.command.completed"
+                    && line["event"]["id"] == "dial-1"
+            })
+        };
+        assert!(reached, "{command} stopped at the dead head of the list");
+        answerer_exits_cleanly(&mut answerer).await;
+    }
+}
+
 /// `T-39`: a named target is what an operator actually has, and the page a script author reads is
 /// where that has to be stated. Without it the advice that survives is the one this story exists
 /// to retire — look the address up yourself and pass a literal.
@@ -3898,6 +4240,7 @@ async fn every_command_deadline_is_the_ceiling_over_target_resolution() {
     let started = std::time::Instant::now();
     let output = scenario_through_nameserver(
         &dns,
+        &[],
         &format!(
             "{{\"id\":\"dial-1\",\"command\":\"dial\",\"uri\":\"sip:bob@{SILENT}\",\
              \"timeout_ms\":1000}}\n\
@@ -4000,6 +4343,7 @@ async fn one_stated_deadline_funds_resolution_and_the_invitation_together() {
     let started = std::time::Instant::now();
     let output = scenario_through_nameserver(
         &dns,
+        &[],
         &format!(
             "{{\"id\":\"dial-1\",\"command\":\"dial\",\"uri\":\"sip:bob@{SLOW}:{peer}\",\
              \"timeout_ms\":2000}}\n\
@@ -4086,11 +4430,16 @@ async fn a_load_run_bounds_resolution_by_its_duration_as_well_as_its_setup_timeo
 }
 
 /// Run one finite stdin scenario whose only resolver is the fixture nameserver.
-async fn scenario_through_nameserver(dns: &Nameserver, script: &str) -> std::process::Output {
+async fn scenario_through_nameserver(
+    dns: &Nameserver,
+    extra: &[&str],
+    script: &str,
+) -> std::process::Output {
     use tokio::io::AsyncWriteExt as _;
 
     let mut child = sipx()
         .args(["scenario", "--local", "127.0.0.1:0"])
+        .args(extra)
         .env("SIPX_NAMESERVER", dns.address.to_string())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

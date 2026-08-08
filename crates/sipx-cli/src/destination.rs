@@ -13,9 +13,10 @@ use sipx_transport::Target;
 
 use crate::output::{Exit, Report};
 
-pub(crate) use sipx_transport::destination::{
-    Attempted, Attempts, Error, MAX_ATTEMPTS, Unreached, first, walk,
-};
+// `MAX_ATTEMPTS` is deliberately not among these: `T-42` left no command counting candidates for
+// itself, so the ceiling is the pass's business and a command that reached for it would be walking
+// a list by hand again.
+pub(crate) use sipx_transport::destination::{Attempted, Attempts, Error, Unreached, first, walk};
 
 /// A resolver that also applies this command's verification and transport policy.
 #[derive(Debug)]

@@ -233,6 +233,12 @@ pub(crate) async fn run(command: LoadOptions, format: Format) -> Exit {
     });
     let measurements = Arc::new(Mutex::new(Vec::<Measurement>::new()));
     let observed = Arc::clone(&measurements);
+    // How far the deepest failed candidate pass got. Every admitted call walks the same resolved
+    // list, so the deepest one is what answers the operator's question — was every address behind
+    // this name tried, or only the head of the list? A shallower pass says only that *that* call
+    // stopped sooner.
+    let walked = Arc::new(Mutex::new(None::<crate::destination::Attempts>));
+    let observed_passes = Arc::clone(&walked);
     let handle = Arc::new(handle);
     // Held back from the workload closure, which owns every clone the admitted calls are placed
     // through: without one reference kept outside it there is nothing left to shut the endpoint
@@ -272,8 +278,9 @@ pub(crate) async fn run(command: LoadOptions, format: Format) -> Exit {
             let credentials = Arc::clone(&credentials);
             let candidates = Arc::clone(&candidates);
             let measurements = Arc::clone(&observed);
+            let passes = Arc::clone(&walked);
             async move {
-                let measurement = run_attempt(
+                let measurement = match run_attempt(
                     index,
                     limits,
                     &handle,
@@ -285,11 +292,16 @@ pub(crate) async fn run(command: LoadOptions, format: Format) -> Exit {
                     &stop,
                 )
                 .await
-                .inspect_err(|cause| {
-                    if matches!(cause, Cause::Other(_)) {
-                        stop.request();
+                {
+                    Ok(measurement) => measurement,
+                    Err(failed) => {
+                        record_pass(&passes, failed.attempts);
+                        if matches!(failed.cause, Cause::Other(_)) {
+                            stop.request();
+                        }
+                        return Err(failed.cause);
                     }
-                })?;
+                };
                 let Ok(mut measurements) = measurements.lock() else {
                     stop.request();
                     return Err(Cause::Other("measurement store poisoned".to_owned()));
@@ -313,12 +325,17 @@ pub(crate) async fn run(command: LoadOptions, format: Format) -> Exit {
         Ok(values) => values.clone(),
         Err(_) => return fail(format, Exit::Failed, "measurement store poisoned"),
     };
+    let walked = match observed_passes.lock() {
+        Ok(pass) => *pass,
+        Err(_) => return fail(format, Exit::Failed, "measurement store poisoned"),
+    };
     emit_summary(
         format,
         uri_text,
         limits,
         &bounded,
         &measurements,
+        walked,
         process_stop.signal(),
         signal_failure.as_deref(),
     );
@@ -333,6 +350,50 @@ pub(crate) async fn run(command: LoadOptions, format: Format) -> Exit {
     }
 }
 
+/// One admitted call that produced no measurement, and how far its candidate pass got.
+///
+/// The count travels beside the cause rather than inside it: `Cause` is the harness's per-call
+/// classification and knows nothing of the address list this command walked, and the pass is the
+/// command's. `T-42` — before it, both of this module's passes counted nothing at all, so a run
+/// against a name with four addresses reported the same failures whether one host refused or every
+/// address behind the name did.
+#[derive(Debug)]
+struct Failed {
+    /// What the harness counts this call as.
+    cause: Cause,
+    /// How far the serial pass got, when the failure came from one.
+    attempts: Option<crate::destination::Attempts>,
+}
+
+impl Failed {
+    /// A failure no candidate pass produced — building the call's identity, or its own teardown.
+    fn stated(cause: Cause) -> Self {
+        Self {
+            cause,
+            attempts: None,
+        }
+    }
+}
+
+/// Turn a pass that reached nothing into the cause the harness counts and the depth it reports.
+///
+/// The classification each variant keeps is the one the hand-rolled loops had: a list walked to its
+/// end is the last transport failure, and an answer is the far end's. `Nothing` is a caller that
+/// resolved no candidate at all, which `run` already refuses before admitting a call, and is
+/// counted as a transport failure because that is what an address list with nothing in it leaves.
+/// `Expired` is new only because the budget it names is: a pass funded from one deadline can now
+/// run out of it, which is a timeout and not a statement about the addresses left untried.
+fn unreached(outcome: crate::destination::Unreached<Cause>) -> Failed {
+    let attempts = outcome.attempts();
+    let cause = match outcome {
+        crate::destination::Unreached::Nothing => Cause::Transport,
+        crate::destination::Unreached::Expired { .. } => Cause::Timeout,
+        crate::destination::Unreached::Unreachable { last, .. }
+        | crate::destination::Unreached::Answered(last) => last,
+    };
+    Failed { cause, attempts }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_attempt(
     index: usize,
@@ -344,28 +405,48 @@ async fn run_attempt(
     options: &DialOptions,
     credentials: Option<&Credentials>,
     stop: &Stop,
-) -> Result<Measurement, Cause> {
+) -> Result<Measurement, Failed> {
     match limits.mode {
         WorkloadMode::Signalling => {
-            let identity = SignallingIdentity::new(handle, to, from, limits.seed, index)?;
-            let mut last_transport = None;
-            for target in candidates.iter().take(crate::destination::MAX_ATTEMPTS) {
-                match run_signalling_attempt(
-                    handle,
-                    target.clone(),
-                    to,
-                    &identity,
-                    credentials,
-                    limits,
-                    stop,
-                )
-                .await
-                {
-                    Err(Cause::Transport) => last_transport = Some(Cause::Transport),
-                    result => return result,
-                }
-            }
-            Err(last_transport.unwrap_or(Cause::Transport))
+            let identity = SignallingIdentity::new(handle, to, from, limits.seed, index)
+                .map_err(Failed::stated)?;
+            // `P-31`'s serial pass, and `P-29`'s accounting with it: `--timeout` bounds *a call's
+            // setup*, so it funds every address of the target together rather than restarting at
+            // each one. A three-address name previously spent three times the number the operator
+            // typed before one call gave up.
+            crate::destination::walk(
+                candidates,
+                (!limits.setup_timeout.is_zero()).then_some(limits.setup_timeout),
+                |target, remaining| {
+                    let target = target.clone();
+                    let identity = &identity;
+                    async move {
+                        match run_signalling_attempt(
+                            handle,
+                            target,
+                            to,
+                            identity,
+                            credentials,
+                            remaining,
+                            limits,
+                            stop,
+                        )
+                        .await
+                        {
+                            Ok(measurement) => crate::destination::Attempted::Reached(measurement),
+                            // Only a transport failure is this address's. A rejection, a response
+                            // deadline or a broken exchange is the far end answering for the name,
+                            // and another address repeats a question already answered.
+                            Err(Cause::Transport) => {
+                                crate::destination::Attempted::Unreachable(Cause::Transport)
+                            }
+                            Err(cause) => crate::destination::Attempted::Answered(cause),
+                        }
+                    }
+                },
+            )
+            .await
+            .map_err(unreached)
         }
         WorkloadMode::GeneratedMedia => {
             run_generated_media_attempt(handle, candidates, to, options, limits, index, stop).await
@@ -381,27 +462,29 @@ async fn run_generated_media_attempt(
     limits: Limits,
     index: usize,
     stop: &Stop,
-) -> Result<Measurement, Cause> {
+) -> Result<Measurement, Failed> {
     let started = tokio::time::Instant::now();
-    let mut last_transport = None;
-    let mut connected = None;
-    for target in candidates.iter().take(crate::destination::MAX_ATTEMPTS) {
-        match sipx_call::dial_until(handle, target.clone(), to, options, stop.requested()).await {
-            Ok(call) => {
-                connected = Some(call);
-                break;
+    // The same pass and the same budget as the signalling mode above; only what one candidate does
+    // with its share differs.
+    let mut call = crate::destination::walk(
+        candidates,
+        (!limits.setup_timeout.is_zero()).then_some(limits.setup_timeout),
+        |target, remaining| {
+            let funded = crate::budget::funded(options, remaining);
+            let target = target.clone();
+            async move {
+                match sipx_call::dial_until(handle, target, to, &funded, stop.requested()).await {
+                    Ok(call) => crate::destination::Attempted::Reached(call),
+                    Err(error @ sipx_call::Error::Transport(_)) => {
+                        crate::destination::Attempted::Unreachable(classify(error))
+                    }
+                    Err(error) => crate::destination::Attempted::Answered(classify(error)),
+                }
             }
-            Err(error @ sipx_call::Error::Transport(_)) => last_transport = Some(error),
-            Err(error) => {
-                last_transport = Some(error);
-                break;
-            }
-        }
-    }
-    let mut call = connected.ok_or_else(|| {
-        let error = last_transport.unwrap_or(sipx_call::Error::NoResponse);
-        classify(error)
-    })?;
+        },
+    )
+    .await
+    .map_err(unreached)?;
     let setup = started.elapsed();
     let status = call.initial_status();
     // One bounded packet is enough to make media deterministic and observable without allocating
@@ -412,9 +495,11 @@ async fn run_generated_media_attempt(
     let quality = call.media().quality().await;
     call.hang_up()
         .await
-        .map_err(|error| Cause::Other(format!("hang up failed: {error}")))?;
+        .map_err(|error| Failed::stated(Cause::Other(format!("hang up failed: {error}"))))?;
     if !played {
-        return Err(Cause::Other("media playback failed".to_owned()));
+        return Err(Failed::stated(Cause::Other(
+            "media playback failed".to_owned(),
+        )));
     }
     Ok(Measurement {
         setup,
@@ -457,12 +542,18 @@ impl SignallingIdentity {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// One candidate's bodyless INVITE/ACK/BYE exchange, bounded by what the pass has left for it.
+///
+/// `within` is that share and not `--timeout` itself: the pass funds every address of the target
+/// together, so an address reached after two dead ones is answered inside what those two left
+/// (`P-29`). `None` is a run that stated no setup deadline at all.
 async fn run_signalling_attempt(
     handle: &sipx_transport::Handle,
     target: sipx_transport::Target,
     to: &Uri,
     identity: &SignallingIdentity,
     credentials: Option<&Credentials>,
+    within: Option<Duration>,
     limits: Limits,
     stop: &Stop,
 ) -> Result<Measurement, Cause> {
@@ -482,7 +573,7 @@ async fn run_signalling_attempt(
             .send(invite.clone(), target.clone())
             .await
             .map_err(|_| Cause::Transport)?;
-        let response = wait_for_invite(handle, &mut responses, limits.setup_timeout, stop).await?;
+        let response = wait_for_invite(handle, &mut responses, within, stop).await?;
         if matches!(response.status.code(), 401 | 407)
             && let Some(credentials) = credentials
             && invite_cseq == 1
@@ -626,10 +717,12 @@ fn build_cause(error: sipx_sip::BuildError) -> Cause {
 async fn wait_for_invite(
     handle: &sipx_transport::Handle,
     responses: &mut sipx_transport::Responses,
-    within: Duration,
+    within: Option<Duration>,
     stop: &Stop,
 ) -> Result<Response, Cause> {
-    let deadline = (!within.is_zero()).then(|| tokio::time::Instant::now() + within);
+    let deadline = within
+        .filter(|within| !within.is_zero())
+        .map(|within| tokio::time::Instant::now() + within);
     loop {
         tokio::select! {
             biased;
@@ -770,6 +863,27 @@ fn credentials(options: &LoadOptions, from: &str) -> Result<Option<Credentials>,
     Ok(Some(Credentials::new(username, password)))
 }
 
+/// Keep the deepest pass any failed call made.
+///
+/// A poisoned store is dropped rather than reported: this is a field beside the run's result, and a
+/// summary that refused to print because a count could not be recorded would withhold the numbers
+/// the run exists to produce. The counts are absent when nothing recorded one, which is exactly
+/// what the reader is told.
+fn record_pass(
+    passes: &Mutex<Option<crate::destination::Attempts>>,
+    attempts: Option<crate::destination::Attempts>,
+) {
+    let Some(attempts) = attempts else {
+        return;
+    };
+    let Ok(mut deepest) = passes.lock() else {
+        return;
+    };
+    if deepest.is_none_or(|previous| previous.attempted() < attempts.attempted()) {
+        *deepest = Some(attempts);
+    }
+}
+
 fn classify(error: sipx_call::Error) -> Cause {
     match error {
         sipx_call::Error::Rejected {
@@ -839,12 +953,18 @@ fn percentile(values: &[Duration], numerator: usize, denominator: usize) -> Opti
     clippy::too_many_lines,
     reason = "one summary calculation feeds JSON, text and bounded INFO from the same facts"
 )]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each is an independently measured fact about the run; bundling them into a struct \
+              would name the summary's own shape twice"
+)]
 fn emit_summary(
     format: Format,
     target: &str,
     limits: Limits,
     bounded: &sipx_call::load::BoundedOutcome,
     measurements: &[Measurement],
+    walked: Option<crate::destination::Attempts>,
     stop_signal: Option<&str>,
     signal_failure: Option<&str>,
 ) {
@@ -891,6 +1011,12 @@ fn emit_summary(
         "mode": limits.mode.as_str(),
         "seed": limits.seed,
         "target": target,
+        // `T-41`'s pair, under the names every other command reports it with, for the deepest pass
+        // a connection failure made. Null — never zero — where no failed call walked a list: zero
+        // would describe a pass that ran and got nowhere, and a run whose calls all connected made
+        // no such pass.
+        "candidates_attempted": walked.map(|walked| walked.attempted()),
+        "candidates_resolved": walked.map(|walked| walked.resolved()),
         "limits": {
             "rate": limits.rate,
             "concurrency": limits.concurrency,
@@ -946,6 +1072,10 @@ fn emit_summary(
                 println!("reason             {reason}");
             }
             println!("target             {target}");
+            if let Some(walked) = walked {
+                println!("candidates_attempted {}", walked.attempted());
+                println!("candidates_resolved  {}", walked.resolved());
+            }
             println!("seed               {}", limits.seed);
             println!("attempted          {}", outcome.attempted);
             println!("connected          {connected}");
