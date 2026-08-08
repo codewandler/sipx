@@ -288,17 +288,31 @@ impl std::fmt::Debug for Session {
 /// about moving anything, and no RFC publishes a KDF vector for the AEAD profiles. Keeping the
 /// block layout fixed and the salt where it already was is the reading that changes one thing at
 /// a time. `docs/specs/srtp.md` §4.3 records it as the one AEAD parameter nothing external pins.
-fn derive(master_key: &[u8], master_salt: &[u8], label: Label, out: &mut [u8]) {
+/// # Errors
+///
+/// [`SrtpError::KeyLength`] when the master key or salt is not a length this PRF can run at.
+/// `Context::new` has already measured both against the profile, so this cannot be reached from
+/// there — but it returns an error rather than degrading, because the two ways of degrading are
+/// both silent. Falling back to a zero key would derive session keys from nothing and protect
+/// every stream with the same ones; leaving `out` zeroed would do the same by another route. A
+/// length check in another function is not a guarantee this one may rely on.
+fn derive(
+    master_key: &[u8],
+    master_salt: &[u8],
+    label: Label,
+    out: &mut [u8],
+) -> Result<(), SrtpError> {
     let mut iv = [0u8; 16];
-    // `master_salt` is at most 14 octets — `Context::new` refused anything else against the
-    // profile before this function was reachable — so the slice is always there. Taken fallibly
-    // anyway: a length check in another function is not a guarantee this one can rely on.
-    if let Some(slot) = iv.get_mut(..master_salt.len()) {
-        slot.copy_from_slice(master_salt);
-    }
-    if let Some(slot) = iv.get_mut(7) {
-        *slot ^= label as u8;
-    }
+    let slot = iv
+        .get_mut(..master_salt.len())
+        .ok_or(SrtpError::KeyLength {
+            what: "master salt",
+            expected: MASTER_SALT_LEN,
+            actual: master_salt.len(),
+        })?;
+    slot.copy_from_slice(master_salt);
+    // The label lands on octet 7 of the block for every profile — §4.3 of `docs/specs/srtp.md`.
+    *iv.get_mut(7).ok_or(SrtpError::TooShort(16))? ^= label as u8;
     // Octets 8..14 would carry `index DIV kdr`; with a rate of zero it is six zero octets, and
     // exclusive-oring zero changes nothing. Written out so the alignment is visible rather than
     // implied by its absence. For the 96-bit AEAD salt they are zero already.
@@ -306,17 +320,32 @@ fn derive(master_key: &[u8], master_salt: &[u8], label: Label, out: &mut [u8]) {
     iv[15] = 0;
 
     out.fill(0);
-    if master_key.len() == 32 {
-        let Ok(key) = <&[u8; 32]>::try_from(master_key) else {
-            return;
-        };
-        Aes256Ctr::new(key.into(), (&iv).into()).apply_keystream(out);
-    } else {
-        let Ok(key) = <&[u8; 16]>::try_from(master_key) else {
-            return;
-        };
-        Aes128Ctr::new(key.into(), (&iv).into()).apply_keystream(out);
+    match master_key.len() {
+        32 => {
+            let key = <&[u8; 32]>::try_from(master_key).map_err(|_| SrtpError::KeyLength {
+                what: "master key",
+                expected: 32,
+                actual: master_key.len(),
+            })?;
+            Aes256Ctr::new(key.into(), (&iv).into()).apply_keystream(out);
+        }
+        16 => {
+            let key = <&[u8; 16]>::try_from(master_key).map_err(|_| SrtpError::KeyLength {
+                what: "master key",
+                expected: 16,
+                actual: master_key.len(),
+            })?;
+            Aes128Ctr::new(key.into(), (&iv).into()).apply_keystream(out);
+        }
+        actual => {
+            return Err(SrtpError::KeyLength {
+                what: "master key",
+                expected: MASTER_KEY_LEN,
+                actual,
+            });
+        }
     }
+    Ok(())
 }
 
 /// One direction of one SRTP stream.
@@ -394,37 +423,37 @@ impl Context {
             master_salt,
             Label::RtpEncryption,
             &mut session.rtp_key,
-        );
+        )?;
         derive(
             master_key,
             master_salt,
             Label::RtpSalt,
             &mut session.rtp_salt,
-        );
+        )?;
         derive(
             master_key,
             master_salt,
             Label::RtpAuthentication,
             &mut session.rtp_auth,
-        );
+        )?;
         derive(
             master_key,
             master_salt,
             Label::RtcpEncryption,
             &mut session.rtcp_key,
-        );
+        )?;
         derive(
             master_key,
             master_salt,
             Label::RtcpSalt,
             &mut session.rtcp_salt,
-        );
+        )?;
         derive(
             master_key,
             master_salt,
             Label::RtcpAuthentication,
             &mut session.rtcp_auth,
-        );
+        )?;
 
         Ok(Self {
             profile,
@@ -484,7 +513,7 @@ impl Context {
             &self.session.rtp_salt,
             ssrc,
             index_of(roc, sequence),
-        )
+        )?
         .apply_keystream(payload);
 
         // The tag covers the whole packet *and* the rollover counter, which is not transmitted.
@@ -546,7 +575,7 @@ impl Context {
             &self.session.rtp_salt,
             ssrc,
             index_of(roc, sequence),
-        )
+        )?
         .apply_keystream(payload);
 
         self.accept(roc, sequence);
@@ -583,7 +612,7 @@ impl Context {
             &self.session.rtcp_salt,
             ssrc,
             u64::from(index),
-        )
+        )?
         .apply_keystream(payload);
 
         // The trailer carries the encryption flag and the index in the clear; the tag covers it.
@@ -729,7 +758,7 @@ impl Context {
                 &self.session.rtcp_salt,
                 ssrc,
                 u64::from(index),
-            )
+            )?
             .apply_keystream(payload);
         }
         self.accept_rtcp(index);
@@ -976,13 +1005,23 @@ fn key_length(profile: Profile, actual: usize) -> SrtpError {
 /// least two octets, so the low 16 bits of the IV are always zero — which is why a plain
 /// 128-bit counter is correct here: it cannot carry into the rest of the block within any packet
 /// short enough to exist.
-fn keystream(key: &[u8], salt: &[u8], ssrc: u32, index: u64) -> Aes128Ctr {
+/// # Errors
+///
+/// [`SrtpError::KeyLength`] when the session key or salt is not the counter-mode transform's.
+/// This branch is only reached under `AES_CM_128_HMAC_SHA1_80`, whose session key and salt
+/// `Context::new` sized itself, so it cannot fail from there — and it is fallible rather than
+/// falling back for the same reason [`derive`] is. A zero key here would encrypt every stream on
+/// the host with one keystream and raise nothing anywhere, which is the worst outcome available.
+fn keystream(key: &[u8], salt: &[u8], ssrc: u32, index: u64) -> Result<Aes128Ctr, SrtpError> {
     let mut iv = [0u8; 16];
-    // Counter mode is only reached under `AES_CM_128_HMAC_SHA1_80`, whose session salt is fourteen
-    // octets; taken fallibly so a future profile cannot silently truncate it here.
-    if let Some(slot) = iv.get_mut(..SESSION_SALT_LEN.min(salt.len())) {
-        slot.copy_from_slice(salt.get(..slot.len()).unwrap_or_default());
-    }
+    let slot = iv
+        .get_mut(..SESSION_SALT_LEN)
+        .ok_or(SrtpError::TooShort(16))?;
+    slot.copy_from_slice(salt.get(..SESSION_SALT_LEN).ok_or(SrtpError::KeyLength {
+        what: "session salt",
+        expected: SESSION_SALT_LEN,
+        actual: salt.len(),
+    })?);
 
     for (slot, byte) in iv.iter_mut().skip(4).zip(ssrc.to_be_bytes()) {
         *slot ^= byte;
@@ -995,11 +1034,12 @@ fn keystream(key: &[u8], salt: &[u8], ssrc: u32, index: u64) -> Aes128Ctr {
     {
         *slot ^= byte;
     }
-    let key: [u8; 16] = key
-        .get(..16)
-        .and_then(|k| k.try_into().ok())
-        .unwrap_or([0; 16]);
-    Aes128Ctr::new(&key.into(), (&iv).into())
+    let key: &[u8; 16] = key.try_into().map_err(|_| SrtpError::KeyLength {
+        what: "session key",
+        expected: 16,
+        actual: key.len(),
+    })?;
+    Ok(Aes128Ctr::new(key.into(), (&iv).into()))
 }
 
 /// HMAC-SHA1 over the packet, truncated to `n_tag` = 80 bits (RFC 3711 §4.2.1).
@@ -1093,11 +1133,13 @@ mod tests {
             &master_salt,
             Label::RtpEncryption,
             &mut cipher_key,
-        );
+        )
+        .expect("the RFC's own master key and salt");
         assert_eq!(cipher_key.to_vec(), hex("C61E7A93744F39EE10734AFE3FF7A087"));
 
         let mut cipher_salt = [0u8; 14];
-        derive(&master_key, &master_salt, Label::RtpSalt, &mut cipher_salt);
+        derive(&master_key, &master_salt, Label::RtpSalt, &mut cipher_salt)
+            .expect("the RFC's own master key and salt");
         assert_eq!(cipher_salt.to_vec(), hex("30CBBC08863D8C85D49DB34A9AE1"));
 
         let mut auth_key = [0u8; 94];
@@ -1106,7 +1148,8 @@ mod tests {
             &master_salt,
             Label::RtpAuthentication,
             &mut auth_key,
-        );
+        )
+        .expect("the RFC's own master key and salt");
         assert_eq!(
             auth_key.to_vec(),
             hex("CEBE321F6FF7716B6FD4AB49AF256A15\
@@ -1240,7 +1283,9 @@ mod tests {
         let salt: [u8; 14] = hex("F0F1F2F3F4F5F6F7F8F9FAFBFCFD").try_into().unwrap();
 
         let mut out = [0u8; 48];
-        keystream(&key, &salt, 0, 0).apply_keystream(&mut out);
+        keystream(&key, &salt, 0, 0)
+            .expect("the RFC's own session key and salt")
+            .apply_keystream(&mut out);
 
         assert_eq!(out[..16].to_vec(), hex("E03EAD0935C95E80E166B16DD92B4EB4"));
         assert_eq!(

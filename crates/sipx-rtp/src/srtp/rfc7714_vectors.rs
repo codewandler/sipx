@@ -416,9 +416,9 @@ fn the_256_bit_kdf_reads_the_whole_master_key() {
     let mut second = [0u8; 32];
 
     let mut key = vec![0u8; 32];
-    derive(&key, &salt, Label::RtpEncryption, &mut first);
+    derive(&key, &salt, Label::RtpEncryption, &mut first).expect("a 256-bit master key");
     key[31] ^= 0xFF;
-    derive(&key, &salt, Label::RtpEncryption, &mut second);
+    derive(&key, &salt, Label::RtpEncryption, &mut second).expect("a 256-bit master key");
 
     assert_ne!(
         first, second,
