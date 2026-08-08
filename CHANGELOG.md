@@ -7,6 +7,35 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0-rc.9] — 2026-08-08
+
+Bounds and identifiers on the diagnostic phone, and the browser kernel's artifact checks finally
+enforced.
+
+### Added
+
+- **The WASM kernel's artifact checks run in the gate and in CI.** The checker existed and was
+  green, but nothing ran it, so the guarantees it asserts — the module imports nothing, its export
+  names match the ABI, it stays inside its size bound — were unenforced while the kernel's own
+  tests passed. The CI job installs both wasm targets and a runtime explicitly, because a host that
+  happened to have them would hide the failure the job exists to catch.
+
+### Changed
+
+- **`peers` bounds the wait for a registrar's first notification.** It inherited the event client's
+  Timer N — 64·T1, thirty-two seconds — which the command stated nowhere and no caller could
+  change; once resolution was bounded, that was the longest thing it could do silently. It now
+  answers in twenty seconds, matching `register`'s default so the two commands share a clock, and a
+  registrar that accepts a subscription and never notifies is a timeout naming the bound that
+  expired.
+
+- **`register` names its address of record on every outcome.** The success report carried `aor` and
+  a failure did not, so a script telling one scheduled check from another had to branch on success
+  before it could look — and the record it most needs to identify is the failing one.
+
+- **The published coverage figure excludes the tests measuring the code.** Inline test modules are
+  excluded by a syntactic rule rather than a file list; the figure moved from 90.13% to 86.79%.
+
 ## [1.0.0-rc.8] — 2026-08-08
 
 Five repairs to checks and contracts that were quieter than they claimed.
@@ -3936,7 +3965,8 @@ Stated so nobody has to discover it from a stack trace:
 - **Interop is verified against Kamailio only.** A second implementation with different
   opinions — Asterisk, as a B2BUA rather than a proxy — has not been tried.
 
-[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.8...HEAD
+[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.9...HEAD
+[1.0.0-rc.9]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.8...v1.0.0-rc.9
 [1.0.0-rc.8]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.7...v1.0.0-rc.8
 [1.0.0-rc.7]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.6...v1.0.0-rc.7
 [1.0.0-rc.6]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.5...v1.0.0-rc.6

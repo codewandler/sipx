@@ -1,13 +1,29 @@
 ---
 title: What's new
-description: Release highlights and adoption notes for the sipx 1.0.0-rc.8 release candidate.
+description: Release highlights and adoption notes for the sipx 1.0.0-rc.9 release candidate.
 ---
 
 # What's new
 
 <!-- BEGIN generated:release-heading -->
-## 1.0.0-rc.8 — 2026-08-08
+## 1.0.0-rc.9 — 2026-08-08
 <!-- END generated:release-heading -->
+
+RC.9 puts stated bounds on two waits that had none, and enforces the browser kernel's artifact
+checks.
+
+```bash
+cargo install --locked --version =1.0.0-rc.9 sipx-cli
+```
+
+- **`peers` no longer waits Timer N for a first notification.** Thirty-two seconds became twenty,
+  matching `register`, and a silent registrar is a timeout that names the bound.
+- **`register` names its address of record on failures too**, so a scheduled check's record is
+  identifiable without branching on success first.
+- **The WASM kernel's artifact checks run in CI**, so an added import or a renamed export is caught.
+- **Coverage stopped counting the tests**: 90.13% to 86.79%.
+
+## 1.0.0-rc.8 — 2026-08-08
 
 RC.8 repairs five checks and contracts that were quieter than they claimed.
 
@@ -581,5 +597,5 @@ answer calls, but application callback bindings are not implemented.
 This website is built from `main`, so a page or API link may describe work newer than the tagged
 release. Use the exact crates.io version when reproducibility matters, and consult the
 [complete changelog](https://github.com/codewandler/sipx/blob/main/CHANGELOG.md) before updating a
-Git revision. Unreleased behavior is not part of `1.0.0-rc.8` merely because it appears on this
+Git revision. Unreleased behavior is not part of `1.0.0-rc.9` merely because it appears on this
 site.
