@@ -504,6 +504,15 @@ default book locations are deliberately not implicit in a registrar query. A 403
 `unauthorized`, a 489 exits `rejected`, and a missing initial NOTIFY exits `timeout`. None falls back
 to a book-only success, because that would present an incomplete answer as complete.
 
+A registrar name with several addresses behind it is tried in order, one at a time, until one
+accepts the subscription and notifies — the same serial pass `dial`, `register` and `load` make, so
+a registrar whose first address is dead is still reached. It is bounded at **twenty seconds** over
+all of those addresses together rather than each, which is the same figure a single address gets to
+send its first notification. Only an address that never answered moves the pass on: a refusal, a
+challenge that could not be answered, or an accepted subscription that then stays silent is the
+registrar speaking, and a second address would repeat the answer. When no address answers, the
+failure carries `candidates_attempted` and `candidates_resolved` exactly as the other commands do.
+
 A book that cannot be read — missing, unreadable, or holding a line that is not a name and a URI —
 exits non-zero and names the file and the line. It never prints an empty list: on a fresh machine
 that would read as "there is nobody to call" when the truth is "you have not been told about
