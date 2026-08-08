@@ -103,6 +103,8 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 ### Media
 _Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
 - [M-78 — Guard public enums by reachability, not by name](M-78-guard-public-enums-by-reachability.md) · Media · widening the guard from Error-suffixed names to every pub enum reports 149 workspace-wide and 49 on the media path, most of them pub inside private modules
+- [M-81 — Make the SRTP protect-error discard tell the truth](M-81-count-the-srtp-protect-discard.md) · Media · a spec sentence says the branch is unreachable · M-79 made it reachable, and it increments nothing
+- [M-80 — Decide non-exhaustive for the two relayed packet structs](M-80-decide-non-exhaustive-before-the-freeze.md) · Media · two field additions in two stories, both breaking · the choice stops being reversible at 1.0
 - [M-74 — Guard public data enums against exhaustive matching](M-74-guard-public-data-enums-against-exhaustive-matching.md) · Media · the non_exhaustive check only matches enums whose name ends in Error, so MediaProfile, IcePolicy, Keying and RtcpMode are unguarded
 
 ### supported test surfaces
@@ -162,6 +164,9 @@ _A live call on a machine with a local accelerator should be able to transcribe 
 - [M-56 — Ship a practical local offline speech-synthesis provider](M-56-ship-local-offline-speech-synthesis.md) · Media · after A-25, A-28 and M-54 · accelerator path plus defined CPU behavior
 - [X-104 — Publish a runnable local live-call speech example and measurements](X-104-publish-local-call-speech-example.md) · Build · M16 exit after X-105 · accelerator when available and bounded CPU fixture everywhere
 - [X-105 — Prove speech-provider substitution with one conformance suite](X-105-prove-speech-provider-substitution.md) · Build · after M-55, M-56, A-26, A-27 and A-28 · same suite for bundled and downstream providers
+
+### Media interoperability closure
+- [M-82 — Say what a forwarded extension means to a peer that negotiated none](M-82-say-what-a-forwarded-extension-means-to-a-peer.md) · Media · sipx negotiates no extmap and now forwards element identifiers verbatim across a bridge
 
 ### Bridge a call to an OpenAI realtime agent
 _Every capability sipx claims — TLS held to [sip-tls.md](../specs/sip-tls.md) §3, SRTP held to_

@@ -14,7 +14,28 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   platforms the helper became dead code and `-D warnings` refused to compile the test target. The
   Linux gate could not see it, because there the caller compiles and the helper is used.
 
+### Added
+
+- **A bridged call forwards the RTP header extension it received** rather than dropping it at the
+  relay boundary. `sipx_media::Encoded` carries the extension, and `Encoded::new` builds a payload
+  this endpoint authored. A conference mix deliberately carries none: the mix is a packet this
+  endpoint composed from several contributors, and no rule picks whose extension describes it.
+
+- **`sipx dial` reports `peer` on every outcome**, not only on an answered call. A refusal, a
+  transport failure and an interrupt all name the URI that was dialled, so a script can attach any
+  record to the call it placed without branching on success first.
+  `scripts/check-outcome-parity.py` derives each command's field set from its report builders and
+  fails when one outcome omits a field a sibling carries.
+
+- **Registry publication is paced by the registry's own stated limits** and by the deadline it
+  returns with a `429`, retried within a finite budget and stopped before any further upload once
+  that budget is spent. An ordinary version update is not paced as though it were a new crate name.
+
 ### Changed
+
+- **`sipx_media::Encoded` gained a public field.** Code constructing it as a struct literal should
+  use `Encoded::new(payload_type, payload)`, which builds a payload this endpoint authored with no
+  extension.
 
 - **The command-line suite's wall-clock bounds are derived from the machine that runs them.** Each
   bound was a number written on an idle box; a deliberately loaded box was measured, one of them
