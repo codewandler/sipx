@@ -2,7 +2,7 @@
 id: T-42
 title: Take the shared candidate pass in dial, load and scenario
 pillar: Transport
-status: in-progress
+status: done
 priority: 3
 design: docs/designs/endpoint-resolution.md
 epic: endpoint-resolution
@@ -27,7 +27,7 @@ command walks the list the same way and reports how far it got in the same two f
       `candidates_resolved`, which today they do not — a failing-first test proves each.
 - [x] Each command's retry classification is unchanged by the move, proved per command rather than
       assumed from the shape of the diff.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -106,3 +106,5 @@ command walks the list the same way and reports how far it got in the same two f
   so that side-car should collapse into it rather than being ported across.
 - `crate::destination::with_attempts` is the reporting half and already emits both fields; the work
   is in producing an `Attempts` for the commands that currently produce none.
+
+- 2026-08-08: closed at the `1.0.0-rc.12` boundary, against the wave gate run on this tree.

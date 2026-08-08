@@ -2,7 +2,7 @@
 id: M-82
 title: Say what a forwarded extension means to a peer that negotiated none
 pillar: Media
-status: in-progress
+status: done
 priority: 20
 design:
 epic: media-interoperability
@@ -40,7 +40,7 @@ inferred, particularly since browser offers carrying `a=extmap:` already appear 
       promises.
 - [x] The browser profile's position is stated: an offer carrying `a=extmap:` is answered
       consistently with the decision, rather than by silence.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -90,3 +90,5 @@ inferred, particularly since browser offers carrying `a=extmap:` already appear 
   No RFC registry change: RFC 8285 stays untracked, because adding a row would force a regeneration
   of `docs/compliance.md`, which is a coordinator-owned file. Adding an `[[rfc]]` row for 8285 with
   `status = "none"` is a reasonable follow-up for whoever next touches the registry.
+
+- 2026-08-08: closed at the `1.0.0-rc.12` boundary, against the wave gate run on this tree.

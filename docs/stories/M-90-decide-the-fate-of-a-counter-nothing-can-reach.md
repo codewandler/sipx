@@ -2,7 +2,7 @@
 id: M-90
 title: Decide, before the freeze, whether a counter nothing can reach stays published
 pillar: Media
-status: in-progress
+status: done
 priority: 7
 design:
 epic: media
@@ -64,7 +64,7 @@ than discovered again by whoever next makes the branch reachable.
       nothing `Packet::encode` produces is one, over every adversarial extension and over-long CSRC
       list a caller can reach it with. That test failing is the notice that the branch owes a
       counter again.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Notes
 
@@ -129,3 +129,5 @@ than discovered again by whoever next makes the branch reachable.
   the crate for exactly that reason — `#[non_exhaustive]` would not break it — but `M-92` should
   read it before deciding, because that decision also fixes whether a counter can ever be added
   back after `1.0.0`, which is the one cost this story accepted.
+
+- 2026-08-08: closed at the `1.0.0-rc.12` boundary, against the wave gate run on this tree.

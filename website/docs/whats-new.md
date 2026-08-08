@@ -1,13 +1,43 @@
 ---
 title: What's new
-description: Release highlights and adoption notes for the sipx 1.0.0-rc.11 release candidate.
+description: Release highlights and adoption notes for the sipx 1.0.0-rc.12 release candidate.
 ---
 
 # What's new
 
 <!-- BEGIN generated:release-heading -->
-## 1.0.0-rc.11 — 2026-08-08
+## 1.0.0-rc.12 — 2026-08-08
 <!-- END generated:release-heading -->
+
+RC.12 is about things that were quietly wrong rather than visibly broken: a frame the browser kernel
+truncated without saying so, a load run that under-counted every time, and dead code no Linux gate
+could ever see.
+
+```bash
+cargo install --locked --version =1.0.0-rc.12 sipx-cli
+```
+
+- **The browser kernel refuses a WebSocket message carrying more than one SIP message.** It used to
+  act on the first and silently discard the rest. The host could not have caught this itself without
+  parsing SIP in JavaScript, which is the one thing the kernel exists to avoid.
+- **`sipx load --calls 1` reports the call it placed.** A bound used to cancel the call that reached
+  it, so every bounded run under-reported by one — and the smallest run a user can ask for could
+  never report a success at all.
+- **Every outbound command walks its candidates the same way**, and `load` and `scenario` now say
+  how far a failed pass got. Three of the five loops replaced counted nothing.
+- **The gate sees dead code on platforms it cannot build.** A helper gated on a feature while its
+  only caller was gated on the feature *and* Linux kept two CI jobs red for a day while every local
+  check was green. There is now a check for the shape, plus a cross-target build for
+  `x86_64-pc-windows-gnu` — the one non-Linux target this workspace builds from Linux, established
+  by measuring all four rather than assuming.
+- **Breaking: `MediaDiscardCounts::srtp_protect_failures` is removed.** `rc.11` closed the only
+  route by which a caller could reach the branch it counted, so it became a published field nothing
+  could move. Read `malformed_extensions_dropped` instead.
+- **What a bridged header extension means to a peer that negotiated none is settled**: forwarded
+  verbatim, never translated, and an offered `a=extmap` is answered by omitting it — with the
+  argument, its limits, and what would reopen it all written down.
+
+## 1.0.0-rc.11 — 2026-08-08
 
 RC.11 closes two ways a header extension could quietly corrupt what a peer received, settles the
 extensibility question while it is still reversible, and lands the contract the custom-DSP epic is
@@ -659,5 +689,5 @@ answer calls, but application callback bindings are not implemented.
 This website is built from `main`, so a page or API link may describe work newer than the tagged
 release. Use the exact crates.io version when reproducibility matters, and consult the
 [complete changelog](https://github.com/codewandler/sipx/blob/main/CHANGELOG.md) before updating a
-Git revision. Unreleased behavior is not part of `1.0.0-rc.11` merely because it appears on this
+Git revision. Unreleased behavior is not part of `1.0.0-rc.12` merely because it appears on this
 site.

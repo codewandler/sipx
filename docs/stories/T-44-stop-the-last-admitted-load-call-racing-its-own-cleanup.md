@@ -2,7 +2,7 @@
 id: T-44
 title: Stop the last admitted load call racing its own cleanup
 pillar: Transport
-status: in-progress
+status: done
 priority: 3
 design:
 epic:
@@ -27,7 +27,7 @@ run an operator can type reports what happened instead of a timeout.
       full setup deadline".
 - [x] A process stop still cancels calls in flight immediately; only reaching a configured bound
       waits for the calls that bound admitted.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -118,3 +118,5 @@ run an operator can type reports what happened instead of a timeout.
 
   The board is not regenerated here, and the `gate` row is left unticked — this worktree ran the
   scoped verification the dispatch named, not `./scripts/gate.py`.
+
+- 2026-08-08: closed at the `1.0.0-rc.12` boundary, against the wave gate run on this tree.

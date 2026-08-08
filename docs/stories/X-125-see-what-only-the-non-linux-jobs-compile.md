@@ -2,7 +2,7 @@
 id: X-125
 title: See what only the non-Linux jobs compile
 pillar: Build
-status: in-progress
+status: done
 priority: 30
 design:
 epic: conformance
@@ -55,7 +55,7 @@ reaches any sipx code.
       measurement rather than an assumption — if one is, it becomes a gate step and this story says
       what it costs; if none is, the reason is recorded beside `NOT_RUN_LOCALLY`'s entry so the next
       person does not re-derive it.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -136,3 +136,5 @@ reaches any sipx code.
   gate runs per wave. Everything else was: the checker directly, its suite (29 tests),
   `./scripts/gate.py --check`, `python3 scripts/test-gate.py` (110 tests), `cargo fmt --all --check`
   and the new cross-target step's own command.
+
+- 2026-08-08: closed at the `1.0.0-rc.12` boundary, against the wave gate run on this tree.

@@ -7,6 +7,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0-rc.12] — 2026-08-08
+
+Six stories: a coalesced frame the browser kernel used to truncate silently, a bounded load run that
+under-reported by one, the shared candidate pass in every outbound command, a counter retired
+because nothing could reach it, the `extmap` position settled, and a check for the dead code only a
+non-Linux job would see.
+
 ### Removed
 
 - **Breaking: `MediaDiscardCounts::srtp_protect_failures` is removed.** Read
@@ -31,6 +38,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   can grow by up to one call duration.
 
 ### Changed
+
+- **The gate reports a `cfg`-gated item whose gate is broader than the union of its callers'
+  gates** — dead code on a platform a Linux host cannot build — and cross-checks `sipx-cli` for
+  `x86_64-pc-windows-gnu`, the one non-Linux target this workspace builds from Linux. Which targets
+  are reachable was settled by measurement; macOS and the MSVC environment are not, and the reason
+  now sits beside the gate's CI-only entry instead of being re-derived.
 
 - **What a bridged RTP header extension means to a peer that negotiated none is now settled**: sipx
   negotiates no `a=extmap`, translates no element identifier between the legs of a bridge, and
@@ -4141,7 +4154,8 @@ Stated so nobody has to discover it from a stack trace:
 - **Interop is verified against Kamailio only.** A second implementation with different
   opinions — Asterisk, as a B2BUA rather than a proxy — has not been tried.
 
-[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.11...HEAD
+[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.12...HEAD
+[1.0.0-rc.12]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.11...v1.0.0-rc.12
 [1.0.0-rc.11]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.10...v1.0.0-rc.11
 [1.0.0-rc.10]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.9...v1.0.0-rc.10
 [1.0.0-rc.9]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.8...v1.0.0-rc.9

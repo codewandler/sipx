@@ -2,7 +2,7 @@
 id: S-53
 title: Refuse coalesced SIP at the browser kernel's byte input
 pillar: Session
-status: in-progress
+status: done
 priority: 30
 design: docs/specs/browser-signalling.md
 epic: browser-sdk
@@ -36,7 +36,7 @@ WebSocket transport already keeps.
 - [x] `browser/test/kernel.test.mjs`'s "a coalesced frame is neither split nor answered by the
       binding" case is tightened to assert the connection closes with `framing`, and the paragraph
       in `docs/specs/browser-signalling.md` §5 naming this story is removed.
-- [ ] `./scripts/gate.py` is green.
+- [x] `./scripts/gate.py` is green.
 
 ## Progress
 
@@ -136,3 +136,5 @@ parser is.
 The likely shape is for the parser to report how many octets it consumed, so the kernel can compare
 against the buffer length — check whether `sipx_sip` already exposes that before adding it, since a
 new public function on `sipx-sip` is a wider change than this story needs.
+
+- 2026-08-08: closed at the `1.0.0-rc.12` boundary, against the wave gate run on this tree.
