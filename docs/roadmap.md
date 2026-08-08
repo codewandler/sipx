@@ -10,13 +10,22 @@ is the order the remaining gaps close in and why.
 
 ## Status
 
-_As of 2026-08-08:_ **`1.0.0-rc.3` is the current public prerelease; beta.2 through beta.7 remain
-immutable.** The first release candidate combines the post-beta.7 transport fallback and drain,
-application-owned observability, explicit PCM/L16 boundary, parser-owned routing/privacy edits,
-field-trap fixes, portable five-target CLI artifacts and a direct architecture guide. The retained
-endpoint-responder runs use one compatible profile and overlap at the tested ceiling, so the
-comparison is inconclusive rather than a ranking. Stable `1.0.0` remains a separate promotion:
-independent application use is still missing and is not inferred from repository evidence.
+_As of 2026-08-08:_ **`1.0.0-rc.3` is the current public prerelease; beta.2 through beta.7 and
+`rc.2` remain immutable.** The second release candidate answers two independent external sweeps of
+the published `rc.2` artifacts — twenty-five findings across call lifecycle, endpoint reachability,
+timeout honesty, refusal signalling, automation contracts and published onboarding — and adds
+bounded SIP endpoint resolution, G.722, a typed CLI parser, supervisor-termination handling and the
+six-module call split, which moves no public path. Local speech and call-audio analysis are
+specified and deliberately unimplemented. Both endpoint-responder directions were re-measured under
+the current contract after a schema change invalidated the retained pair; their intervals still
+overlap at the tested ceiling, so the comparison stays inconclusive rather than a ranking. Stable
+`1.0.0` remains a separate promotion: independent application use is still missing and is not
+inferred from repository evidence.
+
+_As of 2026-08-05:_ **`1.0.0-rc.2` was the first published release candidate.** It combined the
+post-beta.7 transport fallback and drain, application-owned observability, the explicit PCM/L16
+boundary, parser-owned routing and privacy edits, field-trap fixes, portable five-target CLI
+artifacts and a direct architecture guide.
 
 _As of 2026-07-30:_ **all seven `1.0.0-alpha` predicates are met**, and `1.0.0-alpha` is cut.
 [`maturity.md`](maturity.md) reports them, and it reports them as *computed* rather than asserted —

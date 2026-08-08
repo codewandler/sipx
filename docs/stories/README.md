@@ -64,8 +64,6 @@ unmet.
 - [M-57 — Specify deterministic real-time call-audio processing](M-57-specify-real-time-call-audio-processor.md) · Media · M16 spec gate · sans-I/O bounded frame processor using M-54's shared seam
 - [M-70 — Accept multiplexed browser offers with unused component candidates](M-70-accept-multiplexed-browser-offers-with-unused-component-candidates.md) · Media · external review finding 9 · a second browser engine reaches SDP then fails the multiplexed profile
 - [T-39 — Resolve named targets in every phone command](T-39-resolve-named-targets-in-every-phone-command.md) · Transport · external review finding 2 · after T-38 · dial, register and scenario accept named targets without manual address injection
-- [X-112 — Take the integrated gate green on main and reconcile derived artifacts](X-112-take-the-integrated-gate-green-on-main.md) · Build · the single deferred acceptance row 29 stories share · five steps are already proven red at the merge base
-- [X-113 — Record the post-rc.2 boundary and close the wave stories](X-113-record-the-post-rc2-boundary-and-close-the-wave.md) · Build · after X-112 · one changelog boundary, then every story whose acceptance actually holds closes
 
 ## Next (ready — take the top one unless the user named a story)
 
@@ -448,6 +446,8 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [X-103 — Remove endpoint responder hot-path congestion](X-103-remove-endpoint-responder-hot-path-congestion.md) · Build · profile before tuning; exceed the current peer endpoint baseline without weakening correctness or cleanup
 - [X-110 — Replace handwritten CLI argument parsing](X-110-replace-handwritten-cli-argument-parsing.md) · Build · external review findings 4, 7 and 12 · replace the custom Args scanner and flag registries with one typed parser; preserve the shipped CLI contract
 - [X-111 — Make published onboarding executable](X-111-make-published-onboarding-executable.md) · Build · follow-up external review findings 6–7 · dependency snippets omit a used crate and the generated version renders truncated
+- [X-112 — Take the integrated gate green on main and reconcile derived artifacts](X-112-take-the-integrated-gate-green-on-main.md) · Build · the single deferred acceptance row 29 stories share · five steps are already proven red at the merge base
+- [X-113 — Record the post-rc.2 boundary and close the wave stories](X-113-record-the-post-rc2-boundary-and-close-the-wave.md) · Build · after X-112 · one changelog boundary, then every story whose acceptance actually holds closes
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->
