@@ -1,5 +1,5 @@
 ---
-id: M-80
+id: M-84
 title: Carry calibrated thresholds onto the application wire
 pillar: Media
 status: backlog
@@ -48,3 +48,6 @@ to a Rust caller.
 - Weigh the event against the read: a threshold that settles is silent, so an event stream costs
   nothing in steady state, but a client that only ever wants "what now?" is better served by a read.
   `M-60`'s call-side channel is already latest-value, which suits both.
+
+- 2026-08-08: renumbered from `M-80` on filing. `M-80` had already been allocated in the same wave,
+  to the `#[non_exhaustive]` decision for `Encoded` and `Packet`. Only the id moved.
