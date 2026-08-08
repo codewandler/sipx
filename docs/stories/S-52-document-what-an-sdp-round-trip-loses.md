@@ -2,8 +2,8 @@
 id: S-52
 title: Document what an SDP round trip loses
 pillar: Signalling
-status: ready
-priority: 36
+status: done
+priority:
 design:
 epic: sip-core
 areas: [sipx-sdp]
@@ -22,20 +22,28 @@ than from a peer.
 
 ## Acceptance
 
-- [ ] `to_string_sdp`'s documentation names every field the round trip does not preserve: `v=`,
+- [x] `to_string_sdp`'s documentation names every field the round trip does not preserve: `v=`,
       `o=` and `c=` nettype and addrtype, multicast `/ttl`, `m=` port `/count`, line order and
       whitespace.
-- [ ] It states the consequence plainly — safe for a description this stack authored, unsafe for one
+- [x] It states the consequence plainly — safe for a description this stack authored, unsafe for one
       received and forwarded — and points at `sipx-sdp`'s relay path as the supported way to forward.
-- [ ] A test pins the loss set, so a future parser change that silently preserves or drops something
+- [x] A test pins the loss set, so a future parser change that silently preserves or drops something
       else fails rather than quietly widening the contract.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
 - 2026-08-08: filed from `C-7`'s adjacent findings. That story had to rewrite description text in a
   new `crates/sipx-sdp/src/relay.rs` precisely because the round trip is lossy, and noted that a
   note on `to_string_sdp` would have saved the discovery.
+
+- 2026-08-08: implemented. `to_string_sdp` now carries a "This is not a round trip" section naming
+  each dropped field — the reissued `v=`, `o=`/`c=` nettype and addrtype, multicast `/ttl` and
+  address count, `m=` port `/count`, line order and whitespace — and states the consequence:
+  safe for a description this stack authored, unsafe for one it received, with `crate::relay` named
+  as the supported way to forward. `crates/sipx-sdp/tests/round_trip_loss.rs` pins three of those
+  losses against a fixture that carries all of them, so a parser change that starts preserving one
+  fails here rather than surprising the next caller who forwards someone else's description.
 
 ## Notes
 

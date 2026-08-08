@@ -693,6 +693,24 @@ impl SessionDescription {
     ///
     /// Line order follows RFC 8866 §5, which is not a style preference: the grammar fixes the
     /// order, and receivers do reject descriptions that get it wrong.
+    ///
+    /// # This is not a round trip
+    ///
+    /// [`parse`](crate::parse) builds a *view* over the lines it was given, and this renders that
+    /// view — it does not reproduce the bytes it came from. A description that arrived on the wire
+    /// and is written back out here loses, silently:
+    ///
+    /// - the original `v=` line, which is reissued as `v=0`;
+    /// - `o=` and `c=` nettype and addrtype, which are reissued as `IN` and the address family
+    ///   this view holds;
+    /// - a multicast address's `/ttl` and any address count;
+    /// - an `m=` line's port `/count`;
+    /// - line order within a section, and all original whitespace.
+    ///
+    /// **That is safe for a description this stack authored and unsafe for one it received.** For
+    /// an element that forwards someone else's description — a signalling-only coupling, say — use
+    /// [`crate::relay`], which rewrites the text in place and preserves every byte it does not
+    /// have to change. `C-7` had to write that module for exactly this reason.
     #[must_use]
     pub fn to_string_sdp(&self) -> String {
         let mut out = String::with_capacity(256);
