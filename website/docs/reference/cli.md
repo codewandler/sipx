@@ -80,9 +80,58 @@ verification and a `sips:` URI cannot select a cleartext transport.
 `--tls-key <FILE>`. `answer` uses the same pair as its required server identity when listening on
 TLS or WSS. Supplying only half the pair is a usage error before any socket is opened.
 
+### Named destinations
+
+Every outbound command — `dial`, `register`, `load`, `peers --registrar` and `scenario` — takes the
+host you actually have. A name is looked up by the phone itself, following RFC 3263, so there is
+nothing to resolve beforehand and no address to paste into `--target`:
+
+```sh
+sipx dial sip:bob@pbx.example
+sipx register sip:alice@example.com --target pbx.example:5060
+```
+
+What is asked for depends on how much the URI already fixes. A host with an explicit port needs no
+service discovery, so only its address records (`A` and `AAAA`) are looked up. A bare name goes
+through `NAPTR`, then the `SRV` names those point at plus `_sip._udp`, `_sip._tcp` and `_sips._tcp`
+— only `_sips._tcp` for a `sips:` URI — then addresses. An explicit `--transport` or URI
+`transport=` parameter skips `NAPTR` and asks for that one service's `SRV` name, which is also how
+`ws` and `wss` destinations are discovered. A literal IPv4 or IPv6 address performs no lookup at
+all, and is unchanged in every way, including its timing.
+
+The lookup is bounded twice: **two seconds** for any one question, and **eight seconds** for the
+whole resolution including the ordering that follows it. Both are ceilings rather than waits.
+`register --timeout <S>` lowers both under whatever the attempt has left, so resolution can never
+spend a budget the attempt has already given away.
+
+Resolution keeps the identity you asked for. TLS and WSS connect to the selected address and verify
+the name from the URI (or `--tls-server-name`), never the address; a `sips:` URI and an explicitly
+secure transport never fall back to a cleartext candidate.
+
+The three ways a named destination can fail are separate answers, because they have separate fixes:
+
+| What happened | `status` / exit | `error` says |
+|---|---|---|
+| The zone answered, and has no usable record | `failed` (1) | `no usable candidate for <host>` |
+| Nothing established an answer | `failed` (1) | `DNS lookup unavailable for <question>` |
+| A question or the whole resolution ran out of time | `timeout` (5) | `DNS lookup timed out for <question>`, or `SIP target resolution timed out` |
+| The name resolved and the peer refused the connection | `failed` (1) | the transport cause, such as `transport: io: Connection refused` |
+
+A deadline therefore has its own exit code, and the two remaining cases are told apart by `error`
+without waiting: a DNS answer that cannot produce a candidate is reported as `target resolution
+failed`, while a connection failure names the transport error and no resolution at all. `register`
+adds `registration_limit_ms` only when its *own* deadline expired, so a name that will not resolve
+is never presented as a registrar that did not answer.
+
+`SIPX_NAMESERVER` asks a specific resolver instead of the host's configured ones — an IP address,
+optionally with a port, defaulting to 53. It is how a wrong zone is told from an unreachable
+resolver, and it is refused rather than ignored when it cannot be read, including when an unset
+shell variable expands to nothing. Literal destinations do not consult it, because they do not
+consult a resolver.
+
 ## `sipx dial <URI>`
 
-Place a call: `sipx dial sip:bob@192.0.2.1:5060`
+Place a call: `sipx dial sip:bob@pbx.example`
 
 | Flag | Meaning |
 |---|---|
@@ -359,7 +408,7 @@ List what can be called: `sipx peers --json`
 | `--book <FILE>` | Read this peer book; with `--registrar`, merge it explicitly |
 | `--registrar <AOR>` | Subscribe to this registrar's current registrations |
 | `--password <P>` | Digest password; prefer `SIPX_PASSWORD` because argv is visible |
-| `--target <ADDR>` | Registrar socket when it cannot be derived from the AOR |
+| `--target <ADDR>` | Registrar host or address, when it cannot be derived from the AOR |
 | `--expires <S>` | Positive requested subscription lifetime (default 3600) |
 | `--watch <S>` | Keep applying updates for this many seconds after the first snapshot |
 | `--local <ADDR>` | Local signalling bind address |
@@ -392,7 +441,7 @@ seconds since the last complete snapshot was accepted.
 ```sh
 SIPX_PASSWORD="$secret" sipx peers \
   --registrar sip:alice@example.com \
-  --target 192.0.2.20:5060 \
+  --target registrar.example:5060 \
   --watch 30 --json
 ```
 

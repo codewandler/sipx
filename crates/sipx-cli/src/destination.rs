@@ -1,5 +1,6 @@
 //! Shared outbound SIP destination resolution for command adapters.
 
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,6 +15,17 @@ use crate::output::Exit;
 /// T-38's finite serial connection-attempt budget.
 pub(crate) const MAX_ATTEMPTS: usize = 16;
 
+/// The nameserver to ask, when it should not be the one the host is configured with.
+///
+/// A phone that names a destination and cannot say *which* resolver it asked cannot tell a zone
+/// that is wrong from a resolver that is unreachable — and those have different owners and
+/// different fixes. Pointing it somewhere specific is also the only way the process tests can make
+/// a resolution failure, a resolution deadline and a refused connection happen on purpose.
+const NAMESERVER: &str = "SIPX_NAMESERVER";
+
+/// Port 53, when `SIPX_NAMESERVER` names an address and not a port (RFC 1035 §4.2).
+const DNS_PORT: u16 = 53;
+
 /// A reusable system resolver. One command invocation gets one cache and one finite policy.
 #[derive(Debug)]
 pub(crate) struct Resolver {
@@ -22,13 +34,14 @@ pub(crate) struct Resolver {
 }
 
 impl Resolver {
-    /// Read the process' configured nameservers.
+    /// Read the process' configured nameservers, or the one `SIPX_NAMESERVER` names.
     pub(crate) fn system() -> Self {
+        let policy = ResolutionPolicy::default();
         Self {
-            dns: DnsResolver::from_system()
+            dns: configured(policy)
                 .map(Arc::new)
                 .map_err(|source| source.to_string()),
-            policy: ResolutionPolicy::default(),
+            policy,
         }
     }
 
@@ -91,6 +104,39 @@ impl Resolver {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|message| Error::Input { message })
     }
+}
+
+/// Build the DNS client the whole invocation shares.
+///
+/// The nameserver override is read here rather than parsed as a flag: it belongs to the machine
+/// the command runs on, not to the call being placed, and every outbound command already routes
+/// through this one constructor.
+fn configured(policy: ResolutionPolicy) -> std::io::Result<DnsResolver> {
+    let Some(value) = std::env::var_os(NAMESERVER) else {
+        return DnsResolver::from_system();
+    };
+    let value = value.to_string_lossy().into_owned();
+    let address = nameserver(&value).ok_or_else(|| {
+        std::io::Error::other(format!(
+            "{NAMESERVER} must be an IP address, optionally with a port, not {value:?}"
+        ))
+    })?;
+    // The client's own per-question wait is the outer resolution bound rather than the
+    // per-question one, so the deadline that fires — and is therefore the one reported — is always
+    // sipx's own. `Resolver::within` only ever lowers those, so this stays true under a command
+    // deadline too.
+    DnsResolver::for_nameserver(address, policy.resolution_timeout)
+}
+
+/// `address` or `address:port`. A name here would need a resolver to read, which is the thing
+/// being configured.
+fn nameserver(value: &str) -> Option<SocketAddr> {
+    value.parse::<SocketAddr>().ok().or_else(|| {
+        value
+            .parse::<IpAddr>()
+            .ok()
+            .map(|address| SocketAddr::new(address, DNS_PORT))
+    })
 }
 
 struct NoDns;
@@ -252,6 +298,32 @@ mod tests {
                 "outbound command {name} bypasses destination::Resolver"
             );
         }
+    }
+
+    #[test]
+    fn a_nameserver_override_may_leave_the_port_implied() {
+        assert_eq!(
+            nameserver("192.0.2.53"),
+            Some("192.0.2.53:53".parse().expect("a socket address"))
+        );
+        assert_eq!(
+            nameserver("127.0.0.1:5353"),
+            Some("127.0.0.1:5353".parse().expect("a socket address"))
+        );
+        assert_eq!(
+            nameserver("[2001:db8::53]:5353"),
+            Some("[2001:db8::53]:5353".parse().expect("a socket address"))
+        );
+    }
+
+    /// Refused rather than ignored. A resolver override that silently falls back to the host's own
+    /// nameservers would answer from a zone the caller did not ask about, and say nothing — and an
+    /// unset shell variable expands to exactly the empty case.
+    #[test]
+    fn a_nameserver_override_that_cannot_be_read_is_refused() {
+        assert_eq!(nameserver(""), None);
+        assert_eq!(nameserver("resolver.example"), None);
+        assert_eq!(nameserver("192.0.2.53:"), None);
     }
 
     #[test]

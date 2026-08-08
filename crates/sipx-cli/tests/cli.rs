@@ -2630,6 +2630,436 @@ async fn dial_and_register_through_a_loopback_hostname() {
     );
 }
 
+/// The name the fixture zone has an address for: `127.0.0.1`, so a resolved candidate is a port
+/// on this machine and nothing the test does leaves it.
+const RESOLVES: &str = "reachable.sipx.test";
+/// A name the zone answers about and does not have. An answer, not a silence.
+const NEGATIVE: &str = "absent.sipx.test";
+/// A name the fixture never answers about at all.
+const SILENT: &str = "silent.sipx.test";
+
+/// A nameserver on loopback answering from a fixed zone, so which way a named target fails is the
+/// test's decision rather than the machine's DNS.
+///
+/// The wire format is written out by hand rather than taken from a DNS library: the command line
+/// test binary would otherwise carry a resolver dependency purely to describe the answers it wants
+/// the resolver under test to receive.
+struct Nameserver {
+    address: std::net::SocketAddr,
+    served: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Nameserver {
+    /// Questions this fixture has actually been asked — which is what makes "the phone looked the
+    /// name up" an assertion rather than a claim.
+    fn served(&self) -> usize {
+        self.served.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl Drop for Nameserver {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn fixture_nameserver() -> Nameserver {
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("the fixture nameserver binds");
+    let address = socket.local_addr().expect("has an address");
+    let served = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = std::sync::Arc::clone(&served);
+
+    let task = tokio::spawn(async move {
+        let mut datagram = vec![0u8; 2048];
+        while let Ok((length, from)) = socket.recv_from(&mut datagram).await {
+            let Some(question) = Question::read(&datagram[..length]) else {
+                continue;
+            };
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if question.name == SILENT {
+                // The black hole. The question was read, so nothing about this run is an
+                // unreachable server or an ICMP failure — only a deadline can end it.
+                continue;
+            }
+            let response = question.answer(&datagram[..length]);
+            let _ = socket.send_to(&response, from).await;
+        }
+    });
+
+    Nameserver {
+        address,
+        served,
+        task,
+    }
+}
+
+/// One parsed DNS question: the name asked about, its record type, and where the question section
+/// ends so the response can echo it verbatim (RFC 1035 §4.1.2).
+struct Question {
+    name: String,
+    kind: u16,
+    end: usize,
+}
+
+impl Question {
+    fn read(datagram: &[u8]) -> Option<Self> {
+        if datagram.len() < 12 || u16::from_be_bytes([datagram[4], datagram[5]]) != 1 {
+            return None;
+        }
+        let mut labels: Vec<String> = Vec::new();
+        let mut at = 12usize;
+        loop {
+            let length = usize::from(*datagram.get(at)?);
+            if length == 0 {
+                break;
+            }
+            // A question never compresses its own name, so a pointer here is not a question this
+            // fixture knows how to read.
+            if length >= 0xC0 {
+                return None;
+            }
+            let start = at + 1;
+            let end = start + length;
+            labels.push(String::from_utf8_lossy(datagram.get(start..end)?).to_ascii_lowercase());
+            at = end;
+        }
+        let kind_at = at + 1;
+        let kind = u16::from_be_bytes([*datagram.get(kind_at)?, *datagram.get(kind_at + 1)?]);
+        let end = kind_at + 4;
+        // The class the response must echo has to be present before it can be echoed.
+        datagram.get(end - 1)?;
+        Some(Self {
+            name: labels.join("."),
+            kind,
+            end,
+        })
+    }
+
+    /// The zone's answer to this question, as bytes on the wire.
+    fn answer(&self, datagram: &[u8]) -> Vec<u8> {
+        const A: u16 = 1;
+        let (rcode, answers, authority) = match self.name.as_str() {
+            RESOLVES if self.kind == A => (0u8, vec![a_record()], Vec::new()),
+            // The other address family, answered and empty rather than left unanswered.
+            RESOLVES => (0, Vec::new(), vec![soa_record()]),
+            NEGATIVE => (3, Vec::new(), vec![soa_record()]),
+            // No SOA. RFC 2308 §5's negative answer is exactly the part that is missing, which is
+            // how a resolver that could not establish an answer is told from one that did.
+            _ => (3, Vec::new(), Vec::new()),
+        };
+
+        let mut response = Vec::with_capacity(datagram.len() + 128);
+        response.extend_from_slice(&datagram[..2]); // the query's own identifier
+        response.push(0x85); // a response, authoritative, recursion desired
+        response.push(0x80 | rcode); // recursion available, and the result
+        response.extend_from_slice(&1u16.to_be_bytes());
+        response.extend_from_slice(&(answers.len() as u16).to_be_bytes());
+        response.extend_from_slice(&(authority.len() as u16).to_be_bytes());
+        response.extend_from_slice(&0u16.to_be_bytes());
+        response.extend_from_slice(&datagram[12..self.end]); // the question, verbatim
+        for record in answers.into_iter().chain(authority) {
+            response.extend_from_slice(&record);
+        }
+        response
+    }
+}
+
+fn a_record() -> Vec<u8> {
+    let mut record = record_head(1, 4);
+    record.extend_from_slice(&[127, 0, 0, 1]);
+    record
+}
+
+/// RFC 2308 §5: the zone's SOA is what makes an absence an answer rather than a silence, because
+/// it is what tells a resolver how long the absence may be remembered.
+fn soa_record() -> Vec<u8> {
+    let mut data = encoded_name("ns.sipx.test");
+    data.extend(encoded_name("hostmaster.sipx.test"));
+    for value in [1u32, 3600, 600, 86_400, 30] {
+        data.extend_from_slice(&value.to_be_bytes());
+    }
+    let mut record = record_head(6, data.len() as u16);
+    record.extend(data);
+    record
+}
+
+/// Owner name, type, class, TTL and data length — what every record carries (RFC 1035 §4.1.3).
+/// The owner is a pointer to the question's name, which is what every record here is about.
+fn record_head(kind: u16, length: u16) -> Vec<u8> {
+    let mut head = vec![0xC0, 0x0C];
+    head.extend_from_slice(&kind.to_be_bytes());
+    head.extend_from_slice(&1u16.to_be_bytes()); // IN
+    head.extend_from_slice(&60u32.to_be_bytes());
+    head.extend_from_slice(&length.to_be_bytes());
+    head
+}
+
+fn encoded_name(name: &str) -> Vec<u8> {
+    let mut encoded = Vec::new();
+    for label in name.split('.') {
+        encoded.push(label.len() as u8);
+        encoded.extend_from_slice(label.as_bytes());
+    }
+    encoded.push(0);
+    encoded
+}
+
+/// The value a failure report carries for one field, in whichever format it was rendered.
+///
+/// Read as a field rather than as a rendered line: the text form pads names to the widest one, so
+/// asserting on the spacing would break whenever a field is added beside them.
+fn reported(stderr: &str, name: &str, json: bool) -> Option<String> {
+    if json {
+        let object: serde_json::Value =
+            serde_json::from_str(stderr.lines().find(|line| line.starts_with('{'))?).ok()?;
+        object.get(name)?.as_str().map(ToOwned::to_owned)
+    } else {
+        stderr
+            .lines()
+            .find_map(|line| line.strip_prefix(name).map(|value| value.trim().to_owned()))
+    }
+}
+
+/// Run one `sipx` command whose only resolver is the fixture nameserver.
+async fn through_nameserver(
+    dns: &Nameserver,
+    arguments: &[&str],
+    json: bool,
+) -> std::process::Output {
+    let mut command = sipx();
+    command
+        .args(arguments)
+        .args(["--local", "127.0.0.1:0"])
+        .env("SIPX_NAMESERVER", dns.address.to_string());
+    if json {
+        command.arg("--json");
+    }
+    // A failure bound: a resolution or attempt deadline that stopped being obeyed hangs this
+    // assertion rather than the job it runs in.
+    tokio::time::timeout(Duration::from_secs(25), command.output())
+        .await
+        .expect("a named attempt is bounded")
+        .expect("the command runs")
+}
+
+/// `T-39`: a named registrar fails in three different ways and says which. A zone that answers
+/// "no such name", a nameserver that never answers, and a name that resolves to a port nothing
+/// accepts are three different problems with three different fixes, and a phone that reports them
+/// identically sends the operator to the wrong one.
+#[tokio::test]
+async fn a_named_registrar_tells_resolution_failure_timeout_and_connection_failure_apart() {
+    let _scenario = process_scenario().await;
+    let dns = fixture_nameserver().await;
+
+    // Reserved and released, so the port is one nothing on this machine accepts on.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").expect("reserves a loopback port");
+    let refused = closed.local_addr().expect("reserved address").port();
+    drop(closed);
+
+    for json in [false, true] {
+        let register = |target: String, extra: Vec<String>| {
+            let dns = &dns;
+            async move {
+                let mut arguments = vec![
+                    "register".to_owned(),
+                    "sip:alice@example.test".to_owned(),
+                    "--target".to_owned(),
+                    target,
+                ];
+                arguments.extend(extra);
+                let borrowed: Vec<&str> = arguments.iter().map(String::as_str).collect();
+                through_nameserver(dns, &borrowed, json).await
+            }
+        };
+
+        // The zone answered, and the answer is that the name has no address anywhere.
+        let absent = register(
+            format!("{NEGATIVE}:5060"),
+            vec!["--timeout".to_owned(), "10".to_owned()],
+        )
+        .await;
+        let stderr = String::from_utf8_lossy(&absent.stderr).into_owned();
+        assert_eq!(absent.status.code(), Some(1), "{stderr}");
+        assert_eq!(reported(&stderr, "status", json).as_deref(), Some("failed"));
+        assert!(
+            reported(&stderr, "error", json)
+                .is_some_and(|error| error.contains(&format!("no usable candidate for {NEGATIVE}"))),
+            "an answered absence names itself: {stderr}"
+        );
+        assert!(
+            !stderr.contains("registration_limit_ms"),
+            "a name that does not resolve is not the attempt running out of time: {stderr}"
+        );
+        assert!(
+            absent.stdout.is_empty(),
+            "a failure must not land on stdout: {:?}",
+            String::from_utf8_lossy(&absent.stdout)
+        );
+
+        // Nothing answered the question at all. The per-question deadline is what ends it.
+        let silent = register(
+            format!("{SILENT}:5060"),
+            vec!["--timeout".to_owned(), "20".to_owned()],
+        )
+        .await;
+        let stderr = String::from_utf8_lossy(&silent.stderr).into_owned();
+        assert_eq!(
+            silent.status.code(),
+            Some(5),
+            "a resolution that ran out of time is a timeout, not a failure: {stderr}"
+        );
+        assert_eq!(
+            reported(&stderr, "status", json).as_deref(),
+            Some("timeout")
+        );
+        assert!(
+            reported(&stderr, "error", json)
+                .is_some_and(|error| error.contains(&format!("timed out for A/AAAA {SILENT}"))),
+            "the deadline names the question it bounded: {stderr}"
+        );
+
+        // The name resolved. The port is what refused.
+        let unreachable = register(
+            format!("{RESOLVES}:{refused}"),
+            vec![
+                "--transport".to_owned(),
+                "tcp".to_owned(),
+                "--timeout".to_owned(),
+                "10".to_owned(),
+            ],
+        )
+        .await;
+        let stderr = String::from_utf8_lossy(&unreachable.stderr).into_owned();
+        assert_eq!(unreachable.status.code(), Some(1), "{stderr}");
+        assert_eq!(reported(&stderr, "status", json).as_deref(), Some("failed"));
+        assert!(
+            reported(&stderr, "error", json)
+                .is_some_and(|error| error.contains("transport") && !error.contains("resolution")),
+            "resolution succeeded here; naming it as the cause sends the operator to DNS: {stderr}"
+        );
+        assert!(
+            !stderr.contains("registration_limit_ms"),
+            "a refused connection does not wait for the deadline: {stderr}"
+        );
+    }
+
+    assert!(
+        dns.served() >= 6,
+        "every named run must have asked the fixture, or the system resolver answered instead: \
+         {} questions",
+        dns.served()
+    );
+}
+
+/// The same three failures through `dial`, because the resolver is shared: an operator who only
+/// ever runs one of the two commands must not be told a different story by it.
+#[tokio::test]
+async fn a_named_call_target_reports_the_same_three_failures() {
+    let _scenario = process_scenario().await;
+    let dns = fixture_nameserver().await;
+
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").expect("reserves a loopback port");
+    let refused = closed.local_addr().expect("reserved address").port();
+    drop(closed);
+
+    let absent = through_nameserver(
+        &dns,
+        &[
+            "dial",
+            &format!("sip:bob@{NEGATIVE}:5060"),
+            "--timeout",
+            "10",
+            "--duration",
+            "0",
+        ],
+        true,
+    )
+    .await;
+    let stderr = String::from_utf8_lossy(&absent.stderr).into_owned();
+    assert_eq!(absent.status.code(), Some(1), "{stderr}");
+    assert!(
+        reported(&stderr, "error", true)
+            .is_some_and(|error| error.contains(&format!("no usable candidate for {NEGATIVE}"))),
+        "{stderr}"
+    );
+
+    let silent = through_nameserver(
+        &dns,
+        &[
+            "dial",
+            &format!("sip:bob@{SILENT}:5060"),
+            "--timeout",
+            "20",
+            "--duration",
+            "0",
+        ],
+        true,
+    )
+    .await;
+    let stderr = String::from_utf8_lossy(&silent.stderr).into_owned();
+    assert_eq!(silent.status.code(), Some(5), "{stderr}");
+    assert!(
+        reported(&stderr, "error", true)
+            .is_some_and(|error| error.contains(&format!("timed out for A/AAAA {SILENT}"))),
+        "{stderr}"
+    );
+
+    let unreachable = through_nameserver(
+        &dns,
+        &[
+            "dial",
+            &format!("sip:bob@{RESOLVES}:{refused}"),
+            "--transport",
+            "tcp",
+            "--timeout",
+            "10",
+            "--duration",
+            "0",
+        ],
+        true,
+    )
+    .await;
+    let stderr = String::from_utf8_lossy(&unreachable.stderr).into_owned();
+    assert_eq!(unreachable.status.code(), Some(1), "{stderr}");
+    assert!(
+        reported(&stderr, "error", true)
+            .is_some_and(|error| error.contains("transport") && !error.contains("resolution")),
+        "the name resolved; the connection is what failed: {stderr}"
+    );
+}
+
+/// `T-39`: a named target is what an operator actually has, and the page a script author reads is
+/// where that has to be stated. Without it the advice that survives is the one this story exists
+/// to retire — look the address up yourself and pass a literal.
+#[test]
+fn the_named_target_resolution_contract_is_documented() {
+    let reference = include_str!("../../../website/docs/reference/cli.md");
+    for stated in [
+        // A named example, rather than a literal address, in the command that opens the page.
+        "sipx dial sip:bob@pbx.example",
+        // What the lookup follows, and the records it can go through.
+        "RFC 3263",
+        "NAPTR",
+        "SRV",
+        // What bounds it. Both halves, because a per-question wait is not a whole-resolution one.
+        "two seconds",
+        "eight seconds",
+        // The three ways it ends, told apart without reading English prose out of `error`.
+        "no usable candidate",
+        "DNS lookup timed out",
+        // Which resolver was asked, and how to ask a different one.
+        "SIPX_NAMESERVER",
+    ] {
+        assert!(
+            reference.contains(stated),
+            "the CLI reference does not state {stated:?} about named-target resolution"
+        );
+    }
+}
+
 /// The acceptance test for P-3 and P-4: two `sipx` processes, a real call, and a recording
 /// that contains the audio that was played.
 #[tokio::test]
