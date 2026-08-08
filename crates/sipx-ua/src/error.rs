@@ -9,6 +9,15 @@ pub enum Error {
     /// The transport failed.
     #[error("transport: {0}")]
     Transport(#[from] sipx_transport::Error),
+    /// The registrar's name could not be turned into an address (RFC 3263).
+    ///
+    /// Distinct from [`Error::Transport`] because nothing was dialled: no socket was opened and
+    /// no packet was sent, so the fix is in the zone or in the resolver rather than at the
+    /// address. `sipx_transport::destination::Error::kind` separates the two that a caller most
+    /// needs apart — a zone with no answer, which is final, from a deadline, which says nothing
+    /// about the name at all.
+    #[error("resolution: {0}")]
+    Resolution(#[from] sipx_transport::destination::Error),
     /// A message could not be built.
     #[error("build: {0}")]
     Build(#[from] sipx_sip::error::BuildError),

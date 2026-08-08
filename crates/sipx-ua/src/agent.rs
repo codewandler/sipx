@@ -95,6 +95,41 @@ impl Config {
         }
     }
 
+    /// A configuration for a registrar that is *named* rather than addressed (RFC 3263).
+    ///
+    /// [`Config::new`] wants an address, which an application can only get by resolving the name
+    /// itself — and then it owns the deadlines, the NAPTR/SRV/A ordering, the no-downgrade rule
+    /// for `sips:`, and the identity a certificate is checked against. This resolves it through
+    /// the same bounded resolver the diagnostic phone uses, so none of that has to be reproduced
+    /// and none of it can drift apart.
+    ///
+    /// The `resolver` states its own budget when it is built — see
+    /// [`sipx_transport::destination::Resolver::within`] — because a registration attempt holding
+    /// a deadline must not start a longer resolution beside it.
+    ///
+    /// The **first** candidate becomes [`Config::target`]. A caller that wants the fallback order
+    /// as well calls [`sipx_transport::destination::Resolver::resolve`] directly and builds one
+    /// configuration per candidate, up to
+    /// [`sipx_transport::destination::MAX_ATTEMPTS`]; the same call is also the way to reach a
+    /// registrar through an outbound proxy, which takes a next hop this constructor does not.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Resolution`] if the name produced no usable candidate, whether because the zone
+    /// had no answer or because a deadline fired first. The two are told apart by
+    /// `sipx_transport::destination::Error::kind`, and neither is a transport failure: nothing
+    /// has been dialled at this point.
+    pub async fn resolved(
+        aor: impl Into<String>,
+        contact: impl Into<String>,
+        registrar: Uri,
+        resolver: &sipx_transport::destination::Resolver,
+    ) -> Result<Self> {
+        let candidates = resolver.resolve(&registrar, None, None).await?;
+        let target = sipx_transport::destination::first(&candidates)?.clone();
+        Ok(Self::new(aor, contact, registrar, target))
+    }
+
     /// Fail a flow whose keep-alive is unanswered for this long (RFC 5626 §4.4).
     #[must_use]
     pub fn with_keepalive_timeout(mut self, within: Duration) -> Self {

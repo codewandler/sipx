@@ -68,11 +68,15 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
         .await
     {
         Ok(candidates) => candidates,
-        Err(error) => return fail(format, error.exit(), &error.to_string()),
+        Err(error) => {
+            return fail(format, crate::destination::exit(&error), &error.to_string());
+        }
     };
     let target = match crate::destination::first(&candidates) {
         Ok(target) => target.clone(),
-        Err(error) => return fail(format, error.exit(), &error.to_string()),
+        Err(error) => {
+            return fail(format, crate::destination::exit(&error), &error.to_string());
+        }
     };
     let target_addr = target.addr;
     transport = transport.negotiated(target.transport);

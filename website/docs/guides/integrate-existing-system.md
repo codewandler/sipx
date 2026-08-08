@@ -99,9 +99,27 @@ gather host and STUN-derived server-reflexive ICE candidates. TURN and relayed c
 available, so some NAT pairs still have no working media path. Validate from the network where the
 endpoint will actually run, not only on loopback.
 
+## Name a destination instead of addressing one
+
+Your application does not have to turn names into addresses. `sipx_transport::destination::Resolver`
+performs the same RFC 3263 lookup the CLI performs — NAPTR, then SRV, then A and AAAA — and returns
+the ordered `Target` candidates to try. Build it with `Resolver::within(budget)`, which states the
+deadline the lookup has to fit inside; the lookup is bounded at two seconds per question and eight
+seconds overall, or less when your budget is shorter.
+
+Two guarantees come with it, and both are easy to lose when an application resolves names on its
+own. A `sips:` URI never yields a cleartext candidate, so a secure destination cannot silently
+downgrade. And every secure candidate keeps the host you named as its TLS or WSS verification
+identity, so an address chosen by DNS never chooses which certificate is acceptable.
+
+`sipx_ua::Config::resolved` does the same for a registrar you can only name, so a long-lived
+endpoint does not hold an address its DNS record has already replaced. Resolution failure,
+resolution timeout, and connection failure stay distinct: the first two are reported before
+anything is dialled, and `Error::kind` separates a zone with no answer from a deadline.
+
 `with_service_route` writes the preloaded `Route` headers but does not resolve them. Resolve the
-outermost proxy in the application and pass that address as the `Target` to `dial`; the called
-party remains in the Request-URI.
+outermost proxy with the same resolver, pass the first candidate as the `Target` to `dial`, and
+keep the rest as the order to fall back through; the called party remains in the Request-URI.
 
 For a long-lived endpoint, keep operational policy at the transport boundary. A host can rotate the
 TLS identity used by new handshakes, attach one bounded message/connection observer, atomically

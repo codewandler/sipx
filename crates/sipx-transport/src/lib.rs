@@ -39,6 +39,8 @@
 pub mod capture;
 pub mod counters;
 #[cfg(feature = "dns")]
+pub mod destination;
+#[cfg(feature = "dns")]
 pub mod dns;
 pub mod endpoint;
 pub mod error;
