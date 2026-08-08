@@ -144,10 +144,7 @@ async fn a_routed_call_crosses_the_realtime_bridge_in_both_rtp_directions() {
     assert_ne!(uplink, downlink, "correlation uses two distinct signals");
     assert!(
         call.media()
-            .send_encoded(Encoded {
-                payload_type: 0,
-                payload: Bytes::copy_from_slice(&uplink),
-            })
+            .send_encoded(Encoded::new(0, Bytes::copy_from_slice(&uplink)))
             .await,
         "the caller sends one encoded RTP payload"
     );
@@ -260,10 +257,7 @@ async fn sipx_host_is_the_one_command_realtime_path_and_prints_json() {
     let uplink = tone_frame(31);
     assert!(
         call.media()
-            .send_encoded(Encoded {
-                payload_type: 0,
-                payload: Bytes::copy_from_slice(&uplink),
-            })
+            .send_encoded(Encoded::new(0, Bytes::copy_from_slice(&uplink)))
             .await
     );
     assert_eq!(

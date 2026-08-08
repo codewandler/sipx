@@ -622,7 +622,16 @@ enum Frame {
     /// and re-encode exactly, so for the codec sipx ships today this saves work rather than
     /// quality; for any codec whose decode is not invertible it saves both. See
     /// [`crate::bridge`].
-    Encoded { payload_type: u8, payload: Bytes },
+    ///
+    /// `extension` is the RTP header extension the payload arrived with, or `None` when it
+    /// arrived without one and for a payload this endpoint authored (`M-79`). It travels beside
+    /// the bytes rather than being rebuilt at the far end because only the packet it came in on
+    /// knows what it said.
+    Encoded {
+        payload_type: u8,
+        payload: Bytes,
+        extension: Option<Bytes>,
+    },
 }
 
 /// The master keys for one SRTP session, one direction each.
@@ -716,6 +725,34 @@ pub struct Encoded {
     pub payload_type: u8,
     /// The bytes.
     pub payload: Bytes,
+    /// The RTP header extension the packet carried — profile field, length word and data,
+    /// verbatim — or `None` when it carried none (`M-79`).
+    ///
+    /// Here rather than left behind at the packet, because a relay is the one path that cannot
+    /// reconstruct it. The extension and the payload arrived on the same packet and describe the
+    /// same media (RFC 3550 §5.3.1), so forwarding one without the other hands the far end media
+    /// it reads differently from the way its sender meant it. sipx never interprets these bytes;
+    /// see [`sipx_rtp::packet::Packet`].
+    ///
+    /// `None` for a payload this endpoint authored rather than relayed — see [`Encoded::new`],
+    /// which is how such a payload should be built.
+    pub extension: Option<Bytes>,
+}
+
+impl Encoded {
+    /// A payload this endpoint is authoring rather than relaying.
+    ///
+    /// No extension, and that is the point of having the constructor: a header extension
+    /// describes the packet it arrived on, so bytes that did not arrive on one have nothing to
+    /// carry. A relay builds its value from the packet instead, extension included.
+    #[must_use]
+    pub fn new(payload_type: u8, payload: Bytes) -> Self {
+        Self {
+            payload_type,
+            payload,
+            extension: None,
+        }
+    }
 }
 
 /// One peer RTCP report block describing this session's outbound RTP stream.
@@ -2350,11 +2387,15 @@ impl MediaSession {
     }
 
     /// Put a payload on the wire exactly as given, bypassing the codec.
+    ///
+    /// Whatever header extension the [`Encoded`] carries goes out on the same packet (`M-79`).
+    /// A caller authoring its own payload gets that right by construction with [`Encoded::new`].
     pub async fn send_encoded(&self, encoded: Encoded) -> bool {
         self.outgoing
             .send(Frame::Encoded {
                 payload_type: encoded.payload_type,
                 payload: encoded.payload,
+                extension: encoded.extension,
             })
             .await
             .is_ok()
@@ -3133,17 +3174,23 @@ async fn send_loop(socket: Arc<UdpSocket>, mut outgoing: mpsc::Receiver<Frame>, 
             Frame::Encoded {
                 payload_type,
                 payload,
+                extension,
             } => {
                 // Verbatim, on this leg's own sequence and timestamp. The advance is the
                 // configured packet duration in *clock units*: the bytes came from a stream
                 // with the same packetisation, and nothing here can look inside them to check.
-                let packet = Packet::new(
+                let mut packet = Packet::new(
                     *payload_type,
                     clock.sequence,
                     clock.timestamp,
                     ssrc,
                     payload.clone(),
                 );
+                // The extension travels with the payload it arrived on and nothing else about it
+                // is rewritten (`M-79`). The sequence, timestamp and SSRC are this leg's because
+                // the two legs are separate RTP streams; the extension is not, because it
+                // describes the media rather than the stream that is carrying it.
+                packet.extension.clone_from(extension);
                 (
                     packet,
                     u32::try_from(config.clock_units_per_packet()).unwrap_or(0),
@@ -3256,6 +3303,11 @@ async fn next_frame(outgoing: &mut mpsc::Receiver<Frame>, stop: &Stop) -> Option
 /// opaque payload in whatever the other leg negotiated, and there is nothing here that can look
 /// inside them. Substituting this session's own silence keeps the leg saying nothing rather than
 /// saying what the muted party said.
+///
+/// Its header extension is dropped with it, and that is a decision rather than an oversight
+/// (`M-79`). What goes out is this session's own silence, not the media the extension arrived
+/// describing, so keeping it would leave the far end an RFC 8285 element qualifying a packet that
+/// no longer exists.
 ///
 /// A telephone event passes through. It is not audio: it is generated by this endpoint on
 /// purpose, the way a keypad tone is on a handset, and a mute that swallowed keypresses would
@@ -4430,6 +4482,10 @@ async fn deliver(
         let encoded = Encoded {
             payload_type: packet.payload_type,
             payload: packet.payload.clone(),
+            // Both clones are reference counts rather than copies. Dropping the extension here is
+            // what left the relay path stripping what `M-75` had just taught the packet layer to
+            // keep, so it goes on whatever the far side does with it (`M-79`).
+            extension: packet.extension.clone(),
         };
         return tokio::select! {
             () = stop.wait() => false,
@@ -4929,10 +4985,10 @@ mod tests {
         for _ in 0..3 {
             assert!(
                 right
-                    .send_encoded(Encoded {
-                        payload_type: 0,
-                        payload: Bytes::from(g711::ulaw_encode_all(&tone(160))),
-                    })
+                    .send_encoded(Encoded::new(
+                        0,
+                        Bytes::from(g711::ulaw_encode_all(&tone(160))),
+                    ))
                     .await
             );
         }

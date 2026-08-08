@@ -311,10 +311,7 @@ async fn establish(peer: &RealtimePeer) -> Value {
 /// Push one payload up from the call.
 async fn speak(frames: &mpsc::Sender<Encoded>, payload_type: u8, bytes: &[u8]) {
     frames
-        .send(Encoded {
-            payload_type,
-            payload: Bytes::copy_from_slice(bytes),
-        })
+        .send(Encoded::new(payload_type, Bytes::copy_from_slice(bytes)))
         .await
         .expect("the call leg accepts a frame");
 }

@@ -14,6 +14,34 @@
 //! When the codecs differ there is no choice, and the bridge says so rather than transcoding
 //! quietly. Someone looking at a call that sounds worse than it should is entitled to find out
 //! why from the software rather than by reasoning about it.
+//!
+//! # The header extension
+//!
+//! A pass-through leg forwards the RTP header extension the packet arrived with, verbatim
+//! (`M-79`). RFC 3550 §5.3.1 puts the extension in the header of the packet whose payload it
+//! qualifies, so the two are one thing: a bridge that carried the bytes and dropped the extension
+//! would hand the far end media it reads differently from the way its sender meant it.
+//!
+//! Verbatim, and never a translation. RFC 8285 numbers extension elements with identifiers each
+//! session assigns for itself in an SDP `extmap`, so a relay between two sessions that had agreed
+//! *different* numbers would have to renumber — and sipx negotiates no `extmap` at all. There is
+//! therefore no mapping here to translate between, and inventing a reading of the elements in
+//! order to rewrite them would be a guess with a wire effect. Whoever teaches sipx to negotiate
+//! `extmap` has to teach this module's `relay` about it in the same change.
+//!
+//! Three cases carry nothing across, each a decision rather than a gap:
+//!
+//! - **A transcoding bridge.** There is no packet to forward. The far leg's packet is one this
+//!   endpoint authored out of decoded samples, so an arriving extension has nothing left on it to
+//!   describe.
+//! - **A payload type this leg did not negotiate.** `relay` does not forward the payload at
+//!   all, so its extension does not travel either.
+//! - **A muted leg.** What goes out is this session's own silence rather than the relayed bytes;
+//!   see [`crate::session::MediaSession::set_muted`].
+//!
+//! A [`crate::conference::Conference`] carries nothing across either, for a reason particular to
+//! mixing that is recorded there.
+//!
 //! **Experimental** (`A-8`): real over `MediaSession`s you own, and unreachable from a `Call`,
 //! which does not hand its session out. Two calls cannot be bridged yet (`C-6`).
 //!
@@ -120,11 +148,15 @@ fn spawn_leg(from: Arc<MediaSession>, to: Arc<MediaSession>, transcoding: bool) 
 }
 
 /// Pass a payload across, when both legs speak the same codec.
+///
+/// The [`Encoded`] goes over whole, header extension included: see this module's documentation
+/// for why that is forwarding rather than translation, and for the cases where nothing crosses.
 async fn relay(to: &MediaSession, encoded: Encoded) -> bool {
     // A payload type that is not the one this leg negotiated should not be forwarded as though
     // it were. In practice this is a DTMF event on a bridge whose two legs negotiated different
     // dynamic payload types for `telephone-event`, and forwarding it verbatim would have the
-    // far end play a keypress as audio.
+    // far end play a keypress as audio. Its extension is refused with it: an extension describes
+    // the packet it arrived on, and there is no packet going out to carry it.
     if Codec::from_payload_type(encoded.payload_type) != Some(to.codec()) {
         return true;
     }
