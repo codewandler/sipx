@@ -166,8 +166,8 @@ application queue; unknown RTP payload types; playback completion reports with n
 driver datagrams and data-sent notes refused by its queue; renegotiation replies with no listener;
 ICE outputs failing to send; redundant server-reflexive candidates;
 non-STUN-server datagrams consumed while gathering; frames lost by an attached PCM processor
-under the bounded-queue policy of [call-audio-seam.md](call-audio-seam.md) §6; and the three
-jitter-buffer consequences of §4.2.
+under the bounded-queue policy of [call-audio-seam.md](call-audio-seam.md) §6; decoded frames shed
+from the application's inbound queue under §4.3; and the three jitter-buffer consequences of §4.2.
 
 An ICE output naming no bound socket has no counter: it is structurally unreachable because every
 base the agent can name was created from the exact socket vector the driver owns. The site carries
@@ -239,6 +239,67 @@ not offered the silence as audio. A processor that adds spans to delivered lengt
 reconstructs the timeline, and a speech provider is not handed invented quiet it would read as the
 caller pausing.
 
+### 4.3 The application's queue, and what it sheds
+
+The jitter buffer of §4.2 is not the last place inbound audio waits. After it, decoded frames wait
+in a queue the application reads with `MediaSession::recv` — and *that* is where an application's
+own reading speed turns into delay. `M-45` measured the buffer across ten 1 500-packet traces and
+cleared it: bounded, no ratchet, worst measured hold 515 ms under a 300 ms spike on every third
+packet. The queue behind it had no bound in time, no counter and no shed policy, and a 256-frame
+channel delivered with a blocking send is **5.12 seconds** of audio at the universal 20 ms
+packetisation. An application reading slightly slower than real time filled it once and stayed at
+the far end of it for the rest of the call.
+
+**The bound is a duration.** `Config::inbound_queue` states how much audio may be waiting, and
+defaults to **200 ms**. It is expressed in time and enforced against the queued *sample count* at
+the session's audio rate, not against a number of frames, for two reasons. A frame is 10 ms of
+audio in one codec and 60 in another, so a frame depth means a different delay in every session —
+the same sizing inconsistency §4.2's packet-counted depth still carries. And a far end may change
+its packetisation mid-call, which this side cannot refuse; a bound counted in frames would silently
+become a different bound, while a bound counted in audio does not move.
+
+The default comes from the delay budget rather than from the queue. ITU-T G.114 puts the one-way
+mouth-to-ear target at 150 ms and the limit of acceptable interactive conversation at 400 ms, and
+this queue is one contributor among the network, the jitter buffer's ceiling of `jitter_max_depth`
+packets, and the application itself. `Duration::ZERO` is legal and means one frame — the shallowest
+queue there is, because delivering nothing is not a smaller delay — so a bound below one
+packetisation interval degrades rather than refusing the call.
+
+**The policy is shed oldest**, and it is chosen against the two alternatives rather than by
+default:
+
+| Policy | Why not |
+|---|---|
+| backpressure (what this replaced) | the receive loop stops draining the socket, so the delay moves into the kernel's buffer where it is neither bounded nor counted, and the call loses packets with no counter naming the reason |
+| shed newest | bounds the delay identically in the steady state, but leaves the application listening to the *oldest* audio it could still be holding — after a stall it hears the beginning of the stall and the recent speech is gone |
+| **shed oldest** | bounds the delay and keeps the audio the consumer has the best chance of still being able to use |
+
+This is the policy [call-audio-seam.md](call-audio-seam.md) §6.1 already states at the processor
+boundary and [speech-providers.md](speech-providers.md) §8 states at the input-frame bound, for the
+same reason, so the three application-facing queues in this stack shed the same end.
+
+Offering a frame to this queue **never blocks**. RTP decode, statistics and RTCP are therefore never
+held up by a slow or stopped reader, which is what stops an application's reading speed reaching
+the socket at all.
+
+One consequence follows from that and is worth stating rather than discovering. A concealment run
+at §4.2's cap is 200 ms of audio produced in a single burst with nothing awaited between the
+frames, so at the default bound it can fill this queue by itself and shed whatever the application
+had not yet read. That is the bound behaving as specified — 200 ms may be waiting, and a maximal
+concealment run is 200 ms — but a caller that needs a long gap and the audio either side of it in
+one recording should say so with `inbound_queue` rather than assume the default covers both.
+
+**Every shed frame increments `inbound_frames_shed`**, per §4's rule. It is the one counter in the
+snapshot that describes the *application* rather than the network or a codec, and it is what to
+read before concluding that added delay came from the media path: a rising `inbound_frames_shed` is
+the local reader falling behind, not the far end or the network. A concealed slot that is then shed
+appears under both `jitter_concealed` and `inbound_frames_shed`, which are two different facts — a
+packet never arrived, and the reader was too far behind to be handed the silence that stood in for
+it.
+
+Stopping a session closes the queue without discarding it: frames already accepted are still
+delivered, and `recv` reports the end only once they are drained.
+
 ## 5. Test vectors
 
 | Vector | Input | Required result |
@@ -268,6 +329,9 @@ caller pausing.
 | D10 | G.711 at 20 ms, depth 1; sequences 1, 2 and 4 arrive | four packets of audio are delivered, the third being silence, and `jitter_concealed = 1` |
 | D11 | G.711 at 20 ms, depth 1; sequences 1 and 400 arrive | twelve packets of audio — two carried, ten concealed — and `jitter_concealed = 10`; the rest of the gap is reported only as RFC 3550 loss |
 | D12 | depth 2; sequences 1, 2, 3, then 1 again and 3 again | `jitter_late = 1` and `jitter_duplicates = 1`; neither copy is played |
+| D13 | G.711 at 20 ms; 200 packets arrive with nothing reading the session | the application is handed at most `inbound_queue` of audio, not the four seconds that arrived |
+| D14 | D13 repeated at a 60 ms packetisation | the same bound in milliseconds, over a different number of frames |
+| D15 | D13 with a distinct marker near the burst's start and another near its end | the late marker is delivered and the early one is not; `inbound_frames_shed` is the number of frames that did not fit |
 | D5 | negotiated PT 96, `80e003e8000003e8decafbad010a00a0`, then PT 96 packets `806003e9000003e8decafbad010a0140` and `806003ea000003e8decafbad018a01e0` | one digit `1`, duration 480 timestamp units |
 | D6 | D5 followed by two newer copies of the final `018a01e0` payload, a duplicate sequence, and a late continuation | still one digit `1`; state does not move backwards |
 | D7 | PT 96 start `80e007d000000bb8decafbad030a00a0`, continuation `806007d100000bb8decafbad030a0140`, then the explicit silence expiration | one digit `3`, duration 320 timestamp units; a later end report cannot emit it again |

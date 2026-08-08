@@ -54,6 +54,7 @@ pub mod conference;
 mod counters;
 pub mod dtls;
 pub mod ice;
+mod inbound;
 pub mod processing;
 pub mod session;
 pub mod speech;

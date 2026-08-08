@@ -431,10 +431,43 @@ pub struct Config {
     /// It is dynamic, so the number is whatever the answer said — assuming 101 because that
     /// is what sipx offers would decode another endpoint's codec as keypresses.
     pub dtmf_payload_type: Option<u8>,
+    /// How much received audio may wait for the application to read it
+    /// (`docs/specs/media-runtime.md` §4.3).
+    ///
+    /// **In time, not in frames.** A frame is 10 ms of audio in one codec and 60 in another, so
+    /// the same number of frames is a different delay in every session — and a different delay in
+    /// the *same* session, because nothing on this side can stop a far end changing its
+    /// packetisation mid-call. A duration means the same thing everywhere.
+    ///
+    /// An application that reads slower than the far end talks cannot be rescued by any depth;
+    /// what a depth decides is where the delay it causes settles. Past this bound the **oldest**
+    /// queued frame is shed and counted as
+    /// [`MediaDiscardCounts::inbound_frames_shed`](crate::MediaDiscardCounts::inbound_frames_shed),
+    /// so the application stays this far behind live audio instead of drifting further behind for
+    /// the rest of the call.
+    ///
+    /// [`Duration::ZERO`] is legal and means the shallowest queue there is: one frame, because
+    /// delivering nothing is not a smaller delay. It is never a setup error, so a bound below one
+    /// packetisation interval degrades rather than refusing the call.
+    pub inbound_queue: Duration,
 }
 
 impl Config {
     const MIN_INTERVAL: Duration = Duration::from_millis(1);
+
+    /// The default for [`Self::inbound_queue`]: 200 ms.
+    ///
+    /// Ten packetisation intervals at the universal 20 ms — enough to absorb the scheduling
+    /// jitter of an application that reads in a loop, and of one that does a bounded piece of
+    /// work between reads, without absorbing an application that is simply slower than real time.
+    ///
+    /// The ceiling comes from the delay budget rather than from the queue. ITU-T G.114 puts the
+    /// one-way mouth-to-ear target at 150 ms and the limit of acceptable interactive conversation
+    /// at 400 ms, and this queue is only one contributor: the jitter buffer ahead of it may hold
+    /// [`Self::jitter_max_depth`] packets, and the network and the application add their own. Two
+    /// hundred milliseconds leaves that budget intact. Five seconds — what a 256-frame channel was
+    /// worth at 20 ms — does not, and it was where a slow reader settled and stayed.
+    pub const DEFAULT_INBOUND_QUEUE: Duration = Duration::from_millis(200);
 
     /// The payload type this session puts on the wire.
     #[must_use]
@@ -467,6 +500,7 @@ impl Config {
             rtcp_interval: Some(Duration::from_secs(5)),
             rtcp_mode: sipx_sdp::RtcpMode::Separate,
             dtmf_payload_type: Some(dtmf::DEFAULT_PAYLOAD_TYPE),
+            inbound_queue: Self::DEFAULT_INBOUND_QUEUE,
         }
     }
 
@@ -754,7 +788,11 @@ pub struct MediaSession {
     digits: Mutex<mpsc::Receiver<(Digit, Duration)>>,
     /// Distinguishes one keypress from the next.
     tones: AtomicU64,
-    incoming: Mutex<mpsc::Receiver<Vec<i16>>>,
+    /// Received audio waiting for the application, bounded in time
+    /// (`docs/specs/media-runtime.md` §4.3). Held whole rather than split into a receiver half:
+    /// stopping the session has to close it from `&self`, and it is the one queue here whose
+    /// depth is a published contract.
+    incoming: Arc<crate::inbound::InboundQueue>,
     encoded: Mutex<mpsc::Receiver<Encoded>>,
     /// Whether received packets are handed on encoded rather than decoded to samples.
     relay: Arc<AtomicBool>,
@@ -1571,11 +1609,17 @@ impl MediaSession {
             sipx_sdp::RtcpMode::Mux => None,
         };
         let (outgoing_tx, outgoing_rx) = mpsc::channel::<Frame>(64);
-        let (incoming_tx, incoming_rx) = mpsc::channel::<Vec<i16>>(256);
         let (encoded_tx, encoded_rx) = mpsc::channel::<Encoded>(256);
         let (digits_tx, digits_rx) = mpsc::channel::<(Digit, Duration)>(32);
 
         let shared = Shared::new(local_addr, discards);
+        // The one inbound queue whose depth an application can feel, so it is bounded in time and
+        // its overflow is counted (`docs/specs/media-runtime.md` §4.3).
+        let incoming = Arc::new(crate::inbound::InboundQueue::new(
+            config.inbound_queue,
+            config.audio_rate(),
+            Arc::clone(&shared.discards),
+        ));
 
         // Where to send. Starts at the SDP address and is replaced by the first observed
         // source: behind a NAT the advertised address is private and unreachable.
@@ -1624,7 +1668,7 @@ impl MediaSession {
         let receive_owner = tokio::spawn(receive_loop(
             ReceiveInput::socket(Arc::clone(socket)),
             Inbound {
-                audio: incoming_tx,
+                audio: Arc::clone(&incoming),
                 encoded: encoded_tx,
                 relay: Arc::clone(&shared.relay),
                 digits: Keypresses {
@@ -1679,7 +1723,7 @@ impl MediaSession {
             outgoing: outgoing_tx,
             digits: Mutex::new(digits_rx),
             tones: AtomicU64::new(0),
-            incoming: Mutex::new(incoming_rx),
+            incoming,
             encoded: Mutex::new(encoded_rx),
             relay: shared.relay,
             muted: shared.muted,
@@ -1748,10 +1792,16 @@ impl MediaSession {
         let encrypted = config.srtp.is_some();
         let rtcp_interval = config.rtcp_interval;
         let (outgoing_tx, outgoing_rx) = mpsc::channel::<Frame>(64);
-        let (incoming_tx, incoming_rx) = mpsc::channel::<Vec<i16>>(256);
         let (encoded_tx, encoded_rx) = mpsc::channel::<Encoded>(256);
         let (digits_tx, digits_rx) = mpsc::channel::<(Digit, Duration)>(32);
         let shared = Shared::with_stop(local_addr, discards, runtime_stop);
+        // §4.3's bound applies to a browser session for the same reason it applies to any other:
+        // it is the same application boundary, reached over a different transport.
+        let incoming = Arc::new(crate::inbound::InboundQueue::new(
+            config.inbound_queue,
+            config.audio_rate(),
+            Arc::clone(&shared.discards),
+        ));
         #[cfg(all(test, feature = "dtls"))]
         let preparing_peak = profile_tasks.counts().1;
         let remote = Arc::new(Mutex::new(config.remote));
@@ -1786,7 +1836,7 @@ impl MediaSession {
             receive_loop(
                 ReceiveInput::Browser(media),
                 Inbound {
-                    audio: incoming_tx,
+                    audio: Arc::clone(&incoming),
                     encoded: encoded_tx,
                     relay: Arc::clone(&shared.relay),
                     digits: Keypresses {
@@ -1846,7 +1896,7 @@ impl MediaSession {
             outgoing: outgoing_tx,
             digits: Mutex::new(digits_rx),
             tones: AtomicU64::new(0),
-            incoming: Mutex::new(incoming_rx),
+            incoming,
             encoded: Mutex::new(encoded_rx),
             relay: shared.relay,
             muted: shared.muted,
@@ -2311,8 +2361,13 @@ impl MediaSession {
     }
 
     /// Take the next packet's worth of received samples.
+    ///
+    /// At most [`Config::inbound_queue`] of audio is ever waiting here. A caller reading slower
+    /// than the far end talks therefore settles that far behind live audio and stays there; the
+    /// audio it is not keeping up with is shed, oldest first, and counted as
+    /// [`MediaDiscardCounts::inbound_frames_shed`] (`docs/specs/media-runtime.md` §4.3).
     pub async fn recv(&self) -> Option<Vec<i16>> {
-        self.incoming.lock().await.recv().await
+        self.incoming.recv().await
     }
 
     /// Receive this session as linear PCM at an application-chosen rate and depth.
@@ -2666,6 +2721,7 @@ impl MediaSession {
     pub fn stop(&self) {
         self.stop.stop();
         self.taps.close();
+        self.incoming.close();
     }
 
     /// Stop and join every worker owned by this session.
@@ -2675,6 +2731,7 @@ impl MediaSession {
     pub async fn shutdown(&self) {
         self.stop.stop();
         self.taps.close();
+        self.incoming.close();
         if let Some(ingress) = &self.browser_ingress {
             crate::browser::lock_ingress(ingress).close();
         }
@@ -2718,6 +2775,10 @@ impl Drop for MediaSession {
         // over from the seam instead of from a timeout. A retired generation's registry is already
         // empty, because `reconfigure` moved it to the replacement.
         self.taps.close();
+        // The same completion for the inbound audio queue. Under the channel this replaced,
+        // dropping the last sender made a parked `recv` return `None`; the queue outlives its
+        // producers, so it has to be told.
+        self.incoming.close();
         if let Some(ingress) = &self.browser_ingress {
             crate::browser::lock_ingress(ingress).close();
         }
@@ -2729,7 +2790,7 @@ impl Drop for MediaSession {
 
 /// Where a received packet goes, gathered so the receive loop reads as a loop.
 fn delivery<'a>(
-    audio: &'a mpsc::Sender<Vec<i16>>,
+    audio: &'a crate::inbound::InboundQueue,
     encoded: &'a mpsc::Sender<Encoded>,
     relay: &'a AtomicBool,
     discards: &'a DiscardMeters,
@@ -3367,7 +3428,7 @@ struct Keypresses {
 /// mis-ordering waiting to happen — two of them are `Arc<AtomicU64>`-shaped and swapping them
 /// would compile.
 struct Inbound {
-    audio: mpsc::Sender<Vec<i16>>,
+    audio: Arc<crate::inbound::InboundQueue>,
     encoded: mpsc::Sender<Encoded>,
     relay: Arc<AtomicBool>,
     digits: Keypresses,
@@ -3695,10 +3756,22 @@ impl ReceiveInput {
     }
 }
 
+/// Run the receive path, then tell the application no more audio is coming.
+///
+/// The close is what dropping the last `Sender` used to do for the channel this replaced: a
+/// caller parked in [`MediaSession::recv`] has to learn that the stream ended rather than wait out
+/// a timeout, and a browser session whose media channel closes ends this loop without the session
+/// having been stopped. Whatever is already queued is still delivered first.
+async fn receive_loop(input: ReceiveInput, inbound: Inbound) {
+    let audio = Arc::clone(&inbound.audio);
+    receiving(input, inbound).await;
+    audio.close();
+}
+
 // This is the single ordered path from demultiplexing through authentication, source pinning,
 // statistics and delivery. Its length keeps that security-sensitive order visible in one place.
 #[allow(clippy::too_many_lines)]
-async fn receive_loop(mut input: ReceiveInput, inbound: Inbound) {
+async fn receiving(mut input: ReceiveInput, inbound: Inbound) {
     let Inbound {
         audio: incoming,
         encoded,
@@ -3868,7 +3941,7 @@ async fn receive_loop(mut input: ReceiveInput, inbound: Inbound) {
             // the slots between the last packet played and the one it is about to release.
             let missing = buffer.lost();
             let Some(packet) = buffer.pop() else { break };
-            if !conceal(&to, &config, &stop, buffer.lost() - missing).await {
+            if !conceal(&to, &config, &stop, buffer.lost() - missing) {
                 return;
             }
             if !deliver(
@@ -3907,7 +3980,7 @@ const CONCEAL_LIMIT: Duration = Duration::from_millis(200);
 /// Silence rather than an estimated waveform: it is codec-independent, it cannot invent speech
 /// nobody said, and it keeps the played timeline the length the far end sent — which is what stops
 /// a gap becoming both a click at the splice and 20 ms of accumulated drift.
-async fn conceal(to: &Delivery<'_>, config: &Config, stop: &Stop, missing: u64) -> bool {
+fn conceal(to: &Delivery<'_>, config: &Config, stop: &Stop, missing: u64) -> bool {
     if missing == 0 {
         return true;
     }
@@ -3934,11 +4007,12 @@ async fn conceal(to: &Delivery<'_>, config: &Config, stop: &Stop, missing: u64) 
         to.taps
             .note_loss(AudioDirection::Inbound, config.samples_per_packet() as u64);
         to.discards.jitter_concealed.fetch_add(1, Ordering::Relaxed);
-        let delivered = tokio::select! {
-            () = stop.wait() => false,
-            result = to.audio.send(silence.clone()) => result.is_ok(),
-        };
-        if !delivered {
+        // Concealment is audio on the timeline like any other, so it is subject to §4.3's bound
+        // and may itself shed an older frame. A concealed slot the application never hears then
+        // appears under two names, which is right: `jitter_concealed` says a packet never
+        // arrived, and `inbound_frames_shed` says the reader was too far behind to be handed the
+        // silence that stood in for it.
+        if stop.is_stopped() || !to.audio.push(silence.clone()) {
             return false;
         }
     }
@@ -4311,7 +4385,7 @@ async fn note_quality(
 
 /// Where a received packet goes.
 struct Delivery<'a> {
-    audio: &'a mpsc::Sender<Vec<i16>>,
+    audio: &'a crate::inbound::InboundQueue,
     encoded: &'a mpsc::Sender<Encoded>,
     relay: &'a AtomicBool,
     discards: &'a DiscardMeters,
@@ -4385,9 +4459,10 @@ async fn deliver(
         deliver_digit(to, digits, completed, config.clock_rate);
     }
 
-    // The stop signal is checked here too. This is the one await that can park indefinitely —
-    // a full channel means the application has stopped reading — and a task parked here when
-    // the call is hung up would hold its socket and its port for the life of the process.
+    // The stop signal is checked here too. Delivery no longer parks — §4.3's queue sheds instead
+    // of blocking, so an application that stopped reading can no longer hold this loop, its
+    // socket and its port for the life of the process — but a stopped session has nothing left to
+    // deliver to, and decoding into a queue nobody will read is work with no reader.
     let Some(samples) = decoding.decode(&packet.payload) else {
         to.discards
             .opus_decode_failures
@@ -4406,10 +4481,9 @@ async fn deliver(
     to.taps
         .offer(AudioDirection::Inbound, config.audio_rate(), &samples);
 
-    tokio::select! {
-        () = stop.wait() => false,
-        result = to.audio.send(samples) => result.is_ok(),
-    }
+    // Never awaits: past §4.3's bound the queue sheds its oldest frame and counts it, so the
+    // socket keeps being drained and the delay the application sees stays where it was stated.
+    !stop.is_stopped() && to.audio.push(samples)
 }
 
 fn deliver_digit(
@@ -5762,6 +5836,12 @@ mod tests {
         config.jitter_depth = 1;
         config.jitter_max_depth = None;
         config.dtmf_payload_type = None;
+        // What this measures is §4.2's concealment cap, so §4.3's queue must not be the thing that
+        // limits it. The two packets and the ten slots between them are 240 ms of audio produced
+        // in one burst, and the burst never awaits — a concealment run at the cap is 200 ms by
+        // construction, which is exactly what the default queue holds. Stating a deeper queue here
+        // keeps the assertion below about concealment; `tests/inbound_queue.rs` asserts the bound.
+        config.inbound_queue = Duration::from_secs(1);
         let session = MediaSession::start(any(), config).await.expect("starts");
 
         // 200 ms of concealment at 20 ms a packet is ten slots. Sequence 400 is three thousand
@@ -5860,10 +5940,14 @@ mod tests {
     /// bytes on 101 are an unknown payload and cannot become a digit.
     #[tokio::test]
     async fn only_the_negotiated_non_101_payload_can_create_a_digit() {
-        let (audio, _audio_rx) = mpsc::channel(1);
         let (encoded, _encoded_rx) = mpsc::channel(1);
         let relay = AtomicBool::new(false);
         let discards = Arc::new(DiscardMeters::default());
+        let audio = crate::inbound::InboundQueue::new(
+            Config::DEFAULT_INBOUND_QUEUE,
+            Codec::Pcmu.clock_rate(),
+            Arc::clone(&discards),
+        );
         let taps = Taps::new(Arc::clone(&discards));
         let delivery = Delivery {
             audio: &audio,
@@ -6019,10 +6103,14 @@ mod tests {
     /// complete keypress, and assert the loss itself rather than a timeout in a consumer.
     #[tokio::test]
     async fn a_dtmf_digit_refused_by_the_application_queue_is_counted() {
-        let (audio, _audio_rx) = mpsc::channel(1);
         let (encoded, _encoded_rx) = mpsc::channel(1);
         let relay = AtomicBool::new(false);
         let discards = Arc::new(DiscardMeters::default());
+        let audio = crate::inbound::InboundQueue::new(
+            Config::DEFAULT_INBOUND_QUEUE,
+            Codec::Pcmu.clock_rate(),
+            Arc::clone(&discards),
+        );
         let taps = Taps::new(Arc::clone(&discards));
         let delivery = Delivery {
             audio: &audio,
