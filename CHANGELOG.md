@@ -7,6 +7,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0-rc.11] — 2026-08-08
+
+Six stories: the custom call-DSP contract, calibrated voice thresholds, two RTP header-extension
+defects closed, the early negotiation carriers relayed, and the extensibility question settled while
+it is still reversible.
+
 ### Added
 
 - **`sipx-audio` gains `dsp`**: the deterministic custom call-DSP contract
@@ -38,7 +44,30 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   correlated on each, and an offerless INVITE is relayed as RFC 3262 §5's delayed offer rather than
   refused `488`.
 
+- **An RTP header extension whose length word disagrees with the bytes behind it is refused.**
+  `Packet::encode` leaves it off and sends the payload whole; the drop is counted as
+  `MediaDiscardCounts::malformed_extensions_dropped`, and `sipx_rtp::extension_is_self_consistent`
+  is the published question it asks. Such an extension used to be written verbatim, which on an
+  SRTP leg put a run of *unencrypted* media on the wire — the header the transform computed reached
+  into the payload — and on a plain leg truncated the media the peer played, with nothing to log at
+  either end because only the sender ever knew where the boundary was meant to be. Only a
+  caller-built `Encoded::extension` could reach it; a relayed extension is bounds-checked on decode.
+
 ### Changed
+
+- **Breaking: six public structs became `#[non_exhaustive]`** — `sipx_media::Encoded`,
+  `sipx_media::Config`, `sipx_media::browser::SelectedComponent`, `sipx_media::ice::Gathering`,
+  `sipx_rtp::Packet` and `sipx_rtp::dtmf::Event`. A struct literal naming their fields no longer
+  compiles outside these crates: call `T::new(..)` and assign the rest, which stay `pub`. Done
+  before `1.0.0` deliberately — the attribute can be *removed* in a minor release and only *added*
+  in a major one, so this is the last release in which the choice is reversible, and taking it now
+  keeps both answers available rather than betting on which fields the wire will grow next.
+
+- **`load-responder`'s admission ceiling in the default load-pair test sits above the generator's
+  concurrency**, so the test measures whether the workload completed rather than whether the machine
+  had a spare core. The refusal it used to hit was correct: a retiring dialog is counted by both
+  ends across a window no responder-side accounting can close, which was measured and is why exact
+  active-call accounting was tried and reverted rather than shipped.
 
 - **A read-only preflight requires the exact-SHA `main` CI run and its Pages deployment job before
   the release gate runs**, and an exactly-keyed Actions cache restored after immutable-tag
@@ -4072,7 +4101,8 @@ Stated so nobody has to discover it from a stack trace:
 - **Interop is verified against Kamailio only.** A second implementation with different
   opinions — Asterisk, as a B2BUA rather than a proxy — has not been tried.
 
-[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.10...HEAD
+[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.11...HEAD
+[1.0.0-rc.11]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.10...v1.0.0-rc.11
 [1.0.0-rc.10]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.9...v1.0.0-rc.10
 [1.0.0-rc.9]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.8...v1.0.0-rc.9
 [1.0.0-rc.8]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.7...v1.0.0-rc.8

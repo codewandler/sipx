@@ -73,12 +73,9 @@ appeared twice before anyone named it.
 ## Now (in progress)
 - [A-10 — Publish the stable crate set and diagnostic CLI artifacts](A-10-publish-the-stable-crates-and-cli.md) · Application · promote the public beta only after every v1 predicate; stable archives and SBOM live here
 - [A-38 — Publish and verify the second release candidate](A-38-publish-and-verify-rc3.md) · Application · after X-113 · the post-rc.2 wave as one immutable prerelease · no stable-1.0 claim widens
-- [C-8 — Relay the early negotiation carriers](C-8-relay-the-early-negotiation-carriers.md) · Call · C-7 refuses reliable provisionals, PRACK and offerless INVITE rather than half-relaying them · relaying those means authoring a description this role has no media for
 - [M-60 — Calibrate and adapt audio-activity thresholds deterministically](M-60-calibrate-audio-activity-thresholds.md) · Media · after M-58 and M-59 · bounded adaptation with observable reset and limits
-- [M-63 — Specify the custom call-DSP contract](M-63-specify-custom-call-dsp-contract.md) · Media · after M-54 · M18 admission · frame contract, execution profiles and minimum failure policy
 - [M-70 — Accept multiplexed browser offers with unused component candidates](M-70-accept-multiplexed-browser-offers-with-unused-component-candidates.md) · Media · external review finding 9 · a second browser engine reaches SDP then fails the multiplexed profile
 - [M-72 — Prove the AEAD SRTP key derivation against an independent peer](M-72-prove-the-aead-srtp-key-derivation-against-a-peer.md) · Media · RFC 7714 publishes no KDF vector · a wrong salt placement makes two sipx endpoints interoperate with each other and nobody else, and every round-trip test still passes
-- [M-81 — Make the SRTP protect-error discard tell the truth](M-81-count-the-srtp-protect-discard.md) · Media · a spec sentence says the branch is unreachable · M-79 made it reachable, and it increments nothing
 - [T-33 — Bind browser WebSocket signalling](T-33-bind-browser-websocket-signalling.md) · Transport · after A-16 and S-41 · browser owns I/O, WASM core consumes bytes
 - [X-93 — Make protected release evidence faster without weakening it](X-93-make-protected-release-evidence-faster.md) · Build · measure cache and preflight changes against the 12m37 cold beta gate · follow-up
 
@@ -92,7 +89,6 @@ appeared twice before anyone named it.
 
 ### Media
 _Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
-- [M-80 — Decide non-exhaustive for the two relayed packet structs](M-80-decide-non-exhaustive-before-the-freeze.md) · Media · two field additions in two stories, both breaking · the choice stops being reversible at 1.0
 - [M-83 — Extend the extensibility guard past the media path](M-83-extend-the-reachability-guard-past-the-media-path.md) · Media · 98 reachable public enums outside the guarded five crates · the boundary names crates, so no enum is individually excused
 
 ## Blocked
@@ -100,7 +96,7 @@ _Signalling that cannot carry audio is a curiosity. The media layer is also wher
 - [T-24 — Discover SIP endpoints on the local link](T-24-discover-on-the-local-link.md) · Transport · blocked on a scope decision — mDNS is a second protocol and a new parser eating unauthenticated multicast
 
 ## Backlog
-- [X-126 — The default load pair test rejects a call under suite contention](X-126-the-default-load-pair-test-rejects-a-call-under-suite-contention.md) · Quality · default_load_pair_completes_the_requested_signalling_workload fails intermittently in the full cli suite — the responder 503s one call at max_active, connecting 19 of 20
+- [X-129 — Say what --max-active costs a caller who sizes it to their concurrency](X-129-say-what-max-active-costs-a-caller-who-sizes-it-to-their-concurrency.md) · Quality · load-responder sheds calls by design when --max-active equals the generator's concurrency, and nothing tells the operator sizing a run
 
 ### The application host
 _The [app-sdk](https://github.com/codewandler/sipx/blob/main/docs/designs/app-sdk.md) epic ends where a process has to exist: something must hold real_
@@ -167,7 +163,8 @@ _A live call on a machine with a local accelerator should be able to transcribe 
 
 ### Media
 _Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
-- [M-85 — Refuse a header extension that disagrees with itself, at the send boundary](M-85-refuse-a-self-inconsistent-header-extension.md) · Media · M-81 counted the packets SRTP refuses · the in-bounds case is refused by nothing, and sends media octets outside the encryption
+- [M-90 — Decide, before the freeze, whether a counter nothing can reach stays published](M-90-decide-the-fate-of-a-counter-nothing-can-reach.md) · Media · M-85 closed the only route to srtp_protect_failures · a published field that can no longer rise is the thing §4 argues against
+- [M-92 — Give the remaining public-field structs a constructor, then mark them](M-92-give-the-remaining-public-field-structs-a-constructor.md) · Media · M-80's struct guard holds 6 types; 155 reachable public-field structs workspace-wide and 29 on the media surface are still literal-constructible
 
 ### Media interoperability closure
 - [M-82 — Say what a forwarded extension means to a peer that negotiated none](M-82-say-what-a-forwarded-extension-means-to-a-peer.md) · Media · sipx negotiates no extmap and now forwards element identifiers verbatim across a bridge
@@ -220,6 +217,7 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [C-5 — The application contract crate and its sans-IO interpreter](C-5-app-contract-crate-and-interpreter.md) · Application · app-sdk · parallel to C-3/C-4/M-17/M-18 · spec is docs/specs/app-contract.md · size M
 - [C-6 — Reach the bridge and the conference from a call](C-6-reach-the-bridge-from-a-call.md) · Signalling · app-sdk · last; not v1-blocking · C-1 (M9) later upgrades the signalling half · size M
 - [C-7 — Couple two dialogs without terminating media](C-7-off-media-coupling.md) · Signalling · RFC 7092 §3.1.3 · transparent SDP mapping · split from C-1
+- [C-8 — Relay the early negotiation carriers](C-8-relay-the-early-negotiation-carriers.md) · Call · C-7 refuses reliable provisionals, PRACK and offerless INVITE rather than half-relaying them · relaying those means authoring a description this role has no media for
 - [M-1 — Implement SDP and RFC 3264 offer/answer](M-1-sdp-and-offer-answer.md) · Media
 - [M-2 — Implement RTP and RTCP](M-2-rtp-and-rtcp.md) · Media
 - [M-3 — Implement G.711 and WAV handling](M-3-g711-and-wav.md) · Media
@@ -274,6 +272,7 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [M-57 — Specify deterministic real-time call-audio processing](M-57-specify-real-time-call-audio-processor.md) · Media · M16 spec gate · sans-I/O bounded frame processor using M-54's shared seam
 - [M-58 — Detect voice activity with typed call events](M-58-detect-voice-activity.md) · Media · after M-57 and M-54 · start, end and hangover through CallEvent and SDK
 - [M-59 — Report call signal level clipping and silence metrics](M-59-report-call-signal-metrics.md) · Media · after M-57 and M-54 · signal content only, distinct from M-10 network quality
+- [M-63 — Specify the custom call-DSP contract](M-63-specify-custom-call-dsp-contract.md) · Media · after M-54 · M18 admission · frame contract, execution profiles and minimum failure policy
 - [M-69 — Reject an unacceptable initial offer on the wire](M-69-reject-an-unacceptable-initial-offer-on-the-wire.md) · Media · external review finding 3 · no-common-codec failure sends no final SIP response
 - [M-71 — Deliver negotiated DTMF receive events through scenario](M-71-deliver-negotiated-dtmf-receive-events-through-scenario.md) · Media · external review finding 10 · digits send successfully but no typed receive event arrives
 - [M-73 — Align the DTLS profile names with the IANA registry](M-73-align-the-dtls-profile-names-with-the-registry.md) · Media · the counter-mode DTLS profile carries OpenSSL's spelling rather than the registry's; M-41 added registry-correct names beside it
@@ -283,6 +282,9 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [M-77 — Carry a refused frame forward in voice detection](M-77-carry-a-refused-frame-forward-in-voice-detection.md) · Media · a frame the analyser refuses vanishes without breaking the epoch, so a voice transition spanning it can be missed
 - [M-78 — Guard public enums by reachability, not by name](M-78-guard-public-enums-by-reachability.md) · Media · widening the guard from Error-suffixed names to every pub enum reports 149 workspace-wide and 49 on the media path, most of them pub inside private modules
 - [M-79 — Carry the header extension through the relay path](M-79-carry-the-extension-through-the-relay-path.md) · Media · M-75 preserved the extension at the packet layer, but Encoded carries only a payload type and bytes, so bridge and conference still drop it
+- [M-80 — Decide non-exhaustive for the two relayed packet structs](M-80-decide-non-exhaustive-before-the-freeze.md) · Media · two field additions in two stories, both breaking · the choice stops being reversible at 1.0
+- [M-81 — Make the SRTP protect-error discard tell the truth](M-81-count-the-srtp-protect-discard.md) · Media · a spec sentence says the branch is unreachable · M-79 made it reachable, and it increments nothing
+- [M-85 — Refuse a header extension that disagrees with itself, at the send boundary](M-85-refuse-a-self-inconsistent-header-extension.md) · Media · M-81 counted the packets SRTP refuses · the in-bounds case is refused by nothing, and sends media octets outside the encryption
 - [P-1 — Build the CLI scaffold and machine-readable output](P-1-cli-scaffold-and-output.md) · Phone
 - [P-2 — Implement `sipx register`](P-2-cli-register.md) · Phone
 - [P-3 — Implement `sipx dial`](P-3-cli-dial.md) · Phone
@@ -504,6 +506,7 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [X-122 — Make the browser proof assertions non-vacuous](X-122-make-the-browser-proof-assertions-non-vacuous.md) · Build · every negative carries the hash of its positive, so a mutation is refused on the binding alone and a test can pass without checking the field it names
 - [X-123 — Scan nested modules for silent discards](X-123-scan-nested-modules-for-silent-discards.md) · Build · the discard guard reads one directory level, so every file X-67 moved into call/ and coupling/ has been unscanned since the split
 - [X-124 — Stop the gate leaving a default-feature binary](X-124-stop-the-gate-leaving-a-default-feature-binary.md) · Build · check-cli-reference builds sipx-cli with default features after the all-features test step, so every gate run ends by leaving a binary the next run's tests will spawn
+- [X-126 — The default load pair test rejects a call under suite contention](X-126-the-default-load-pair-test-rejects-a-call-under-suite-contention.md) · Quality · default_load_pair_completes_the_requested_signalling_workload fails intermittently in the full cli suite — the responder 503s one call at max_active, connecting 19 of 20
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

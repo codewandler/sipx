@@ -2,7 +2,7 @@
 id: M-80
 title: Decide non-exhaustive for the two relayed packet structs
 pillar: Media
-status: in-progress
+status: done
 priority: 7
 design:
 epic: media
@@ -52,7 +52,7 @@ repository has an opinion about these two. That is the gap.
       state in the checker why structs are deliberately out of its scope.
       → `struct_problems` / `breakable_structs` / `MEDIA_SURFACE` in `scripts/check-audio-claims.py`,
       wired into `main` and covered by `TheStructExtensibilityRule` in `scripts/test-audio-claims.py`.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
       → not run: one gate per wave is the coordinator's. See the pre-existing failure below.
 
 ## Progress
@@ -155,3 +155,5 @@ repository has an opinion about these two. That is the gap.
   worktree with no changes applied: `Ran 73 tests … FAILED (failures=1)`. Left alone rather than
   fixed: the assertion belongs to the DSP epic that added those modules, and updating it would be
   asserting a crate shape this story never examined.
+
+- 2026-08-08: closed at the `1.0.0-rc.11` boundary, against the wave gate run on this tree.

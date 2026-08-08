@@ -2,7 +2,7 @@
 id: M-85
 title: Refuse a header extension that disagrees with itself, at the send boundary
 pillar: Media
-status: in-progress
+status: done
 priority: 5
 design:
 epic: media
@@ -81,7 +81,7 @@ written and the far end rejects it, silently, with no counter on either side.
       change; `M-81` documented the behaviour this story replaces.
       → `crates/sipx-media/src/session.rs:745-771`, and the corrected sentence on `send_encoded`
       at `crates/sipx-media/src/session.rs:2419-2424`.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -195,3 +195,5 @@ written and the far end rejects it, silently, with no counter on either side.
   half of what `M-81` uncovered: an extension whose length word overstates its bytes while keeping
   the computed header inside the packet is refused by nothing, and puts a plaintext run of media on
   the wire under all three protection profiles.
+
+- 2026-08-08: closed at the `1.0.0-rc.11` boundary, against the wave gate run on this tree.

@@ -2,7 +2,7 @@
 id: C-8
 title: Relay the early negotiation carriers
 pillar: Call
-status: in-progress
+status: done
 priority: 35
 design: docs/designs/edge.md
 epic: edge
@@ -35,7 +35,7 @@ the coupling ever authoring a media description of its own.
       carrier, as `C-7`'s does for `InitialInvite`, `Update` and `Reinvite`.
 - [x] `docs/rfc/registry.toml`'s RFC 7092 evidence is extended in the same commit, and the status is
       raised only for what is actually proven — `C-7` deliberately left it `partial`.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -139,3 +139,5 @@ the coupling ever authoring a media description of its own.
   source leg as nothing at all, so a plain `180 Ringing` from the target does not make the source
   endpoint ring. `C-7` behaved the same way and no acceptance row here names it. It carries no
   description, so it is a progress-relay gap rather than a negotiation one.
+
+- 2026-08-08: closed at the `1.0.0-rc.11` boundary, against the wave gate run on this tree.

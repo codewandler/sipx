@@ -2,7 +2,7 @@
 id: X-126
 title: The default load pair test rejects a call under suite contention
 pillar: Quality
-status: in-progress
+status: done
 priority: 2
 design:
 epic:
@@ -28,7 +28,7 @@ completed and a red one means it did not.
       `check-fixed-sleep.py` rule.
 - [x] If the responder's admission control is the real finding rather than the test's timing, that
       is stated with evidence and the story is re-pointed at the responder.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -165,3 +165,5 @@ completed and a red one means it did not.
   against this test's twelve, and it held 20 of 20 under the same load. Latent, not observed, and
   left alone rather than swept into this diff. Filed as `X-129`: nothing warns a user sizing a real
   run that `--max-active` equal to a generator's concurrency will shed calls by design.
+
+- 2026-08-08: closed at the `1.0.0-rc.11` boundary, against the wave gate run on this tree.

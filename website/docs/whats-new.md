@@ -1,13 +1,43 @@
 ---
 title: What's new
-description: Release highlights and adoption notes for the sipx 1.0.0-rc.10 release candidate.
+description: Release highlights and adoption notes for the sipx 1.0.0-rc.11 release candidate.
 ---
 
 # What's new
 
 <!-- BEGIN generated:release-heading -->
-## 1.0.0-rc.10 — 2026-08-08
+## 1.0.0-rc.11 — 2026-08-08
 <!-- END generated:release-heading -->
+
+RC.11 closes two ways a header extension could quietly corrupt what a peer received, settles the
+extensibility question while it is still reversible, and lands the contract the custom-DSP epic is
+built on.
+
+```bash
+cargo install --locked --version =1.0.0-rc.11 sipx-cli
+```
+
+- **An extension that disagrees with itself no longer reaches the wire.** A length word claiming
+  more bytes than were behind it moved the header boundary into the media: on an SRTP leg that put a
+  run of *unencrypted* audio on the wire, and on a plain leg it truncated what the peer played.
+  Neither end could see it, because only the sender knew where the boundary was meant to be. Both
+  are refused now, at one boundary, and counted.
+- **Breaking: six public structs became `#[non_exhaustive]`.** A literal naming their fields no
+  longer compiles outside their crate; use the constructor and assign the rest. Taken now on purpose
+  — the attribute can be removed in a minor release and only added in a major one, so this is the
+  last candidate in which the choice is still reversible.
+- **The custom call-DSP contract ships**, with capability discovery, a caller-owned bounded
+  workspace, three named execution profiles — only two of which may claim that over-budget work
+  cannot stall RTP — and a conformance harness that reports what it cannot prove rather than passing
+  it. No processor implementation ships behind it, and none should be inferred.
+- **Voice-activity thresholds calibrate against a call's own background noise**, entirely in sample
+  counts, with the effective thresholds readable without mutating anything or exposing audio.
+- **A browser WebSocket signalling binding** drives the WebAssembly kernel over WSS with bounded
+  queues and a reconnect budget that ends in a typed event rather than a retry loop.
+- **The off-media coupling relays the early negotiation carriers** — reliable provisionals with
+  PRACK correlated on both legs, and an offerless INVITE as a delayed offer rather than a `488`.
+
+## 1.0.0-rc.10 — 2026-08-08
 
 RC.10 answers a question this project had been guessing at for three releases — whether its own
 tests fail because the machine is busy — and carries nine stories besides.
@@ -629,5 +659,5 @@ answer calls, but application callback bindings are not implemented.
 This website is built from `main`, so a page or API link may describe work newer than the tagged
 release. Use the exact crates.io version when reproducibility matters, and consult the
 [complete changelog](https://github.com/codewandler/sipx/blob/main/CHANGELOG.md) before updating a
-Git revision. Unreleased behavior is not part of `1.0.0-rc.10` merely because it appears on this
+Git revision. Unreleased behavior is not part of `1.0.0-rc.11` merely because it appears on this
 site.

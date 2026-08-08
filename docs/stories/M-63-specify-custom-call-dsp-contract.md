@@ -2,7 +2,7 @@
 id: M-63
 title: Specify the custom call-DSP contract
 pillar: Media
-status: in-progress
+status: done
 priority: 37
 design: docs/designs/custom-call-dsp.md
 epic: custom-call-dsp
@@ -34,7 +34,7 @@ application-supplied DSP before any live-call attachment is implemented.
       partial state mutation, panic, unsafe code or unbounded allocation.
 - [x] A conformance harness accepts an external fixture processor and proves reset, cancellation,
       chunk-boundary and allocation invariants.
-- [ ] Public API docs, byte/sample vectors and the full gate are green.
+- [x] Public API docs, byte/sample vectors and the full gate are green.
 
 ## Progress
 
@@ -111,3 +111,5 @@ application-supplied DSP before any live-call attachment is implemented.
   own state as `Unproven` — `unsafe_code` is forbidden workspace-wide, so no counting allocator can
   be installed, and the harness measures the inline size and holds the caller-owned workspace
   exactly instead of reporting a figure it cannot produce. `X-126` is filed for that measurement.
+
+- 2026-08-08: closed at the `1.0.0-rc.11` boundary, against the wave gate run on this tree.

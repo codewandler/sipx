@@ -60,22 +60,21 @@ No aggregate percentage is given. `media` and `core` differ in size and in how m
 
 | Pillar | Open stories |
 |---|---|
-| Media | 21 |
+| Media | 19 |
 | Application | 16 |
 | Build | 11 |
 | Transport | 4 |
 | Signalling | 3 |
 | Phone | 2 |
-| Call | 1 |
 | Quality | 1 |
 | Session | 1 |
-| **total** | **60** |
+| **total** | **57** |
 
-315 stories done. `blocked` counts as open: a story parked on a dependency is distance, not progress.
+321 stories done. `blocked` counts as open: a story parked on a dependency is distance, not progress.
 
 ## Discovery versus closure
 
-<!-- maturity-event-days: {"basis":"sha256:e3751d923098ebb13a0b4d7db279749678936d69eb73504e7515089f7d647ee3","closed":{"2026-07-28":58,"2026-07-29":48,"2026-07-30":40,"2026-07-31":5,"2026-08-01":1,"2026-08-03":12,"2026-08-04":39,"2026-08-05":35,"2026-08-08":77},"filed":{"2026-07-28":95,"2026-07-29":42,"2026-07-30":44,"2026-07-31":3,"2026-08-03":1,"2026-08-04":51,"2026-08-05":73,"2026-08-06":17,"2026-08-08":50}} -->
+<!-- maturity-event-days: {"basis":"sha256:6a8025511b622c126e1783dde4caa0523c8559e58f8ff3a1b030f8be7cba37a8","closed":{"2026-07-28":58,"2026-07-29":48,"2026-07-30":40,"2026-07-31":5,"2026-08-01":1,"2026-08-03":12,"2026-08-04":39,"2026-08-05":35,"2026-08-08":83},"filed":{"2026-07-28":95,"2026-07-29":42,"2026-07-30":44,"2026-07-31":3,"2026-08-03":1,"2026-08-04":51,"2026-08-05":73,"2026-08-06":17,"2026-08-08":53}} -->
 
 Burn-down is not a maturity signal while discovery outpaces closure. The marker to watch is not a single day where closure wins but the date that crossover becomes **durable** — that is when the codebase stops surprising its authors.
 
@@ -90,7 +89,7 @@ Burn-down is not a maturity signal while discovery outpaces closure. The marker 
 | 2026-08-04 | 51 | 39 | -12 |
 | 2026-08-05 | 73 | 35 | -38 |
 | 2026-08-06 | 17 | 0 | -17 |
-| 2026-08-08 | 50 | 77 | +27 |
+| 2026-08-08 | 53 | 83 | +30 |
 
 Filed is a story file being added; closed is a `status: done` line appearing, so a story reopened and closed again counts twice — which is the honest reading of *closed that day*.
 

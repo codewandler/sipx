@@ -2,7 +2,7 @@
 id: M-81
 title: Make the SRTP protect-error discard tell the truth
 pillar: Media
-status: in-progress
+status: done
 priority: 6
 design:
 epic: media
@@ -63,7 +63,7 @@ what SRTP authenticates or encrypts.
       dropped by `Packet::encode`'s length filter, which the doc does not mention either.
       → `crates/sipx-media/src/session.rs:745-763` and the corrected sentence on `send_encoded`,
       `crates/sipx-media/src/session.rs:2413-2425`.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -136,3 +136,4 @@ what SRTP authenticates or encrypts.
   from the "a field stuck at zero" that `docs/specs/media-runtime.md` §4 argues against twice.
   `M-90` is filed to settle that before the freeze.
 
+- 2026-08-08: closed at the `1.0.0-rc.11` boundary, against the wave gate run on this tree.
