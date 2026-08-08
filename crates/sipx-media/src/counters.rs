@@ -17,6 +17,19 @@ pub struct MediaDiscardCounts {
     pub srtp_unprotect_failures: u64,
     /// RTCP reports that failed SRTCP authentication or decryption.
     pub srtcp_unprotect_failures: u64,
+    /// RTP packets dropped because SRTP refused to protect them (`M-81`).
+    ///
+    /// **This one describes the application on this side, not the far end.** The only way to
+    /// reach it is to hand [`send_encoded`](crate::MediaSession::send_encoded) an
+    /// [`Encoded`](crate::Encoded) whose header extension disagrees with itself, so the header
+    /// the transform computes runs past the end of the packet; the packet is then dropped rather
+    /// than sent in the clear (`docs/specs/media-runtime.md` §4). Nothing a peer sends can move
+    /// it — a received extension is bounds-checked when the packet is decoded — so this is not a
+    /// number to read as evidence of an attack.
+    ///
+    /// It does not promise that every unsendable packet is here. A packet the socket itself
+    /// refused is a send error and ends the loop; this counts only what the transform refused.
+    pub srtp_protect_failures: u64,
     /// RTP packets whose SSRC differed from the established stream.
     pub foreign_ssrc: u64,
     /// Complete DTMF digits refused because the application queue was full or closed.
@@ -79,6 +92,7 @@ impl MediaDiscardCounts {
             self.opus_decode_failures,
             self.srtp_unprotect_failures,
             self.srtcp_unprotect_failures,
+            self.srtp_protect_failures,
             self.foreign_ssrc,
             self.dtmf_delivery_failures,
             self.unknown_payload_type,
@@ -107,6 +121,7 @@ pub(crate) struct DiscardMeters {
     pub(crate) opus_decode_failures: AtomicU64,
     pub(crate) srtp_unprotect_failures: AtomicU64,
     pub(crate) srtcp_unprotect_failures: AtomicU64,
+    pub(crate) srtp_protect_failures: AtomicU64,
     pub(crate) foreign_ssrc: AtomicU64,
     pub(crate) dtmf_delivery_failures: AtomicU64,
     pub(crate) unknown_payload_type: AtomicU64,
@@ -131,6 +146,7 @@ impl DiscardMeters {
             opus_decode_failures: self.opus_decode_failures.load(Ordering::Relaxed),
             srtp_unprotect_failures: self.srtp_unprotect_failures.load(Ordering::Relaxed),
             srtcp_unprotect_failures: self.srtcp_unprotect_failures.load(Ordering::Relaxed),
+            srtp_protect_failures: self.srtp_protect_failures.load(Ordering::Relaxed),
             foreign_ssrc: self.foreign_ssrc.load(Ordering::Relaxed),
             dtmf_delivery_failures: self.dtmf_delivery_failures.load(Ordering::Relaxed),
             unknown_payload_type: self.unknown_payload_type.load(Ordering::Relaxed),
