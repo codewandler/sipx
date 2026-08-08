@@ -51,6 +51,20 @@ contains the capability's word. `sipx-media` may claim bridging because it has `
 `sipx-call` may not, because it has nothing named bridge — which is `X-35`'s finding and `C-6`'s
 gap.
 
+A fourth rule runs over the API rather than over the prose, because `A-9` froze what a published
+crate may add and an enum variant is the one addition that breaks a caller who did nothing wrong.
+
+**Extensibility.** A public enum either carries `#[non_exhaustive]` or argues beside itself why its
+variants are the complete domain. Which enums that covers is decided by **reachability from the
+crate root**: a `pub enum` is public API when its module path is writable from outside — every
+`mod` on the way is a bare `pub` — or when the crate re-exports it out of a private module, which
+is how `sipx-call` publishes `MediaProfile` from a private `media_policy`. A `pub enum` in a
+private module that nothing re-exports is not public API at all, and reporting it would be noise
+dressed as contract. `M-78` replaced the rule this succeeds, which selected by a name ending in
+`Error` — a spelling convention standing in for a visibility question, so `MediaProfile`,
+`IcePolicy` and `Keying` were unguarded for the life of the project while an internal
+`ParseError` was held to the contract.
+
 Three things this deliberately does not do.
 
 **It reads each crate documentation and package README's summary paragraph, not the whole file.**
@@ -74,6 +88,13 @@ false.
 There is no suppression list, under any name. A claim this check reports is either true and
 missing from the other doors, or false and has to go; a third option is what let the first three
 corrections be hand corrections.
+
+`GUARDED_SURFACE` is the one boundary in this file and it is deliberately not that. It names
+crates and never an item, so no enum can be excused individually; correcting the extensibility
+rule's selector turned up more than a hundred reachable enums at once, which is a breaking change
+across eleven crates rather than a review anybody can do, and the run prints how many are still
+outstanding beyond it. A suppression list makes a finding disappear. This one makes it a number
+printed on every run.
 """
 
 import re
@@ -169,12 +190,15 @@ CAPABILITIES = (
 
 VOCABULARY = CODECS + CAPABILITIES
 
-#: A module declaration, with the feature that gates it if there is one. The visibility is
-#: optional: a library writes `pub mod`, and a binary — where there is no public API to write —
-#: writes bare `mod`, so requiring `pub` here read `sipx-cli` as a crate with no code in it.
+#: A module declaration, with the feature that gates it if there is one and the visibility it
+#: carries. The visibility is optional: a library writes `pub mod`, and a binary — where there is
+#: no public API to write — writes bare `mod`, so requiring `pub` here read `sipx-cli` as a crate
+#: with no code in it. `exported` captures a bare `pub` and `restriction` captures the parenthesised
+#: form, because the two are opposites for reachability: `pub mod` widens the crate's surface and
+#: `pub(crate) mod` is as private as no visibility at all.
 _MODULE = re.compile(
     r'(?:#\[cfg\(feature = "(?P<feature>[\w-]+)"\)\]\s*\n\s*)?'
-    r"(?:pub(?:\([\w:]+\))? )?mod (?P<name>\w+);"
+    r"(?:(?P<exported>pub) |pub\((?P<restriction>[\w: ]+)\) )?mod (?P<name>\w+);"
 )
 #: An item's declaration keywords, in the order Rust writes them after the visibility.
 _DECLARES = r"(?:(?:async|const|unsafe|extern)\s+)*(?:fn|struct|enum|trait|const|type|union)"
@@ -198,14 +222,40 @@ _WORD = re.compile(r"[A-Z]+(?![a-z])|[A-Z][a-z0-9]*|[a-z0-9]+")
 #: crate a row is about.
 _CRATE_CELL = re.compile(r"`sipx(?:-[a-z0-9]+)*`")
 
-#: A public error enum. The name is deliberately the policy: error structs can add private
-#: implementation detail without breaking a caller, while an enum variant is part of every
-#: downstream exhaustive match.
-_ERROR_ENUM = re.compile(r"(?m)^[ \t]*pub enum (?P<name>(?:[A-Za-z0-9_]*Error|Error))\b")
+#: A public enum. Enums and not structs, because a struct can add a private field without
+#: breaking a caller while every enum variant is part of every downstream exhaustive match. Line
+#: anchored for the reason the item patterns above are: a doc comment quoting `pub enum Foo` is
+#: prose.
+_PUBLIC_ENUM = re.compile(r"(?m)^[ \t]*pub enum (?P<name>\w+)")
 
-#: The one phrase that classifies an intentionally exhaustive error enum. Like the fixed-sleep
-#: guard's classifications, the reason lives at the site it excuses rather than in a list here.
+#: A re-export. The body runs to the semicolon and may span lines, because that is how a crate
+#: root writes a long one. What it re-exports is read out of the body by `reexports` below.
+_REEXPORT = re.compile(r"(?m)^[ \t]*pub use\s+(?P<body>[^;]+);")
+
+#: The one phrase that classifies an intentionally exhaustive enum. Like the fixed-sleep guard's
+#: classifications, the reason lives at the site it excuses rather than in a list here.
 EXHAUSTIVE_REASON = "/// Exhaustive by design:"
+
+#: The crates whose reachable public enums are held to the guard today.
+#:
+#: This is a **rollout boundary and not a suppression list**, and the difference is mechanical
+#: rather than a promise. It names crates and never enums, so nothing inside a crate that is in
+#: scope can be excused one item at a time — which is the shape a suppression list takes and the
+#: shape this check has always refused. Widening it is a reviewable diff, and until it is widened
+#: the run prints how many reachable enums outside it are still unguarded, so the debt is reported
+#: at every gate run rather than kept somewhere nobody reads.
+#:
+#: Why a boundary exists at all: `M-78` replaced a rule that keyed on a name ending in `Error`,
+#: and correcting the selector turns up well over a hundred reachable enums across the workspace.
+#: Marking those is a breaking change for every downstream `match` arm in eleven crates at once,
+#: which is not one reviewable change; `M-74` paid down the media path, which is the surface the
+#: argument was made for. The remainder is recorded in `M-78`'s progress note.
+GUARDED_SURFACE = ("sipx-audio", "sipx-call", "sipx-media", "sipx-rtp", "sipx-sdp")
+
+#: `sipx-app-protocol` owns a closed, versioned application vocabulary and documents its own
+#: exceptions, so `A-9` explicitly leaves it out — a decision that outlives any particular
+#: rollout boundary and so is written down separately from one.
+CLOSED_VOCABULARY = "sipx-app-protocol"
 
 
 def words(identifier: str) -> set[str]:
@@ -358,36 +408,6 @@ def readme_problems(crates: list[str]) -> list[str]:
     return problems
 
 
-def error_enum_problems(crates: list[str]) -> list[str]:
-    """Public error enums that promise their current variant set can never grow.
-
-    `sipx-app-protocol` owns a closed, versioned application vocabulary and documents its own
-    exceptions, so A-9 explicitly leaves it out. Everywhere else an enum is extensible unless the
-    type itself argues why its variants are the complete domain.
-    """
-    problems = []
-    for crate in crates:
-        if crate == "sipx-app-protocol":
-            continue
-        for path in sorted((CRATES / crate / "src").rglob("*.rs")):
-            source = path.read_text(encoding="utf-8")
-            for found in _ERROR_ENUM.finditer(source):
-                block_start = source.rfind("\n\n", 0, found.start())
-                preamble = source[block_start + 2 : found.start()]
-                if "#[non_exhaustive]" in preamble or EXHAUSTIVE_REASON in preamble:
-                    continue
-                line = source.count("\n", 0, found.start()) + 1
-                try:
-                    where = path.relative_to(ROOT)
-                except ValueError:
-                    where = path
-                problems.append(
-                    f"{where}:{line} `{found.group('name')}` is exhaustive; add "
-                    f"`#[non_exhaustive]` or an adjacent `{EXHAUSTIVE_REASON}` rationale"
-                )
-    return problems
-
-
 def entry_point(crate: str) -> Path:
     """A crate's `lib.rs`, or its `main.rs` when it is only a binary."""
     for name in ("lib.rs", "main.rs"):
@@ -456,6 +476,222 @@ def modules(crate: str, entry: Path) -> list[Module]:
 
     walk(entry, "", "")
     return found
+
+
+class Reach(NamedTuple):
+    """One module of a crate, reduced to whether anybody outside the crate can write its path."""
+
+    #: Its path from the crate root — `ice::agent` — or empty for the root itself.
+    module: str
+    #: The file it is written in.
+    path: Path
+    #: Whether every `mod` on the way here carries a bare `pub`. `pub(crate) mod` and a bare `mod`
+    #: are the same thing to a downstream crate: it cannot name what is inside either.
+    exported: bool
+
+
+def module_graph(crate: str, entry: Path) -> dict[str, Reach]:
+    """Every module of a crate, keyed by its path, with whether it is exported.
+
+    The same declarations `modules` walks, read for a different question: `modules` collects what
+    can back a claim, this collects what a `match` in somebody else's crate can see. A module
+    declared and absent is skipped here rather than raised on — `modules` walks the same lines and
+    reports it, and one missing file described by two readers in two sentences is worse than one.
+    """
+    found: dict[str, Reach] = {}
+
+    def walk(path: Path, module: str, exported: bool) -> None:
+        found[module] = Reach(module=module, path=path, exported=exported)
+        for match in _MODULE.finditer(code(path.read_text(encoding="utf-8"))):
+            name = match.group("name")
+            child_module = f"{module}::{name}" if module else name
+            if child_module in found:
+                continue
+            flat = path.parent / f"{name}.rs"
+            nested = path.parent / name / "mod.rs"
+            child = flat if flat.exists() else nested
+            if child.exists():
+                walk(child, child_module, exported and match.group("exported") is not None)
+
+    walk(entry, "", True)
+    return found
+
+
+def use_targets(module: str, prefix: str) -> list[str]:
+    """The module paths a `use` prefix could name, read from inside `module`.
+
+    `crate::`, `self::` and `super::` say where they start from and resolve to one answer. A bare
+    first segment does not: under Rust 2018's uniform paths it is a sibling module, an item of the
+    crate root, or another crate entirely. The third names no module of this crate and falls away
+    on its own, so offering the first two costs nothing and misses neither.
+    """
+    segments = [segment for segment in prefix.split("::") if segment]
+    anchored = False
+    while segments and segments[0] in ("crate", "self", "super"):
+        head = segments.pop(0)
+        anchored = True
+        if head == "crate":
+            module = ""
+        elif head == "super":
+            module = module.rpartition("::")[0]
+    if anchored:
+        return ["::".join(filter(None, (module, *segments)))]
+    return ["::".join(filter(None, (module, *segments))), "::".join(segments)]
+
+
+def _leaves(items: str) -> list[str]:
+    """The names inside a `use` brace list, split on the commas that are not nested."""
+    leaves: list[str] = []
+    depth = 0
+    current = ""
+    for character in items:
+        if character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+        if character == "," and depth == 0:
+            leaves.append(current)
+            current = ""
+        else:
+            current += character
+    leaves.append(current)
+    return [leaf.strip() for leaf in leaves if leaf.strip()]
+
+
+def reexports(module: str, text: str) -> tuple[set[tuple[str, str]], set[str]]:
+    """What a module's `pub use` lines publish, as `(module, name)` pairs and glob targets.
+
+    A name is recorded under the module it is re-exported *from*, because that is where the type
+    is declared and where the guard has to look. `as` renames are read by their original name for
+    the same reason: the rename changes what a caller writes, not which type grows a variant.
+    """
+    named: set[tuple[str, str]] = set()
+    globs: set[str] = set()
+    for found in _REEXPORT.finditer(text):
+        body = " ".join(found.group("body").split())
+        prefix, brace, rest = body.partition("{")
+        leaves = _leaves(rest.rpartition("}")[0]) if brace else [body.rpartition("::")[2]]
+        if not brace:
+            prefix = body.rpartition("::")[0]
+        for target in use_targets(module, prefix):
+            for leaf in leaves:
+                leaf = leaf.partition(" as ")[0].strip()
+                if leaf == "*":
+                    globs.add(target)
+                elif leaf.isidentifier():
+                    named.add((target, leaf))
+    return named, globs
+
+
+def reachable_enums(crate: str) -> list[tuple[Path, str, str, int]]:
+    """Every public enum of a crate a downstream `match` can name, with where it is written.
+
+    Two ways to be nameable, and the second is why a name-based or a module-visibility-only rule
+    both get this wrong. A `pub enum` in a module reached only through `pub mod` declarations is
+    public because its path is writable. A `pub enum` in a *private* module is public when the
+    crate re-exports it — `sipx-call` keeps `MediaProfile` in a private `media_policy` and
+    publishes it from the crate root, and a reader that stopped at module visibility would call
+    the type it publishes an implementation detail.
+
+    The converse is the half `M-78` was filed for: a `pub enum` in a private module that nothing
+    re-exports is not public API, however `pub` it is written, and marking it would be noise
+    dressed as contract.
+
+    A binary crate returns nothing: it has no public API for anybody to match on.
+    """
+    entry = entry_point(crate)
+    if entry.name != "lib.rs":
+        return []
+    graph = module_graph(crate, entry)
+    sources = {
+        module: code(reach.path.read_text(encoding="utf-8")) for module, reach in graph.items()
+    }
+
+    exported = {module for module, reach in graph.items() if reach.exported}
+    published_names: set[tuple[str, str]] = set()
+    modules_to_read = list(exported)
+    names_to_chase: list[tuple[str, str]] = []
+
+    def publish(target: str, leaf: str) -> None:
+        whole = f"{target}::{leaf}" if target else leaf
+        if whole in graph:
+            # The re-export names a module rather than an item, which publishes all of it.
+            if whole not in exported:
+                exported.add(whole)
+                modules_to_read.append(whole)
+        elif (target, leaf) not in published_names:
+            published_names.add((target, leaf))
+            names_to_chase.append((target, leaf))
+
+    # Both worklists only ever add to sets, so this settles. Names are chased as well as modules
+    # because a private module often just forwards: `sipx-sip` publishes its transaction types out
+    # of `transaction/mod.rs`, which re-exports them from a private `transaction::client`, and
+    # recording only the first hop would leave the declaration site unguarded while the name is on
+    # the crate's surface.
+    while modules_to_read or names_to_chase:
+        while modules_to_read:
+            module = modules_to_read.pop()
+            named, globs = reexports(module, sources[module])
+            for target in globs:
+                if target in graph and target not in exported:
+                    exported.add(target)
+                    modules_to_read.append(target)
+            for target, leaf in named:
+                if target in graph:
+                    publish(target, leaf)
+        while names_to_chase:
+            module, leaf = names_to_chase.pop()
+            for target, forwarded in reexports(module, sources[module])[0]:
+                if forwarded == leaf and target in graph:
+                    publish(target, leaf)
+
+    found = []
+    for module, reach in sorted(graph.items()):
+        for match in _PUBLIC_ENUM.finditer(sources[module]):
+            name = match.group("name")
+            if module in exported or (module, name) in published_names:
+                found.append((reach.path, module, name, match.start()))
+    return found
+
+
+def enum_problems(crates: list[str]) -> list[str]:
+    """Reachable public enums that promise their current variant set can never grow.
+
+    An enum is extensible unless the type itself argues why its variants are the complete domain.
+    The argument lives beside the type — never in a list here — so a reader who has to add a
+    variant meets it at the moment the question arises.
+    """
+    problems = []
+    for crate in crates:
+        for path, _module, name, offset in reachable_enums(crate):
+            source = code(path.read_text(encoding="utf-8"))
+            preamble = source[source.rfind("\n\n", 0, offset) + 2 : offset]
+            if "#[non_exhaustive]" in preamble or EXHAUSTIVE_REASON in preamble:
+                continue
+            line = source.count("\n", 0, offset) + 1
+            try:
+                where = path.relative_to(ROOT)
+            except ValueError:
+                where = path
+            problems.append(
+                f"{where}:{line} `{name}` is reachable from the crate root and exhaustive; add "
+                f"`#[non_exhaustive]` or an adjacent `{EXHAUSTIVE_REASON}` rationale"
+            )
+    return problems
+
+
+def guarded(crates: list[str]) -> list[str]:
+    """The crates whose reachable enums this run holds to the guard. See `GUARDED_SURFACE`."""
+    return [crate for crate in crates if crate in GUARDED_SURFACE and crate != CLOSED_VOCABULARY]
+
+
+def outside_the_boundary(crates: list[str]) -> list[str]:
+    """The crates the rollout has not reached, whose debt the summary line reports."""
+    return [
+        crate
+        for crate in crates
+        if crate not in GUARDED_SURFACE and crate != CLOSED_VOCABULARY
+    ]
 
 
 def crate_vocabulary(entry: Path, found: list[Module]) -> frozenset[str]:
@@ -743,7 +979,7 @@ def main() -> int:
         return 1
 
     read_crates = [read(name, tables) for name in crates]
-    problems += error_enum_problems(crates)
+    problems += enum_problems(guarded(crates))
     for crate in read_crates:
         problems += (
             claim_problems(crate) + agreement_problems(crate) + stability_problems(crate)
@@ -771,6 +1007,13 @@ def main() -> int:
     print(
         f"{len(read_crates)} published crates, {doors} front doors, {len(codecs)} codecs claimed "
         f"({', '.join(codecs) or 'none'}), every claim backed and every door agreeing"
+    )
+    # The rollout boundary's debt, counted on every run. See `GUARDED_SURFACE`: a boundary that
+    # reported nothing would be a suppression list with a better name.
+    debt = enum_problems(outside_the_boundary(crates))
+    print(
+        f"{len(GUARDED_SURFACE)} crates hold every reachable public enum non-exhaustive or argued; "
+        f"{len(debt)} reachable enums outside that boundary are still exhaustive"
     )
     return 0
 

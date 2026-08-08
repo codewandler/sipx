@@ -30,6 +30,14 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
+#: Rust's test-module attribute, assembled rather than written out.
+#:
+#: `TheModuleReader` reads *this file* as if it were Rust, and `guard.code` truncates a file at the
+#: first literal occurrence of this attribute. Spelling it out above the fixtures that need it
+#: would cut this file short of the declarations that test reads — which is exactly `X-116`'s
+#: defect, reproduced inside the file that exists to catch it.
+TEST_ATTRIBUTE = "#[cfg" + "(test)]"
+
 
 def load_module():
     """Import check-audio-claims.py, whose hyphen keeps it out of the normal import path."""
@@ -104,9 +112,31 @@ class TheRepositoryItself(unittest.TestCase):
                 relative = guard.package_readme(name).relative_to(guard.CRATES / name)
                 self.assertIn(str(relative), packaged)
 
-    def test_every_public_error_enum_is_non_exhaustive_or_argued_at_the_type(self):
-        """A-9's failing-first API assertion: additive variants must stay additive."""
-        self.assertEqual([], guard.error_enum_problems(self.published))
+    def test_every_reachable_public_enum_is_non_exhaustive_or_argued_at_the_type(self):
+        """A-9's failing-first API assertion: additive variants must stay additive.
+
+        `M-74`'s row, once `M-78` corrected which enums the rule selects. Before that it read a
+        name suffix, so `MediaProfile`, `IcePolicy`, `Keying`, `RtcpMode` and `Codec` — every data
+        enum on the media path — were outside a contract that covered an internal `ParseError`.
+        """
+        self.assertEqual([], guard.enum_problems(guard.guarded(self.published)))
+
+    def test_the_guard_reads_enums_out_of_every_crate_it_covers(self):
+        """A blinded reader passes every rule that runs over it, and says so at exit 0.
+
+        `X-116` put Rust's test-module attribute in a crate-root comment, and `code` truncates
+        each file at the first one — that single comment made this reader see thirteen empty
+        crates. A count is the cheapest assertion that cannot hold while the reader is blind.
+        """
+        for name in guard.guarded(self.published):
+            with self.subTest(crate=name):
+                self.assertGreater(len(guard.reachable_enums(name)), 0)
+
+    def test_the_rollout_boundary_names_crates_that_exist(self):
+        """A boundary able to name one enum would be a suppression list with a better name."""
+        for name in guard.GUARDED_SURFACE:
+            with self.subTest(crate=name):
+                self.assertIn(name, self.published)
 
     def test_every_claim_every_crate_makes_is_backed(self):
         """`X-35`'s failing-first assertion.
@@ -362,17 +392,17 @@ class TheSummary(unittest.TestCase):
         self.assertEqual("", guard.markdown_summary("Telephony audio: G.711.\n"))
 
 
-class TheErrorEnumRule(unittest.TestCase):
+class TheExtensibilityRule(unittest.TestCase):
     """A-9: an exception is argued at the type, never hidden in a suppression list."""
 
-    def test_an_exhaustive_error_enum_is_reported(self):
+    def test_an_exhaustive_enum_is_reported(self):
         problems = self.problems_for(
             "/// A failure.\n#[derive(Debug)]\npub enum DemoError { Failed }\n"
         )
         self.assertEqual(1, len(problems))
         self.assertIn("DemoError", problems[0])
 
-    def test_a_non_exhaustive_error_enum_is_not_reported(self):
+    def test_a_non_exhaustive_enum_is_not_reported(self):
         self.assertEqual(
             [],
             self.problems_for(
@@ -381,7 +411,7 @@ class TheErrorEnumRule(unittest.TestCase):
             ),
         )
 
-    def test_an_exhaustive_error_with_an_adjacent_reason_is_not_reported(self):
+    def test_an_exhaustive_enum_with_an_adjacent_reason_is_not_reported(self):
         self.assertEqual(
             [],
             self.problems_for(
@@ -399,17 +429,163 @@ class TheErrorEnumRule(unittest.TestCase):
         self.assertEqual(1, len(problems))
 
     def problems_for(self, source: str) -> list[str]:
-        with tempfile.TemporaryDirectory() as directory:
-            crates = pathlib.Path(directory) / "crates"
-            src = crates / "sipx-demo" / "src"
-            src.mkdir(parents=True)
-            (src / "lib.rs").write_text(source)
-            original = guard.CRATES
-            guard.CRATES = crates
-            try:
-                return guard.error_enum_problems(["sipx-demo"])
-            finally:
-                guard.CRATES = original
+        return demo_crate({"lib.rs": source})
+
+
+def demo_crate(files: dict[str, str]) -> list[str]:
+    """Run the extensibility rule over a crate laid out from `path -> source` under `src/`."""
+    with tempfile.TemporaryDirectory() as directory:
+        crates = pathlib.Path(directory) / "crates"
+        src = crates / "sipx-demo" / "src"
+        src.mkdir(parents=True)
+        for name, source in files.items():
+            written = src / name
+            written.parent.mkdir(parents=True, exist_ok=True)
+            written.write_text(source)
+        original = guard.CRATES
+        guard.CRATES = crates
+        try:
+            return guard.enum_problems(["sipx-demo"])
+        finally:
+            guard.CRATES = original
+
+
+#: An enum with no guard and no rationale, which is the thing the rule is looking for. Named
+#: without an `Error` suffix on purpose: the rule this replaced keyed on that spelling, so a
+#: fixture called `DemoError` would pass under both rules and prove nothing about either.
+UNGUARDED = "/// Which way a stream flows.\n#[derive(Debug)]\npub enum Flow { In, Out }\n"
+
+
+class TheReachabilityRule(unittest.TestCase):
+    """`M-78`: which enums the rule selects, which is a visibility question and not a spelling one.
+
+    The rule this replaced keyed on a name ending in `Error`. That is a convention standing in for
+    "downstream code can `match` on this", and the two came apart in both directions: `MediaProfile`,
+    `IcePolicy` and `Keying` are on `sipx-call`'s crate root and went unguarded for the life of the
+    project, while a `ParseError` in a private module nothing re-exports was held to a contract no
+    caller can depend on.
+
+    Three shapes, and every one of them has to be asserted, because getting one right by making
+    another wrong is the whole failure mode here.
+    """
+
+    def test_a_reachable_unguarded_enum_is_reported(self):
+        """Shape one, and the assertion that the rule is not keyed on a name."""
+        problems = demo_crate({"lib.rs": "pub mod stream;\n", "stream.rs": UNGUARDED})
+        self.assertEqual(1, len(problems))
+        self.assertIn("`Flow`", problems[0])
+        self.assertIn("reachable from the crate root", problems[0])
+
+    def test_a_reachable_enum_that_is_guarded_or_reasoned_is_quiet(self):
+        """Shape two, both ways of satisfying it."""
+        self.assertEqual(
+            [],
+            demo_crate(
+                {
+                    "lib.rs": "pub mod guarded;\npub mod reasoned;\n",
+                    "guarded.rs": "/// Flow.\n#[non_exhaustive]\npub enum Flow { In, Out }\n",
+                    "reasoned.rs": "/// Flow.\n///\n/// Exhaustive by design: a stream has two "
+                    "ends.\npub enum Side { Near, Far }\n",
+                }
+            ),
+        )
+
+    def test_a_public_enum_inside_a_private_module_is_quiet(self):
+        """Shape three: `pub` is not public when nothing outside the crate can write the path."""
+        self.assertEqual([], demo_crate({"lib.rs": "mod stream;\n", "stream.rs": UNGUARDED}))
+
+    def test_a_public_enum_inside_a_crate_visible_module_is_quiet(self):
+        """`pub(crate) mod` and a bare `mod` are the same thing to a downstream `match`."""
+        self.assertEqual(
+            [], demo_crate({"lib.rs": "pub(crate) mod stream;\n", "stream.rs": UNGUARDED})
+        )
+
+    def test_a_private_module_the_crate_re_exports_is_reported(self):
+        """`sipx-call` keeps `MediaProfile` in a private `media_policy` and publishes it anyway.
+
+        This is the half a module-visibility-only reader gets wrong, and it is not a corner: it is
+        how every crate in this workspace presents a curated root.
+        """
+        problems = demo_crate(
+            {"lib.rs": "mod stream;\npub use stream::Flow;\n", "stream.rs": UNGUARDED}
+        )
+        self.assertEqual(1, len(problems))
+        self.assertIn("`Flow`", problems[0])
+
+    def test_a_re_export_publishes_only_what_it_names(self):
+        """The sibling type in the same private module stays private, and stays quiet."""
+        problems = demo_crate(
+            {
+                "lib.rs": "mod stream;\npub use stream::Flow;\n",
+                "stream.rs": UNGUARDED + "\n/// Unpublished.\npub enum Hidden { One }\n",
+            }
+        )
+        self.assertEqual(1, len(problems))
+        self.assertIn("`Flow`", problems[0])
+
+    def test_a_glob_re_export_publishes_the_whole_module(self):
+        self.assertEqual(
+            2,
+            len(
+                demo_crate(
+                    {
+                        "lib.rs": "mod stream;\npub use stream::*;\n",
+                        "stream.rs": UNGUARDED + "\n/// Also out.\npub enum Other { One }\n",
+                    }
+                )
+            ),
+        )
+
+    def test_a_name_forwarded_through_a_private_module_is_followed_to_its_declaration(self):
+        """`sipx-sip` publishes transaction types out of a `mod.rs` that itself re-exports them.
+
+        Stopping at the first hop would leave the declaration unguarded while the name is on the
+        crate's surface, which is the state the guard exists to make impossible.
+        """
+        problems = demo_crate(
+            {
+                "lib.rs": "mod outer;\npub use outer::Flow;\n",
+                "outer/mod.rs": "mod inner;\npub use inner::Flow;\n",
+                "outer/inner.rs": UNGUARDED,
+            }
+        )
+        self.assertEqual(1, len(problems))
+        self.assertIn("inner.rs", problems[0])
+
+    def test_a_test_module_is_not_public_api(self):
+        """`code` cuts every file at the test-module attribute, and a fixture enum is not a promise.
+
+        Load-bearing rather than incidental: `X-116` put that attribute in a crate-root comment
+        and blinded the reader across all thirteen crates at once.
+        """
+        self.assertEqual(
+            [],
+            demo_crate(
+                {
+                    "lib.rs": "pub mod stream;\n",
+                    "stream.rs": f"{TEST_ATTRIBUTE}\nmod tests {{\n{UNGUARDED}}}\n",
+                }
+            ),
+        )
+
+    def test_a_binary_crate_has_no_public_api_to_guard(self):
+        self.assertEqual([], demo_crate({"main.rs": UNGUARDED}))
+
+    def test_the_module_graph_records_what_each_declaration_exports(self):
+        entry = guard.entry_point("sipx-call")
+        graph = guard.module_graph("sipx-call", entry)
+        self.assertTrue(graph["call"].exported)
+        # `media_policy` is private and its types reach the root through `pub use`.
+        self.assertFalse(graph["media_policy"].exported)
+
+    def test_a_use_prefix_resolves_from_where_it_is_written(self):
+        self.assertEqual(["ice"], guard.use_targets("session", "crate::ice"))
+        self.assertEqual(["session::ice"], guard.use_targets("session", "self::ice"))
+        self.assertEqual(["session::ice"], guard.use_targets("session::inner", "super::ice"))
+        self.assertEqual(["ice"], guard.use_targets("session", "super::ice"))
+        # A bare prefix is a sibling, an item of the root, or another crate; the last matches no
+        # module of this crate and falls away on its own.
+        self.assertEqual(["session::ice", "ice"], guard.use_targets("session", "ice"))
 
 
 class TheClaimVocabulary(unittest.TestCase):
