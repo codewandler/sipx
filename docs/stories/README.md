@@ -75,6 +75,8 @@ appeared twice before anyone named it.
 - [A-38 — Publish and verify the second release candidate](A-38-publish-and-verify-rc3.md) · Application · after X-113 · the post-rc.2 wave as one immutable prerelease · no stable-1.0 claim widens
 - [M-70 — Accept multiplexed browser offers with unused component candidates](M-70-accept-multiplexed-browser-offers-with-unused-component-candidates.md) · Media · external review finding 9 · a second browser engine reaches SDP then fails the multiplexed profile
 - [M-72 — Prove the AEAD SRTP key derivation against an independent peer](M-72-prove-the-aead-srtp-key-derivation-against-a-peer.md) · Media · RFC 7714 publishes no KDF vector · a wrong salt placement makes two sipx endpoints interoperate with each other and nobody else, and every round-trip test still passes
+- [M-74 — Guard public data enums against exhaustive matching](M-74-guard-public-data-enums-against-exhaustive-matching.md) · Media · the non_exhaustive check only matches enums whose name ends in Error, so MediaProfile, IcePolicy, Keying and RtcpMode are unguarded
+- [M-78 — Guard public enums by reachability, not by name](M-78-guard-public-enums-by-reachability.md) · Media · widening the guard from Error-suffixed names to every pub enum reports 149 workspace-wide and 49 on the media path, most of them pub inside private modules
 - [M-79 — Carry the header extension through the relay path](M-79-carry-the-extension-through-the-relay-path.md) · Media · M-75 preserved the extension at the packet layer, but Encoded carries only a payload type and bytes, so bridge and conference still drop it
 - [P-28 — Report the same fields across every outcome](P-28-report-the-same-fields-across-every-outcome.md) · Phone · register's success report carries aor and its failure report does not, so no script can match on it across both
 - [X-119 — Pace registry publication within its rate limit](X-119-pace-registry-publication-within-its-rate-limit.md) · Build · split out of X-93 · the 429 pacing row shares nothing with the rest of that story
@@ -102,10 +104,9 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 
 ### Media
 _Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
-- [M-78 — Guard public enums by reachability, not by name](M-78-guard-public-enums-by-reachability.md) · Media · widening the guard from Error-suffixed names to every pub enum reports 149 workspace-wide and 49 on the media path, most of them pub inside private modules
 - [M-81 — Make the SRTP protect-error discard tell the truth](M-81-count-the-srtp-protect-discard.md) · Media · a spec sentence says the branch is unreachable · M-79 made it reachable, and it increments nothing
 - [M-80 — Decide non-exhaustive for the two relayed packet structs](M-80-decide-non-exhaustive-before-the-freeze.md) · Media · two field additions in two stories, both breaking · the choice stops being reversible at 1.0
-- [M-74 — Guard public data enums against exhaustive matching](M-74-guard-public-data-enums-against-exhaustive-matching.md) · Media · the non_exhaustive check only matches enums whose name ends in Error, so MediaProfile, IcePolicy, Keying and RtcpMode are unguarded
+- [M-83 — Extend the extensibility guard past the media path](M-83-extend-the-reachability-guard-past-the-media-path.md) · Media · 98 reachable public enums outside the guarded five crates · the boundary names crates, so no enum is individually excused
 
 ### supported test surfaces
 _The workspace has seeded links, virtual time and call fixtures, but downstream applications have no_

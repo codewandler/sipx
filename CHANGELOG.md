@@ -33,6 +33,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Every public enum on the media path is extensible or says why it is not.** The guard that
+  enforces this used to select enums by a name ending in `Error`, which is a spelling convention
+  standing in for a visibility question; it now selects by reachability from the crate root, so it
+  covers what a downstream `match` can actually see and stays quiet about a `pub enum` in a private
+  module that nothing re-exports. Twenty-five enums became `#[non_exhaustive]` — `sipx_media::Codec`
+  among them, which has already grown twice — and twenty-one carry a written argument for why their
+  variants are the complete domain. **This is a breaking change for exhaustive `match` arms on any
+  of the twenty-five:** each needs a fallback arm, and adding a variant to them stops being a
+  breaking change in return.
+
 - **`sipx_media::Encoded` gained a public field.** Code constructing it as a struct literal should
   use `Encoded::new(payload_type, payload)`, which builds a payload this endpoint authored with no
   extension.
