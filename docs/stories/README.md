@@ -75,7 +75,9 @@ appeared twice before anyone named it.
 - [A-38 — Publish and verify the second release candidate](A-38-publish-and-verify-rc3.md) · Application · after X-113 · the post-rc.2 wave as one immutable prerelease · no stable-1.0 claim widens
 - [M-70 — Accept multiplexed browser offers with unused component candidates](M-70-accept-multiplexed-browser-offers-with-unused-component-candidates.md) · Media · external review finding 9 · a second browser engine reaches SDP then fails the multiplexed profile
 - [M-72 — Prove the AEAD SRTP key derivation against an independent peer](M-72-prove-the-aead-srtp-key-derivation-against-a-peer.md) · Media · RFC 7714 publishes no KDF vector · a wrong salt placement makes two sipx endpoints interoperate with each other and nobody else, and every round-trip test still passes
+- [M-77 — Carry a refused frame forward in voice detection](M-77-carry-a-refused-frame-forward-in-voice-detection.md) · Media · a frame the analyser refuses vanishes without breaking the epoch, so a voice transition spanning it can be missed
 - [X-116 — Measure coverage without counting inline test modules](X-116-measure-coverage-without-inline-test-modules.md) · Build · the published 90% line figure is flattered because unit tests live inside src/ and path exclusion cannot reach them
+- [X-122 — Make the browser proof assertions non-vacuous](X-122-make-the-browser-proof-assertions-non-vacuous.md) · Build · every negative carries the hash of its positive, so a mutation is refused on the binding alone and a test can pass without checking the field it names
 
 ## Next (ready — take the top one unless the user named a story)
 
@@ -86,10 +88,6 @@ _The measure of this stack's reach is what can be built on it **without writing 
 ### browser audio SDK
 _Beta.4 proves that sipx can interoperate with a browser audio endpoint, but it does not let a web_
 - [X-120 — Run the WASM kernel checks in CI](X-120-run-the-wasm-kernel-checks-in-ci.md) · Build · check-wasm-kernel.sh exists and is green but nothing runs it · the artifact checks — no imports, export names, size bound — are unenforced
-
-### real-time call-audio analysis
-_Applications need small, predictable facts about live audio even when no speech model is enabled:_
-- [M-77 — Carry a refused frame forward in voice detection](M-77-carry-a-refused-frame-forward-in-voice-detection.md) · Media · a frame the analyser refuses vanishes without breaking the epoch, so a voice transition spanning it can be missed
 
 ### Conformance
 - [X-119 — Pace registry publication within its rate limit](X-119-pace-registry-publication-within-its-rate-limit.md) · Build · split out of X-93 · the 429 pacing row shares nothing with the rest of that story
@@ -122,8 +120,8 @@ _Everything above this layer inherits its correctness properties. SIP's genuinel
 
 ### supported test surfaces
 _The workspace has seeded links, virtual time and call fixtures, but downstream applications have no_
+- [X-123 — Scan nested modules for silent discards](X-123-scan-nested-modules-for-silent-discards.md) · Build · the discard guard reads one directory level, so every file X-67 moved into call/ and coupling/ has been unscanned since the split
 - [X-121 — Refuse a stale uplifted binary](X-121-refuse-a-stale-uplifted-binary.md) · Build · a non-all-features cargo run leaves target/debug/sipx without device-audio, and a later all-features test spawns it without complaint
-- [X-122 — Make the browser proof assertions non-vacuous](X-122-make-the-browser-proof-assertions-non-vacuous.md) · Build · every negative carries the hash of its positive, so a mutation is refused on the binding alone and a test can pass without checking the field it names
 - [X-118 — Make bounded-timeout tests robust under load](X-118-make-bounded-timeout-tests-robust-under-load.md) · Build · a CANCEL test that passes in isolation timed out under three concurrent gate runs · a flaky red is worse than a slow one
 
 ## Blocked
