@@ -39,6 +39,10 @@
 #                                                   checker with a link to an id no page emits
 #   7. every public item is documented and every    `RUSTDOCFLAGS=-D warnings cargo doc`
 #      intra-doc link resolves
+#   8. every generated report under `docs/` is      `check-report-index.py --check` exits
+#      reachable, and says what it does not claim   non-zero — the index is generated from the
+#                                                   reports that exist, so a new one is red
+#                                                   until it is described (X-117)
 #
 # `set -euo pipefail` below is load-bearing for all of it: without `pipefail`, piping the site
 # build into a log to inspect its output would discard the build's own exit code, which is how a
@@ -84,6 +88,20 @@ echo "==> compiling the published answer consumer"
 # nowhere — and anchors are part of the link, not decoration on it.
 echo "==> checking internal docs links and anchors"
 ./scripts/check-docs-links.py
+
+# Check 8. Reachability is the same question one step further out: a link that resolves is worth
+# nothing if no page carries it, which is how all four generated reports came to be reachable only
+# by already knowing their filename (X-117). The index region is generated from the pages that
+# exist, so a fifth report is red here on the commit that adds it.
+#
+# The check runs before its own suite, which is the opposite of the ordering `gate.py` uses for
+# script tests, and deliberately: an unreachable report fails *both*, and the suite would report it
+# as a unittest traceback naming `test_the_repository_index_is_current`. The check reports it as
+# the sentence naming the page and what to do about it. Whichever runs first is the message a
+# reader gets, so the precise one goes first and the suite still runs behind it.
+echo "==> checking every generated report is reachable"
+./scripts/check-report-index.py --check
+python3 scripts/test-report-index.py
 
 # The site build. The four reporting handlers in docusaurus.config.js are the link check for the
 # published half; a page that links to something the site does not publish, or to an anchor no
