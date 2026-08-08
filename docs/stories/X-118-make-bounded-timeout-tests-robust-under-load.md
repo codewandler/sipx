@@ -35,6 +35,13 @@ weakening what they assert.
   on that CANCEL test while three gates ran concurrently; the test passes in isolation and the final
   run on a quiet box had all 145 suites green. `M-41`'s diff touches no `sipx-cli` file.
 
+- 2026-08-08: **stronger evidence, and a corrected cause.** The box this was observed on is shared:
+  alongside seven sipx implementor worktrees, five other checkouts (`flux`, `flux-c728`, `flux-c736`,
+  `flux-c740`, `flux-c742`) were running their own builds and gates, at load average **41.85 on 20
+  cores**. So the CANCEL timeout was not "three concurrent sipx gates" — it was an oversubscribed
+  machine, which is both more likely to recur and entirely outside this repository's control. A
+  wall-clock assertion tuned on an idle box is not a property of the code under test.
+
 ## Notes
 
 - This matters more now: concurrent implementors are the normal working mode, so a load-sensitive
