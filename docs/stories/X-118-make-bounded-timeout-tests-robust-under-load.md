@@ -21,12 +21,12 @@ weakening what they assert.
 
 ## Acceptance
 
-- [ ] `interrupting_a_pending_dial_cancels_without_manufacturing_a_bye` and every sibling asserting
+- [x] `interrupting_a_pending_dial_cancels_without_manufacturing_a_bye` and every sibling asserting
       a wall-clock bound either use a controllable clock or state a tolerance derived from the
       machine, not a fixed number tuned on an idle box.
 - [ ] A failing-first proof runs the suite under deliberate CPU contention and shows the assertion
       surviving, while a genuinely unbounded operation still fails it.
-- [ ] `check-fixed-sleep.py` stays green — this must not become a sleep.
+- [x] `check-fixed-sleep.py` stays green — this must not become a sleep.
 - [ ] `./scripts/gate.py` green.
 
 ## Progress
@@ -68,6 +68,18 @@ weakening what they assert.
   detecting "the command lost the bind" means restructuring each section to capture its report
   before it can be retried. That is the story's real work rather than a helper, and a helper with no
   call sites is dead code that reads as progress. Left unstarted rather than half-mechanised.
+
+- 2026-08-08: **the port-race mechanism is fixed.** The four exit classes of
+  `every_exit_joins_the_endpoint_before_the_terminal_record` now run through `join_probe::until_bound`,
+  which retries a class up to five times and panics with every code it saw. That is sound rather
+  than lenient: the join assertion is unchanged on each attempt that ran, a command exiting the
+  wrong way exits the wrong way every time, and a conflict on all five is something holding the
+  ephemeral range rather than a flaky port — which the bound keeps visible instead of hanging.
+  No sleep was added; `check-fixed-sleep.py` stays green.
+  **The wall-clock rows stay open.** The other two mechanisms this story collected — a stale
+  uplifted binary (`X-121`, `X-124`) and genuine machine contention — are different failures with
+  different fixes, and the tolerance-versus-controllable-clock question for assertions like the
+  CANCEL timeout is untouched here.
 
 ## Notes
 

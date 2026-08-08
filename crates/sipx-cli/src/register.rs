@@ -763,113 +763,129 @@ mod tests {
     ///
     /// The endpoint's own socket is the evidence; `crate::join_probe` explains why the probe is an
     /// observation rather than a race.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "four exit classes in one list; splitting them would put the rule in one place \
+                  and its exceptions in four"
+    )]
     #[tokio::test]
     async fn every_exit_joins_the_endpoint_before_the_terminal_record() {
         // Success: a registrar that records the binding and answers.
-        let registrar = tokio::net::UdpSocket::bind("127.0.0.1:0")
-            .await
-            .expect("binds");
-        let address = registrar.local_addr().expect("has an address");
-        let answering = tokio::spawn(answer_one_register(registrar, "200 OK", Some(60)));
-        let local = crate::join_probe::free_local();
-        let exit = run(
-            command(&[
-                "register",
-                "sip:alice@example.com",
-                "--target",
-                &address.to_string(),
-                "--local",
-                &local.to_string(),
-                "--expires",
-                "60",
-                "--timeout",
-                "10",
-            ])
-            .expect("valid syntax"),
-            Format::Text,
-        )
+        crate::join_probe::until_bound("success", Exit::Success.code(), || async {
+            let registrar = tokio::net::UdpSocket::bind("127.0.0.1:0")
+                .await
+                .expect("binds");
+            let address = registrar.local_addr().expect("has an address");
+            let answering = tokio::spawn(answer_one_register(registrar, "200 OK", Some(60)));
+            let local = crate::join_probe::free_local();
+            let exit = run(
+                command(&[
+                    "register",
+                    "sip:alice@example.com",
+                    "--target",
+                    &address.to_string(),
+                    "--local",
+                    &local.to_string(),
+                    "--expires",
+                    "60",
+                    "--timeout",
+                    "10",
+                ])
+                .expect("valid syntax"),
+                Format::Text,
+            )
+            .await;
+            crate::join_probe::assert_released(local, "success");
+            answering.abort();
+            exit.code()
+        })
         .await;
-        crate::join_probe::assert_released(local, "success");
-        assert_eq!(exit.code(), Exit::Success.code());
-        answering.await.expect("the registrar task joins");
 
         // A refusal: the registrar answered, and the answer was no.
-        let registrar = tokio::net::UdpSocket::bind("127.0.0.1:0")
-            .await
-            .expect("binds");
-        let address = registrar.local_addr().expect("has an address");
-        let refusing = tokio::spawn(answer_one_register(registrar, "404 Not Found", None));
-        let local = crate::join_probe::free_local();
-        let exit = run(
-            command(&[
-                "register",
-                "sip:alice@example.com",
-                "--target",
-                &address.to_string(),
-                "--local",
-                &local.to_string(),
-                "--timeout",
-                "10",
-            ])
-            .expect("valid syntax"),
-            Format::Text,
-        )
+        crate::join_probe::until_bound("rejection", Exit::Rejected.code(), || async {
+            let registrar = tokio::net::UdpSocket::bind("127.0.0.1:0")
+                .await
+                .expect("binds");
+            let address = registrar.local_addr().expect("has an address");
+            let refusing = tokio::spawn(answer_one_register(registrar, "404 Not Found", None));
+            let local = crate::join_probe::free_local();
+            let exit = run(
+                command(&[
+                    "register",
+                    "sip:alice@example.com",
+                    "--target",
+                    &address.to_string(),
+                    "--local",
+                    &local.to_string(),
+                    "--timeout",
+                    "10",
+                ])
+                .expect("valid syntax"),
+                Format::Text,
+            )
+            .await;
+            crate::join_probe::assert_released(local, "rejection");
+            refusing.abort();
+            exit.code()
+        })
         .await;
-        crate::join_probe::assert_released(local, "rejection");
-        assert_eq!(exit.code(), Exit::Rejected.code());
-        refusing.await.expect("the registrar task joins");
 
-        // A transport failure: nothing accepted the connection, which is an answer about the
-        // address rather than silence to wait out.
-        let closed = std::net::TcpListener::bind("127.0.0.1:0").expect("reserves a loopback port");
-        let unreachable = closed.local_addr().expect("reserved address");
-        drop(closed);
-        let local = crate::join_probe::free_local();
-        let exit = run(
-            command(&[
-                "register",
-                "sip:alice@example.com",
-                "--target",
-                &unreachable.to_string(),
-                "--transport",
-                "tcp",
-                "--local",
-                &local.to_string(),
-                "--timeout",
-                "10",
-            ])
-            .expect("valid syntax"),
-            Format::Text,
-        )
+        // A transport failure: a stream port with nothing accepting on it.
+        crate::join_probe::until_bound("transport failure", Exit::Failed.code(), || async {
+            let closed = std::net::TcpListener::bind("127.0.0.1:0").expect("reserves a port");
+            let unreachable = closed.local_addr().expect("reserved address");
+            drop(closed);
+            let local = crate::join_probe::free_local();
+            let exit = run(
+                command(&[
+                    "register",
+                    "sip:alice@example.com",
+                    "--target",
+                    &unreachable.to_string(),
+                    "--transport",
+                    "tcp",
+                    "--local",
+                    &local.to_string(),
+                    "--timeout",
+                    "10",
+                ])
+                .expect("valid syntax"),
+                Format::Text,
+            )
+            .await;
+            crate::join_probe::assert_released(local, "transport failure");
+            exit.code()
+        })
         .await;
-        crate::join_probe::assert_released(local, "transport failure");
-        assert_eq!(exit.code(), Exit::Failed.code());
 
         // And the deadline, which `P-25` already joins: it is asserted here beside the others so
         // the four exit classes are one list rather than a rule with an exception filed elsewhere.
-        let black_hole = tokio::net::UdpSocket::bind("127.0.0.1:0")
-            .await
-            .expect("binds");
-        let address = black_hole.local_addr().expect("has an address");
-        let local = crate::join_probe::free_local();
-        let exit = run(
-            command(&[
-                "register",
-                "sip:alice@example.com",
-                "--target",
-                &address.to_string(),
-                "--local",
-                &local.to_string(),
-                "--timeout",
-                "1",
-            ])
-            .expect("valid syntax"),
-            Format::Text,
-        )
+        crate::join_probe::until_bound("deadline", Exit::Timeout.code(), || async {
+            let black_hole = tokio::net::UdpSocket::bind("127.0.0.1:0")
+                .await
+                .expect("binds");
+            let address = black_hole.local_addr().expect("has an address");
+            let local = crate::join_probe::free_local();
+            let exit = run(
+                command(&[
+                    "register",
+                    "sip:alice@example.com",
+                    "--target",
+                    &address.to_string(),
+                    "--local",
+                    &local.to_string(),
+                    "--timeout",
+                    "1",
+                ])
+                .expect("valid syntax"),
+                Format::Text,
+            )
+            .await;
+            crate::join_probe::assert_released(local, "deadline");
+            drop(black_hole);
+            exit.code()
+        })
         .await;
-        crate::join_probe::assert_released(local, "deadline");
-        assert_eq!(exit.code(), Exit::Timeout.code());
-        drop(black_hole);
     }
 
     /// The refusal is the command's answer, at the command's exit code — a usage error

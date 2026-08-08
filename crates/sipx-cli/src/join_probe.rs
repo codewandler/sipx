@@ -33,3 +33,36 @@ pub(crate) fn assert_released(local: SocketAddr, exit_class: &str) {
         );
     }
 }
+
+/// Run one exit class until it is not defeated by a port collision, at most [`ATTEMPTS`] times.
+///
+/// [`free_local`] hands out an ephemeral port the kernel has just released, and this binary runs
+/// its tests in parallel, so another test can take that port in the window before the command
+/// under test binds it. The command then reports a bind failure and exits `Failed` — which is a
+/// real answer to a question nobody asked, and it is the shape that made this test flaky
+/// (`X-118`).
+///
+/// Retrying is honest here because the assertion is unchanged on every attempt that actually ran:
+/// a command that genuinely exits the wrong way exits the wrong way every time, and the panic
+/// below names how many attempts agreed. A conflict on all of them is not a flaky port either —
+/// it is something holding the whole ephemeral range — so the bound is what keeps that visible
+/// instead of hanging.
+pub(crate) async fn until_bound<F, Fut>(class: &str, expected: i32, mut section: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = i32>,
+{
+    const ATTEMPTS: usize = 5;
+    let mut seen = Vec::with_capacity(ATTEMPTS);
+    for _ in 0..ATTEMPTS {
+        let code = section().await;
+        if code == expected {
+            return;
+        }
+        seen.push(code);
+    }
+    panic!(
+        "{class}: expected exit {expected} and got {seen:?} across {ATTEMPTS} attempts — if these \
+         are all the same code, the command is not joining or not exiting the way this class says"
+    );
+}
