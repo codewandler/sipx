@@ -1,14 +1,15 @@
-//! Telephony audio primitives: G.711 (µ-law and A-law), L16, linear PCM conversion and
+//! Telephony audio primitives: G.711 (µ-law and A-law), G.722, L16, linear PCM conversion and
 //! resampling, WAV reading and writing, and Opus behind the `opus` feature.
 //!
 //! Codecs are pure Rust by default. Opus lives behind the `opus` feature because it binds
 //! to C.
 //!
-//! **G.722 remains absent** (`X-26`). G.722 and resampling were named in this crate's description
-//! from the commit that scaffolded the workspace, although neither existed when `X-26` removed
-//! those claims. `M-43` deliberately restores only the explicit resampling claim below. The
-//! wideband slot G.722 would have filled is Opus's (`M-13`), and the rest of the stack has always
-//! agreed — `Codec::from_payload_type(9)` returns `None` and an offer of G.722 alone is refused.
+//! **G.722 is implemented natively** (`M-44`), reversing the absence `X-26` recorded. The
+//! history matters here: this crate's description promised G.722 from the commit that
+//! scaffolded the workspace while nothing implemented it, `X-26` removed the claim rather than
+//! backfilling the code, and `M-44` implemented the codec from the ITU-T G.722 recommendation —
+//! verified against the recommendation's own Appendix II digital test sequences rather than by
+//! round-tripping (`docs/specs/g722.md`). The claim exists again because the code does.
 //!
 //! **Resampling is now explicit and supported** (`M-43`). [`PcmFormat`] names unsigned 8-bit or
 //! signed 16-bit mono PCM and a rate from 1 through 384,000 Hz; [`LinearResampler`] converts that
@@ -34,7 +35,7 @@
 //!   you are prepared to follow it.
 //!
 //!
-//! **Supported.** G.711 and L16 both ways, linear PCM conversion/resampling, mixing and WAV. Opus is behind the off-by-default `opus` feature
+//! **Supported.** G.711, G.722 and L16 both ways, linear PCM conversion/resampling, mixing and WAV. Opus is behind the off-by-default `opus` feature
 //! and remains **Experimental** at this crate boundary. `sipx-call` and an Opus-enabled diagnostic
 //! CLI can select it, but no default shipped application enables its native dependency. Cargo's
 //! normalized package manifests are checked with the feature off and on, including a clean packaged
@@ -42,6 +43,7 @@
 //! evidence in both SIP roles. Optional RFC 7587 `fmtp` controls are not implemented.
 
 pub mod g711;
+pub mod g722;
 pub mod l16;
 pub mod mix;
 #[cfg(feature = "opus")]

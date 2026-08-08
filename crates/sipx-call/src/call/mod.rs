@@ -689,7 +689,9 @@ impl Call {
     /// Shared by both recording verbs so the duration on the event cannot come to mean one thing
     /// for one of them and something else for the other.
     fn finished_recording(&self, samples: Vec<i16>) -> Vec<i16> {
-        let rate = u64::from(self.media.clock_rate()).max(1);
+        // Samples are counted at the *audio* rate, which for G.722 is twice the RTP clock
+        // (RFC 3551 §4.5.2) — dividing by the clock rate would double the reported duration.
+        let rate = u64::from(self.media.audio_rate()).max(1);
         let duration = Duration::from_micros(samples.len() as u64 * 1_000_000 / rate);
         self.events.emit(CallEvent::RecordingFinished { duration });
         samples

@@ -413,7 +413,8 @@ impl Actor {
             .as_ref()
             .ok_or_else(|| "there is no active call".to_owned())?;
         let media = call.media_handle();
-        let rate = media.clock_rate();
+        // The recording's WAV rate is the audio rate — for G.722 twice the RTP clock.
+        let rate = media.audio_rate();
         let (stop, stopped) = oneshot::channel();
         let task = tokio::spawn(record(media, stopped));
         self.recording = Some(Recording {

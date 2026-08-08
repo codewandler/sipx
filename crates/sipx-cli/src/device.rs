@@ -483,7 +483,9 @@ mod enabled {
             duration: Duration,
             cancelled: &tokio_util::sync::CancellationToken,
         ) -> Result<u64, String> {
-            let rate = media.clock_rate();
+            // Device conversion targets the audio rate — for G.722 that is 16 kHz while the
+            // RTP clock stays at 8000 (RFC 3551 §4.5.2).
+            let rate = media.audio_rate();
             let packet_samples = u32::try_from(media.samples_per_packet())
                 .map_err(|_| "media packet is too large for a device frame".to_owned())?;
             let starting = (|| {

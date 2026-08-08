@@ -31,6 +31,7 @@ pub(crate) enum MediaProfileChoice {
 pub(crate) enum CodecChoice {
     Pcmu,
     Pcma,
+    G722,
     L16,
     Opus,
 }

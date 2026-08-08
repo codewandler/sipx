@@ -430,6 +430,7 @@ fn carried() -> &'static [Codec] {
     &[
         Codec::Pcmu,
         Codec::Pcma,
+        Codec::G722,
         Codec::L16,
         #[cfg(feature = "opus")]
         Codec::Opus,
@@ -445,11 +446,14 @@ fn carried() -> &'static [Codec] {
 /// comment asking them to match.
 ///
 /// RFC 7587 §7 fixes Opus's RTP clock at 48000 and its rtpmap channel count at 2 whatever the
-/// audio actually is, so `opus/16000` is nothing we have however it is numbered.
+/// audio actually is, so `opus/16000` is nothing we have however it is numbered. G.722's rtpmap
+/// spelling is `G722/8000` even though the audio is 16 kHz — RFC 3551 §4.5.2 preserves the
+/// historical clock on the wire, and a `G722/16000` spelling would name a format nobody has.
 const fn offered_rtpmap(codec: Codec) -> &'static str {
     match codec {
         Codec::Pcmu => "PCMU/8000",
         Codec::Pcma => "PCMA/8000",
+        Codec::G722 => "G722/8000",
         Codec::L16 => "L16/44100/1",
         #[cfg(feature = "opus")]
         Codec::Opus => "opus/48000/2",
@@ -483,6 +487,31 @@ pub(crate) mod tests {
             let _ = write!(body, "a=rtpmap:{rtpmap}\r\n");
         }
         sipx_sdp::parse(&body).expect("a description this test wrote")
+    }
+
+    /// M-44, and the RFC 3551 §6/§4.5.2 pair of facts in one place: static payload type 9 with
+    /// **no** `a=rtpmap` line is G.722 — the field-reported failure is a stack rejecting exactly
+    /// that offer — and the negotiated RTP clock is 8000 even though the audio is 16 kHz.
+    #[test]
+    fn a_bare_static_9_offer_negotiates_g722() {
+        let bare = offered("9 0", &["0 PCMU/8000"]);
+        let settled = negotiated(&bare, Codecs::G722).expect("bare static 9 is G.722");
+        assert_eq!(settled.codec, Codec::G722);
+        assert_eq!(settled.wire_payload_type(), 9);
+        assert_eq!(settled.clock_rate, 8_000, "the RFC 3551 §4.5.2 clock");
+
+        // And identically when the offer writes the rtpmap out.
+        let mapped = offered("9 0", &["9 G722/8000", "0 PCMU/8000"]);
+        let settled = negotiated(&mapped, Codecs::G722).expect("mapped 9 is G.722 too");
+        assert_eq!(settled.codec, Codec::G722);
+        assert_eq!(settled.wire_payload_type(), 9);
+        assert_eq!(settled.clock_rate, 8_000);
+
+        // A G722/16000 spelling names a format nobody has (the clock is part of the format's
+        // identity), so the offer falls through to the PCMU beside it.
+        let wrong_clock = offered("9 0", &["9 G722/16000", "0 PCMU/8000"]);
+        let settled = negotiated(&wrong_clock, Codecs::G722).expect("PCMU remains usable");
+        assert_eq!(settled.codec, Codec::Pcmu);
     }
 
     /// The default is the G.711 pair, in every build. The `opus` feature adds a variant to
@@ -924,6 +953,39 @@ pub(crate) mod tests {
                       agreement holds on the refusing side as well",
             formats: "18",
             rtpmaps: &["18 G729/8000"],
+            codecs: Codecs::G711,
+        },
+        Agreement {
+            why: "M-44: bare static 9 with no rtpmap — the field-reported offer a stack \
+                      must not reject when G.722 is selected",
+            formats: "9 0",
+            rtpmaps: &["0 PCMU/8000"],
+            codecs: Codecs::G722,
+        },
+        Agreement {
+            why: "M-44: the same offer with the rtpmap written out, and the historical \
+                      G722/8000 clock spelling",
+            formats: "9 0",
+            rtpmaps: &["9 G722/8000", "0 PCMU/8000"],
+            codecs: Codecs::G722,
+        },
+        Agreement {
+            why: "M-44: G.722 on a dynamic number is matched by the rtpmap, not the number",
+            formats: "96",
+            rtpmaps: &["96 G722/8000"],
+            codecs: Codecs::G722,
+        },
+        Agreement {
+            why: "M-44: 9 remapped to another encoding is not taken on the number",
+            formats: "9",
+            rtpmaps: &["9 G729/8000"],
+            codecs: Codecs::G722,
+        },
+        Agreement {
+            why: "M-44: a G.722 offer reaching a call that selected only G.711 settles on \
+                      neither more nor less than the selection allows",
+            formats: "9 0",
+            rtpmaps: &["9 G722/8000", "0 PCMU/8000"],
             codecs: Codecs::G711,
         },
     ];

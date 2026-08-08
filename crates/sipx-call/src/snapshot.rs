@@ -1293,6 +1293,9 @@ const fn preference_id(value: crate::CodecPreference) -> u8 {
         crate::CodecPreference::Pcma => 1,
         crate::CodecPreference::Opus => 2,
         crate::CodecPreference::L16 => 3,
+        // Appended with the next free id (`M-44`), never renumbering: these values are on
+        // disk, and an old reader meeting 4 fails typed rather than misreading a codec.
+        crate::CodecPreference::G722 => 4,
     }
 }
 
@@ -1302,6 +1305,7 @@ fn decode_preference(value: u8) -> Result<crate::CodecPreference, DialogPersiste
         1 => Ok(crate::CodecPreference::Pcma),
         2 => Ok(crate::CodecPreference::Opus),
         3 => Ok(crate::CodecPreference::L16),
+        4 => Ok(crate::CodecPreference::G722),
         _ => Err(DialogPersistenceError::InvalidValue {
             field: "codec preference",
         }),
@@ -1315,6 +1319,7 @@ const fn codec_id(value: Codec) -> u8 {
         #[cfg(feature = "opus")]
         Codec::Opus => 2,
         Codec::L16 => 3,
+        Codec::G722 => 4,
     }
 }
 
@@ -1327,6 +1332,7 @@ fn decode_codec(value: u8) -> Result<Codec, DialogPersistenceError> {
         #[cfg(not(feature = "opus"))]
         2 => Err(DialogPersistenceError::UnsupportedCodec(2)),
         3 => Ok(Codec::L16),
+        4 => Ok(Codec::G722),
         other => Err(DialogPersistenceError::UnsupportedCodec(other)),
     }
 }

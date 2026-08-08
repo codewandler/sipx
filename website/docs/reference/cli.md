@@ -104,7 +104,7 @@ Place a call: `sipx dial sip:bob@192.0.2.1:5060`
 | `--tls-cert <FILE>` | Mutual-TLS client certificate chain; requires `--tls-key` |
 | `--tls-key <FILE>` | Mutual-TLS client private key; requires `--tls-cert` |
 | `--profile <P>` | Select `standard` (default) or fail-closed `browser-audio`. The latter requires WSS plus the Opus and DTLS build features; it fixes codecs/keying and defaults ICE to `host` |
-| `--codec <C>` | Select `pcmu`, `pcma`, `l16`, or `opus`; repeat in preference order (default `pcmu`, then `pcma`). Opus requires the optional build feature |
+| `--codec <C>` | Select `pcmu`, `pcma`, `g722`, `l16`, or `opus`; repeat in preference order (default `pcmu`, then `pcma`). Opus requires the optional build feature; G.722 is always built in |
 | `--media-security <M>` | Select `auto`, `plain`, `sdes`, or `dtls-srtp` (default `auto`). Explicit SDES requires TLS/WSS signalling |
 | `--ice <P>` | Select `disabled`, `host`, or `stun` (default `disabled`) |
 | `--stun-server <ADDR>` | STUN server as `host:port`; required by `--ice stun` and refused otherwise |
@@ -165,7 +165,7 @@ Wait for a call and answer it: `sipx answer --play greeting.wav`
 | `--tls-cert <FILE>` | TLS/WSS server certificate chain; requires `--tls-key` |
 | `--tls-key <FILE>` | TLS/WSS server private key; requires `--tls-cert` |
 | `--profile <P>` | Select `standard` (default) or fail-closed `browser-audio`; the latter requires a WSS listener, Opus, DTLS, and ICE |
-| `--codec <C>` | Select `pcmu`, `pcma`, `l16`, or `opus`; repeat in preference order (default `pcmu`, then `pcma`) |
+| `--codec <C>` | Select `pcmu`, `pcma`, `g722`, `l16`, or `opus`; repeat in preference order (default `pcmu`, then `pcma`) |
 | `--media-security <M>` | Select `auto`, `plain`, `sdes`, or `dtls-srtp` (default `auto`) |
 | `--ice <P>` | Select `disabled`, `host`, or `stun` (default `disabled`) |
 | `--stun-server <ADDR>` | STUN server as `host:port`; required by `--ice stun` and refused otherwise |
@@ -433,7 +433,7 @@ string `id` in its completion or refusal event.
 | `--tls-ca <FILE>` | Add PEM trust roots to the platform store |
 | `--tls-cert <FILE>` | Certificate chain for TLS/WSS; pair with `--tls-key` |
 | `--tls-key <FILE>` | Private key paired with `--tls-cert` |
-| `--codec <C>` | Select `pcmu`, `pcma`, `l16`, or `opus`; repeat in preference order |
+| `--codec <C>` | Select `pcmu`, `pcma`, `g722`, `l16`, or `opus`; repeat in preference order |
 | `--media-security <M>` | Select `auto`, `plain`, `sdes`, or `dtls-srtp` |
 | `--ice <P>` | Select `disabled`, `host`, or `stun` |
 | `--stun-server <ADDR>` | STUN server as `host:port` for `--ice stun` |

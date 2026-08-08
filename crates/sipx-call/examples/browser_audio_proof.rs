@@ -299,6 +299,7 @@ fn positive_result(
     let negotiated_codec = match call.media().codec() {
         Codec::Pcmu => "pcmu",
         Codec::Pcma => "pcma",
+        Codec::G722 => "g722",
         Codec::L16 => "l16",
         #[cfg(feature = "opus")]
         Codec::Opus => "opus",

@@ -334,6 +334,7 @@ const fn codec(value: CodecChoice) -> CodecPreference {
     match value {
         CodecChoice::Pcmu => CodecPreference::Pcmu,
         CodecChoice::Pcma => CodecPreference::Pcma,
+        CodecChoice::G722 => CodecPreference::G722,
         CodecChoice::Opus => CodecPreference::Opus,
         CodecChoice::L16 => CodecPreference::L16,
     }
@@ -351,6 +352,7 @@ const fn codec_name(codec: Codec) -> &'static str {
     match codec {
         Codec::Pcmu => "pcmu",
         Codec::Pcma => "pcma",
+        Codec::G722 => "g722",
         Codec::L16 => "l16",
         #[cfg(feature = "opus")]
         Codec::Opus => "opus",
@@ -431,6 +433,32 @@ mod tests {
         let raw = raw(&["dial", "sip:bob@192.0.2.1", "--codec", "l16"]);
         let selected = selection(&raw, TransportKind::Udp).unwrap();
         assert_eq!(selected.policy().codecs, Codecs::L16);
+    }
+
+    /// M-44: `--codec g722` is a first-class ordered selection in every build — unlike Opus it
+    /// has no feature gate to refuse it behind.
+    #[test]
+    fn g722_reaches_the_exact_call_policy() {
+        let alone = raw(&["dial", "sip:bob@192.0.2.1", "--codec", "g722"]);
+        let selected = selection(&alone, TransportKind::Udp).unwrap();
+        assert_eq!(
+            selected.policy().codecs.preferences().collect::<Vec<_>>(),
+            [CodecPreference::G722]
+        );
+
+        let ordered = raw(&[
+            "dial",
+            "sip:bob@192.0.2.1",
+            "--codec",
+            "g722",
+            "--codec",
+            "pcmu",
+        ]);
+        let selected = selection(&ordered, TransportKind::Udp).unwrap();
+        assert_eq!(
+            selected.policy().codecs.preferences().collect::<Vec<_>>(),
+            [CodecPreference::G722, CodecPreference::Pcmu]
+        );
     }
 
     #[test]
