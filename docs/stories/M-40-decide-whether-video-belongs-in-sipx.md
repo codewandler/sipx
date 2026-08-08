@@ -2,8 +2,8 @@
 id: M-40
 title: Decide whether video belongs in sipx
 pillar: Media
-status: in-progress
-priority: 19
+status: done
+priority:
 design: docs/designs/video.md
 epic: video
 areas: [sipx-sdp, sipx-media, sipx-call, interop, docs]
@@ -83,6 +83,8 @@ rather than by a proof, because there is nothing to prove.
 Left `in-progress` deliberately: closing it is `/track:done`, which also owns `CHANGELOG.md`, the
 board and a `scripts/maturity.py` regeneration (the open-story counts in `docs/maturity.md` change
 when this goes `done`).
+
+- 2026-08-08: closed in the `1.0.0-rc.5` boundary.
 
 ## Notes
 

@@ -2,8 +2,8 @@
 id: P-26
 title: Cover resolution in every command deadline
 pillar: Phone
-status: in-progress
-priority: 15
+status: done
+priority:
 design:
 epic: diagnostic-automation
 areas: [sipx-cli, sipx-transport]
@@ -31,7 +31,7 @@ after an unbounded name lookup finished.
       covers resolution — and the statement is checked rather than prose.
 - [x] A resolution timeout stays distinguishable from a resolution failure and from a connection
       failure in text, JSON and exit status, exactly as `T-39` established.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -57,6 +57,8 @@ after an unbounded name lookup finished.
   `diagnostic-phone.md` §3.2's "starts when the initial INVITE is handed to the endpoint", which is
   published surface this story did not sanction touching. §3.2 now states the split explicitly; a
   follow-up story should decide whether `dial` adopts `register`'s remainder accounting.
+
+- 2026-08-08: closed in the `1.0.0-rc.5` boundary.
 
 ## Notes
 

@@ -2,8 +2,8 @@
 id: M-58
 title: Detect voice activity with typed call events
 pillar: Media
-status: in-progress
-priority: 13
+status: done
+priority:
 design: docs/designs/call-audio-analysis.md
 epic: call-audio-analysis
 areas: [sipx-audio, sipx-call, app-sdk, audio-analysis, vad, m16]
@@ -69,3 +69,4 @@ speech model or a device-specific runtime.
 - **`M-57`'s last acceptance row is now satisfiable**: the API its implementing stories owed exists
   (`sipx_audio::analysis`, `Call::detect_voice_activity`, the two wire events) and the focused
   spec/vector checks are green against it. Closing that row is `M-57`'s to do, not this story's.
+- 2026-08-08: closed in the `1.0.0-rc.5` boundary.

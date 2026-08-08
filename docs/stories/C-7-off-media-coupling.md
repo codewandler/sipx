@@ -2,8 +2,8 @@
 id: C-7
 title: Couple two dialogs without terminating media
 pillar: Signalling
-status: in-progress
-priority: 17
+status: done
+priority:
 design: docs/designs/edge.md
 epic: edge
 areas: [sipx-call, sipx-sdp]
@@ -21,7 +21,7 @@ endpoints and remains entirely off the media path.
 - [x] A coupling can be created without constructing either leg's `MediaSession`, binding RTP or
       advertising a sipx media address; omitting `bridge_media` from two media-terminating calls is
       not accepted as equivalent.
-- [ ] Offers and answers on every carrier supported by `C-1` are mapped transparently between the
+- [x] Offers and answers on every carrier supported by `C-1` are mapped transparently between the
       endpoint descriptions while preserving the independent per-dialog origin/version, security
       and direction invariants recorded in a normative spec.
 - [x] Malformed or unmappable SDP is refused on its source leg before any peer-leg signalling is
@@ -64,6 +64,8 @@ endpoints and remains entirely off the media path.
 - `coupling.rs` became `coupling/mod.rs`. Not cosmetic: `check-audio-claims.py` resolves a child
   module against its parent's directory, so the `coupling.rs` plus `coupling/` layout is a gate
   failure, and the nested layout is what `X-67` established for `call/`.
+
+- 2026-08-08: closed in the `1.0.0-rc.5` boundary.
 
 ## Notes
 - This is a signalling role, not a proxy, routing product or dial plan. Target selection remains

@@ -2,8 +2,8 @@
 id: S-41
 title: Export the sans-I/O session kernel to WebAssembly
 pillar: Signalling
-status: in-progress
-priority: 20
+status: done
+priority:
 design: docs/designs/browser-sdk.md
 epic: browser-sdk
 areas: [sipx-sip, sipx-sdp, sipx-ua, wasm, m15]
@@ -31,7 +31,7 @@ whose environment is explicit and deterministic.
       create/drop cycles stay inside the specified memory bound.
 - [x] The spec's byte and state vectors run against native Rust and WASM and produce identical events
       and wire bytes.
-- [ ] The browser build remains feature-gated and does not change the MSRV or default native package
+- [x] The browser build remains feature-gated and does not change the MSRV or default native package
       graph; all feature combinations and the gate are green.
 
 ## Progress
@@ -71,3 +71,4 @@ has no CI job, on purpose: adding a job requires a matching `Step` or `NOT_RUN_L
 gate still reports 40 steps over 21 CI jobs with none unaccounted for. Wiring it needs a `wasm-kernel`
 job in `ci.yml` plus a `Step("wasm kernel", "wasm-kernel", ("./scripts/check-wasm-kernel.sh",))`,
 and the job needs `rustup target add wasm32-unknown-unknown wasm32-wasip1` and a `wasmtime` install.
+- 2026-08-08: closed in the `1.0.0-rc.5` boundary.

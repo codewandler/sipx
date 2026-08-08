@@ -7,6 +7,251 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0-rc.5] — 2026-08-08
+
+This boundary is a wave of independent implementation, like the one before it. It puts the first two
+consumers on the call-audio seam — deterministic voice activity and deterministic signal metrics,
+both as typed call events on the wire an application already reads — and runs the speech provider
+contract for the first time, with a driver and a privacy model, while still shipping no speech. It
+compiles the sans-I/O session kernel to WebAssembly against a cross-target digest, adds the
+signalling-only dialog coupling that holds no media at all, makes every command's stated deadline
+cover target resolution, and gives the gate a clock. It also records one decision: **video is not
+admitted**, the vision is unchanged, and the conditions that would reverse that are written down. It
+remains a prerelease on the same terms as `rc.4`: Supported APIs still receive migration guidance
+when they change, Experimental APIs may change without it, and stable promotion still requires
+independent application use.
+
+### Added
+
+- **A call reports voice activity as typed events, and no speech model is loaded to produce them.**
+  `sipx_audio::analysis` implements `docs/specs/call-audio-processing.md` whole: the integer window
+  predicates with the `i64` width proof asserted rather than assumed, the activity, hangover and
+  silence-timeout state machines, typed reset versus refusal, and the declared bounds — a
+  preallocated observation ring that coalesces overflow into a counted `Lost` marker and allocates
+  nothing after construction. `Call::detect_voice_activity` attaches through the existing PCM seam
+  and opens no second tap; after it, `CallEvent::VoiceStarted` and `CallEvent::VoiceEnded` arrive on
+  the call's existing stream — no handle to hold and nothing to poll — each naming the `Call-ID`, the
+  direction, this call's observation sequence, and the sample position with the rate it is counted
+  at. Only transitions are reported, so a drop may not lie: one the consumer had no room for is
+  retried against the *latest* state rather than queued, which collapses flapping and leaves an
+  application holding where the call actually is. The terminal cut travels through a slot reserved
+  when detection starts and the call cancels and **joins** the watcher before the stream ends, so the
+  cut precedes `Ended` by construction rather than by hoping two tasks interleave the right way; a
+  re-INVITE that replaces the media session does the same and re-attaches, so activity is never
+  latched across a renegotiation. On the wire this is `call.voice.started` and `call.voice.ended`, a
+  compatible `v1` addition whose rows are derived-tested out of the specification rather than
+  transcribed beside it, and which call an observation belongs to stays the envelope's `call.id`
+  rather than a second spelling in the event body. `call.dtmf` and every other existing event are
+  untouched. All twenty-five of the specification's sample vectors run from outside the crate, and
+  that corpus is the failing-first test — at the merge base it does not compile, because the module
+  it names does not exist. Two simultaneous live calls carry voice at once and each is asserted to
+  hear only its own; a shared analyser, a shared observation counter or a shared attachment would
+  each pass a single-call test and fail that one. **No speech model is loaded anywhere on this path,
+  and none is reachable from it.** The processing specification these two entries implement is
+  closed with this: its last open row waited on the public API its implementing stories would
+  propose, and that API now exists.
+
+- **A call's signal level, clipping and silence are typed events, computed without floating point.**
+  `Call::report_signal_metrics` is the sibling of voice detection — same seam, same analyser
+  contract, same call-owned lifecycle stopped and joined before the stream ends — differing in one
+  thing: a metric is not a latched state, so there is no reserved slot and no retry, and a consumer
+  that misses a report has lost history rather than correctness. `sipx_audio::signal` computes
+  nothing from samples. It is a pure reducer over the observations the analyser already produced: it
+  owns no accumulator over audio, no window, no threshold and no predicate, and it does not
+  re-derive the duration conversion, because two derivations of one number is how they start
+  disagreeing. `rms` is the only derived number and it is integer — `floor(sqrt(floor(Σs² /
+  samples)))` in sample amplitude, deliberately not an ITU-T P.56 active speech level — and there is
+  no floating point anywhere in the path. Every report names the `epoch`, the measurement run and
+  the rate it was measured in, and a period is discarded unreported if anything could have holed it:
+  a reset, a non-contiguous window index, or the analyser's `Lost` marker. A report summing across a
+  gap would claim coverage nobody measured, which is worse than no report. Unmeasured audio is owed
+  forward as a break — a frame this join cannot forward, or one the analyser refuses, sets a pending
+  loss the next frame carries — which is why the refusal site is not a silent discard. On the wire
+  this is `call.signal.metrics` and `call.signal.silence`, additive, carrying the derived facts an
+  application acts on while the raw accumulators stay in process. The names and the documentation
+  separate signal content from the RTP/RTCP network-quality snapshot deliberately, and no existing
+  field changes meaning.
+
+- **The speech provider contract's sessions now run, and nothing behind them still hears or says
+  anything.** `RecognitionDriver` and `SynthesisDriver` are the asynchronous shell the contract
+  described and nothing implemented. `RecognitionDriver::attach` is the only constructor and it goes
+  through the selection result and the seam's processor attachment, so a driver reaches call media
+  through the one tap and nothing else; the synthesis driver takes no attachment at all, because the
+  seam observes call audio rather than injecting it and placing synthesized audio is a separate
+  piece of work. The output queue coalesces per utterance, newest winning the slot the first
+  revision opened, and counts only terminal and lifecycle outputs against the declared unconsumed
+  bound. At that bound the driver stops consuming provider output, which stops frame consumption,
+  which engages the seam's own drop-oldest policy — so the pipeline degrades to bounded, named loss
+  instead of growing memory. Every stop arms the drain deadline: a flush, a cancellation, a provider
+  failure, a warm-up timeout and the seam completing, which reaches the session as a cancellation
+  and never as a failure; if the session's own `Stopped` does not arrive, the driver abandons the
+  provider and emits `Stopped { aborted: true }` in its place. The two conformance vectors that were
+  structurally unrunnable without a driver now run, and the bound's two halves are deliberately
+  separate tests, because coalescing needs a seam deep enough to lose nothing and input degradation
+  needs one shallow enough to lose almost everything. Three normative gaps were closed rather than
+  guessed at, each of which admitted two implementations: deadline generation is the driver's and
+  the driver is what discards a stale firing, since a provider is told nothing about arming; the
+  drain abort's order is fixed, and the output bound pauses consumption without ever delaying the
+  driver's own terminal; and window credit returns when a chunk is *handed on*, since returning it
+  on receipt would move the bounded memory one queue along rather than bound it. **No speech
+  recognition or synthesis implementation, model, accelerator dependency or real audio ships.**
+
+- **A call's speech data stays with the call, and with the operation.** No retention beyond the live
+  operation is now the default for user data, and every way of exceeding it is something a host asks
+  for rather than something it forgets to turn off. The contract gained a privacy section that
+  classifies the six things a session can hold and says whose each one is, names the opt-ins, widens
+  admission to the whole privacy declaration rather than the locality half of it, puts redaction in
+  the types, and fixes the erase-release-close order at a stop. In `sipx_media::speech::privacy` the
+  default is a value — `SpeechPrivacy::LOCAL_NO_RETENTION`, which is also `Default` — so a host that
+  configures nothing has opted in to nothing. The four opt-ins are debug capture, persistent derived
+  data, off-host processing and network egress; selection refuses a provider whose declaration
+  exceeds the host's policy with `RetentionRefused` alongside the existing locality refusal, and the
+  two are separate because they are separate host decisions: one provider would send the call
+  somewhere else, the other would keep it. The admission is a call event and reports the opt-ins *in
+  force* — what the provider declared — rather than what the host permitted, because a permitted
+  opt-in nothing uses is not an answer to "what is happening to this call?". Redaction is in `Debug`
+  rather than in a review rule: an utterance, a recognition frame, a synthesis chunk and an enqueued
+  synthesis input render their class and their size where the content would go, and `Secret` carries
+  the credentials and model paths the contract never sees — so the ordinary `tracing` records a
+  driver now emits, naming provider identity, kind, limits, lifecycle and typed cause, are safe by
+  construction. At a stop the driver erases every unconsumed output carrying call audio, drops the
+  provider, releases the seam attachment and only then closes its output stream; that order is what
+  makes cleanup inspectable, so the vectors assert on a released resource instead of on elapsed
+  time. Nine sessions started and cancelled on one call, against a seam that bounds a call at eight
+  attachments, is the whole proof of the second half. **Erasure is stated for what it is**: no copy
+  survives and nothing can reach one — not that a freed allocation was overwritten. The public
+  privacy guide states the local and offline defaults, the opt-ins and the operational limits.
+  **Still no speech implementation, model, accelerator dependency or real audio ships: the inert
+  test providers remain the only ones in the tree, and sipx cannot transcribe or speak.**
+
+- **The sans-I/O SIP session kernel compiles to WebAssembly, and the host supplies everything it
+  cannot have.** `crates/sipx-wasm` is the browser SDK specification's ABI and control plane as a
+  state machine with no environment of its own: the twelve entry points, the twelve error codes, the
+  record framing, the entropy tape, the bounds and poisoned state, the snapshot, all ten verbs, all
+  eight events and both state tables. It reads no clock, opens no socket, spawns nothing and asks
+  for no randomness — monotonic time, fired timers, received bytes and entropy octets are arguments.
+  The ABI is expressed in safe Rust and the allocator hands out an offset into a buffer the kernel
+  keeps, so the ownership rules are enforced over an allocation table rather than over raw memory;
+  nothing dereferences a host pointer, which is how `unsafe_code = "forbid"` survives a WebAssembly
+  ABI, and the loadable module is twelve one-line shims over it and nothing else. Two default-on
+  feature seams name each crate's only draw on an operating-system entropy source, and
+  `wasm32-unknown-unknown` will not compile that dependency at all — which is what makes "no
+  fallback" a build property rather than a promise. Native defaults, the MSRV and the published API
+  are unchanged, and the only lockfile movement is the new workspace member, with no new external
+  crate. **The identical-behaviour claim is one artifact, not two suites**: the same seventy-six
+  vector tests pass natively and compiled to WebAssembly, including a SHA-256 over the whole RFC
+  4475/5118 replay that is byte-identical on both targets, and a harness drives the shipped module
+  from a plain `WebAssembly.instantiate` with no glue and asserts what only the artifact can answer
+  for — no imports at all, the export names, a declared 32 MiB maximum linear memory, the pinned
+  identifiers in the REGISTER it emits, and five hundred create/free cycles that grow linear memory
+  by zero pages. **The corpus replay found a real defect on its first run.** A request missing the
+  headers a response is built from — RFC 4475's `insuf.dat` — poisoned the kernel. RFC 3261 §8.2.6.1
+  leaves nowhere to send an answer and nothing to correlate it with, so it is now discarded and
+  counted, exactly as the native stack discards it. In WebAssembly a panic is a trap, so that was
+  one malformed datagram away from taking a page's endpoint down; it was found before the kernel's
+  first release rather than in one. **The one-command cross-target check is not yet a gate step and
+  has no CI job**, because adding one requires a matching entry in the gate in the same change and
+  that file was being edited concurrently; wiring it is outstanding.
+
+- **Two dialogs can be coupled by signalling alone, with sipx never on the media path.**
+  `sipx_call::OffMediaCoupling` owns two `Dialog`s rather than two `Call`s, and that is the whole
+  difference: a `Call` binds an RTP socket before it can offer anything, so no flag on the
+  media-terminating coupling could ever be truthful about RFC 7092 §3.1.3. Nothing is bound and no
+  local media address is advertised. `sipx_sdp::relay::DescriptionRelay` maps one endpoint's
+  description into the other dialog by replacing exactly one line: the `o=` becomes the receiving
+  dialog's own origin, and its version advances only when the rest of the description changed, since
+  the two legs' offer/answer sequences are not the same sequence. Addresses, ports, transport
+  profile, `a=crypto`, `a=fingerprint`, `a=setup`, ICE credentials and candidates, direction and
+  lines this stack has never heard of all pass through byte for byte. The rewrite is textual, and
+  that is the interesting decision: re-serializing a parsed description normalizes line order,
+  multicast TTLs, `m=` port counts and whitespace, which are liberties an endpoint may take with a
+  description it authored and an off-media element may not take with one it is only carrying.
+  Lifecycle is the existing coupling state and not a second one — glare refused 491 before anything
+  is forwarded, BYE answered then sent on the peer, a target 4xx/5xx returned as the source INVITE's
+  own final response, CANCEL withdrawing the owned target invitation — and refusals are typed and
+  decided on the source leg before the peer is told anything, leaving both dialogs exactly as they
+  were. The proof is causal rather than structural: a raw source endpoint and a real sipx target
+  exchange descriptions through the coupling and the target's RTP arrives on a socket the test bound
+  itself, then, after a relayed re-INVITE and a relayed UPDATE, at the ports those descriptions
+  named; its negative control asserts the opposite for a media-terminating coupling with no bridge,
+  which offers the target sipx's own port. **What is refused rather than half-done**: reliable
+  provisionals and PRACK, foreclosed by not offering `100rel`, and offerless INVITEs in either
+  direction, refused `488`. Both would need this role to *author* a description, which means
+  describing a media endpoint it does not have, and the delayed-offer shape needs its own work.
+  **The RFC 7092 registry row therefore stays `partial`**; what is missing is no longer §3.1.3 but
+  those early carriers and the taxonomy roles sipx deliberately does not hold.
+
+- **The gate records what each step cost, and nothing gates on a duration.** Every step is timed,
+  the run prints them ordered by cost so the expensive tail is visible without reading a log, and
+  the record lands in a machine-readable file under the build directory — or wherever `--timings`
+  points, for a run that should outlive a `cargo clean`. A recorded run states its commit, the host
+  CPU count, the one-minute load and the state of the build cache, because a duration without those
+  is not comparable with another: this project runs several gates at once, and a core count says how
+  many cores exist rather than how many a run had. "Cold" is three-valued for the same reason — with
+  a compiler-cache wrapper an empty build directory no longer means every crate was compiled, and
+  recording that as cold is how a change to nobody's code reads as a speed-up. Total wall clock is
+  reported separately from the sum of the steps, so parallelism and serialization stay
+  distinguishable. A step whose duration is missing or unparseable is reported rather than silently
+  dropped and the sum is checked against the rows, because a filtered-out row leaves a total short
+  by exactly the step that went missing and looks entirely plausible; a step the run never reached
+  keeps its row and says `not started`, because a table the reader can count has to hold every step.
+  **No threshold exists** — a slow run is never a failed run, the same rule coverage follows and for
+  the same reason — and a record that cannot be written does not redden the tree either, since the
+  exit code is a claim about the tree and an unwritable directory is a claim about the machine. The
+  first thing it found: the release-rehearsal test step is 3m34s, about 58% of the whole non-cargo
+  half of the gate and roughly six times the next Python step, and nothing about it is a build.
+  Nobody knew, because nothing measured it. There is deliberately no committed timings document — a
+  duration is a fact about one machine at one moment, and a committed one would need a staleness
+  rule to stay true.
+
+### Changed
+
+- **Every command's stated deadline now covers target resolution.** `dial`, `load`, `peers` and
+  `scenario` resolved through the process-wide resolver, so the resolver's own two-second
+  per-question and eight-second whole-resolution bounds decided when a command carrying its own
+  deadline gave up: `dial --timeout 1` against a nameserver that never answers took 2.0 seconds, and
+  the flag was describing a phase rather than the command. `Resolver::within` now takes an optional
+  duration — `None` being a command that states no deadline — and the unbounded constructor is
+  private, so a command cannot resolve without saying what it resolves under; an inventory test
+  asserts exactly that for all five outbound commands, which is what keeps a sixth from
+  reintroducing the gap, and `register`'s existing branch collapses into the same call.
+  `Resolver::narrowed` derives a tighter policy from an existing resolver, so `scenario` — one actor
+  placing many calls — bounds each dial frame by its own per-frame timeout without discarding the
+  DNS cache between calls. `peers` states no attempt deadline at all, so its bound is `--expires`,
+  the only duration its caller gives it, now validated before the lookup rather than after it since
+  that value is the lookup's ceiling. The published reference states the coverage on every deadline
+  row and the check reads the inventory off the page instead of a hand-kept list, so a command that
+  gains a deadline and says nothing about it fails. **What this does not do**: the invitation phase
+  is still funded from a fresh copy of the stated budget rather than from what resolution left.
+  Resolution is bounded *by* the deadline, not subtracted *from* it, so the worst case for `dial`,
+  `load` and `scenario` remains two phases of the stated value rather than one — `register` alone
+  funds each candidate from the remainder. The phone diagnostics specification now states that split
+  explicitly rather than leaving a reader to infer a total; closing it changes what the invitation
+  limit and elapsed figures mean and rewrites published surface, so it is a separate decision.
+
+- **Video is not admitted, and the vision is unchanged.** The post-beta admission gate closed with a
+  measured record rather than a preference: the video epic closes at maturity 0, no video code
+  enters the workspace, and no implementation work becomes ready. Three independent reasons, each
+  measured. *Demand*: the project's one demand instrument puts video at or near zero, and no
+  reviewer, field report, comparison row or downstream consumer asks for it — the browser SDK
+  contract already refuses an offered video section with an automatic 488, and the SDP half of that
+  refusal is a running test. *Cost*: it is a second media stack rather than an increment. The
+  browser transport shell and the SDP AST are reusable, but packetization, feedback, congestion,
+  buffering, codec and proof are all new — the RTP crate has no MTU, fragmentation or aggregation;
+  RTCP knows four packet types on a flat five-second timer, so RFC 4585 timing and RFC 5104 codec
+  control are new subsystems; the pacer is one frame to one packet to one 20 ms tick, which video
+  inverts; and the delivered browser profile is normatively one media section, so video invalidates
+  it rather than extending it. *The release gate*: the v1 predicate that the public API has been
+  used from outside this repository is unmet. The decisive technical finding is the codec boundary —
+  RFC 6184 and RFC 7741 specify payload formats, not codecs, and every practical encoder or decoder
+  means FFI, forbidden workspace-wide, or a large hostile-input decoder. There is therefore no
+  initial codec, so no profile can be scoped. **The record states what would reverse it**: six
+  falsifiable reversal triggers, the resource budgets an admitted profile would have to hold, and
+  the evidence standard it would have to meet, so the decision is checkable later rather than
+  re-argued from taste.
+
+---
+
 ## [1.0.0-rc.4] — 2026-08-08
 
 This boundary is a wave of independent implementation rather than an answer to an external sweep. It
@@ -3554,7 +3799,8 @@ Stated so nobody has to discover it from a stack trace:
 - **Interop is verified against Kamailio only.** A second implementation with different
   opinions — Asterisk, as a B2BUA rather than a proxy — has not been tried.
 
-[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.4...HEAD
+[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.5...HEAD
+[1.0.0-rc.5]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.4...v1.0.0-rc.5
 [1.0.0-rc.4]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.3...v1.0.0-rc.4
 [1.0.0-rc.3]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.2...v1.0.0-rc.3
 [1.0.0-rc.2]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.1...v1.0.0-rc.2

@@ -2,8 +2,8 @@
 id: X-114
 title: Instrument gate step timings
 pillar: Build
-status: in-progress
-priority: 16
+status: done
+priority:
 design:
 epic: conformance
 areas: [scripts, ci]
@@ -33,7 +33,7 @@ to be faster without weakening it, and today there is nothing to compare against
       for coverage, and for the same reason.
 - [x] A failing-first test proves a step whose duration is missing or unparseable is reported rather
       than silently dropped.
-- [ ] `./scripts/gate.py` green, and `gate.py --check` still accounts for every CI job. *`--check`
+- [x] `./scripts/gate.py` green, and `gate.py --check` still accounts for every CI job. *`--check`
       holds — 40 steps over 21 CI jobs, none unaccounted for, and no CI job was added. The full
       sweep was not run: this wave's dispatch withholds it because it is ~30 minutes per implementor
       and the diff is Python-only. The steps it can reach were run instead (below).*
@@ -66,6 +66,8 @@ to be faster without weakening it, and today there is nothing to compare against
   one moment, and a committed one would need a staleness rule to stay true — the story rules that
   out in as many words ("instrumentation that itself needs maintenance to stay true is worse than
   none").
+
+- 2026-08-08: closed in the `1.0.0-rc.5` boundary.
 
 ## Notes
 

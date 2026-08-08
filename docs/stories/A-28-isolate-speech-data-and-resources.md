@@ -2,8 +2,8 @@
 id: A-28
 title: Isolate speech data and resources with no default retention
 pillar: Application
-status: in-progress
-priority: 12
+status: done
+priority:
 design: docs/designs/local-speech.md
 epic: local-speech
 areas: [app-sdk, speech, privacy, security, m16]
@@ -31,7 +31,7 @@ host policy for every operation that retains data or sends it off the machine.
       still reporting typed provider identity, lifecycle, limits and failure causes.
 - [x] Cancellation and provider failure erase transient buffers and release accelerator and CPU
       resources; tests inspect cleanup instead of relying on elapsed time.
-- [ ] The public privacy guide states local/offline defaults, opt-ins and operational limits, and the
+- [x] The public privacy guide states local/offline defaults, opt-ins and operational limits, and the
       full gate is green.
 
 ## Progress
@@ -76,3 +76,4 @@ host policy for every operation that retains data or sends it off the machine.
   Still open for the epic, and not this story's: `A-26`/`A-27` carry the admission event onto the
   application SDK's own stream, and `X-105` turns the `PRV` vectors into the public testkit suite a
   downstream provider runs.
+- 2026-08-08: closed in the `1.0.0-rc.5` boundary.

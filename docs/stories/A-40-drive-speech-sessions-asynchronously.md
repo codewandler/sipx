@@ -2,8 +2,8 @@
 id: A-40
 title: Drive speech sessions asynchronously
 pillar: Application
-status: in-progress
-priority: 11
+status: done
+priority:
 design: docs/designs/local-speech.md
 epic: local-speech
 areas: [sipx-media, speech, m16]
@@ -33,7 +33,7 @@ built the contract and proved it executable; nothing yet runs it.
       fixed sleep substitutes for an observed barrier.
 - [x] Still no speech implementation, model, accelerator dependency or audio retention ships — the
       inert provider remains the only one in the tree.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -64,6 +64,8 @@ built the contract and proved it executable; nothing yet runs it.
   `cargo fmt --check`, `check-fixed-sleep.py --check`, `check-provenance.sh`, `check-docs-links.py`,
   `check-app-surface.py --check`, `check-audio-claims.py --check`, and a docs build with
   `RUSTDOCFLAGS=-D warnings`.
+
+- 2026-08-08: closed in the `1.0.0-rc.5` boundary.
 
 ## Notes
 

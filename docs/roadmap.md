@@ -10,6 +10,15 @@ is the order the remaining gaps close in and why.
 
 ## Status
 
+_As of 2026-08-08:_ **`1.0.0-rc.5` is the current public prerelease; beta.2 through beta.7, `rc.2`,
+`rc.3` and `rc.4` remain immutable.** The fifth candidate adds deterministic call-audio analysis —
+voice activity and signal metrics as typed call events, loading no speech model — the asynchronous
+driver and privacy boundary for the speech contract, the sans-I/O session kernel exported to
+WebAssembly with identical wire bytes on both targets, and RFC 7092 §3.1.3 signalling-only dialog
+coupling. Video was considered and **not admitted**, with the reversal conditions recorded rather
+than the question left open. Stable `1.0.0` remains a separate promotion: independent application
+use is still missing and is not inferred from repository evidence.
+
 _As of 2026-08-08:_ **`1.0.0-rc.3` is the current public prerelease; beta.2 through beta.7 and
 `rc.2` remain immutable.** The second release candidate answers two independent external sweeps of
 the published `rc.2` artifacts — twenty-five findings across call lifecycle, endpoint reachability,

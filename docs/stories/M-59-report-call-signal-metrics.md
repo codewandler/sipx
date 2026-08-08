@@ -2,8 +2,8 @@
 id: M-59
 title: Report call signal level clipping and silence metrics
 pillar: Media
-status: in-progress
-priority: 14
+status: done
+priority:
 design: docs/designs/call-audio-analysis.md
 epic: call-audio-analysis
 areas: [sipx-audio, sipx-call, app-sdk, audio-analysis, metrics, m16]
@@ -31,7 +31,7 @@ keeping them distinct from packet-loss, jitter, round-trip and MOS statistics.
       duration.
 - [x] Names and documentation explicitly separate signal-content metrics from M-10's RTP/RTCP
       network-quality snapshot; no existing field changes meaning.
-- [ ] Property tests cover extreme samples without overflow or panic and the full gate is green.
+- [x] Property tests cover extreme samples without overflow or panic and the full gate is green.
 
 ## Progress
 
@@ -80,3 +80,4 @@ keeping them distinct from packet-loss, jitter, round-trip and MOS statistics.
 
   Left for later: `M-60`'s calibration is unaffected — an adapted threshold is a new
   `AnalysisProfile`, and the reducer summarises whatever windows result.
+- 2026-08-08: closed in the `1.0.0-rc.5` boundary.

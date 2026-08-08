@@ -2,8 +2,8 @@
 id: M-57
 title: Specify deterministic real-time call-audio processing
 pillar: Media
-status: in-progress
-priority: 20
+status: done
+priority:
 design: docs/designs/call-audio-analysis.md
 epic: call-audio-analysis
 areas: [sipx-audio, sipx-media, audio-analysis, vad, m16]
@@ -31,7 +31,7 @@ before implementing algorithms or SDK events.
       mutation of provider, playback or RTP state.
 - [x] Byte-level/sample-level vectors cover silence, speech-like energy, clipping, impulses, DC,
       format changes and sequence gaps before implementation.
-- [ ] The public API review and focused spec/vector checks are green.
+- [x] The public API review and focused spec/vector checks are green.
 
 ## Progress
 
@@ -46,3 +46,4 @@ before implementing algorithms or SDK events.
 - The last acceptance row stays open deliberately: the spec/vector checks that exist today
   (provenance, docs links, site build) run in the gate, but a public API review needs the API the
   implementing stories will propose — it cannot be green before `M-54`/`M-58` exist.
+- 2026-08-08: closed. `M-58` implements the whole of this specification in `crates/sipx-audio/src/analysis.rs` and runs all 25 CAP-* vectors against it; `M-59` consumes the same `Observation` as a pure reducer rather than re-deriving §4's formula. The public API this row waited on therefore exists, and the focused spec and vector checks are green against it on `main`.

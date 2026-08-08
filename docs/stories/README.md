@@ -73,7 +73,6 @@ appeared twice before anyone named it.
 ## Now (in progress)
 - [A-10 — Publish the stable crate set and diagnostic CLI artifacts](A-10-publish-the-stable-crates-and-cli.md) · Application · promote the public beta only after every v1 predicate; stable archives and SBOM live here
 - [A-38 — Publish and verify the second release candidate](A-38-publish-and-verify-rc3.md) · Application · after X-113 · the post-rc.2 wave as one immutable prerelease · no stable-1.0 claim widens
-- [M-57 — Specify deterministic real-time call-audio processing](M-57-specify-real-time-call-audio-processor.md) · Media · M16 spec gate · sans-I/O bounded frame processor using M-54's shared seam
 - [M-70 — Accept multiplexed browser offers with unused component candidates](M-70-accept-multiplexed-browser-offers-with-unused-component-candidates.md) · Media · external review finding 9 · a second browser engine reaches SDP then fails the multiplexed profile
 
 ## Next (ready — take the top one unless the user named a story)
@@ -84,17 +83,13 @@ _The measure of this stack's reach is what can be built on it **without writing 
 
 ### browser audio SDK
 _Beta.4 proves that sipx can interoperate with a browser audio endpoint, but it does not let a web_
-- [S-41 — Export the sans-I/O session kernel to WebAssembly](S-41-export-the-sans-io-session-kernel-to-wasm.md) · Signalling · after A-16 · deterministic Rust state machine with host bytes, timers and entropy
 - [X-120 — Run the WASM kernel checks in CI](X-120-run-the-wasm-kernel-checks-in-ci.md) · Build · check-wasm-kernel.sh exists and is green but nothing runs it · the artifact checks — no imports, export names, size bound — are unenforced
 
 ### real-time call-audio analysis
 _Applications need small, predictable facts about live audio even when no speech model is enabled:_
 - [M-77 — Carry a refused frame forward in voice detection](M-77-carry-a-refused-frame-forward-in-voice-detection.md) · Media · a frame the analyser refuses vanishes without breaking the epoch, so a voice transition spanning it can be missed
-- [M-58 — Detect voice activity with typed call events](M-58-detect-voice-activity.md) · Media · after M-57 and M-54 · start, end and hangover through CallEvent and SDK
-- [M-59 — Report call signal level clipping and silence metrics](M-59-report-call-signal-metrics.md) · Media · after M-57 and M-54 · signal content only, distinct from M-10 network quality
 
 ### Conformance
-- [X-114 — Instrument gate step timings](X-114-instrument-gate-step-timings.md) · Build · X-93's baseline exists only as prose in its own story · gate.py has no clock at all, so nothing can be shown to have got faster
 - [X-115 — Catch implemented but unclosed stories](X-115-catch-implemented-but-unclosed-stories.md) · Build · A-16 was fully delivered, left at status backlog, then re-selected into a wave and dispatched to an implementor
 - [X-116 — Measure coverage without counting inline test modules](X-116-measure-coverage-without-inline-test-modules.md) · Build · the published 90% line figure is flattered because unit tests live inside src/ and path exclusion cannot reach them
 - [X-117 — Make the generated reports discoverable](X-117-make-the-generated-reports-discoverable.md) · Build · coverage, comparison, compliance and maturity are all reachable only by knowing their path
@@ -106,7 +101,6 @@ _sipx's backlog has been derived from RFCs, from our own review findings, and fr
 - [M-76 — Bound the inbound audio queue in time](M-76-bound-the-inbound-audio-queue-in-time.md) · Media · M-45 measured the jitter buffer and cleared it · the inbound channel holds 256 frames, which is 5.12 seconds of audio with no time bound, counter or shed policy
 
 ### Reliable diagnostic automation
-- [P-26 — Cover resolution in every command deadline](P-26-cover-resolution-in-every-command-deadline.md) · Phone · dial --timeout starts its clock after resolution · a slow name can spend the resolver's eight seconds before the invitation is even sent
 - [P-27 — Make every command exit a join barrier](P-27-make-every-command-exit-a-join-barrier.md) · Phone · P-25 added the join on register's deadline path only · every other exit still reports before its work is observably finished
 - [P-28 — Report the same fields across every outcome](P-28-report-the-same-fields-across-every-outcome.md) · Phone · register's success report carries aor and its failure report does not, so no script can match on it across both
 - [P-29 — Fund every phase from one process budget](P-29-fund-every-phase-from-one-process-budget.md) · Phone · P-26 bounded resolution BY the deadline rather than subtracting it FROM the deadline, so the worst case is two phases of the stated value
@@ -114,7 +108,6 @@ _sipx's backlog has been derived from RFCs, from our own review findings, and fr
 
 ### Edge / B2BUA
 _A programmable SIP and media edge — transports, endpoints and routes, with dialog bridging and_
-- [C-7 — Couple two dialogs without terminating media](C-7-off-media-coupling.md) · Signalling · RFC 7092 §3.1.3 · transparent SDP mapping · split from C-1
 - [C-8 — Relay the early negotiation carriers](C-8-relay-the-early-negotiation-carriers.md) · Call · C-7 refuses reliable provisionals, PRACK and offerless INVITE rather than half-relaying them · relaying those means authoring a description this role has no media for
 
 ### Bounded endpoint resolution
@@ -122,11 +115,6 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 
 ### Library Parity
 - [T-40 — Expose the bounded resolver to library consumers](T-40-expose-the-bounded-resolver-to-library-consumers.md) · Transport · T-38/T-39 built bounded resolution inside sipx-cli · the public guide still tells applications to resolve the proxy themselves
-
-### local live-call speech
-_A live call on a machine with a local accelerator should be able to transcribe received speech and_
-- [A-40 — Drive speech sessions asynchronously](A-40-drive-speech-sessions-asynchronously.md) · Application · A-39 built the contract, not the shell that runs it · owns §10's three driver-side vectors, which cannot run until it exists
-- [A-28 — Isolate speech data and resources with no default retention](A-28-isolate-speech-data-and-resources.md) · Application · after A-25 · gates provider delivery · explicit opt-in for retention or off-host processing
 
 ### Media
 _Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
@@ -145,9 +133,6 @@ _Everything above this layer inherits its correctness properties. SIP's genuinel
 ### supported test surfaces
 _The workspace has seeded links, virtual time and call fixtures, but downstream applications have no_
 - [X-118 — Make bounded-timeout tests robust under load](X-118-make-bounded-timeout-tests-robust-under-load.md) · Build · a CANCEL test that passes in isolation timed out under three concurrent gate runs · a flaky red is worse than a slow one
-
-### Video
-- [M-40 — Decide whether video belongs in sipx](M-40-decide-whether-video-belongs-in-sipx.md) · Media · post-beta admission gate; the current vision says video is a non-goal, so no implementation precedes this decision
 
 ## Blocked
 - [M-16 — Implement ICE](M-16-ice.md) · Media · epic tracker · split into M-19 … M-24 · spec is docs/specs/ice.md, written first
@@ -238,15 +223,18 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [A-22 — Bridge a call to an OpenAI agent](A-22-bridge-a-call-to-an-openai-agent.md) · Application · integrates A-19–A-21 — the bridge component, its host configuration, and the one-command product path
 - [A-24 — Publish and verify 1.0.0-beta.5](A-24-publish-and-verify-beta5.md) · Application · published immutable beta · exact registry, CLI, Pages and prerelease evidence recorded
 - [A-25 — Specify interchangeable local speech providers](A-25-specify-interchangeable-local-speech-providers.md) · Application · M16 spec gate · endpoint default and per-call override · local/offline by default
+- [A-28 — Isolate speech data and resources with no default retention](A-28-isolate-speech-data-and-resources.md) · Application · after A-25 · gates provider delivery · explicit opt-in for retention or off-host processing
 - [A-35 — Publish and verify 1.0.0-beta.6](A-35-publish-and-verify-beta6.md) · Application · published immutable beta · exact registry, CLI, Pages and prerelease evidence recorded
 - [A-36 — Publish and verify 1.0.0-beta.7](A-36-publish-and-verify-beta7.md) · Application · published immutable beta · exact registry, CLI, Pages and prerelease evidence recorded
 - [A-37 — Publish and verify the first release candidate](A-37-publish-and-verify-rc1.md) · Application · first release candidate · reviewed docs, exact registry packages and portable artifacts
 - [A-39 — Build the speech provider contract skeleton](A-39-build-the-speech-provider-contract-skeleton.md) · Application · A-25 specified it and nothing implements it · the registry, session types and selection order every later speech story needs
+- [A-40 — Drive speech sessions asynchronously](A-40-drive-speech-sessions-asynchronously.md) · Application · A-39 built the contract, not the shell that runs it · owns §10's three driver-side vectors, which cannot run until it exists
 - [C-1 — Drive two dialogs as one call](C-1-couple-two-dialogs.md) · Signalling · M9 · RFC 7092 · the B2BUA primitive; the product stays out of this repo
 - [C-2 — Carry media on an early dialog](C-2-early-media.md) · Media · M9 · RFC 3960 gateway model · one live session crosses early and confirmed dialog state
 - [C-3 — Report call state as a typed event stream](C-3-call-events-as-a-stream.md) · Signalling · app-sdk keystone · the other stories report through this · size M
 - [C-4 — Serve many calls from one endpoint](C-4-serve-many-calls-from-one-endpoint.md) · Signalling · app-sdk · after C-3 · size M
 - [C-5 — The application contract crate and its sans-IO interpreter](C-5-app-contract-crate-and-interpreter.md) · Application · app-sdk · parallel to C-3/C-4/M-17/M-18 · spec is docs/specs/app-contract.md · size M
+- [C-7 — Couple two dialogs without terminating media](C-7-off-media-coupling.md) · Signalling · RFC 7092 §3.1.3 · transparent SDP mapping · split from C-1
 - [M-1 — Implement SDP and RFC 3264 offer/answer](M-1-sdp-and-offer-answer.md) · Media
 - [M-2 — Implement RTP and RTCP](M-2-rtp-and-rtcp.md) · Media
 - [M-3 — Implement G.711 and WAV handling](M-3-g711-and-wav.md) · Media
@@ -284,6 +272,7 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [M-37 — Never put a fallback codec under a negotiated payload type](M-37-never-put-a-fallback-codec-under-a-negotiated-payload-type.md) · Media · R-08 in the 2026-07-30 repository review — failed Opus setup constructs Direct PCMU state while retaining the negotiated Opus payload type
 - [M-38 — Complete one browser-compatible WebRTC audio path](M-38-browser-compatible-webrtc-audio.md) · Media · epic tracker; reuse WSS, ICE, DTLS-SRTP and Opus, then prove their browser-audio composition
 - [M-39 — Close the packaged and independent-peer Opus proof](M-39-close-the-opus-product-proof.md) · Media · Opus is rate- and direction-correct through the CLI, normalized packages and an independent peer
+- [M-40 — Decide whether video belongs in sipx](M-40-decide-whether-video-belongs-in-sipx.md) · Media · post-beta admission gate; the current vision says video is a non-goal, so no implementation precedes this decision
 - [M-41 — Negotiate AEAD SRTP protection profiles](M-41-negotiate-aead-srtp-protection-profiles.md) · Media · RFC 7714 · one profile shipped today · AEAD-only peers cannot negotiate media with sipx at all · follow-up
 - [M-42 — Advertise a chosen address and latch RTP without ICE](M-42-advertise-a-chosen-address-and-latch-rtp-without-ice.md) · Media · the loudest unmet need in the surveyed ecosystem · most requesters are not doing ICE at all
 - [M-43 — Carry linear PCM in and out without format assumptions](M-43-carry-linear-pcm-in-and-out-without-format-assumptions.md) · Media · four reported use cases resolve to one unopinionated PCM boundary · not an AI feature
@@ -297,6 +286,9 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [M-51 — Prove browser audio against an independent endpoint](M-51-prove-browser-audio.md) · Media · beta.4 product proof · both SIP roles, non-silent Opus both ways, immediate fingerprint and downgrade negatives
 - [M-53 — Ship a runnable RTP echo example](M-53-ship-a-runnable-rtp-echo-example.md) · Media · discovered by X-97 · exercise the public RTP receive/send seam without inventing a second media stack
 - [M-54 — Expose bounded call PCM processing and resampling](M-54-expose-bounded-call-pcm-processing.md) · Media · after A-25 and M-43 · shared seam for local speech and deterministic analysis
+- [M-57 — Specify deterministic real-time call-audio processing](M-57-specify-real-time-call-audio-processor.md) · Media · M16 spec gate · sans-I/O bounded frame processor using M-54's shared seam
+- [M-58 — Detect voice activity with typed call events](M-58-detect-voice-activity.md) · Media · after M-57 and M-54 · start, end and hangover through CallEvent and SDK
+- [M-59 — Report call signal level clipping and silence metrics](M-59-report-call-signal-metrics.md) · Media · after M-57 and M-54 · signal content only, distinct from M-10 network quality
 - [M-69 — Reject an unacceptable initial offer on the wire](M-69-reject-an-unacceptable-initial-offer-on-the-wire.md) · Media · external review finding 3 · no-common-codec failure sends no final SIP response
 - [M-71 — Deliver negotiated DTMF receive events through scenario](M-71-deliver-negotiated-dtmf-receive-events-through-scenario.md) · Media · external review finding 10 · digits send successfully but no typed receive event arrives
 - [P-1 — Build the CLI scaffold and machine-readable output](P-1-cli-scaffold-and-output.md) · Phone
@@ -323,6 +315,7 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [P-23 — Validate output and capabilities before network I/O](P-23-validate-output-and-capabilities-before-network-io.md) · Phone · follow-up external review finding 9 · version ignores JSON and unavailable media features are reported only after a peer answers
 - [P-24 — Report call progress consistently](P-24-report-call-progress-consistently.md) · Phone · follow-up external review finding 11 · answer and load do not emit the INFO progress promised for -v
 - [P-25 — Bound a registration attempt](P-25-bound-a-registration-attempt.md) · Phone · external review finding 4's actual consequence · X-110 made --timeout an explicit error on register, but nothing bounds the attempt
+- [P-26 — Cover resolution in every command deadline](P-26-cover-resolution-in-every-command-deadline.md) · Phone · dial --timeout starts its clock after resolution · a slow name can spend the resolver's eight seconds before the invitation is even sent
 - [S-1 — Specify the SIP message model and parser](S-1-sip-message-parser-specs.md) · Signalling · gates every other sip-core story
 - [S-2 — Implement SIP URIs, header names and header parameters](S-2-uri-and-header-primitives.md) · Signalling
 - [S-3 — Implement typed headers with verbatim passthrough](S-3-typed-headers.md) · Signalling
@@ -363,6 +356,7 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [S-38 — Place and maintain event subscriptions](S-38-place-and-maintain-event-subscriptions.md) · Signalling · after S-37 · reusable outbound SUBSCRIBE and NOTIFY tracking · S-24 is a consumer
 - [S-39 — Send and receive publications through an endpoint](S-39-send-and-receive-publications-through-an-endpoint.md) · Signalling · after S-37 · make the existing RFC 3903 compositor and entity tags wire-reachable
 - [S-40 — Surface application-owned dialog requests](S-40-surface-application-owned-dialog-requests.md) · Signalling · authenticated INFO, MESSAGE and admitted extension methods without bypassing dialog invariants
+- [S-41 — Export the sans-I/O session kernel to WebAssembly](S-41-export-the-sans-io-session-kernel-to-wasm.md) · Signalling · after A-16 · deterministic Rust state machine with host bytes, timers and entropy
 - [S-42 — Report the address learned during registration](S-42-report-the-address-learned-during-registration.md) · Signalling · discovered by X-97 · preserve received/rport observation in the typed registration outcome
 - [S-43 — Serialize and restore dialog state](S-43-serialize-and-restore-dialog-state.md) · Signalling · discovered by X-97 · versioned sans-I/O snapshot without serializing sockets, tasks or secrets
 - [S-44 — Expose lossless SIP URI user replacement](S-44-expose-lossless-uri-rewriting-primitives.md) · Signalling · downstream routing needs parser-owned, byte-exact SIP and SIPS user mutation
@@ -500,6 +494,7 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [X-111 — Make published onboarding executable](X-111-make-published-onboarding-executable.md) · Build · follow-up external review findings 6–7 · dependency snippets omit a used crate and the generated version renders truncated
 - [X-112 — Take the integrated gate green on main and reconcile derived artifacts](X-112-take-the-integrated-gate-green-on-main.md) · Build · the single deferred acceptance row 29 stories share · five steps are already proven red at the merge base
 - [X-113 — Record the post-rc.2 boundary and close the wave stories](X-113-record-the-post-rc2-boundary-and-close-the-wave.md) · Build · after X-112 · one changelog boundary, then every story whose acceptance actually holds closes
+- [X-114 — Instrument gate step timings](X-114-instrument-gate-step-timings.md) · Build · X-93's baseline exists only as prose in its own story · gate.py has no clock at all, so nothing can be shown to have got faster
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

@@ -1,13 +1,57 @@
 ---
 title: What's new
-description: Release highlights and adoption notes for the sipx 1.0.0-rc.4 release candidate.
+description: Release highlights and adoption notes for the sipx 1.0.0-rc.5 release candidate.
 ---
 
 # What's new
 
 <!-- BEGIN generated:release-heading -->
-## 1.0.0-rc.4 — 2026-08-08
+## 1.0.0-rc.5 — 2026-08-08
 <!-- END generated:release-heading -->
+
+RC.5 makes a call's audio observable and its speech contract runnable, exports the signalling kernel
+to WebAssembly, and adds a coupling role that stays entirely off the media path. It remains a
+prerelease on the same terms as RC.4.
+
+Install the exact CLI release with:
+
+```bash
+cargo install --locked --version =1.0.0-rc.5 sipx-cli
+```
+
+- **Calls report voice activity and signal metrics as typed events.** Both are deterministic signal
+  analysis over the bounded PCM seam — **no speech model is loaded** — and both carry direction, call
+  identity, an observation sequence and sample time. Delivery is bounded and cannot delay RTP; a slow
+  consumer sees a sequence gap rather than a stalled call.
+- **The speech contract runs.** An asynchronous driver pumps recognition and synthesis sessions off
+  the seam, bounds unconsumed output, and aborts a wedged session on its drain deadline. Speech data
+  is now isolated by default: nothing is retained, four opt-ins cover debug capture, persistent
+  derived data, off-host processing and network egress, logs redact content while keeping identity
+  and lifecycle, and cancellation erases a call's audio buffers. **Still no speech recognition or
+  synthesis implementation ships** — the contract is what exists.
+- **The signalling kernel runs in WebAssembly.** The sans-I/O SIP and SDP core builds without
+  sockets, an async runtime, a filesystem, an OS clock or an entropy source; the host supplies bytes,
+  fired timers, monotonic time and entropy across a versioned ABI. Native and wasm32 produce
+  byte-identical wire output and identical events, pinned by a digest over the full RFC 4475 and
+  5118 replay.
+- **Two dialogs can be coupled without touching their media.** The RFC 7092 §3.1.3 role drives both
+  dialogs and maps SDP transparently while binding no RTP and advertising no address of its own, so
+  audio flows endpoint to endpoint. Reliable provisionals, PRACK and offerless INVITE are
+  deliberately refused rather than half-relayed: mapping them would mean describing a media endpoint
+  this role does not have.
+- **Every command's stated deadline now bounds target resolution.** A slow name can no longer consume
+  the resolver's own budget before the command's clock starts.
+- **The gate records what each step costs.** Timings go to a machine-readable record alongside the
+  commit, host CPU count and cache state. Nothing gates on a duration — a slow run is not a failed
+  run.
+
+### Video
+
+Video was considered and **not admitted**. The decision is recorded with the cost measured across
+every seam it would touch, and with the evidence that would reverse it, rather than left open. The
+vision's telephony-audio focus is unchanged.
+
+## 1.0.0-rc.4 — 2026-08-08
 
 RC.4 continues the release-candidate line. It attaches application audio processing to a live call
 through one bounded seam, negotiates the RFC 7714 AEAD-GCM protection profiles, gives registration a
@@ -465,5 +509,5 @@ answer calls, but application callback bindings are not implemented.
 This website is built from `main`, so a page or API link may describe work newer than the tagged
 release. Use the exact crates.io version when reproducibility matters, and consult the
 [complete changelog](https://github.com/codewandler/sipx/blob/main/CHANGELOG.md) before updating a
-Git revision. Unreleased behavior is not part of `1.0.0-rc.4` merely because it appears on this
+Git revision. Unreleased behavior is not part of `1.0.0-rc.5` merely because it appears on this
 site.
