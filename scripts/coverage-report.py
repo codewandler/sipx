@@ -268,13 +268,37 @@ def schema_problems(data: object) -> list[str]:
                 f"exclusions the measurement never made — re-measure with `{REFRESH_COMMAND}`"
             )
 
-    problems += counters_problems("totals", data.get("totals"))
+    counter_problems = counters_problems("totals", data.get("totals"))
     crates = data.get("crates")
     if not isinstance(crates, dict) or not crates:
-        problems.append("crates is missing")
+        counter_problems.append("crates is missing")
     else:
         for name in sorted(crates):
-            problems += counters_problems(f"crates.{name}", crates[name])
+            counter_problems += counters_problems(f"crates.{name}", crates[name])
+    problems += counter_problems
+    if not counter_problems:
+        problems += arithmetic_problems(data["totals"], crates)
+    return problems
+
+
+def arithmetic_problems(totals: dict, crates: dict) -> list[str]:
+    """Whether the per-crate rows still sum to the workspace row.
+
+    The two tables on the page are the same files counted twice, so they add up or one of them is
+    wrong. Checked rather than assumed, because this is the shape a hand-edited record takes: the
+    page is rendered from the record, so editing the record moves the page and the byte-compare
+    notices nothing. `maturity.py` makes the same argument for its `other` bucket — a table whose
+    rows do not add up invites the reader to derive a number nobody measured.
+    """
+    problems = []
+    for counter in COUNTERS:
+        for field in ("covered", "total"):
+            summed = sum(counts[counter][field] for counts in crates.values())
+            if summed != totals[counter][field]:
+                problems.append(
+                    f"the crates sum to {summed} {counter} {field} and totals says "
+                    f"{totals[counter][field]}; the published tables would not add up"
+                )
     return problems
 
 

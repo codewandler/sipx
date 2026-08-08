@@ -249,6 +249,14 @@ class TheFigureIsGeneratedAndNotTyped(unittest.TestCase):
         self.assertTrue(problems)
         self.assertIn("percent", " ".join(problems))
 
+    def test_a_hand_edited_record_stops_the_tables_adding_up(self):
+        """The page is rendered from the record, so editing the record moves the page with it."""
+        data = measurement()
+        data["crates"]["sipx-sip"]["lines"]["covered"] += 1
+        problems = coverage.schema_problems(data)
+        self.assertTrue(problems)
+        self.assertIn("would not add up", " ".join(problems))
+
     def test_a_hand_edited_report_fails_the_check(self):
         with report_of(measurement()) as (measurement_path, report_path):
             report_path.write_text(report_path.read_text().replace("70.00%", "97.00%"))
