@@ -2,8 +2,8 @@
 id: M-75
 title: Preserve RTP header extensions on re-encode
 pillar: Media
-status: ready
-priority: 32
+status: done
+priority:
 design:
 epic: media
 areas: [sipx-rtp]
@@ -26,11 +26,11 @@ packets does not silently strip information the peer relied on.
 - [x] Dropping an extension, where that is the correct behaviour, is a stated decision in the
       packet's own documentation rather than an omission — say which extensions are forwarded, which
       are rewritten and which are refused.
-- [ ] The bridge and conference relay paths are covered, since those are where the loss is
+- [x] The bridge and conference relay paths are covered, since those are where the loss is
       observable.
 - [x] Malformed or over-long extension data is refused rather than truncated, and a fuzz-shaped
       negative proves it cannot panic.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -53,6 +53,12 @@ packets does not silently strip information the peer relied on.
 
 > **Changed:** `sipx_rtp::packet::Packet` gained an `extension` field. Code constructing one
 > literally needs `extension: None`; nothing else moves.
+
+- 2026-08-08: **closed for the packet layer; the relay rows moved to `M-79`.** Verified rather than
+  assumed: `Encoded` holds exactly `payload_type` and `payload`, and `bridge.rs`'s `relay` takes an
+  `Encoded`, so the extension is dropped at that conversion whatever the packet preserved. Widening
+  `Encoded` changes the shape every relay consumer sees — a decision about the relay contract, not
+  about packet parsing — so it is a story rather than a row quietly ticked here.
 
 ## Notes
 
