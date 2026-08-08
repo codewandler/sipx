@@ -2413,7 +2413,7 @@ fn open_offerless_invitation(
 ///
 /// Split out of `dial_with` for length, but it is the part with all the hazards in it, so it
 /// keeps its own name: everything here is about not leaving the far end in a call.
-async fn withdraw(
+pub(crate) async fn withdraw(
     endpoint: &Handle,
     invite: &Request,
     target: Target,
@@ -5570,7 +5570,7 @@ async fn acknowledge(response: &Response, ctx: &mut Acknowledging<'_>) -> Result
     crate::rel::send_prack(ctx.endpoint, &mut dialog, &target, rseq, invite_cseq, body).await
 }
 
-fn normal_clearing_reason() -> ReasonValue {
+pub(crate) fn normal_clearing_reason() -> ReasonValue {
     ReasonValue::q850(16, Some(b"Normal call clearing".to_vec()))
 }
 
@@ -5607,7 +5607,7 @@ async fn send_ack(endpoint: &Handle, dialog: &Dialog, target: Target) -> Result<
 ///
 /// The same ACK goes out each time, rather than a freshly built one: it acknowledges one
 /// response, and a new branch on every repeat would present each as a new request.
-async fn reack_retransmitted_2xx(
+pub(crate) async fn reack_retransmitted_2xx(
     endpoint: Handle,
     mut responses: sipx_transport::Responses,
     ack: Request,
@@ -5626,7 +5626,7 @@ async fn reack_retransmitted_2xx(
     }
 }
 
-fn build_ack(endpoint: &Handle, dialog: &Dialog, target: &Target) -> Result<Request> {
+pub(crate) fn build_ack(endpoint: &Handle, dialog: &Dialog, target: &Target) -> Result<Request> {
     let (local, remote) = dialog.local_and_remote();
     let (uri, routes) = dialog.request_target();
     let via = format!(

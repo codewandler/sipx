@@ -33,6 +33,7 @@ pub mod crypto;
 pub mod fingerprint;
 pub mod ice;
 pub mod parse;
+pub mod relay;
 pub mod rtpmap;
 pub mod session;
 
@@ -42,6 +43,7 @@ pub use ice::{
     RelatedAddress, RemoteCandidate, Transport,
 };
 pub use parse::parse;
+pub use relay::{DescriptionRelay, RelayError};
 pub use session::{
     Address, Attribute, Connection, Direction, MediaDescription, Origin, RtcpMode,
     SessionDescription, Timing,

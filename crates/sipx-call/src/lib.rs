@@ -51,10 +51,9 @@
 //! multiplexed RTCP, and that required audio vocabulary. It is one bounded audio endpoint profile,
 //! not a browser API or a general WebRTC compatibility claim.
 //!
-//! Absent rather than experimental, so that nobody looks for it: a signalling-only coupling that
-//! leaves media endpoint-owned (`C-7`), and **multi-party** call bridging or conferencing. A
-//! [`Coupling`] can own two calls and attach a bounded media bridge, but `Call` does not expose its
-//! `MediaSession` for arbitrary application-side mixing.
+//! Absent rather than experimental, so that nobody looks for it: **multi-party** call bridging or
+//! conferencing. A [`Coupling`] can own two calls and attach a bounded media bridge, but `Call`
+//! does not expose its `MediaSession` for arbitrary application-side mixing.
 //!
 //! [`Error`] is `#[non_exhaustive]`: additive diagnostics stay additive for downstream callers, so
 //! a `match` over it carries a `_` arm.
@@ -90,6 +89,7 @@ pub use call::{
     serve_until,
 };
 pub use counters::SignallingCounts;
+pub use coupling::transparent::{OffMediaCoupling, OffMediaOptions};
 pub use coupling::{
     CancelAction, ConfirmedCoupling, Coupling, CouplingEnd, CouplingState, EarlyCoupling,
     FailureAction, Leg, OfferAction, OfferAxis,

@@ -1,7 +1,7 @@
 # Design: Edge / B2BUA
 
 **Status:** resolved — the product is out of scope, the primitive is scheduled · **Pillar:**
-Application · **Epic:** `edge` · **Stories:** `C-1`
+Application · **Epic:** `edge` · **Stories:** `C-1`, `C-7`
 
 ## Why
 
@@ -28,8 +28,10 @@ built carries the audio in between.
 
 RFC 7092 is the vocabulary for this. §3.1.3 (SDP-modifying signalling-only) is the role sipx should
 be able to hold with no media path at all, and §3.2.3 (media termination) the one whose media half
-already exists. Nothing here makes sipx a proxy: a B2BUA is two user agents, which is exactly why
-it belongs in a user-agent stack while forking and Record-Route insertion do not.
+already exists. Both are now built, as two objects rather than one with a switch — see "signalling-
+only is absence" below, which `C-7` reopened and answered differently. Nothing here makes sipx a
+proxy: a B2BUA is two user agents, which is exactly why it belongs in a user-agent stack while
+forking and Record-Route insertion do not.
 
 ### The coupling primitive (`C-1`)
 
@@ -71,9 +73,29 @@ types: `ring_offer_early` originates an offer in a reliable provisional,
 acknowledges the exchange. The coupling consequently does not carry a parallel SDP interpreter or a
 second dialog sequence space for those axes. It suspends the target PRACK while a fresh reliable
 provisional offer obtains the source leg's PRACK answer; malformed answers and cancellation clean
-both pending legs, and a crossed target final is ACKed and ended with BYE. Omitting `bridge_media`
-creates no forwarding task but does not make the two terminating `Call` sessions off-path; `C-7`
-owns transparent SDP mapping for RFC 7092 section 3.1.3.
+both pending legs, and a crossed target final is ACKed and ended with BYE.
+
+### The off-media role (`C-7`)
+
+`OffMediaCoupling` owns two `Dialog`s instead of two `Call`s. That is the whole design: a `Call`
+binds an RTP socket before it can offer anything, so any coupling built from two of them terminates
+media whether or not a bridge forwards between them, and no flag on it can be truthful about
+§3.1.3. Owning dialogs directly removes the media session rather than switching it off.
+
+What the two legs exchange is the endpoints' own descriptions with one line replaced.
+`sipx_sdp::relay::DescriptionRelay` rewrites `o=` — per-dialog identity, and a version that
+advances only when the description does (RFC 3264 §8) — and leaves everything else exactly as the
+endpoint wrote it: addresses, ports, transport profile, `a=crypto`, `a=fingerprint`, ICE
+credentials and candidates, direction, and lines this stack has never heard of. The rewrite is
+textual for that last reason. Re-serializing a parsed description normalizes line order, multicast
+TTLs and `m=` port counts, which is a liberty a media-terminating endpoint may take with a
+description it authored and an off-media element may not take with one it is only carrying.
+
+The lifecycle is the same `CouplingState`: glare 491 before anything is forwarded, BYE mapped onto
+the peer, a target 4xx/5xx returned as the source INVITE's own final response, CANCEL withdrawing
+the owned target invitation. What the role refuses rather than half-does is the carriers that would
+require it to *author* a description: an offerless INVITE in either direction, and the reliable
+provisional, which its target INVITE forecloses by not offering `100rel`.
 
 ## Alternatives considered
 
@@ -104,14 +126,22 @@ owns transparent SDP mapping for RFC 7092 section 3.1.3.
   which answer closes which offer are protocol invariants, so making them overridable would let an
   application configure an invalid B2BUA. Routing, admission and target choice are not fields on
   it; the application performs those before giving the two legs to the coupling.
-- **Resolved — signalling-only is absence, not a second mode.** A coupling has no bridge unless
-  `bridge_media` is called. The offer/answer and lifecycle state is identical either way, which is
-  RFC 7092's useful distinction: media behaviour classifies the B2BUA but does not create another
-  signalling machine. The application relays the descriptions selected by `CouplingState` directly
-  when it stays off the media path; attaching the bridge terminates the two negotiated sessions.
+- **Resolved, then corrected — signalling-only is absence at the *bridge*, and a distinct owner at
+  the *session*.** `C-1` concluded that signalling-only was the absence of `bridge_media`, and
+  `C-1`'s own final review found the hole: both legs are `Call`s, a `Call` binds and advertises a
+  local media endpoint before it can offer anything, and so "no bridge" only ever meant "media
+  terminated and then dropped". `C-7` therefore adds a second owner, `OffMediaCoupling`, and not a
+  second signalling machine — the offer/answer and lifecycle state remains the one `CouplingState`,
+  which is the part of the original answer that held. Media behaviour still does not create another
+  state machine; it does decide what the two legs are made of.
 
 ## Acceptance / done
 
 `C-1`: two dialogs are driven as one call by a single policy, an offer relayed from either leg is
 answered on the other, either leg ending ends the other, and audio passes between them with no
 shared mutable session.
+
+`C-7`: the same policy drives two dialogs with no media session on either leg, the endpoints'
+descriptions cross with only their `o=` line replaced, and the packets go from one endpoint to the
+other — proved by them arriving on a socket the test bound, at the port the relayed re-INVITE
+named.

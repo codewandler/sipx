@@ -4,6 +4,11 @@
 //! joined pending legs through cancellation, refusal or confirmation; [`Coupling`] then owns the
 //! two calls, optional media bridge, and confirmed signalling loop. Listener configuration,
 //! initial leg creation, routing and target choice stay above this crate.
+//!
+//! Those three are the media-terminating role (RFC 7092 §3.2.3): both legs are [`Call`]s, so both
+//! bind and advertise a local media endpoint whether or not a bridge forwards between them.
+//! [`transparent`] is the other role — two dialogs, no media session on either, and the endpoints'
+//! own descriptions relayed between them.
 
 use std::collections::VecDeque;
 use std::net::IpAddr;
@@ -17,6 +22,8 @@ use tokio::sync::mpsc;
 use crate::call::{CouplingDialEvent, sleep_until};
 use crate::dispatch::CouplingInvitation;
 use crate::{Call, Calls, DialOptions, Dialing, Error, Invitation, Result, Ringing};
+
+pub mod transparent;
 
 const DEFERRED_CAPACITY: usize = 16;
 

@@ -1,14 +1,14 @@
 # Two-dialog call coupling
 
-**Status:** normative · **Story:** C-1 · **Crates:** `sipx-call`, `sipx-media` ·
+**Status:** normative · **Stories:** C-1, C-7 · **Crates:** `sipx-call`, `sipx-sdp`, `sipx-media` ·
 **RFCs:** 3261, 3264, 3262, 3311, 7092
 
 ## 1. Scope
 
 This is the primitive a back-to-back user agent is built from, not a listener, router, registrar or
-dial plan. RFC 7092 supplies the taxonomy: this story owns the media-terminating call role and its
-optional channel-based bridge (§3.2.3). `C-7` owns the distinct §3.1.3 role whose SDP mapping leaves
-sipx entirely off the media path.
+dial plan. RFC 7092 supplies the taxonomy: `C-1` owns the media-terminating call role and its
+optional channel-based bridge (§3.2.3), and `C-7` the distinct §3.1.3 role whose SDP mapping leaves
+sipx entirely off the media path (section 6.1).
 
 The primitive has three layers. `CouplingState` is sans-I/O and describes every legal offer
 carrier. `EarlyCoupling` owns an inbound `Invitation`/`Ringing`, an outbound `Dialing`, and both
@@ -28,6 +28,7 @@ target selection remain application policy and are inputs to that constructor.
 | `EarlyCoupling` | `Invitation`, `Ringing`, `Dialing`, two request receivers | Pending-dialog driver through failure or confirmation |
 | `ConfirmedCoupling` | `Coupling` plus the two request receivers | Ownership-preserving early-to-confirmed handoff |
 | `Coupling` | two `Call`s, two request receivers, optional `Bridge` | Confirmed-dialog driver and sole owner of both calls |
+| `OffMediaCoupling` | two `Dialog`s, two request receivers, two `DescriptionRelay`s | The §3.1.3 driver: no `Call`, therefore no media session on either leg |
 
 `Coupling` does not expose either call by value. Borrowed inspection does not transfer ownership.
 Media remains owned by its call and moves through the bridge's bounded channels; neither call waits
@@ -107,8 +108,7 @@ so its glare decision remains live.
 
 An unattached media bridge means no forwarding task, but each `Call` still binds and advertises a
 local media endpoint. That is media termination without forwarding, not RFC 7092 section 3.1.3's
-off-media-path role. A transparent SDP mapping is required before signalling-only coupling is a
-truthful claim.
+off-media-path role, which section 6.1 below specifies separately.
 
 ## 5. Lifecycle table
 
@@ -132,8 +132,43 @@ those sessions and reports whether it transcodes. Dropping or closing the coupli
 before the calls and stops both forwarding tasks.
 
 An application implementing RFC 7092 §3.2.3 negotiates the two sessions at the B2BUA and calls
-`bridge_media`. Section 3.1.3 remains open: it needs a distinct transparent SDP mapping whose calls
-do not bind or advertise local media endpoints.
+`bridge_media`.
+
+### 6.1 The off-media role (RFC 7092 §3.1.3)
+
+`OffMediaCoupling` is the other role and a different object, because the difference is not a flag:
+it owns two `Dialog`s rather than two `Call`s, so there is no `MediaSession` to construct, no RTP
+socket to bind, and no local media address to advertise. Omitting `bridge_media` from two
+media-terminating calls is **not** equivalent and is not accepted as this role.
+
+The mapping is `sipx_sdp::relay::DescriptionRelay`, one per dialog, and it changes exactly one
+line.
+
+| Element | Rule |
+|---|---|
+| `o=` | Replaced with this dialog's own origin: a fixed username and session id chosen once per leg, and this side's signalling address. RFC 8866 §5.2 makes the origin address session identity and explicitly not a media destination |
+| `o=` version | Advances when the rest of the description differs from the last one emitted into **this** dialog, and stays put when it does not (RFC 3264 §8). The two legs never share a counter: their offer/answer sequences are not the same sequence |
+| `c=`, `m=` port, `m=` protocol, formats | Verbatim. These are the endpoints' own; replacing any of them is what puts an element on the media path |
+| `a=crypto`, `a=fingerprint`, `a=setup`, `a=ice-*`, `a=rtcp-mux` | Verbatim. Keying and connectivity are established endpoint to endpoint, so removing, adding or re-generating any of them is a downgrade or an outright break |
+| direction attributes | Verbatim, not mirrored. The description is being carried to the other endpoint unchanged, not answered |
+| unmodelled lines, line order, line endings | Preserved. The rewrite is textual for this reason: re-serializing a parsed view normalizes multicast TTLs, `m=` port counts, line order and whitespace, which is not a change this role is entitled to make |
+
+Refusals are decided on the source leg before the peer leg is sent anything, and leave both
+dialogs exactly as they were:
+
+| Condition | Result |
+|---|---|
+| body is not a session description | `488`, `Error::Relay(RelayError::Malformed)` |
+| description carries no `m=` line | `488`, `RelayError::NoMedia` |
+| an accepted `m=` line has no address at either level | `488`, `RelayError::NoConnection` |
+| offerless initial INVITE, or offerless re-INVITE | `488`. Answering one means originating a description, which is the one thing this role has nothing to describe |
+
+The lifecycle is the same `CouplingState`, not a second one: glare is refused **491** before
+anything is forwarded, a BYE on either leg is answered and then sent on the peer, a target final
+4xx/5xx becomes the source INVITE's own final response with the same status, and a CANCEL while
+the target INVITE is pending withdraws it. The target INVITE deliberately does not offer `100rel`
+(RFC 3262 §3), so no peer may put an offer in a reliable provisional: that carrier, and PRACK with
+it, needs a description this role does not author.
 
 ## 7. Test vectors
 
@@ -159,3 +194,8 @@ do not bind or advertise local media endpoints.
 | E6 | target 2xx crosses the held PRACK, then the E4 failure occurs | target receives ACK then BYE; no target PRACK or stale CANCEL leaves |
 | M1 | fresh coupling | no media bridge and no forwarding task |
 | M2 | `bridge_media` | audio crosses in both directions over the existing bridge |
+| T1 | off-media coupling of two endpoints, then a re-INVITE moving one endpoint's port, then an UPDATE moving it back | each leg receives the other endpoint's description with only `o=` replaced; RTP arrives at the endpoint's own socket, and after each relayed negotiation at the port it named |
+| T2 | the same source description twice, then a changed one | the emitted `o=` version stays put, then advances |
+| T3 | unmappable description on a confirmed off-media leg | `488` on its source leg, nothing sent on the peer leg, and the next offer still relays |
+| T4 | `EarlyCoupling::dial` with no bridge attached, same source description | the target is offered sipx's own port — the negative control for T1 |
+| T5 | off-media leg: crossed offer, source CANCEL before the target answers, target 486 | 491 then the retry relayed; the target invitation receives CANCEL; 486 becomes the source INVITE's final response |
