@@ -228,12 +228,35 @@ def _run(command: Sequence[str], *, timeout: int) -> str:
 
 
 def build_binary() -> pathlib.Path:
-    _run(("cargo", "build", "-p", "sipx-cli", "--quiet"), timeout=BUILD_TIMEOUT_SECONDS)
+    """Build the reference binary into its own directory, never the shared one.
+
+    The reference documents the **default**-feature command surface, which is what a reader
+    installing `sipx-cli` without extra features gets, so this build stays default-feature. But it
+    must not land on `target/debug/sipx`: the gate runs this step *after* the all-features `test`
+    step, so writing there left every run ending with a binary the next run's process tests spawn.
+    Those tests then failed as "heard no audio at all" — the shape of a real media defect, and the
+    shape `X-118` attributed to machine load. `X-121` made a mismatched binary announce itself;
+    this stops producing one. A sibling target directory keeps both truths: the reference is still
+    held against the default build, and the shared binary is left exactly as the tests built it.
+    """
     metadata = json.loads(
         _run(("cargo", "metadata", "--no-deps", "--format-version", "1"), timeout=HELP_TIMEOUT_SECONDS)
     )
+    reference_target = pathlib.Path(metadata["target_directory"]) / "cli-reference"
+    _run(
+        (
+            "cargo",
+            "build",
+            "-p",
+            "sipx-cli",
+            "--quiet",
+            "--target-dir",
+            str(reference_target),
+        ),
+        timeout=BUILD_TIMEOUT_SECONDS,
+    )
     suffix = ".exe" if os.name == "nt" else ""
-    return pathlib.Path(metadata["target_directory"]) / "debug" / f"sipx{suffix}"
+    return reference_target / "debug" / f"sipx{suffix}"
 
 
 def executable_help(binary: pathlib.Path) -> tuple[str, dict[str, str]]:

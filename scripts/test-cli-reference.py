@@ -110,5 +110,38 @@ class JsonComparison(unittest.TestCase):
         self.assertEqual(checker.json_drift(document, checker.discover_json_contracts(ROOT)), [])
 
 
+class TheReferenceBuild(unittest.TestCase):
+    """The reference build must not land on the binary the process tests spawn.
+
+    `gate.py` runs this check after the all-features `test` step, so building into the shared
+    directory left every gate run ending with a default-feature `sipx`. The next run's process
+    tests spawned it and failed as though audio were broken.
+    """
+
+    def _build_source(self) -> str:
+        source = pathlib.Path(SCRIPT).read_text(encoding="utf-8")
+        start = source.index("def build_binary(")
+        return source[start : source.index("\ndef ", start)]
+
+    def test_the_reference_build_uses_its_own_target_directory(self) -> None:
+        build = self._build_source()
+        self.assertIn(
+            "--target-dir",
+            build,
+            "build_binary writes into the shared target directory, so a gate run ends by leaving "
+            "a default-feature sipx for the next run's process tests to spawn",
+        )
+        self.assertIn("cli-reference", build)
+
+    def test_the_reference_build_stays_default_feature(self) -> None:
+        build = self._build_source()
+        self.assertNotIn(
+            "--all-features",
+            build,
+            "the reference documents the default-feature surface a reader installing sipx-cli "
+            "gets; building it with every feature would document a different binary",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
