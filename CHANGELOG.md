@@ -7,6 +7,54 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0-rc.7] — 2026-08-08
+
+This candidate fixes the delay two field reports described, and repairs three checks that were
+reporting less than they claimed. Most of it exists because earlier work verified its own tools
+rather than trusting them.
+
+### Added
+
+- **A connection failure says how many resolved addresses it tried.** The report carries the
+  candidates attempted alongside the candidates resolved, in text and JSON, from the library as well
+  as the phone. Equal counts mean the name is ruled out; a smaller attempted count is a statement
+  about the deadline and says nothing about the untried remainder. No exit code or existing field
+  changed.
+
+- **A process test refuses a binary built with other features.** Spawning a `sipx` built without the
+  features a test needs used to fail as a media or device defect; it now names the mismatch and what
+  to remove. The version report gained a machine-readable feature list, while its text form stays
+  byte-identical because a release check compares it against downloaded artifacts.
+
+### Changed
+
+- **Inbound audio is bounded in time rather than in frames.** The queue between the media session
+  and the application held 256 frames — 5.12 seconds at 20 ms packets — with no time bound, no
+  counter and no shed policy, and an application reading slightly slower than real time settled at
+  the far end of it and stayed there. It now holds a stated duration, 200 ms by default, measured
+  as queued audio rather than a frame count so that the same configuration means the same delay
+  whatever packetisation the far end uses. Overflow sheds the **oldest** audio and every shed frame
+  is counted.
+
+  *Migration:* an application that reads its call audio slower than real time — for example one that
+  buffers a clip and processes it after the call — will now lose the oldest audio rather than
+  receiving all of it late. `Config::inbound_queue` raises the bound, and
+  `MediaDiscardCounts::inbound_frames_shed` reports whenever it bites. A maximal concealment run is
+  200 ms and can therefore fill the default queue by itself.
+
+### Fixed
+
+- **A frame the analyser refuses no longer hides a voice transition.** The refused frame's
+  discontinuity is carried to the next accepted frame and restarts the epoch, so a transition
+  spanning the gap is reported rather than lost. The two joins that needed this now share one
+  implementation instead of two copies, which is what let the defect exist in one of them.
+
+- **Twelve of the browser proof's twenty assertions could not fail.** Each negative record carries
+  the hash of the positive it was recorded against, so any mutated evidence was refused on that
+  binding before the field under test was read. Every assertion is now proved load-bearing by
+  stubbing exactly the refusal it rests on, and a further check fails if a test reaches the
+  validator without an audit entry.
+
 ## [1.0.0-rc.6] — 2026-08-08
 
 This candidate is mostly about the project's own evidence: what the coverage figure counts, whether
@@ -3853,7 +3901,8 @@ Stated so nobody has to discover it from a stack trace:
 - **Interop is verified against Kamailio only.** A second implementation with different
   opinions — Asterisk, as a B2BUA rather than a proxy — has not been tried.
 
-[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.6...HEAD
+[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.7...HEAD
+[1.0.0-rc.7]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.6...v1.0.0-rc.7
 [1.0.0-rc.6]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.5...v1.0.0-rc.6
 [1.0.0-rc.5]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.4...v1.0.0-rc.5
 [1.0.0-rc.4]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.3...v1.0.0-rc.4

@@ -2,8 +2,8 @@
 id: M-77
 title: Carry a refused frame forward in voice detection
 pillar: Media
-status: in-progress
-priority: 2
+status: done
+priority:
 design: docs/designs/call-audio-analysis.md
 epic: call-audio-analysis
 areas: [sipx-call, sipx-audio]
@@ -33,7 +33,7 @@ already does, so a gap in the fed stream cannot be silently summed across.
       missing.
       → `audio_feed.rs`'s refusal arm: the samples are still gone, and what is no longer discarded
       is the break they left.
-- [ ] `./scripts/gate.py` green, including `sipx-transport`'s discard-site check.
+- [x] `./scripts/gate.py` green, including `sipx-transport`'s discard-site check.
       *The discard-site check is green (`cargo test -p sipx-transport --test discards
       --all-features`, 3 passed), as are `cargo test -p sipx-call -p sipx-audio --all-features`,
       clippy and `cargo fmt --all --check`. The full gate is the wave coordinator's, once per wave.*
@@ -80,6 +80,8 @@ already does, so a gap in the fed stream cannot be silently summed across.
     explained truthfully, not because the marker was left behind.
   - **The non-`Signed16` arm owes a break too.** It is unreachable through `Call`, and `M-59`
     already owed there while `M-58` did not; sharing the code settled it in the honest direction.
+
+- 2026-08-08: closed in the `1.0.0-rc.7` boundary.
 
 ## Notes
 

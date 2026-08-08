@@ -2,8 +2,8 @@
 id: X-121
 title: Refuse a stale uplifted binary
 pillar: Build
-status: in-progress
-priority: 3
+status: done
+priority:
 design:
 epic: test-surfaces
 areas: [sipx-cli, scripts]
@@ -28,7 +28,7 @@ requires, instead of failing as though the feature were broken.
       failure.
 - [x] The mechanism is cheap enough to run per test process — `sipx version --json` already reports
       the build, so prefer reading it over rebuilding.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -63,6 +63,8 @@ requires, instead of failing as though the feature were broken.
       `cargo fmt --all --check`, `./scripts/check-cli-reference.py --check`,
       `./scripts/check-provenance.sh`, `./scripts/coverage-report.py --check`, and the six
       `sipx-cli` feature combinations `check-features.sh` compiles.
+
+- 2026-08-08: closed in the `1.0.0-rc.7` boundary.
 
 ## Notes
 

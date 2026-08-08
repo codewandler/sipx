@@ -1,13 +1,43 @@
 ---
 title: What's new
-description: Release highlights and adoption notes for the sipx 1.0.0-rc.6 release candidate.
+description: Release highlights and adoption notes for the sipx 1.0.0-rc.7 release candidate.
 ---
 
 # What's new
 
 <!-- BEGIN generated:release-heading -->
-## 1.0.0-rc.6 — 2026-08-08
+## 1.0.0-rc.7 — 2026-08-08
 <!-- END generated:release-heading -->
+
+RC.7 fixes the added-delay reports at their real source and repairs three checks that were measuring
+less than they claimed.
+
+Install the exact CLI release with:
+
+```bash
+cargo install --locked --version =1.0.0-rc.7 sipx-cli
+```
+
+- **Inbound audio is bounded in time.** The queue between a call and the application held 5.12
+  seconds of audio at 20 ms packets, with no bound, counter or shed policy — an application reading
+  slightly slower than real time settled at the far end and stayed there. It now holds 200 ms by
+  default, measured as audio rather than frames so the bound means the same thing whatever the far
+  end sends, and every shed frame is counted.
+- **A refused analysis frame no longer hides a voice transition.** The gap it leaves restarts the
+  epoch rather than vanishing.
+- **A connection failure reports how many addresses it tried**, from the library as well as the
+  phone, so "this name resolves to one dead host" reads differently from "everything behind this
+  name is unreachable".
+- **Process tests refuse a binary built with the wrong features**, instead of failing as though
+  audio were broken.
+
+### Upgrade edits
+
+- An application that reads call audio slower than real time now loses the oldest audio rather than
+  receiving all of it late. Raise `Config::inbound_queue` if that is not what you want, and watch
+  `MediaDiscardCounts::inbound_frames_shed` to see whether it is biting.
+
+## 1.0.0-rc.6 — 2026-08-08
 
 RC.6 is largely about this project's own evidence — what the coverage number counts, whether a
 generated report can be found, whether a story's status agrees with its acceptance, and whether a
@@ -534,5 +564,5 @@ answer calls, but application callback bindings are not implemented.
 This website is built from `main`, so a page or API link may describe work newer than the tagged
 release. Use the exact crates.io version when reproducibility matters, and consult the
 [complete changelog](https://github.com/codewandler/sipx/blob/main/CHANGELOG.md) before updating a
-Git revision. Unreleased behavior is not part of `1.0.0-rc.6` merely because it appears on this
+Git revision. Unreleased behavior is not part of `1.0.0-rc.7` merely because it appears on this
 site.

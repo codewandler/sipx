@@ -2,8 +2,8 @@
 id: X-122
 title: Make the browser proof assertions non-vacuous
 pillar: Build
-status: in-progress
-priority: 4
+status: done
+priority:
 design:
 epic: test-surfaces
 areas: [scripts, tests]
@@ -27,7 +27,7 @@ because the evidence binding refused the mutation before the field was ever read
       the field it names must make it fail.
 - [x] Every other proof assertion is audited the same way, and any found vacuous is either fixed or
       removed — a test that cannot fail is worse than no test, because it reads as coverage.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -52,6 +52,8 @@ because the evidence binding refused the mutation before the field was ever read
   the coordinator's per-wave run and was not run here.
 - 2026-08-08: `PEER_KEYINGS` was deliberately left alone — it needs a transform dimension in
   `tests/interop/run.sh`, which is a different file and a different claim.
+
+- 2026-08-08: closed in the `1.0.0-rc.7` boundary.
 
 ## Notes
 

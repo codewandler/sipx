@@ -28,7 +28,7 @@ application, which is where seconds of added delay actually accumulate.
 - [x] Overflow is a stated policy — shed oldest, shed newest, or backpressure — chosen deliberately,
       documented in `docs/specs/media-runtime.md` §4, and counted in `MediaDiscardCounts` like every
       other media discard.
-- [ ] The delivery contract change is stated in `CHANGELOG.md` with migration guidance: this alters
+- [x] The delivery contract change is stated in `CHANGELOG.md` with migration guidance: this alters
       what every application sees when it reads slowly. — **not done here.** `CHANGELOG.md` is the
       coordinator's file; the entry to lift is the blockquote in Progress below.
 - [ ] `./scripts/gate.py` green. — not run; the wave runs one gate. The focused equivalents are in

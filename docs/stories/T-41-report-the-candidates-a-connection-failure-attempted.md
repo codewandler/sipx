@@ -2,8 +2,8 @@
 id: T-41
 title: Report the candidates a connection failure attempted
 pillar: Transport
-status: in-progress
-priority: 5
+status: done
+priority:
 design: docs/designs/endpoint-resolution.md
 epic: endpoint-resolution
 areas: [sipx-transport, sipx-cli]
@@ -30,7 +30,7 @@ unreachable".
       refusing.
 - [x] No new exit code and no renamed JSON field; the published exit table and contract table stay
       as `T-39` left them.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -62,3 +62,4 @@ unreachable".
   package clippy (0), `cargo fmt --all --check` (0), `check-cli-reference.py --check` (0),
   `check-provenance.sh` (0), `coverage-report.py --check` (0), and the `no-default-features` rows
   for all three packages.
+- 2026-08-08: closed in the `1.0.0-rc.7` boundary.

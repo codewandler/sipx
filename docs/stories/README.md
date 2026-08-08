@@ -76,11 +76,7 @@ appeared twice before anyone named it.
 - [M-70 — Accept multiplexed browser offers with unused component candidates](M-70-accept-multiplexed-browser-offers-with-unused-component-candidates.md) · Media · external review finding 9 · a second browser engine reaches SDP then fails the multiplexed profile
 - [M-72 — Prove the AEAD SRTP key derivation against an independent peer](M-72-prove-the-aead-srtp-key-derivation-against-a-peer.md) · Media · RFC 7714 publishes no KDF vector · a wrong salt placement makes two sipx endpoints interoperate with each other and nobody else, and every round-trip test still passes
 - [M-76 — Bound the inbound audio queue in time](M-76-bound-the-inbound-audio-queue-in-time.md) · Media · M-45 measured the jitter buffer and cleared it · the inbound channel holds 256 frames, which is 5.12 seconds of audio with no time bound, counter or shed policy
-- [M-77 — Carry a refused frame forward in voice detection](M-77-carry-a-refused-frame-forward-in-voice-detection.md) · Media · a frame the analyser refuses vanishes without breaking the epoch, so a voice transition spanning it can be missed
-- [T-41 — Report the candidates a connection failure attempted](T-41-report-the-candidates-a-connection-failure-attempted.md) · Transport · the spec's ConnectionFailed promises how many candidates were attempted; only the last error reaches the operator
 - [X-116 — Measure coverage without counting inline test modules](X-116-measure-coverage-without-inline-test-modules.md) · Build · the published 90% line figure is flattered because unit tests live inside src/ and path exclusion cannot reach them
-- [X-121 — Refuse a stale uplifted binary](X-121-refuse-a-stale-uplifted-binary.md) · Build · a non-all-features cargo run leaves target/debug/sipx without device-audio, and a later all-features test spawns it without complaint
-- [X-122 — Make the browser proof assertions non-vacuous](X-122-make-the-browser-proof-assertions-non-vacuous.md) · Build · every negative carries the hash of its positive, so a mutation is refused on the binding alone and a test can pass without checking the field it names
 
 ## Next (ready — take the top one unless the user named a story)
 
@@ -281,6 +277,7 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [M-69 — Reject an unacceptable initial offer on the wire](M-69-reject-an-unacceptable-initial-offer-on-the-wire.md) · Media · external review finding 3 · no-common-codec failure sends no final SIP response
 - [M-71 — Deliver negotiated DTMF receive events through scenario](M-71-deliver-negotiated-dtmf-receive-events-through-scenario.md) · Media · external review finding 10 · digits send successfully but no typed receive event arrives
 - [M-73 — Align the DTLS profile names with the IANA registry](M-73-align-the-dtls-profile-names-with-the-registry.md) · Media · the counter-mode DTLS profile carries OpenSSL's spelling rather than the registry's; M-41 added registry-correct names beside it
+- [M-77 — Carry a refused frame forward in voice detection](M-77-carry-a-refused-frame-forward-in-voice-detection.md) · Media · a frame the analyser refuses vanishes without breaking the epoch, so a voice transition spanning it can be missed
 - [P-1 — Build the CLI scaffold and machine-readable output](P-1-cli-scaffold-and-output.md) · Phone
 - [P-2 — Implement `sipx register`](P-2-cli-register.md) · Phone
 - [P-3 — Implement `sipx dial`](P-3-cli-dial.md) · Phone
@@ -395,6 +392,7 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [T-38 — Specify bounded SIP endpoint resolution](T-38-specify-bounded-sip-endpoint-resolution.md) · Transport · external review finding 2 · spec-first target derivation, DNS ordering, identity and deadlines
 - [T-39 — Resolve named targets in every phone command](T-39-resolve-named-targets-in-every-phone-command.md) · Transport · external review finding 2 · after T-38 · dial, register and scenario accept named targets without manual address injection
 - [T-40 — Expose the bounded resolver to library consumers](T-40-expose-the-bounded-resolver-to-library-consumers.md) · Transport · T-38/T-39 built bounded resolution inside sipx-cli · the public guide still tells applications to resolve the proxy themselves
+- [T-41 — Report the candidates a connection failure attempted](T-41-report-the-candidates-a-connection-failure-attempted.md) · Transport · the spec's ConnectionFailed promises how many candidates were attempted; only the last error reaches the operator
 - [X-1 — Scaffold the Cargo workspace, lint policy, licensing and CI](X-1-workspace-scaffold.md) · Core
 - [X-2 — Import the RFC 4475 torture corpus and its harness](X-2-rfc4475-torture-corpus.md) · Core
 - [X-3 — Enforce the provenance policy in CI and pre-commit](X-3-provenance-gate.md) · Core
@@ -489,6 +487,8 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [X-114 — Instrument gate step timings](X-114-instrument-gate-step-timings.md) · Build · X-93's baseline exists only as prose in its own story · gate.py has no clock at all, so nothing can be shown to have got faster
 - [X-115 — Catch implemented but unclosed stories](X-115-catch-implemented-but-unclosed-stories.md) · Build · A-16 was fully delivered, left at status backlog, then re-selected into a wave and dispatched to an implementor
 - [X-117 — Make the generated reports discoverable](X-117-make-the-generated-reports-discoverable.md) · Build · coverage, comparison, compliance and maturity are all reachable only by knowing their path
+- [X-121 — Refuse a stale uplifted binary](X-121-refuse-a-stale-uplifted-binary.md) · Build · a non-all-features cargo run leaves target/debug/sipx without device-audio, and a later all-features test spawns it without complaint
+- [X-122 — Make the browser proof assertions non-vacuous](X-122-make-the-browser-proof-assertions-non-vacuous.md) · Build · every negative carries the hash of its positive, so a mutation is refused on the binding alone and a test can pass without checking the field it names
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->
