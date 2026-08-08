@@ -32,7 +32,9 @@ selection order — with no speech provider behind any of it. This is the thing 
       unavailable provider is refused before any call resource is taken.
 - [x] The specification's conformance vectors run against a deliberately inert in-repo test provider
       that implements the contract and recognizes nothing — proving the contract is executable
-      without implying a capability.
+      without implying a capability. **31 of §10's 34 vectors run here.** REC-7 and LIF-6 are
+      obligations of §2's asynchronous driver, which this story deliberately does not build, and
+      `A-40` owns them; the test file records the exclusion rather than leaving it to be noticed.
 - [x] No speech recognition or synthesis implementation, model, accelerator dependency or audio
       retention ships in this story, and the public documentation does not present speech as an
       available capability.
