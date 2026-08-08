@@ -37,6 +37,9 @@ pub struct MediaDiscardCounts {
     pub ice_redundant_candidates: u64,
     /// Datagrams consumed during gathering that did not come from the queried STUN server.
     pub ice_gathering_foreign_datagrams: u64,
+    /// Frames an attached PCM processor lost under the seam's bounded-queue policy
+    /// (`docs/specs/call-audio-seam.md` §6).
+    pub processor_frames_lost: u64,
 }
 
 impl MediaDiscardCounts {
@@ -64,6 +67,7 @@ impl MediaDiscardCounts {
             self.ice_send_failures,
             self.ice_redundant_candidates,
             self.ice_gathering_foreign_datagrams,
+            self.processor_frames_lost,
         ]
         .into_iter()
         .fold(0, u64::saturating_add)
@@ -87,6 +91,7 @@ pub(crate) struct DiscardMeters {
     pub(crate) ice_send_failures: AtomicU64,
     pub(crate) ice_redundant_candidates: AtomicU64,
     pub(crate) ice_gathering_foreign_datagrams: AtomicU64,
+    pub(crate) processor_frames_lost: AtomicU64,
 }
 
 impl DiscardMeters {
@@ -112,6 +117,7 @@ impl DiscardMeters {
             ice_gathering_foreign_datagrams: self
                 .ice_gathering_foreign_datagrams
                 .load(Ordering::Relaxed),
+            processor_frames_lost: self.processor_frames_lost.load(Ordering::Relaxed),
         }
     }
 }

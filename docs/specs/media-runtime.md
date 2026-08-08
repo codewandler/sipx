@@ -164,8 +164,9 @@ The snapshot counts each consequence separately: codec encode and decode failure
 unprotect failures; packets from a foreign SSRC; completed DTMF digits refused by the
 application queue; unknown RTP payload types; playback completion reports with no listener; ICE
 driver datagrams and data-sent notes refused by its queue; renegotiation replies with no listener;
-ICE outputs failing to send; redundant server-reflexive candidates; and
-non-STUN-server datagrams consumed while gathering.
+ICE outputs failing to send; redundant server-reflexive candidates;
+non-STUN-server datagrams consumed while gathering; and frames lost by an attached PCM processor
+under the bounded-queue policy of [call-audio-seam.md](call-audio-seam.md) §6.
 
 An ICE output naming no bound socket has no counter: it is structurally unreachable because every
 base the agent can name was created from the exact socket vector the driver owns. The site carries
