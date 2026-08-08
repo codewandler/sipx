@@ -7,6 +7,20 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The `device-audio` build is no longer broken on macOS and Windows.** A test helper was gated on
+  the feature while its only caller was gated on the feature *and* Linux, so on the other two
+  platforms the helper became dead code and `-D warnings` refused to compile the test target. The
+  Linux gate could not see it, because there the caller compiles and the helper is used.
+
+### Changed
+
+- **The command-line suite's wall-clock bounds are derived from the machine that runs them.** Each
+  bound was a number written on an idle box; a deliberately loaded box was measured, one of them
+  failed, and they now scale by what starting a `sipx` process costs on the host, clamped so an
+  operation that never finishes is still reported as one. Nothing asserted after a wait changed.
+
 ## [1.0.0-rc.9] — 2026-08-08
 
 Bounds and identifiers on the diagnostic phone, and the browser kernel's artifact checks finally
