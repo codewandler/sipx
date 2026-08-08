@@ -275,11 +275,11 @@ pub(crate) struct AudioOptions {
     )]
     pub(crate) record: Option<String>,
 
-    /// Local source: wav:<path>, device:<id> or null.
+    /// Local source: `wav:<path>`, `device:<id>` or null.
     #[arg(long, value_parser = parse_non_empty)]
     pub(crate) audio_input: Option<String>,
 
-    /// Local sink: wav:<path>, device:<id> or null.
+    /// Local sink: `wav:<path>`, `device:<id>` or null.
     #[arg(long, value_parser = parse_non_empty)]
     pub(crate) audio_output: Option<String>,
 }
