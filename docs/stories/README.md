@@ -77,6 +77,7 @@ appeared twice before anyone named it.
 - [M-72 — Prove the AEAD SRTP key derivation against an independent peer](M-72-prove-the-aead-srtp-key-derivation-against-a-peer.md) · Media · RFC 7714 publishes no KDF vector · a wrong salt placement makes two sipx endpoints interoperate with each other and nobody else, and every round-trip test still passes
 - [M-77 — Carry a refused frame forward in voice detection](M-77-carry-a-refused-frame-forward-in-voice-detection.md) · Media · a frame the analyser refuses vanishes without breaking the epoch, so a voice transition spanning it can be missed
 - [X-116 — Measure coverage without counting inline test modules](X-116-measure-coverage-without-inline-test-modules.md) · Build · the published 90% line figure is flattered because unit tests live inside src/ and path exclusion cannot reach them
+- [X-121 — Refuse a stale uplifted binary](X-121-refuse-a-stale-uplifted-binary.md) · Build · a non-all-features cargo run leaves target/debug/sipx without device-audio, and a later all-features test spawns it without complaint
 - [X-122 — Make the browser proof assertions non-vacuous](X-122-make-the-browser-proof-assertions-non-vacuous.md) · Build · every negative carries the hash of its positive, so a mutation is refused on the binding alone and a test can pass without checking the field it names
 
 ## Next (ready — take the top one unless the user named a story)
@@ -121,7 +122,7 @@ _Everything above this layer inherits its correctness properties. SIP's genuinel
 ### supported test surfaces
 _The workspace has seeded links, virtual time and call fixtures, but downstream applications have no_
 - [X-123 — Scan nested modules for silent discards](X-123-scan-nested-modules-for-silent-discards.md) · Build · the discard guard reads one directory level, so every file X-67 moved into call/ and coupling/ has been unscanned since the split
-- [X-121 — Refuse a stale uplifted binary](X-121-refuse-a-stale-uplifted-binary.md) · Build · a non-all-features cargo run leaves target/debug/sipx without device-audio, and a later all-features test spawns it without complaint
+- [X-124 — Stop the gate leaving a default-feature binary](X-124-stop-the-gate-leaving-a-default-feature-binary.md) · Build · check-cli-reference builds sipx-cli with default features after the all-features test step, so every gate run ends by leaving a binary the next run's tests will spawn
 - [X-118 — Make bounded-timeout tests robust under load](X-118-make-bounded-timeout-tests-robust-under-load.md) · Build · a CANCEL test that passes in isolation timed out under three concurrent gate runs · a flaky red is worse than a slow one
 
 ## Blocked

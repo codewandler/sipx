@@ -42,6 +42,15 @@ weakening what they assert.
   machine, which is both more likely to recur and entirely outside this repository's control. A
   wall-clock assertion tuned on an idle box is not a property of the code under test.
 
+- 2026-08-08: **a deterministic cause has been found for the same symptom, and it was never ruled
+  out against the load diagnosis.** `X-121` traced it: `check-cli-reference.py` builds `sipx-cli`
+  with default features, and `gate.py` runs that step *after* the all-features `test` step, so every
+  gate run leaves a binary the next run's process tests spawn — failing as "heard no audio at all",
+  which is exactly what this story attributes to contention. `X-124` owns the fix and `X-121`'s
+  guard now makes the two distinguishable. **Do this story after those**, and re-measure whether a
+  load-sensitive assertion remains once the deterministic cause is gone; it may be that little or
+  none of what was attributed to load was load.
+
 ## Notes
 
 - This matters more now: concurrent implementors are the normal working mode, so a load-sensitive
