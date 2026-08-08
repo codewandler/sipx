@@ -18,6 +18,26 @@ pub enum Error {
     /// about the name at all.
     #[error("resolution: {0}")]
     Resolution(#[from] sipx_transport::destination::Error),
+    /// Every candidate a serial pass attempted failed to connect (RFC 3263 §4.3).
+    ///
+    /// The spec's `ConnectionFailed { attempted, last_error }`
+    /// (`docs/specs/sip-target-resolution.md` §8). Distinct from [`Error::Transport`], which is
+    /// one connection failing and says nothing about whether anything else was tried: the count
+    /// is what separates a name that resolves to one dead host from a name every address behind
+    /// which is unreachable. It renders as a transport failure still, because that is what it is
+    /// and what a reader is looking for, with the pass named after it.
+    ///
+    /// `attempts.attempted()` is attempted-so-far — see
+    /// [`sipx_transport::destination::Attempts`] for why a caller's deadline makes that the only
+    /// honest reading, and why `resolved` travels beside it.
+    #[error("transport: {source}, after attempting {attempts}")]
+    ConnectionFailed {
+        /// How far the pass got, and how far it could have gone.
+        attempts: sipx_transport::destination::Attempts,
+        /// The failure the last attempted candidate produced.
+        #[source]
+        source: sipx_transport::Error,
+    },
     /// A message could not be built.
     #[error("build: {0}")]
     Build(#[from] sipx_sip::error::BuildError),

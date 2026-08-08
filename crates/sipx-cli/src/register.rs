@@ -240,36 +240,33 @@ impl Attempt {
     }
 }
 
+/// The serial pass, which belongs to the library: `T-41` moved it there so an application gets the
+/// candidate order, the shared budget and the attempted count without reproducing any of it.
+///
+/// What stays here is the command's: the deadline is restated with the number the caller typed
+/// rather than the slice of it the pass was funded from, because "did not complete within 999ms"
+/// describes an accounting detail and the person reading it asked for one second.
 async fn register_candidates(
     handle: &sipx_transport::Handle,
     config: &Config,
     candidates: &[sipx_transport::Target],
     attempt: &Attempt,
 ) -> Result<(UserAgent, sipx_ua::Lease, sipx_transport::TransportKind), sipx_ua::Error> {
-    let mut last_transport = None;
-    for target in candidates.iter().take(crate::destination::MAX_ATTEMPTS) {
-        let mut candidate = config.clone();
-        candidate.target = target.clone();
-        let mut agent = UserAgent::new(handle.clone(), candidate);
-        // Each candidate is funded from what the deadline has left, never from a fresh copy of
-        // it: sixteen candidates with a budget each would multiply the bound the caller stated by
-        // sixteen, which is the shape of overshoot this story exists to remove.
-        let outcome = match attempt.remaining() {
-            Some(remaining) if remaining.is_zero() => return Err(attempt.expired()),
-            Some(remaining) => agent.register_within(remaining).await,
-            None => agent.register().await,
-        };
-        match outcome {
-            Ok(lease) => return Ok((agent, lease, target.transport)),
-            Err(error @ sipx_ua::Error::Transport(_)) => last_transport = Some(error),
-            // Restated with the deadline the caller typed rather than the slice of it this
-            // candidate was funded from: "did not complete within 999ms" describes an accounting
-            // detail, and the person reading it asked for one second.
-            Err(sipx_ua::Error::AttemptTimeout { .. }) => return Err(attempt.expired()),
-            Err(error) => return Err(error),
+    match UserAgent::register_candidates(
+        handle.clone(),
+        config.clone(),
+        candidates,
+        attempt.remaining(),
+    )
+    .await
+    {
+        Ok((agent, lease)) => {
+            let negotiated = agent.target().transport;
+            Ok((agent, lease, negotiated))
         }
+        Err(sipx_ua::Error::AttemptTimeout { .. }) => Err(attempt.expired()),
+        Err(error) => Err(error),
     }
-    Err(last_transport.unwrap_or(sipx_ua::Error::NoResponse))
 }
 
 /// Report an attempt that ran out of time, after joining what it left running.
@@ -487,9 +484,15 @@ async fn report_failure(
         _ => Exit::Failed,
     };
     handle.shutdown().await;
-    let report = Report::new()
-        .text("status", exit.as_str())
-        .text("error", error.to_string());
+    let report = crate::destination::with_attempts(
+        Report::new()
+            .text("status", exit.as_str())
+            .text("error", error.to_string()),
+        match error {
+            sipx_ua::Error::ConnectionFailed { attempts, .. } => Some(*attempts),
+            _ => None,
+        },
+    );
     let report = match export.into_report(report) {
         Ok(report) => report,
         Err(message) => return fail(format, Exit::Failed, &message),

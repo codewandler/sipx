@@ -39,6 +39,84 @@ use crate::{Target, TransportKind};
 /// connection attempts, each with its own timeout, long after the caller gave up.
 pub const MAX_ATTEMPTS: usize = 16;
 
+/// How far a serial pass over the ordered candidate list got, for a failure that has to say
+/// whether the *name* is unreachable or one host behind it refused.
+///
+/// `docs/specs/sip-target-resolution.md` §8 promises this as `ConnectionFailed { attempted,
+/// last_error }`. The last transport error alone cannot carry it: `Connection refused` reads
+/// identically whether it came from the only address a name has or from the last of sixteen, and
+/// those are different problems with different owners — one host to restart, or a zone that points
+/// at nothing that is listening.
+///
+/// **`attempted` is attempted-so-far, never attempted-in-total.** A caller's deadline is the
+/// ceiling over the whole pass (`P-26`), so a pass can end with candidates it never reached, and a
+/// count that meant "how many there were" would describe such a name as ruled out when nothing had
+/// ruled it out. [`Attempts::resolved`] is beside it for exactly that reason: the pair says both
+/// things, and [`Attempts::exhausted`] is the question they answer together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Attempts {
+    resolved: usize,
+    attempted: usize,
+}
+
+impl Attempts {
+    /// A pass about to begin over `resolved` ordered candidates.
+    #[must_use]
+    pub fn over(resolved: usize) -> Self {
+        Self {
+            resolved,
+            attempted: 0,
+        }
+    }
+
+    /// Count one candidate as attempted.
+    ///
+    /// Saturating at [`Attempts::budget`]: a pass cannot have attempted more candidates than it
+    /// was allowed to start, and a counter that could say otherwise would turn a miscount into a
+    /// report nobody can contradict.
+    pub fn attempt(&mut self) {
+        self.attempted = self.attempted.saturating_add(1).min(self.budget());
+    }
+
+    /// How many candidates have been attempted so far.
+    #[must_use]
+    pub fn attempted(&self) -> usize {
+        self.attempted
+    }
+
+    /// How many candidates resolution produced, attempted or not.
+    #[must_use]
+    pub fn resolved(&self) -> usize {
+        self.resolved
+    }
+
+    /// How many of them this pass may attempt at all — [`MAX_ATTEMPTS`] is the ceiling.
+    #[must_use]
+    pub fn budget(&self) -> usize {
+        self.resolved.min(MAX_ATTEMPTS)
+    }
+
+    /// Whether nothing remained to try, as opposed to the pass being cut short.
+    ///
+    /// True is "every address behind this name refused"; false is "the pass stopped before the
+    /// list did", which says nothing about the candidates it never reached.
+    #[must_use]
+    pub fn exhausted(&self) -> bool {
+        self.attempted >= self.budget()
+    }
+}
+
+impl std::fmt::Display for Attempts {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let plural = if self.resolved == 1 { "" } else { "s" };
+        write!(
+            formatter,
+            "{} of {} candidate{plural}",
+            self.attempted, self.resolved
+        )
+    }
+}
+
 /// The nameserver to ask, when it should not be the one the host is configured with.
 ///
 /// A caller that names a destination and cannot say *which* resolver it asked cannot tell a zone
@@ -471,6 +549,64 @@ mod tests {
         assert_eq!(nameserver(""), None);
         assert_eq!(nameserver("resolver.example"), None);
         assert_eq!(nameserver("192.0.2.53:"), None);
+    }
+
+    /// `T-41`: the count a connection failure reports is attempted-so-far, never
+    /// attempted-in-total. `P-26` makes a caller's deadline the ceiling over the whole serial
+    /// pass, so a pass can end with candidates it never reached — and a single number that meant
+    /// "how many there were" would describe a name as exhausted when nothing had ruled the tail
+    /// out. Exhausted and cut short are the two readings, and they must not render alike.
+    #[test]
+    fn an_exhausted_pass_and_one_cut_short_are_told_apart() {
+        let mut spent = Attempts::over(3);
+        for _ in 0..3 {
+            spent.attempt();
+        }
+        assert_eq!(spent.attempted(), 3);
+        assert_eq!(spent.resolved(), 3);
+        assert!(spent.exhausted(), "every candidate was tried");
+        assert_eq!(spent.to_string(), "3 of 3 candidates");
+
+        let mut abandoned = Attempts::over(3);
+        abandoned.attempt();
+        assert_eq!(abandoned.attempted(), 1);
+        assert_eq!(abandoned.resolved(), 3);
+        assert!(
+            !abandoned.exhausted(),
+            "two candidates were never reached, so the name is not ruled out"
+        );
+        assert_eq!(abandoned.to_string(), "1 of 3 candidates");
+
+        let mut alone = Attempts::over(1);
+        alone.attempt();
+        assert!(alone.exhausted());
+        assert_eq!(
+            alone.to_string(),
+            "1 of 1 candidate",
+            "one candidate is one candidate, not one candidates"
+        );
+    }
+
+    /// The serial budget is a bound on the pass, not on the list: a resolution that produced more
+    /// candidates than `MAX_ATTEMPTS` is exhausted once the budget is spent, because nothing more
+    /// will be tried. Reporting both numbers is what keeps that legible.
+    #[test]
+    fn the_attempt_budget_bounds_what_exhausted_can_mean() {
+        let mut bounded = Attempts::over(MAX_ATTEMPTS + 4);
+        for _ in 0..MAX_ATTEMPTS {
+            bounded.attempt();
+        }
+        assert_eq!(bounded.attempted(), MAX_ATTEMPTS);
+        assert_eq!(bounded.resolved(), MAX_ATTEMPTS + 4);
+        assert!(
+            bounded.exhausted(),
+            "the pass may not continue, so it is spent"
+        );
+
+        // And a counter that is driven past its budget still reports the budget: the pass cannot
+        // have attempted more candidates than it was allowed to.
+        bounded.attempt();
+        assert_eq!(bounded.attempted(), MAX_ATTEMPTS);
     }
 
     #[test]

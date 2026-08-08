@@ -5,7 +5,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use sipx_sip::build::ResponseBuilder;
 use sipx_sip::{Address, HeaderName, Method, Request, StatusCode, Uri};
-use sipx_transport::{Handle, Incoming, Target};
+use sipx_transport::{Handle, Incoming, Target, destination};
 
 use crate::auth::Credentials;
 use crate::error::{Error, Result};
@@ -542,6 +542,80 @@ impl UserAgent {
         self.gruus = gruu::Gruus::default();
         self.push_support = crate::push::Support::default();
         Err(Error::AttemptTimeout { limit: budget })
+    }
+
+    /// Register through the first of the ordered candidates that connects (RFC 3263 §4.3).
+    ///
+    /// [`Config::resolved`] takes the first candidate, which is what a caller with one address
+    /// wants. This is the whole ordered list: candidates are attempted **serially**, in order, and
+    /// a later one never starts until the earlier attempt has finished, because two REGISTERs in
+    /// flight for one binding is a duplicate request rather than a fallback
+    /// (`docs/specs/sip-target-resolution.md` §5). At most
+    /// [`sipx_transport::destination::MAX_ATTEMPTS`] of them are tried.
+    ///
+    /// Only a *transport* failure moves to the next candidate. A refusal, a challenge that cannot
+    /// be answered or an expired budget belongs to the exchange that produced it and is returned
+    /// as it stands; retrying those against another address asks a different host a question that
+    /// has already been answered.
+    ///
+    /// `budget` is what the caller's whole attempt has left when the pass begins, and it funds
+    /// every candidate together rather than each one separately — sixteen candidates with a copy
+    /// of the deadline each would multiply the bound the caller stated by sixteen (`P-26`).
+    /// `None` states no deadline and leaves each transaction its own expiry, exactly as
+    /// [`UserAgent::register`] does.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ConnectionFailed`] when every attempted candidate failed to connect, carrying how
+    /// many were attempted alongside the last transport error — the difference between one dead
+    /// host behind a name and every address behind it being unreachable.
+    /// [`Error::AttemptTimeout`] when `budget` ran out, in which case the pass reached fewer
+    /// candidates than the list holds. Anything else is the failure the candidate that produced
+    /// it returned.
+    pub async fn register_candidates(
+        endpoint: Handle,
+        config: Config,
+        candidates: &[Target],
+        budget: Option<Duration>,
+    ) -> Result<(Self, Lease)> {
+        let mut attempts = destination::Attempts::over(candidates.len());
+        let started = tokio::time::Instant::now();
+        let mut last = None;
+        for target in candidates.iter().take(destination::MAX_ATTEMPTS) {
+            attempts.attempt();
+            let mut candidate = config.clone();
+            candidate.target = target.clone();
+            let mut agent = Self::new(endpoint.clone(), candidate);
+            let outcome = match budget {
+                Some(budget) => {
+                    let remaining = budget.saturating_sub(started.elapsed());
+                    if remaining.is_zero() {
+                        return Err(Error::AttemptTimeout { limit: budget });
+                    }
+                    agent.register_within(remaining).await
+                }
+                None => agent.register().await,
+            };
+            match outcome {
+                Ok(lease) => return Ok((agent, lease)),
+                Err(Error::Transport(error)) => last = Some(error),
+                Err(error) => return Err(error),
+            }
+        }
+        // Nothing is attempted at all only when the list was empty, which is a caller that
+        // resolved nothing; there is no transport failure to report for that.
+        Err(
+            last.map_or(Error::NoResponse, |source| Error::ConnectionFailed {
+                attempts,
+                source,
+            }),
+        )
+    }
+
+    /// Where this agent sends its registrations.
+    #[must_use]
+    pub fn target(&self) -> &Target {
+        &self.config.target
     }
 
     /// Register, answering a challenge if one comes.
