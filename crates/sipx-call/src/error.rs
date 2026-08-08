@@ -139,6 +139,12 @@ pub enum Error {
     /// The SDP could not be read.
     #[error("sdp: {0}")]
     Sdp(String),
+    /// A description could not be put in front of the other dialog of an off-media coupling.
+    ///
+    /// Distinct from [`Self::Sdp`] because it is not the reader that failed: the description
+    /// parsed and this side declined to relay it, which is a decision with a named reason.
+    #[error("relayed description: {0}")]
+    Relay(#[from] sipx_sdp::RelayError),
     /// A named browser-audio policy boundary refused setup or renegotiation.
     #[error("browser-audio profile: {0}")]
     Profile(#[from] sipx_sdp::browser_audio::ProfileError),

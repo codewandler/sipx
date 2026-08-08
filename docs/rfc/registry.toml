@@ -1132,10 +1132,13 @@ status = "partial"
 roles = ["uac", "uas"]
 spec = "docs/specs/call-coupling.md"
 evidence = [
-  "crates/sipx-call/src/coupling.rs",
+  "crates/sipx-call/src/coupling/mod.rs",
+  "crates/sipx-call/src/coupling/transparent.rs",
+  "crates/sipx-sdp/src/relay.rs",
   "crates/sipx-call/tests/coupling.rs",
+  "crates/sipx-call/tests/off_media_coupling.rs",
 ]
-note = "The taxonomy is informational rather than a protocol conformance claim. sipx supplies the logical UAS/UAC concatenation as one owner of two dialogs: its owning constructor creates the target initial INVITE from the source offer; a target reliable-provisional offer is relayed to a source reliable provisional and its source PRACK answer is relayed in the held target PRACK; per-leg policy covers every carrier; UPDATE and re-INVITE relay live; glare is refused before forwarding; and a BYE on either confirmed leg ends its peer. Attaching the media bridge gives §3.2.3 media termination with explicit transcoding. Partial because leaving the bridge unattached still leaves two locally terminating media sessions rather than the truly off-media-path §3.1.3 role. Both `uac` and `uas` are named because a B2BUA is their logical concatenation, not because sipx ships routing, a registrar or a dial plan."
+note = "The taxonomy is informational rather than a protocol conformance claim. sipx supplies the logical UAS/UAC concatenation as one owner of two dialogs: its owning constructor creates the target initial INVITE from the source offer; a target reliable-provisional offer is relayed to a source reliable provisional and its source PRACK answer is relayed in the held target PRACK; per-leg policy covers every carrier; UPDATE and re-INVITE relay live; glare is refused before forwarding; and a BYE on either confirmed leg ends its peer. Attaching the media bridge gives §3.2.3 media termination with explicit transcoding. §3.1.3 is a distinct owner rather than that coupling without a bridge: it holds two dialogs and no media session, relays each endpoint's own description with only the per-dialog `o=` line replaced, and refuses an unmappable one before the peer leg is told. The live proof is causal — RTP arrives on a socket the test bound and, after a relayed re-INVITE, at the port that re-INVITE named. Partial because the off-media role covers the initial INVITE, UPDATE and re-INVITE carriers only: it forecloses the reliable provisional by not offering 100rel and refuses an offerless INVITE, since both would make it author a description it has no media endpoint for. sipx also holds neither the proxy-B2BUA (§3.1.1) nor the media relay or media-aware roles (§3.2.1, §3.2.2). Both `uac` and `uas` are named because a B2BUA is their logical concatenation, not because sipx ships routing, a registrar or a dial plan."
 
 [[rfc]]
 number = 7865

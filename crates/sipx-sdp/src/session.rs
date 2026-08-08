@@ -31,7 +31,7 @@ impl Address {
         }
     }
 
-    fn address_type(&self) -> &'static str {
+    pub(crate) fn address_type(&self) -> &'static str {
         match self {
             Self::Ip(IpAddr::V6(_)) => "IP6",
             // RFC 8866 §5.7 requires an addrtype even for a name, whose family the

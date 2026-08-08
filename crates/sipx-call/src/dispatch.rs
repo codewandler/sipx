@@ -374,6 +374,22 @@ impl CouplingInvitation {
         self.pending.claim()
     }
 
+    /// The `To` tag every response about this invitation carries.
+    pub(crate) fn tag(&self) -> String {
+        self.pending.tag()
+    }
+
+    /// Claim the invitation and fix its tag in the same transition, so a crossing CANCEL either
+    /// wins outright or answers with the tag this acceptance is about to use.
+    pub(crate) fn claim_with_tag(&self, tag: &str) -> Result<()> {
+        self.pending.claim_with_tag(tag)
+    }
+
+    /// Give up the cancellation bookkeeping once a final response has been sent.
+    pub(crate) fn into_parts(self) -> (Incoming, mpsc::Receiver<Incoming>) {
+        (self.incoming, self.requests)
+    }
+
     pub(crate) async fn refuse(
         &self,
         endpoint: &Handle,
