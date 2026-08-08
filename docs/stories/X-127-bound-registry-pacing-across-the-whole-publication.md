@@ -1,5 +1,5 @@
 ---
-id: X-126
+id: X-127
 title: Bound registry pacing across the whole publication, not one invocation
 pillar: Build
 status: backlog
@@ -54,3 +54,6 @@ first multi-crate publication has a finite total cost a reviewer can read off th
   returning `None`), `:2120-2141` (`main`'s untested `new_crates` derivation),
   `docs/specs/release-rehearsal.md:213-215` (the contradicted sentence).
 - `X-119` records the missing workflow argument as left open in its own `## Progress`.
+
+- 2026-08-08: renumbered from `X-126` on filing. `X-126` was allocated in the same wave, to the
+  load-pair test that rejects a call under suite contention. Only the id moved.
