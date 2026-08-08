@@ -1,0 +1,359 @@
+17.  RTCP Test Vectors
+
+   The examples in this section are all based upon the same RTCP packet:
+
+            81c8000e 4d617273 4e545031 4e545031
+            52545020 0000042a 0000eb98 4c756e61
+            deadbeef deadbeef deadbeef deadbeef
+            deadbeef
+
+   with 32-bit SRTCP index 000005d4.
+
+   As shown in Section 9.1, the IV is formed by XORing two 12-octet
+   values.  The first 12-octet value is formed by concatenating
+   two zero octets, the 4-octet SSRC (found in the fifth through
+   eighth octets of the RTP packet), another two padding octets, and the
+   31-bit SRTCP index, right-justified in a 32-bit = 4-octet field with
+   a single "0" bit prepended as padding.  An example of SRTCP IV
+   formation is shown below:
+
+             | Pad |   SSRC    | Pad |  0+SRTCP  |
+              00 00 4d 61 72 73 00 00 00 00 05 d4
+       salt   51 75 69 64 20 70 72 6f 20 71 75 6f
+              ------------------------------------
+         IV   51 75 24 05 52 03 72 6f 20 71 70 bb
+
+   In an SRTCP packet, a 1-bit Encryption flag is prepended to the
+   31-bit SRTCP index to form a 32-bit value we shall call the
+   "ESRTCP word".  The E-flag is one if the SRTCP packet has been
+   encrypted and zero if it has been tagged but not encrypted.  Note
+   that the ESRTCP field is only present in an SRTCP packet, not in an
+   RTCP packet.  The full ESRTCP word is part of the AAD.
+
+   When encrypting and tagging an RTCP packet (E-flag = 1), the SRTCP
+   packet consists of the following fields in the following order:
+
+   - The first 8 octets of the RTCP packet (part of the AAD).
+
+   - The cipher.
+
+   - The ESRTCP word (the final part of the AAD).
+
+   - Any Raw Data that might have been appended to the end of the
+     original RTCP packet.
+
+   Recall that AEAD treats the authentication tag as an integral part of
+   the cipher, and in fact the authentication tag is the last 8 or
+   16 octets of the cipher.
+
+   The reader is reminded that when the RTCP packet is to be tagged but
+   not encrypted (E-flag = 0), GCM will produce a cipher that consists
+   solely of the 8-octet or 16-octet authentication tag.  The tagged
+   SRTCP consists of the following fields in the order listed below:
+
+   - All of the AAD, except for the ESRTCP word.
+
+   - The cipher (= the authentication tag).
+
+   - The ESRTCP word (the final part of the AAD).
+
+   - Any Raw Data that might have been appended to the end of the
+     original RTCP packet.
+
+17.1.  SRTCP AEAD_AES_128_GCM Encryption and Tagging
+
+   Encrypting the following packet:
+
+        81c8000d 4d617273 4e545031 4e545032
+        52545020 0000042a 0000e930 4c756e61
+        deadbeef deadbeef deadbeef deadbeef
+        deadbeef
+
+   Key size = 128 bits
+   Tag size =  16 octets
+
+   Form the IV
+          | Pad |   SSRC    | Pad |   SRTCP   |
+           00 00 4d 61 72 73 00 00 00 00 05 d4
+     salt: 51 75 69 64 20 70 72 6f 20 71 75 6f
+       IV: 51 75 24 05 52 03 72 6f 20 71 70 bb
+
+   Key: 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f
+   AAD: 81c8000d 4d617273 800005d4
+    PT: 4e545031 4e545032 52545020 0000042a
+        0000e930 4c756e61 deadbeef deadbeef
+        deadbeef deadbeef deadbeef
+    IV: 51 75 24 05 52 03 72 6f 20 71 70 bb
+     H: c6a13b37878f5b826f4f8162a1c8d879
+
+   Encrypt the Plaintext
+     block # 0
+       IV||blk_cntr: 517524055203726f207170bb00000002
+          key_block: 2d bd 18 b4 92 8e e6 4e f5 73 87 46 2f 6b 7a b3
+        plain_block: 4e 54 50 31 4e 54 50 32 52 54 50 20 00 00 04 2a
+       cipher_block: 63 e9 48 85 dc da b6 7c a7 27 d7 66 2f 6b 7e 99
+     block # 1
+       IV||blk_cntr: 517524055203726f207170bb00000003
+          key_block: 7f f5 29 c7 20 73 9d 4c 18 db 1b 1e ad a0 d1 35
+        plain_block: 00 00 e9 30 4c 75 6e 61 de ad be ef de ad be ef
+       cipher_block: 7f f5 c0 f7 6c 06 f3 2d c6 76 a5 f1 73 0d 6f da
+     block # 2
+       IV||blk_cntr: 517524055203726f207170bb00000004
+          key_block: 92 4d 25 a9 58 9d 83 02 d5 14 99 b4 e0 14 78 15
+        plain_block: de ad be ef de ad be ef de ad be ef
+       cipher_block: 4c e0 9b 46 86 30 3d ed 0b b9 27 5b
+
+   Cipher before tag appended
+        63e94885 dcdab67c a727d766 2f6b7e99
+        7ff5c0f7 6c06f32d c676a5f1 730d6fda
+        4ce09b46 86303ded 0bb9275b
+
+   Compute the GMAC tag
+
+     Process the AAD
+           AAD word: 81c8000d4d617273800005d400000000
+       partial hash: 085d6eb166c555aa62982f630430ec6e
+
+     Process the cipher
+        cipher word: 63e94885dcdab67ca727d7662f6b7e99
+       partial hash: 8c9221be93466d68bbb16fa0d42b0187
+        cipher word: 7ff5c0f76c06f32dc676a5f1730d6fda
+       partial hash: 221ebb044ec9fd0bf116d7780f198792
+        cipher word: 4ce09b4686303ded0bb9275b00000000
+       partial hash: 50f70b9ca110ab312dce212657328dae
+
+     Process the length word
+        length word: 00000000000000600000000000000160
+       partial hash: 7296107c9716534371dfc1a30c5ffeb5
+
+   Turn GHASH into GMAC
+              GHASH: 72 96 10 7c 97 16 53 43 71 df c1 a3 0c 5f fe b5
+                 K0: ba dc b4 24 01 d9 1e 6c b4 74 39 d1 49 86 14 6b
+          full GMAC: c8 4a a4 58 96 cf 4d 2f c5 ab f8 72 45 d9 ea de
+
+   Cipher with tag
+        63e94885 dcdab67c a727d766 2f6b7e99
+        7ff5c0f7 6c06f32d c676a5f1 730d6fda
+        4ce09b46 86303ded 0bb9275b c84aa458
+        96cf4d2f c5abf872 45d9eade
+
+   Append the ESRTCP word with the E-flag set
+        63e94885 dcdab67c a727d766 2f6b7e99
+        7ff5c0f7 6c06f32d c676a5f1 730d6fda
+        4ce09b46 86303ded 0bb9275b c84aa458
+        96cf4d2f c5abf872 45d9eade 800005d4
+
+   Encrypted and tagged packet:
+        81c8000d 4d617273 63e94885 dcdab67c
+        a727d766 2f6b7e99 7ff5c0f7 6c06f32d
+        c676a5f1 730d6fda 4ce09b46 86303ded
+        0bb9275b c84aa458 96cf4d2f c5abf872
+        45d9eade 800005d4
+
+17.2.  SRTCP AEAD_AES_256_GCM Verification and Decryption
+
+   Key size = 256 bits
+   Tag size =  16 octets
+
+     Process the length word
+
+   Decrypting the following packet:
+
+        81c8000d 4d617273 d50ae4d1 f5ce5d30
+        4ba297e4 7d470c28 2c3ece5d bffe0a50
+        a2eaa5c1 110555be 8415f658 c61de047
+        6f1b6fad 1d1eb30c 4446839f 57ff6f6c
+        b26ac3be 800005d4
+
+   Key size = 256 bits
+   Key size =  16 octets
+
+   Form the IV
+          | Pad |   SSRC    | Pad |   SRTCP   |
+           00 00 4d 61 72 73 00 00 00 00 05 d4
+     salt: 51 75 69 64 20 70 72 6f 20 71 75 6f
+       IV: 51 75 24 05 52 03 72 6f 20 71 70 bb
+
+   Key: 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f
+        10 11 12 13 14 15 16 17 18 19 1a 1b 1c 1d 1e 1f
+   AAD: 81c8000d 4d617273 800005d4
+    CT: d50ae4d1 f5ce5d30 4ba297e4 7d470c28
+        2c3ece5d bffe0a50 a2eaa5c1 110555be
+        8415f658 c61de047 6f1b6fad 1d1eb30c
+        4446839f 57ff6f6c b26ac3be
+    IV: 51 75 24 05 52 03 72 6f 20 71 70 bb
+     H: f29000b62a499fd0a9f39a6add2e7780
+
+   Verify the received tag
+      1d 1e b3 0c 44 46 83 9f 57 ff 6f 6c b2 6a c3 be
+
+     Process the AAD
+           AAD word: 81c8000d4d617273800005d400000000
+       partial hash: 3ae5afd36dead5280b18950400176b5b
+
+     Process the cipher
+        cipher word: d50ae4d1f5ce5d304ba297e47d470c28
+       partial hash: e90fab7546f6940781227227ac926ebe
+        cipher word: 2c3ece5dbffe0a50a2eaa5c1110555be
+       partial hash: 9b236807d8b2dab07583adce367aa88f
+        cipher word: 8415f658c61de0476f1b6fad00000000
+       partial hash: e69313f423a75e3e0b7eb93321700e86
+
+     Process the length word
+        length word: 00000000000000600000000000000160
+       partial hash: 3a284af2616fdf505faf37eec39fbc8b
+
+   Turn GHASH into GMAC
+              GHASH: 3a 28 4a f2 61 6f df 50 5f af 37 ee c3 9f bc 8b
+                 K0: 27 36 f9 fe 25 29 5c cf 08 50 58 82 71 f5 7f 35
+          full GMAC: 1d 1e b3 0c 44 46 83 9f 57 ff 6f 6c b2 6a c3 be
+
+        Received tag = 1d1eb30c 4446839f 57ff6f6c b26ac3be
+        Computed tag = 1d1eb30c 4446839f 57ff6f6c b26ac3be
+     Received tag verified.
+
+   Decrypt the cipher
+     block # 0
+       IV||blk_cntr: 517524055203726f207170bb00000002
+          key_block: 9b 5e b4 e0 bb 9a 0d 02 19 f6 c7 c4 7d 47 08 02
+       cipher_block: d5 0a e4 d1 f5 ce 5d 30 4b a2 97 e4 7d 47 0c 28
+        plain_block: 4e 54 50 31 4e 54 50 32 52 54 50 20 00 00 04 2a
+     block # 1
+       IV||blk_cntr: 517524055203726f207170bb00000003
+          key_block: 2c 3e 27 6d f3 8b 64 31 7c 47 1b 2e cf a8 eb 51
+       cipher_block: 2c 3e ce 5d bf fe 0a 50 a2 ea a5 c1 11 05 55 be
+        plain_block: 00 00 e9 30 4c 75 6e 61 de ad be ef de ad be ef
+     block # 2
+       IV||blk_cntr: 517524055203726f207170bb00000004
+          key_block: 5a b8 48 b7 18 b0 5e a8 b1 b6 d1 42 3b 74 39 55
+       cipher_block: 84 15 f6 58 c6 1d e0 47 6f 1b 6f ad
+        plain_block: de ad be ef de ad be ef de ad be ef
+
+   Verified and decrypted packet:
+        81c8000d 4d617273 4e545031 4e545032
+        52545020 0000042a 0000e930 4c756e61
+        deadbeef deadbeef deadbeef deadbeef
+        deadbeef
+
+17.3.  SRTCP AEAD_AES_128_GCM Tagging Only
+
+   Tagging the following packet:
+
+        81c8000d 4d617273 4e545031 4e545032
+        52545020 0000042a 0000e930 4c756e61
+        deadbeef deadbeef deadbeef deadbeef
+        deadbeef
+
+   Key size = 128 bits
+   Tag size =  16 octets
+
+   Form the IV
+          | Pad |   SSRC    | Pad |   SRTCP   |
+           00 00 4d 61 72 73 00 00 00 00 05 d4
+     salt: 51 75 69 64 20 70 72 6f 20 71 75 6f
+       IV: 51 75 24 05 52 03 72 6f 20 71 70 bb
+
+   Key: 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f
+   AAD: 81c8000d 4d617273 4e545031 4e545032
+        52545020 0000042a 0000e930 4c756e61
+        deadbeef deadbeef deadbeef deadbeef
+        deadbeef 000005d4
+    IV: 51 75 24 05 52 03 72 6f 20 71 70 bb
+     H: c6a13b37878f5b826f4f8162a1c8d879
+
+   Compute the GMAC tag
+
+     Process the AAD
+           AAD word: 81c8000d4d6172734e5450314e545032
+       partial hash: f8dbbe278e06afe17fb4fb2e67f0a22e
+           AAD word: 525450200000042a0000e9304c756e61
+       partial hash: 6ccd900dfd0eb292f68f8a410d0648ec
+           AAD word: deadbeefdeadbeefdeadbeefdeadbeef
+       partial hash: 6a14be0ea384c6b746235ba955a57ff5
+           AAD word: deadbeef000005d40000000000000000
+       partial hash: cc81f14905670a1e37f8bc81a91997cd
+
+     Process the length word
+        length word: 00000000000001c00000000000000000
+       partial hash: 3ec16d4c3c0e90a59e91be415bd976d8
+
+   Turn GHASH into GMAC
+              GHASH: 3e c1 6d 4c 3c 0e 90 a5 9e 91 be 41 5b d9 76 d8
+                 K0: ba dc b4 24 01 d9 1e 6c b4 74 39 d1 49 86 14 6b
+          full GMAC: 84 1d d9 68 3d d7 8e c9 2a e5 87 90 12 5f 62 b3
+
+   Cipher with tag
+        841dd968 3dd78ec9 2ae58790 125f62b3
+
+   Tagged packet:
+        81c8000d 4d617273 4e545031 4e545032
+        52545020 0000042a 0000e930 4c756e61
+        deadbeef deadbeef deadbeef deadbeef
+        deadbeef 841dd968 3dd78ec9 2ae58790
+        125f62b3 000005d4
+
+17.4.  SRTCP AEAD_AES_256_GCM Tag Verification
+
+   Key size = 256 bits
+   Tag size =  16 octets
+
+     Process the length word
+   Verifying the following packet:
+
+        81c8000d 4d617273 4e545031 4e545032
+        52545020 0000042a 0000e930 4c756e61
+        deadbeef deadbeef deadbeef deadbeef
+        deadbeef 91db4afb feee5a97 8fab4393
+        ed2615fe 000005d4
+
+   Key size = 256 bits
+   Key size =  16 octets
+
+   Form the IV
+          | Pad |   SSRC    | Pad |   SRTCP   |
+           00 00 4d 61 72 73 00 00 00 00 05 d4
+     salt: 51 75 69 64 20 70 72 6f 20 71 75 6f
+       IV: 51 75 24 05 52 03 72 6f 20 71 70 bb
+
+   Key: 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f
+        10 11 12 13 14 15 16 17 18 19 1a 1b 1c 1d 1e 1f
+   AAD: 81c8000d 4d617273 4e545031 4e545032
+        52545020 0000042a 0000e930 4c756e61
+        deadbeef deadbeef deadbeef deadbeef
+        deadbeef 000005d4
+    CT: 91db4afb feee5a97 8fab4393 ed2615fe
+    IV: 51 75 24 05 52 03 72 6f 20 71 70 bb
+     H: f29000b62a499fd0a9f39a6add2e7780
+
+   Verify the received tag
+      91 db 4a fb fe ee 5a 97 8f ab 43 93 ed 26 15 fe
+
+     Process the AAD
+           AAD word: 81c8000d4d6172734e5450314e545032
+       partial hash: 7bc665c71676a5a5f663b3229af4b85c
+           AAD word: 525450200000042a0000e9304c756e61
+       partial hash: 34ed77752703ab7d69f44237910e3bc0
+           AAD word: deadbeefdeadbeefdeadbeefdeadbeef
+       partial hash: 74a59f1a99282344d64ab1c8a2be6cf8
+           AAD word: deadbeef000005d40000000000000000
+       partial hash: 126335c0baa7ab1b79416ceeb9f7a518
+
+     Process the length word
+        length word: 00000000000001c00000000000000000
+       partial hash: b6edb305dbc7065887fb1b119cd36acb
+
+   Turn GHASH into GMAC
+              GHASH: b6 ed b3 05 db c7 06 58 87 fb 1b 11 9c d3 6a cb
+                 K0: 27 36 f9 fe 25 29 5c cf 08 50 58 82 71 f5 7f 35
+          full GMAC: 91 db 4a fb fe ee 5a 97 8f ab 43 93 ed 26 15 fe
+
+        Received tag = 91db4afb feee5a97 8fab4393 ed2615fe
+        Computed tag = 91db4afb feee5a97 8fab4393 ed2615fe
+     Received tag verified.
+
+   Verified packet:
+        81c8000d 4d617273 4e545031 4e545032
+        52545020 0000042a 0000e930 4c756e61
+        deadbeef deadbeef deadbeef deadbeef
+        deadbeef
+

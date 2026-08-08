@@ -1,0 +1,566 @@
+16.  Some RTP Test Vectors
+
+   The examples in this section are all based upon the same RTP packet
+
+            8040f17b 8041f8d3 5501a0b2 47616c6c
+            69612065 7374206f 6d6e6973 20646976
+            69736120 696e2070 61727465 73207472
+            6573
+
+   consisting of a 12-octet header (8040f17b 8041f8d3 5501a0b2) and a
+   38-octet payload (47616c6c 69612065 7374206f 6d6e6973 20646976
+   69736120 696e2070 61727465 73207472 6573), which is just the ASCII
+   string "Gallia est omnis divisa in partes tres".  The salt used
+   (51756964 2070726f 2071756f) comes from the ASCII string "Quid pro
+   quo".  The 16-octet (128-bit) key is 00 01 02 ... 0f, and the
+   32-octet (256-bit) key is 00 01 02 ... 1f.  At the time this document
+   was written, the RTP payload type (1000000 binary = 64 decimal) was
+   an unassigned value.
+
+   As shown in Section 8.1, the IV is formed by XORing two 12-octet
+   values.  The first 12-octet value is formed by concatenating two
+   zero octets, the 4-octet SSRC (found in the ninth through 12th octets
+   of the packet), the 4-octet rollover counter (ROC) maintained at each
+   end of the link, and the 2-octet sequence number (SEQ) (found in the
+   third and fourth octets of the packet).  The second 12-octet value is
+   the salt, a value that is held constant at least until the key is
+   changed.
+
+              | Pad |   SSRC    |    ROC    | SEQ |
+               00 00 55 01 a0 b2 00 00 00 00 f1 7b
+        salt   51 75 69 64 20 70 72 6f 20 71 75 6f
+               ------------------------------------
+          IV   51 75 3c 65 80 c2 72 6f 20 71 84 14
+
+   All of the RTP examples use this IV.
+
+16.1.  SRTP AEAD_AES_128_GCM
+
+16.1.1.  SRTP AEAD_AES_128_GCM Encryption
+
+   Encrypting the following packet:
+
+        8040f17b 8041f8d3 5501a0b2 47616c6c
+        69612065 7374206f 6d6e6973 20646976
+        69736120 696e2070 61727465 73207472
+        6573
+
+   Form the IV
+          | Pad |   SSRC    |    ROC    | SEQ |
+           00 00 55 01 a0 b2 00 00 00 00 f1 7b
+     salt: 51 75 69 64 20 70 72 6f 20 71 75 6f
+       IV: 51 75 3c 65 80 c2 72 6f 20 71 84 14
+
+   Key: 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f
+   AAD: 8040f17b 8041f8d3 5501a0b2
+    PT: 47616c6c 69612065 7374206f 6d6e6973
+        20646976 69736120 696e2070 61727465
+        73207472 6573
+    IV: 51 75 3c 65 80 c2 72 6f 20 71 84 14
+     H: c6a13b37878f5b826f4f8162a1c8d879
+
+   Encrypt the Plaintext
+     block # 0
+       IV||blk_cntr: 51753c6580c2726f2071841400000002
+          key_block: b5 2c 8f cf 92 55 fe 09 df ce a6 73 f0 10 22 b9
+        plain_block: 47 61 6c 6c 69 61 20 65 73 74 20 6f 6d 6e 69 73
+       cipher_block: f2 4d e3 a3 fb 34 de 6c ac ba 86 1c 9d 7e 4b ca
+     block # 1
+       IV||blk_cntr: 51753c6580c2726f2071841400000003
+          key_block: 9e 07 52 a3 64 5a 2f 4f 2b cb d4 0a 30 b5 a5 fe
+        plain_block: 20 64 69 76 69 73 61 20 69 6e 20 70 61 72 74 65
+       cipher_block: be 63 3b d5 0d 29 4e 6f 42 a5 f4 7a 51 c7 d1 9b
+     block # 2
+       IV||blk_cntr: 51753c6580c2726f2071841400000004
+          key_block: 45 fe 4e ad ed 40 0a 5d 1a f3 63 f9 0c e1 49 3b
+        plain_block: 73 20 74 72 65 73
+       cipher_block: 36 de 3a df 88 33
+
+   Cipher before tag appended
+        f24de3a3 fb34de6c acba861c 9d7e4bca
+        be633bd5 0d294e6f 42a5f47a 51c7d19b
+        36de3adf 8833
+
+   Compute the GMAC tag
+
+     Process the AAD
+           AAD word: 8040f17b8041f8d35501a0b200000000
+       partial hash: bcfb3d1d0e6e3e78ba45403377dba11b
+
+     Process the cipher
+        cipher word: f24de3a3fb34de6cacba861c9d7e4bca
+       partial hash: 0ebc0abe1b15b32fedd2b07888c1ef61
+        cipher word: be633bd50d294e6f42a5f47a51c7d19b
+       partial hash: 438e5797011ea860585709a2899f4685
+        cipher word: 36de3adf883300000000000000000000
+       partial hash: 336fb643310d7bac2aeaa76247f6036d
+
+     Process the length word
+        length word: 00000000000000600000000000000130
+       partial hash: 1b964067078c408c4e442a8f015e5264
+
+   Turn GHASH into GMAC
+              GHASH: 1b 96 40 67 07 8c 40 8c 4e 44 2a 8f 01 5e 52 64
+                 K0: 92 0b 3f 40 b9 3d 2a 1d 1c 8b 5c d1 e5 67 5e aa
+          full GMAC: 89 9d 7f 27 be b1 6a 91 52 cf 76 5e e4 39 0c ce
+
+   Cipher with tag
+        f24de3a3 fb34de6c acba861c 9d7e4bca
+        be633bd5 0d294e6f 42a5f47a 51c7d19b
+        36de3adf 8833899d 7f27beb1 6a9152cf
+        765ee439 0cce
+
+   Encrypted and tagged packet:
+        8040f17b 8041f8d3 5501a0b2 f24de3a3
+        fb34de6c acba861c 9d7e4bca be633bd5
+        0d294e6f 42a5f47a 51c7d19b 36de3adf
+        8833899d 7f27beb1 6a9152cf 765ee439
+        0cce
+
+16.1.2.  SRTP AEAD_AES_128_GCM Decryption
+
+   Decrypting the following packet:
+
+        8040f17b 8041f8d3 5501a0b2 f24de3a3
+        fb34de6c acba861c 9d7e4bca be633bd5
+        0d294e6f 42a5f47a 51c7d19b 36de3adf
+        8833899d 7f27beb1 6a9152cf 765ee439
+        0cce
+
+   Form the IV
+          | Pad |   SSRC    |    ROC    | SEQ |
+           00 00 55 01 a0 b2 00 00 00 00 f1 7b
+     salt: 51 75 69 64 20 70 72 6f 20 71 75 6f
+       IV: 51 75 3c 65 80 c2 72 6f 20 71 84 14
+
+   Key: 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f
+   AAD: 8040f17b 8041f8d3 5501a0b2
+    CT: f24de3a3 fb34de6c acba861c 9d7e4bca
+        be633bd5 0d294e6f 42a5f47a 51c7d19b
+        36de3adf 8833899d 7f27beb1 6a9152cf
+        765ee439 0cce
+    IV: 51 75 3c 65 80 c2 72 6f 20 71 84 14
+     H: c6a13b37878f5b826f4f8162a1c8d879
+
+   Verify the received tag
+      89 9d 7f 27 be b1 6a 91 52 cf 76 5e e4 39 0c ce
+
+     Process the AAD
+           AAD word: 8040f17b8041f8d35501a0b200000000
+       partial hash: bcfb3d1d0e6e3e78ba45403377dba11b
+
+     Process the cipher
+        cipher word: f24de3a3fb34de6cacba861c9d7e4bca
+       partial hash: 0ebc0abe1b15b32fedd2b07888c1ef61
+        cipher word: be633bd50d294e6f42a5f47a51c7d19b
+       partial hash: 438e5797011ea860585709a2899f4685
+        cipher word: 36de3adf883300000000000000000000
+       partial hash: 336fb643310d7bac2aeaa76247f6036d
+
+     Process the length word
+        length word: 00000000000000600000000000000130
+       partial hash: 1b964067078c408c4e442a8f015e5264
+
+   Turn GHASH into GMAC
+              GHASH: 1b 96 40 67 07 8c 40 8c 4e 44 2a 8f 01 5e 52 64
+                 K0: 92 0b 3f 40 b9 3d 2a 1d 1c 8b 5c d1 e5 67 5e aa
+          full GMAC: 89 9d 7f 27 be b1 6a 91 52 cf 76 5e e4 39 0c ce
+
+        Received tag = 899d7f27 beb16a91 52cf765e e4390cce
+        Computed tag = 899d7f27 beb16a91 52cf765e e4390cce
+     Received tag verified.
+
+   Decrypt the cipher
+     block # 0
+       IV||blk_cntr: 51753c6580c2726f2071841400000002
+          key_block: b5 2c 8f cf 92 55 fe 09 df ce a6 73 f0 10 22 b9
+       cipher_block: f2 4d e3 a3 fb 34 de 6c ac ba 86 1c 9d 7e 4b ca
+        plain_block: 47 61 6c 6c 69 61 20 65 73 74 20 6f 6d 6e 69 73
+     block # 1
+       IV||blk_cntr: 51753c6580c2726f2071841400000003
+          key_block: 9e 07 52 a3 64 5a 2f 4f 2b cb d4 0a 30 b5 a5 fe
+       cipher_block: be 63 3b d5 0d 29 4e 6f 42 a5 f4 7a 51 c7 d1 9b
+        plain_block: 20 64 69 76 69 73 61 20 69 6e 20 70 61 72 74 65
+     block # 2
+       IV||blk_cntr: 51753c6580c2726f2071841400000004
+          key_block: 45 fe 4e ad ed 40 0a 5d 1a f3 63 f9 0c e1 49 3b
+       cipher_block: 36 de 3a df 88 33
+        plain_block: 73 20 74 72 65 73
+
+   Verified and tagged packet:
+        47616c6c 69612065 7374206f 6d6e6973
+        20646976 69736120 696e2070 61727465
+        73207472 6573
+
+16.1.3.  SRTP AEAD_AES_128_GCM Authentication Tagging
+
+   Tagging the following packet:
+
+        8040f17b 8041f8d3 5501a0b2 47616c6c
+        69612065 7374206f 6d6e6973 20646976
+        69736120 696e2070 61727465 73207472
+        6573
+
+   Form the IV
+          | Pad |   SSRC    |    ROC    | SEQ |
+           00 00 55 01 a0 b2 00 00 00 00 f1 7b
+     salt: 51 75 69 64 20 70 72 6f 20 71 75 6f
+       IV: 51 75 3c 65 80 c2 72 6f 20 71 84 14
+
+   Key: 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f
+   AAD: 8040f17b 8041f8d3 5501a0b2 47616c6c
+        69612065 7374206f 6d6e6973 20646976
+        69736120 696e2070 61727465 73207472
+        6573
+    IV: 51 75 3c 65 80 c2 72 6f 20 71 84 14
+     H: c6a13b37878f5b826f4f8162a1c8d879
+
+   Compute the GMAC tag
+
+     Process the AAD
+           AAD word: 8040f17b8041f8d35501a0b247616c6c
+       partial hash: 79f41fea34a474a77609d8925e9f2b22
+           AAD word: 696120657374206f6d6e697320646976
+       partial hash: 84093a2f85abf17ab37d3ce2f706138f
+           AAD word: 69736120696e20706172746573207472
+       partial hash: ab2760fee24e6dec754739d8059cd144
+           AAD word: 65730000000000000000000000000000
+       partial hash: e84f3c55d287fc561c41d09a8aada4be
+
+     Process the length word
+        length word: 00000000000001900000000000000000
+       partial hash: b04200c26b81c98af55cc2eafccd1cbc
+
+   Turn GHASH into GMAC
+              GHASH: b0 42 00 c2 6b 81 c9 8a f5 5c c2 ea fc cd 1c bc
+                 K0: 92 0b 3f 40 b9 3d 2a 1d 1c 8b 5c d1 e5 67 5e aa
+          full GMAC: 22 49 3f 82 d2 bc e3 97 e9 d7 9e 3b 19 aa 42 16
+
+   Cipher with tag
+        22493f82 d2bce397 e9d79e3b 19aa4216
+
+   Tagged packet:
+        8040f17b 8041f8d3 5501a0b2 47616c6c
+        69612065 7374206f 6d6e6973 20646976
+        69736120 696e2070 61727465 73207472
+        65732249 3f82d2bc e397e9d7 9e3b19aa
+        4216
+
+16.1.4.  SRTP AEAD_AES_128_GCM Tag Verification
+
+   Verifying the following packet:
+
+        8040f17b 8041f8d3 5501a0b2 47616c6c
+        69612065 7374206f 6d6e6973 20646976
+        69736120 696e2070 61727465 73207472
+        65732249 3f82d2bc e397e9d7 9e3b19aa
+        4216
+
+   Form the IV
+          | Pad |   SSRC    |    ROC    | SEQ |
+           00 00 55 01 a0 b2 00 00 00 00 f1 7b
+     salt: 51 75 69 64 20 70 72 6f 20 71 75 6f
+       IV: 51 75 3c 65 80 c2 72 6f 20 71 84 14
+
+   Key: 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f
+   AAD: 8040f17b 8041f8d3 5501a0b2 47616c6c
+        69612065 7374206f 6d6e6973 20646976
+        69736120 696e2070 61727465 73207472
+        6573
+    CT: 22493f82 d2bce397 e9d79e3b 19aa4216
+    IV: 51 75 3c 65 80 c2 72 6f 20 71 84 14
+     H: c6a13b37878f5b826f4f8162a1c8d879
+
+   Verify the received tag
+      22 49 3f 82 d2 bc e3 97 e9 d7 9e 3b 19 aa 42 16
+
+     Process the AAD
+           AAD word: 8040f17b8041f8d35501a0b247616c6c
+       partial hash: 79f41fea34a474a77609d8925e9f2b22
+           AAD word: 696120657374206f6d6e697320646976
+       partial hash: 84093a2f85abf17ab37d3ce2f706138f
+           AAD word: 69736120696e20706172746573207472
+       partial hash: ab2760fee24e6dec754739d8059cd144
+           AAD word: 65730000000000000000000000000000
+       partial hash: e84f3c55d287fc561c41d09a8aada4be
+
+     Process the length word
+        length word: 00000000000001900000000000000000
+       partial hash: b04200c26b81c98af55cc2eafccd1cbc
+
+   Turn GHASH into GMAC
+              GHASH: b0 42 00 c2 6b 81 c9 8a f5 5c c2 ea fc cd 1c bc
+                 K0: 92 0b 3f 40 b9 3d 2a 1d 1c 8b 5c d1 e5 67 5e aa
+          full GMAC: 22 49 3f 82 d2 bc e3 97 e9 d7 9e 3b 19 aa 42 16
+
+        Received tag = 22493f82 d2bce397 e9d79e3b 19aa4216
+        Computed tag = 22493f82 d2bce397 e9d79e3b 19aa4216
+     Received tag verified.
+
+16.2.  SRTP AEAD_AES_256_GCM
+
+16.2.1.  SRTP AEAD_AES_256_GCM Encryption
+
+   Encrypting the following packet:
+
+        8040f17b 8041f8d3 5501a0b2 47616c6c
+        69612065 7374206f 6d6e6973 20646976
+        69736120 696e2070 61727465 73207472
+        6573
+
+   Form the IV
+          | Pad |   SSRC    |    ROC    | SEQ |
+           00 00 55 01 a0 b2 00 00 00 00 f1 7b
+     salt: 51 75 69 64 20 70 72 6f 20 71 75 6f
+       IV: 51 75 3c 65 80 c2 72 6f 20 71 84 14
+
+   Key: 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f
+        10 11 12 13 14 15 16 17 18 19 1a 1b 1c 1d 1e 1f
+   AAD: 8040f17b 8041f8d3 5501a0b2
+    PT: 47616c6c 69612065 7374206f 6d6e6973
+        20646976 69736120 696e2070 61727465
+        73207472 6573
+    IV: 51 75 3c 65 80 c2 72 6f 20 71 84 14
+     H: f29000b62a499fd0a9f39a6add2e7780
+
+   Encrypt the Plaintext
+     block # 0
+       IV||blk_cntr: 51753c6580c2726f2071841400000002
+          key_block: 75 d0 b2 14 c1 43 de 77 9c eb 58 95 5e 40 5a d9
+        plain_block: 47 61 6c 6c 69 61 20 65 73 74 20 6f 6d 6e 69 73
+       cipher_block: 32 b1 de 78 a8 22 fe 12 ef 9f 78 fa 33 2e 33 aa
+     block # 1
+       IV||blk_cntr: 51753c6580c2726f2071841400000003
+          key_block: 91 e4 7b 4e f3 2b 83 d3 dc 65 0a 72 17 8d da 6a
+        plain_block: 20 64 69 76 69 73 61 20 69 6e 20 70 61 72 74 65
+       cipher_block: b1 80 12 38 9a 58 e2 f3 b5 0b 2a 02 76 ff ae 0f
+     block # 2
+       IV||blk_cntr: 51753c6580c2726f2071841400000004
+          key_block: 68 86 43 eb dd 08 07 98 16 3a 16 d5 e5 04 f6 3a
+        plain_block: 73 20 74 72 65 73
+       cipher_block: 1b a6 37 99 b8 7b
+
+   Cipher before tag appended
+        32b1de78 a822fe12 ef9f78fa 332e33aa
+        b1801238 9a58e2f3 b50b2a02 76ffae0f
+        1ba63799 b87b
+
+   Compute the GMAC tag
+
+     Process the AAD
+           AAD word: 8040f17b8041f8d35501a0b200000000
+       partial hash: 0154dcb75485b71880e1957c877351bd
+
+     Process the cipher
+        cipher word: 32b1de78a822fe12ef9f78fa332e33aa
+       partial hash: c3f07db9a8b9cb4345eb07f793d322d2
+        cipher word: b18012389a58e2f3b50b2a0276ffae0f
+       partial hash: 6d1e66fe32eb32ecd8906ceab09db996
+        cipher word: 1ba63799b87b00000000000000000000
+       partial hash: b3d1d2f1fa3b366619bc42cd2eedafee
+
+     Process the length word
+        length word: 00000000000000600000000000000130
+       partial hash: 7debf5fa1fac3bd318d5e1a7ee401091
+
+   Turn GHASH into GMAC
+              GHASH: 7d eb f5 fa 1f ac 3b d3 18 d5 e1 a7 ee 40 10 91
+                 K0: 07 48 2e cc c0 53 ed 63 e1 6e 99 df 39 e7 7c 82
+          full GMAC: 7a a3 db 36 df ff d6 b0 f9 bb 78 78 d7 a7 6c 13
+
+   Cipher with tag
+        32b1de78 a822fe12 ef9f78fa 332e33aa
+        b1801238 9a58e2f3 b50b2a02 76ffae0f
+        1ba63799 b87b7aa3 db36dfff d6b0f9bb
+        7878d7a7 6c13
+
+   Encrypted and tagged packet:
+        8040f17b 8041f8d3 5501a0b2 32b1de78
+        a822fe12 ef9f78fa 332e33aa b1801238
+        9a58e2f3 b50b2a02 76ffae0f 1ba63799
+        b87b7aa3 db36dfff d6b0f9bb 7878d7a7
+        6c13
+
+16.2.2.  SRTP AEAD_AES_256_GCM Decryption
+
+   Decrypting the following packet:
+
+        8040f17b 8041f8d3 5501a0b2 32b1de78
+        a822fe12 ef9f78fa 332e33aa b1801238
+        9a58e2f3 b50b2a02 76ffae0f 1ba63799
+        b87b7aa3 db36dfff d6b0f9bb 7878d7a7
+        6c13
+
+   Form the IV
+          | Pad |   SSRC    |    ROC    | SEQ |
+           00 00 55 01 a0 b2 00 00 00 00 f1 7b
+     salt: 51 75 69 64 20 70 72 6f 20 71 75 6f
+       IV: 51 75 3c 65 80 c2 72 6f 20 71 84 14
+
+   Key: 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f
+        10 11 12 13 14 15 16 17 18 19 1a 1b 1c 1d 1e 1f
+   AAD: 8040f17b 8041f8d3 5501a0b2
+    CT: 32b1de78 a822fe12 ef9f78fa 332e33aa
+        b1801238 9a58e2f3 b50b2a02 76ffae0f
+        1ba63799 b87b7aa3 db36dfff d6b0f9bb
+        7878d7a7 6c13
+    IV: 51 75 3c 65 80 c2 72 6f 20 71 84 14
+     H: f29000b62a499fd0a9f39a6add2e7780
+
+   Verify the received tag
+      7a a3 db 36 df ff d6 b0 f9 bb 78 78 d7 a7 6c 13
+
+     Process the AAD
+           AAD word: 8040f17b8041f8d35501a0b200000000
+       partial hash: 0154dcb75485b71880e1957c877351bd
+
+     Process the cipher
+        cipher word: 32b1de78a822fe12ef9f78fa332e33aa
+       partial hash: c3f07db9a8b9cb4345eb07f793d322d2
+        cipher word: b18012389a58e2f3b50b2a0276ffae0f
+       partial hash: 6d1e66fe32eb32ecd8906ceab09db996
+        cipher word: 1ba63799b87b00000000000000000000
+       partial hash: b3d1d2f1fa3b366619bc42cd2eedafee
+
+     Process the length word
+        length word: 00000000000000600000000000000130
+       partial hash: 7debf5fa1fac3bd318d5e1a7ee401091
+
+   Turn GHASH into GMAC
+              GHASH: 7d eb f5 fa 1f ac 3b d3 18 d5 e1 a7 ee 40 10 91
+                 K0: 07 48 2e cc c0 53 ed 63 e1 6e 99 df 39 e7 7c 82
+          full GMAC: 7a a3 db 36 df ff d6 b0 f9 bb 78 78 d7 a7 6c 13
+
+        Received tag = 7aa3db36 dfffd6b0 f9bb7878 d7a76c13
+        Computed tag = 7aa3db36 dfffd6b0 f9bb7878 d7a76c13
+     Received tag verified.
+
+   Decrypt the cipher
+     block # 0
+       IV||blk_cntr: 51753c6580c2726f2071841400000002
+          key_block: 75 d0 b2 14 c1 43 de 77 9c eb 58 95 5e 40 5a d9
+       cipher_block: 32 b1 de 78 a8 22 fe 12 ef 9f 78 fa 33 2e 33 aa
+        plain_block: 47 61 6c 6c 69 61 20 65 73 74 20 6f 6d 6e 69 73
+     block # 1
+       IV||blk_cntr: 51753c6580c2726f2071841400000003
+          key_block: 91 e4 7b 4e f3 2b 83 d3 dc 65 0a 72 17 8d da 6a
+       cipher_block: b1 80 12 38 9a 58 e2 f3 b5 0b 2a 02 76 ff ae 0f
+        plain_block: 20 64 69 76 69 73 61 20 69 6e 20 70 61 72 74 65
+     block # 2
+       IV||blk_cntr: 51753c6580c2726f2071841400000004
+          key_block: 68 86 43 eb dd 08 07 98 16 3a 16 d5 e5 04 f6 3a
+       cipher_block: 1b a6 37 99 b8 7b
+        plain_block: 73 20 74 72 65 73
+
+   Verified and tagged packet:
+        47616c6c 69612065 7374206f 6d6e6973
+        20646976 69736120 696e2070 61727465
+        73207472 6573
+
+16.2.3.  SRTP AEAD_AES_256_GCM Authentication Tagging
+
+   Tagging the following packet:
+
+        8040f17b 8041f8d3 5501a0b2 47616c6c
+        69612065 7374206f 6d6e6973 20646976
+        69736120 696e2070 61727465 73207472
+        6573
+
+   Form the IV
+          | Pad |   SSRC    |    ROC    | SEQ |
+           00 00 55 01 a0 b2 00 00 00 00 f1 7b
+     salt: 51 75 69 64 20 70 72 6f 20 71 75 6f
+       IV: 51 75 3c 65 80 c2 72 6f 20 71 84 14
+
+   Key: 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f
+        10 11 12 13 14 15 16 17 18 19 1a 1b 1c 1d 1e 1f
+   AAD: 8040f17b 8041f8d3 5501a0b2 47616c6c
+        69612065 7374206f 6d6e6973 20646976
+        69736120 696e2070 61727465 73207472
+        6573
+    IV: 51 75 3c 65 80 c2 72 6f 20 71 84 14
+     H: f29000b62a499fd0a9f39a6add2e7780
+
+   Compute the GMAC tag
+
+     Process the AAD
+           AAD word: 8040f17b8041f8d35501a0b247616c6c
+       partial hash: c059753e6763791762ca630d8ef97714
+           AAD word: 696120657374206f6d6e697320646976
+       partial hash: a4e3401e712900dc4f1d2303bc4b2675
+           AAD word: 69736120696e20706172746573207472
+       partial hash: 1c8c1af883de0d67878f379a19c65987
+           AAD word: 65730000000000000000000000000000
+       partial hash: 958462781aa8e8feacce6d93b54472ac
+
+     Process the length word
+        length word: 00000000000001900000000000000000
+       partial hash: af2efb5dcfdb9900e7127721fdb56956
+
+   Turn GHASH into GMAC
+              GHASH: af 2e fb 5d cf db 99 00 e7 12 77 21 fd b5 69 56
+                 K0: 07 48 2e cc c0 53 ed 63 e1 6e 99 df 39 e7 7c 82
+          full GMAC: a8 66 d5 91 0f 88 74 63 06 7c ee fe c4 52 15 d4
+
+   Cipher with tag
+        a866d591 0f887463 067ceefe c45215d4
+
+   Tagged packet:
+        8040f17b 8041f8d3 5501a0b2 47616c6c
+        69612065 7374206f 6d6e6973 20646976
+        69736120 696e2070 61727465 73207472
+        6573a866 d5910f88 7463067c eefec452
+        15d4
+
+16.2.4.  SRTP AEAD_AES_256_GCM Tag Verification
+
+   Verifying the following packet:
+
+        8040f17b 8041f8d3 5501a0b2 47616c6c
+        69612065 7374206f 6d6e6973 20646976
+        69736120 696e2070 61727465 73207472
+        6573a866 d5910f88 7463067c eefec452
+        15d4
+
+   Form the IV
+          | Pad |   SSRC    |    ROC    | SEQ |
+           00 00 55 01 a0 b2 00 00 00 00 f1 7b
+     salt: 51 75 69 64 20 70 72 6f 20 71 75 6f
+       IV: 51 75 3c 65 80 c2 72 6f 20 71 84 14
+
+   Key: 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f
+        10 11 12 13 14 15 16 17 18 19 1a 1b 1c 1d 1e 1f
+   AAD: 8040f17b 8041f8d3 5501a0b2 47616c6c
+        69612065 7374206f 6d6e6973 20646976
+        69736120 696e2070 61727465 73207472
+        6573
+    CT: a866d591 0f887463 067ceefe c45215d4
+    IV: 51 75 3c 65 80 c2 72 6f 20 71 84 14
+     H: f29000b62a499fd0a9f39a6add2e7780
+
+   Verify the received tag
+      a8 66 d5 91 0f 88 74 63 06 7c ee fe c4 52 15 d4
+
+     Process the AAD
+           AAD word: 8040f17b8041f8d35501a0b247616c6c
+       partial hash: c059753e6763791762ca630d8ef97714
+           AAD word: 696120657374206f6d6e697320646976
+       partial hash: a4e3401e712900dc4f1d2303bc4b2675
+           AAD word: 69736120696e20706172746573207472
+       partial hash: 1c8c1af883de0d67878f379a19c65987
+           AAD word: 65730000000000000000000000000000
+       partial hash: 958462781aa8e8feacce6d93b54472ac
+
+     Process the length word
+        length word: 00000000000001900000000000000000
+       partial hash: af2efb5dcfdb9900e7127721fdb56956
+
+   Turn GHASH into GMAC
+              GHASH: af 2e fb 5d cf db 99 00 e7 12 77 21 fd b5 69 56
+                 K0: 07 48 2e cc c0 53 ed 63 e1 6e 99 df 39 e7 7c 82
+          full GMAC: a8 66 d5 91 0f 88 74 63 06 7c ee fe c4 52 15 d4
+
+        Received tag = a866d591 0f887463 067ceefe c45215d4
+        Computed tag = a866d591 0f887463 067ceefe c45215d4
+     Received tag verified.
+

@@ -311,18 +311,43 @@ impl MediaDescription {
         self.attributes.push(Attribute::flag(direction.as_str()));
     }
 
-    /// The first `a=crypto` line this stream carries that sipx can act on (RFC 4568).
+    /// The **strongest** `a=crypto` line this stream carries that sipx can act on (RFC 4568).
     ///
-    /// Several may be offered, in preference order. sipx takes the first it can perform rather
-    /// than the first listed: an offer whose favourite suite is one sipx does not implement is
-    /// still an offer worth answering.
+    /// Several may be offered. RFC 4568 §5.1.1 says the order expresses the offerer's preference,
+    /// and this deliberately does not honour it — the same departure, for the same reason, that
+    /// `sipx_sip::auth::strongest` makes from RFC 8760 §2.4 for digest algorithms. An `a=crypto`
+    /// list is not integrity protected before the media is keyed, so an on-path attacker who
+    /// reorders the lines picks the cipher, and an answerer that honours the order complies.
+    /// Ranking by strength removes the lever, at the cost of ignoring a preference the peer has
+    /// already said it can live without by offering the alternative at all.
+    ///
+    /// Ties go to the earlier line, so the peer's order still decides where strength does not.
+    /// Lines naming a suite sipx cannot perform are skipped rather than refused: an offer whose
+    /// favourite is one this stack does not implement is still an offer worth answering.
     #[must_use]
     pub fn crypto(&self) -> Option<crate::crypto::Crypto> {
+        self.crypto_offers().into_iter().reduce(|best, next| {
+            if next.suite.strength() > best.suite.strength() {
+                next
+            } else {
+                best
+            }
+        })
+    }
+
+    /// Every `a=crypto` line this stream carries that sipx can act on, in the order given.
+    ///
+    /// For a caller that wants to see the whole list rather than the one [`Self::crypto`] would
+    /// select — the offer this side sent, for instance, which RFC 4568 §5.1.3's check runs
+    /// against in full.
+    #[must_use]
+    pub fn crypto_offers(&self) -> Vec<crate::crypto::Crypto> {
         self.attributes
             .iter()
             .filter(|attribute| attribute.name == "crypto")
             .filter_map(|attribute| attribute.value.as_deref())
-            .find_map(crate::crypto::Crypto::parse)
+            .filter_map(crate::crypto::Crypto::parse)
+            .collect()
     }
 
     /// The first `a=fingerprint` this stream carries that sipx may act on (RFC 8122 §5).

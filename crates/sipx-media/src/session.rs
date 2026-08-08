@@ -599,6 +599,14 @@ enum Frame {
 /// cipher.
 #[derive(Clone, PartialEq, Eq)]
 pub struct SrtpKeys {
+    /// The protection profile both ends negotiated.
+    ///
+    /// Carried rather than inferred. The keying path knows which transform was agreed — an SDES
+    /// crypto-suite token or a DTLS-SRTP `use_srtp` profile — and a media session that guessed it
+    /// back from how many octets of key arrived would install whichever cipher happened to share
+    /// a key length. `docs/designs/media-runtime-safety.md`: never install a different cipher
+    /// under a negotiated identifier.
+    pub profile: sipx_rtp::srtp::Profile,
     /// Master key and salt this side encrypts with — the one offered in our SDP.
     pub local: (Vec<u8>, Vec<u8>),
     /// Master key and salt the far end encrypts with — the one from its SDP.
@@ -636,9 +644,27 @@ impl SrtpKeys {
             value: "the answer carried no crypto attribute this side can perform".to_owned(),
         })?;
         Ok(Self {
+            // `verify_answer` has already established that the two agree on the suite, so this is
+            // the negotiated transform and not a preference of ours applied after the fact.
+            profile: transform_of(ours.suite),
             local: (ours.master_key().to_vec(), ours.master_salt().to_vec()),
             remote: (theirs.master_key().to_vec(), theirs.master_salt().to_vec()),
         })
+    }
+}
+
+/// The SRTP transform an SDES crypto-suite names.
+///
+/// The single point where an RFC 4568 token becomes a cipher, mirroring
+/// [`crate::dtls::Profile::transform`] for the other keying path. One function per path and no
+/// third opinion anywhere: that is what makes "never install a different cipher under a
+/// negotiated identifier" something a reader can check.
+#[must_use]
+pub fn transform_of(suite: sipx_sdp::crypto::Suite) -> sipx_rtp::srtp::Profile {
+    match suite {
+        sipx_sdp::crypto::Suite::AeadAes256Gcm => sipx_rtp::srtp::Profile::AeadAes256Gcm,
+        sipx_sdp::crypto::Suite::AeadAes128Gcm => sipx_rtp::srtp::Profile::AeadAes128Gcm,
+        _ => sipx_rtp::srtp::Profile::AesCm128HmacSha1_80,
     }
 }
 
@@ -750,6 +776,8 @@ pub struct MediaSession {
     dtmf_payload_type: Option<u8>,
     rtcp_mode: sipx_sdp::RtcpMode,
     encrypted: bool,
+    /// The protection profile the keying settled on, `None` when the media is not encrypted.
+    srtp_profile: Option<sipx_rtp::srtp::Profile>,
     local_addr: SocketAddr,
     samples_per_packet: usize,
     packet_duration: Duration,
@@ -1525,6 +1553,7 @@ impl MediaSession {
         prepared: Prepared,
         discards: Arc<DiscardMeters>,
     ) -> Self {
+        let srtp_profile = srtp_profile_of(&config);
         let samples_per_packet = config.samples_per_packet();
         let packet_duration = config.packet_duration;
         let clock_rate = config.clock_rate;
@@ -1664,6 +1693,7 @@ impl MediaSession {
             dtmf_payload_type,
             rtcp_mode,
             encrypted,
+            srtp_profile,
             local_addr,
             samples_per_packet,
             packet_duration,
@@ -1706,6 +1736,7 @@ impl MediaSession {
             stop: runtime_stop,
             profile_tasks,
         } = runtime;
+        let srtp_profile = srtp_profile_of(&config);
         let samples_per_packet = config.samples_per_packet();
         let packet_duration = config.packet_duration;
         let clock_rate = config.clock_rate;
@@ -1829,6 +1860,7 @@ impl MediaSession {
             dtmf_payload_type,
             rtcp_mode,
             encrypted,
+            srtp_profile,
             local_addr,
             samples_per_packet,
             packet_duration,
@@ -2185,6 +2217,18 @@ impl MediaSession {
     #[must_use]
     pub fn is_encrypted(&self) -> bool {
         self.encrypted
+    }
+
+    /// The SRTP protection profile this session negotiated, if it is encrypted.
+    ///
+    /// [`Self::is_encrypted`] answers *whether* the media is protected; this answers *by what*,
+    /// which since `M-41` is a question with three answers rather than one. Worth being able to ask
+    /// without a packet capture, for the same reason: a call protected by the interoperability
+    /// floor and one protected by AES-256-GCM look identical from the outside, and an operator who
+    /// negotiated a policy has no other way to see whether it held.
+    #[must_use]
+    pub fn srtp_profile(&self) -> Option<sipx_rtp::srtp::Profile> {
+        self.srtp_profile
     }
 
     /// The RTP timestamp clock negotiated for this stream.
@@ -2769,10 +2813,24 @@ fn authenticated(
     }
 }
 
-/// An SRTP context from a master key and salt, or `None` when the media is not encrypted.
-fn srtp_context(keys: Option<&(Vec<u8>, Vec<u8>)>) -> Option<sipx_rtp::SrtpContext> {
-    let (key, salt) = keys?;
-    match sipx_rtp::SrtpContext::new(key, salt) {
+/// The profile a configuration was keyed for, if it was keyed at all.
+fn srtp_profile_of(config: &Config) -> Option<sipx_rtp::srtp::Profile> {
+    config.srtp.as_ref().map(|keys| keys.profile)
+}
+
+/// An SRTP context for one direction of a keyed session, or `None` when the media is not
+/// encrypted.
+///
+/// Takes the whole [`SrtpKeys`] and a selector rather than a bare key pair, so the profile and the
+/// key material it belongs to are read from one value. Splitting them at the call site is how a
+/// context ends up keyed for one transform and told it is another.
+fn srtp_context(
+    keys: Option<&SrtpKeys>,
+    direction: fn(&SrtpKeys) -> &(Vec<u8>, Vec<u8>),
+) -> Option<sipx_rtp::SrtpContext> {
+    let keys = keys?;
+    let (key, salt) = direction(keys);
+    match sipx_rtp::SrtpContext::new(keys.profile, key, salt) {
         Ok(context) => Some(context),
         Err(error) => {
             // discard: this refuses configuration before any packet exists; runtime discard
@@ -2962,7 +3020,7 @@ async fn send_loop(socket: Arc<UdpSocket>, mut outgoing: mpsc::Receiver<Frame>, 
     // One context, owned by this loop. SRTP keeps a rollover counter and a replay window per
     // stream, and a context behind a lock would put a mutex in the packet path for state exactly
     // one task ever touches.
-    let mut protect = srtp_context(config.srtp.as_ref().map(|keys| &keys.local));
+    let mut protect = srtp_context(config.srtp.as_ref(), |keys| &keys.local);
 
     // One clock for the whole stream. Sending on channel readiness instead makes the packet
     // rate depend on how fast the application produces samples.
@@ -3664,8 +3722,8 @@ async fn receive_loop(mut input: ReceiveInput, inbound: Inbound) {
         Some(max) => JitterBuffer::adaptive(config.jitter_depth, max),
         None => JitterBuffer::new(config.jitter_depth),
     };
-    let mut unprotect = srtp_context(config.srtp.as_ref().map(|keys| &keys.remote));
-    let mut unprotect_rtcp = srtp_context(config.srtp.as_ref().map(|keys| &keys.remote));
+    let mut unprotect = srtp_context(config.srtp.as_ref(), |keys| &keys.remote);
+    let mut unprotect_rtcp = srtp_context(config.srtp.as_ref(), |keys| &keys.remote);
     let mut dtmf = sipx_rtp::dtmf::Receiver::new();
     let started = tokio::time::Instant::now();
     // The synchronisation source this session is carrying; see `accept_source` for why one is
@@ -3890,7 +3948,7 @@ async fn rtcp_loop(
     stop: Arc<Stop>,
 ) {
     // Owned by this loop, like the RTP contexts: SRTCP keeps its own index, and one task sends.
-    let mut protect = srtp_context(srtp.as_ref().map(|keys| &keys.local));
+    let mut protect = srtp_context(srtp.as_ref(), |keys| &keys.local);
 
     loop {
         // Drawn afresh every cycle: reusing one draw for the whole session would leave the
@@ -4011,7 +4069,7 @@ async fn rtcp_receive_loop(
     stop: Arc<Stop>,
     discards: Arc<DiscardMeters>,
 ) {
-    let mut unprotect = srtp_context(srtp.as_ref().map(|keys| &keys.remote));
+    let mut unprotect = srtp_context(srtp.as_ref(), |keys| &keys.remote);
     let mut datagram = vec![0u8; 2048];
     loop {
         let read = tokio::select! {

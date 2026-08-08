@@ -12,6 +12,7 @@ categories.workspace = true
 
 [dependencies]
 aes.workspace = true
+aes-gcm.workspace = true
 ctr.workspace = true
 hmac.workspace = true
 sha1.workspace = true

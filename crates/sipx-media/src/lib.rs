@@ -61,6 +61,6 @@ pub use session::DtlsStartError;
 pub use session::{
     Codec, CodecDirection, Config, Encoded, Interrupt, MediaPort, MediaSession, PcmCapture,
     Playback, PlaybackEnd, PlaybackId, RtcpQualityHook, RtcpQualitySample, SetupError, SrtpKeys,
-    StartError,
+    StartError, transform_of,
 };
 pub use sipx_audio::{Pcm, PcmEncoding, PcmError, PcmFormat, PcmSamples};

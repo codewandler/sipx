@@ -740,13 +740,13 @@ status = "partial"
 spec = "docs/specs/srtp.md"
 roles = ["uac", "uas"]
 evidence = [
-  "crates/sipx-rtp/src/srtp.rs",
+  "crates/sipx-rtp/src/srtp/mod.rs",
   "crates/sipx-media/tests/srtp.rs",
   "crates/sipx-call/tests/secure_media.rs",
   "crates/sipx-call/examples/browser_audio_proof.rs",
   "crates/sipx-cli/tests/interop_srtp.rs",
 ]
-note = "The default transform, AES_CM_128_HMAC_SHA1_80, for RTP and RTCP, with separate SRTP and SRTCP replay windows and rollover inference. Key derivation and the keystream are checked against the RFC's own Appendix B vectors, and the session authentication key against §5.2's n_a rather than against §B.3's 94-octet example — `M-25` found it keyed with the latter. Both roles reach it on a live call, keyed by RFC 4568: in `secure_media.rs` each end asserts the call negotiated SRTP, and audio crosses the encrypted stream from the calling end to the answering one — one direction, which is the encrypt path on one side and the decrypt path on the other. `interop_srtp.rs` covers both directions against a peer that keyed the session independently, but it is `#[ignore]`d and runs only in the interop matrix, not in the local gate. `X-30` added those two citations, because until then this row claimed both roles from `sipx-rtp` alone and would have read the same had no call ever keyed a stream. Only one transform: no AES-192/256, no f8, no null cipher, and no rekeying (the key derivation rate is fixed at zero). `M-47` added the §3.4 SRTCP replay list over its explicit index, separate from SRTP's sequence and rollover state, with authentication before either window changes."
+note = "The default transform, AES_CM_128_HMAC_SHA1_80, for RTP and RTCP, with separate SRTP and SRTCP replay windows and rollover inference. Key derivation and the keystream are checked against the RFC's own Appendix B vectors, and the session authentication key against §5.2's n_a rather than against §B.3's 94-octet example — `M-25` found it keyed with the latter. Both roles reach it on a live call, keyed by RFC 4568: in `secure_media.rs` each end asserts the call negotiated SRTP, and audio crosses the encrypted stream from the calling end to the answering one — one direction, which is the encrypt path on one side and the decrypt path on the other. `interop_srtp.rs` covers both directions against a peer that keyed the session independently, but it is `#[ignore]`d and runs only in the interop matrix, not in the local gate. `X-30` added those two citations, because until then this row claimed both roles from `sipx-rtp` alone and would have read the same had no call ever keyed a stream. Still no AES-f8, no null cipher, no 32-bit tag, no RFC 6188 counter-mode AES-256 suite, and no rekeying (the key derivation rate is fixed at zero). `M-47` added the §3.4 SRTCP replay list over its explicit index, separate from SRTP's sequence and rollover state, with authentication before either window changes. `M-41` made the protection profile an explicit negotiated value rather than an assumption: `srtp::Profile` is an argument to `Context::new`, every key, salt and tag length is read off it, and a key or salt of another profile's length is refused by name. The counter-mode transform is unchanged and remains the interoperability floor RFC 5764 §4.1.2 requires; what changed is that it is now one of three rather than the only one. See RFC 7714."
 
 [[rfc]]
 number = 4568
@@ -803,7 +803,28 @@ evidence = [
   "crates/sipx-cli/tests/interop_srtp.rs",
   "crates/sipx-call/examples/browser_audio_proof.rs",
 ]
-note = "Both call roles are reachable when the application explicitly selects `Keying::DtlsSrtp` and the off-by-default `dtls` feature supplies OpenSSL. The diagnostic phone maps `--media-security dtls-srtp` to that policy for dial and answer, reports the negotiated keying from the running calls, and carries audio between the two command processes; a build without the feature refuses before signalling and never substitutes SDES or cleartext. The initial offer and answer carry `UDP/TLS/RTP/SAVP`, a fresh certificate fingerprint and the negotiated setup role; the final response and UAC ACK leave before the handshake begins. The verified exporter output reaches `Config::srtp` on the same bound media socket, and a live call test carries encrypted audio in both roles. The browser-audio profile composes ICE and DTLS-SRTP on one nominated component; the native-browser proof observes DTLS and SRTP in both roles and changes one signalled fingerprint while retaining the real certificate to prove that mismatch installs no usable media path. The separate independent-peer case is `interop_srtp.rs`. Partial: only AES_CM_128_HMAC_SHA1_80 is offered; reliable early media and rekeying remain refused rather than downgraded."
+note = "Both call roles are reachable when the application explicitly selects `Keying::DtlsSrtp` and the off-by-default `dtls` feature supplies OpenSSL. The diagnostic phone maps `--media-security dtls-srtp` to that policy for dial and answer, reports the negotiated keying from the running calls, and carries audio between the two command processes; a build without the feature refuses before signalling and never substitutes SDES or cleartext. The initial offer and answer carry `UDP/TLS/RTP/SAVP`, a fresh certificate fingerprint and the negotiated setup role; the final response and UAC ACK leave before the handshake begins. The verified exporter output reaches `Config::srtp` on the same bound media socket, and a live call test carries encrypted audio in both roles. The browser-audio profile composes ICE and DTLS-SRTP on one nominated component; the native-browser proof observes DTLS and SRTP in both roles and changes one signalled fingerprint while retaining the real certificate to prove that mismatch installs no usable media path. The separate independent-peer case is `interop_srtp.rs`. `M-41` widened the `use_srtp` list to the three profiles `sipx-rtp` can key — `SRTP_AEAD_AES_256_GCM` (0x0008), `SRTP_AEAD_AES_128_GCM` (0x0007) and `SRTP_AES128_CM_SHA1_80` (0x0001) — strongest first, with the mandatory-to-implement counter-mode profile kept as the floor rather than dropped. The list is derived from the transform enum rather than written out, the exporter length follows the negotiated profile, and the negotiated transform travels into the session with the keys instead of being inferred there. Partial: reliable early media and rekeying remain refused rather than downgraded, and the counter-mode profile name is still OpenSSL's spelling rather than the registry's (`docs/specs/srtp.md` §12.4)."
+
+[[rfc]]
+number = 7714
+title = "AES-GCM Authenticated Encryption in SRTP"
+layer = "media"
+status = "partial"
+spec = "docs/specs/srtp.md"
+roles = ["uac", "uas"]
+evidence = [
+  "crates/sipx-rtp/src/srtp/mod.rs",
+  "crates/sipx-rtp/src/srtp/rfc7714_vectors.rs",
+  "crates/sipx-sdp/src/crypto.rs",
+  "crates/sipx-sdp/tests/srtp_negotiation.rs",
+  "crates/sipx-media/src/dtls/mod.rs",
+  "crates/sipx-media/tests/srtp.rs",
+  "crates/sipx-call/src/call/offer_answer.rs",
+  "crates/sipx-call/tests/secure_media.rs",
+  "crates/sipx-testkit/corpus/rfc7714/rtp-vectors.txt",
+  "scripts/import-rfc7714-corpus.sh",
+]
+note = "The AEAD profiles `AEAD_AES_128_GCM` and `AEAD_AES_256_GCM`, for RTP and RTCP, on both keying paths. §8.1's SRTP IV and §9.1's SRTCP IV are formed from the packet rather than drawn, §8.2's associated-data boundary is the RTP header through any extension, and §9.2's SRTCP layout — cipher first, ESRTCP word last — is implemented as the RFC states it rather than as RFC 3711 §3.4 orders the same fields. §9.3's unencrypted form is read but never sent. The transform is checked against §16 and §17's own vectors, which are **recovered from the RFC** by `scripts/import-rfc7714-corpus.sh` rather than transcribed: it slices the two sections out of the RFC editor's text into `crates/sipx-testkit/corpus/rfc7714/`, and its `--check` mode is a gate step that re-slices and diffs, so a fixture edited to agree with a disagreeing implementation fails before a story can be called done. §14.1's SDES crypto-suite names and §14.2's DTLS-SRTP profiles and identifiers are both carried, ordered strongest first, and selection is by strength rather than by the order a peer listed them in. §12's requirement that an implementation support both key sizes is met. §13.2's 16-octet tag is not truncated. **Partial**, for two things §11 asks for and nothing published can check: the RFC gives no key-derivation vector, so the 96-bit master salt's alignment in the AES_CM PRF input block rests on a reading recorded in `docs/specs/srtp.md` §4.3 and §12.10 rather than on a number, and RFC 6904 header-extension encryption (§8.3) is not implemented under any profile."
 
 [[rfc]]
 number = 5763

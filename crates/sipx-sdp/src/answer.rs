@@ -34,9 +34,15 @@ pub struct Capabilities {
     pub session_version: u64,
     /// The SRTP keying this side offers, if the media is to be encrypted (RFC 4568).
     ///
-    /// `None` means plain RTP. It is `None` unless the signalling is secure, because
+    /// **Strongest first**, one entry per suite, each with its own tag and its own key. Empty
+    /// means plain RTP, and it is empty unless the signalling is secure, because
     /// [`crate::crypto::Crypto::offer`] will not produce a key over a path that anyone can read.
-    pub crypto: Option<crate::crypto::Crypto>,
+    ///
+    /// A list rather than one attribute because a single-suite offer is an ultimatum: a peer that
+    /// cannot perform the one suite named has to decline the stream. RFC 4568 §5.1.1 allows
+    /// several, and each carries its own key material — sharing one key across suites would give
+    /// two transforms the same master secret.
+    pub crypto: Vec<crate::crypto::Crypto>,
     /// The certificate fingerprint this side offers, if the media is to be keyed with DTLS-SRTP
     /// (RFC 5763 / 8122).
     ///
@@ -65,7 +71,7 @@ impl Capabilities {
             direction: Direction::SendRecv,
             session_id: 1,
             session_version: 1,
-            crypto: None,
+            crypto: Vec::new(),
             dtls: None,
             rtcp_mux: false,
             dtls_setup: crate::fingerprint::SetupCapabilities::both(),
@@ -107,26 +113,61 @@ impl Capabilities {
             direction: Direction::SendRecv,
             session_id: 1,
             session_version: 1,
-            crypto: None,
+            crypto: Vec::new(),
             dtls: None,
             rtcp_mux: false,
             dtls_setup: crate::fingerprint::SetupCapabilities::both(),
         }
     }
 
-    /// The same capabilities, offering SRTP.
+    /// The same capabilities, offering SRTP under every suite sipx can perform.
     ///
     /// `secure_signalling` decides whether a key is generated at all: SDES carries the master
     /// key in the SDP body, so offering one over cleartext SIP publishes it (RFC 4568 §7.1).
     /// Passing `false` therefore leaves the offer as plain RTP rather than offering encryption
     /// that would not be encryption.
+    ///
+    /// One `a=crypto` per suite, strongest first, tagged `1` upward in that order. Each carries
+    /// **its own** key: RFC 4568 §6.1's `inline` parameter is per attribute, and reusing one
+    /// key across two transforms would mean a peer that accepted the weaker one had also been
+    /// handed the master secret of the stronger.
     #[must_use]
     pub fn with_srtp(mut self, secure_signalling: bool) -> Self {
-        self.crypto = crate::crypto::Crypto::offer(
-            1,
-            crate::crypto::Suite::AesCm128HmacSha1_80,
-            secure_signalling,
-        );
+        self.crypto = crate::crypto::Suite::STRONGEST_FIRST
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, suite)| {
+                let tag = u32::try_from(index).unwrap_or(0).saturating_add(1);
+                crate::crypto::Crypto::offer(tag, suite, secure_signalling)
+            })
+            .collect();
+        self
+    }
+
+    /// The same capabilities, offering SRTP under exactly the suites named, strongest first.
+    ///
+    /// For a deployment that has to narrow the list — a peer that mis-parses an unknown suite
+    /// token, or a policy that will not carry counter mode. Narrowing it to nothing offers plain
+    /// RTP, which is what an empty list means everywhere else.
+    #[must_use]
+    pub fn with_srtp_suites(
+        mut self,
+        suites: &[crate::crypto::Suite],
+        secure_signalling: bool,
+    ) -> Self {
+        let mut wanted: Vec<crate::crypto::Suite> = crate::crypto::Suite::STRONGEST_FIRST
+            .into_iter()
+            .filter(|suite| suites.contains(suite))
+            .collect();
+        wanted.dedup();
+        self.crypto = wanted
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, suite)| {
+                let tag = u32::try_from(index).unwrap_or(0).saturating_add(1);
+                crate::crypto::Crypto::offer(tag, suite, secure_signalling)
+            })
+            .collect();
         self
     }
 
@@ -149,7 +190,7 @@ impl Capabilities {
         // Mutually exclusive with SDES rather than additive. They are different `m=` protocols,
         // so an offer cannot propose both on one stream, and leaving a stale `a=crypto` in place
         // would put a master key in an SDP whose whole purpose is not to carry one.
-        self.crypto = None;
+        self.crypto.clear();
         self
     }
 
@@ -179,10 +220,10 @@ impl Capabilities {
     pub fn protocol(&self) -> &'static str {
         if self.dtls.is_some() {
             "UDP/TLS/RTP/SAVP"
-        } else if self.crypto.is_some() {
-            "RTP/SAVP"
-        } else {
+        } else if self.crypto.is_empty() {
             "RTP/AVP"
+        } else {
+            "RTP/SAVP"
         }
     }
 
@@ -226,6 +267,36 @@ pub fn answer(offer: &SessionDescription, capabilities: &Capabilities) -> Sessio
     }
 }
 
+/// The one `a=crypto` an answer accepts: the strongest suite **both** ends offered.
+///
+/// Ranked over the intersection rather than over the offer alone, because accepting a suite this
+/// side generated no key for produces an answer that names a transform and carries nothing usable
+/// under it. Ties — which only arise between two lines naming the same suite — go to the earlier
+/// offered line, so the peer's order still decides where strength does not.
+///
+/// `None` when the two lists share nothing, which is a declined stream and not a plain call: RFC
+/// 4568 §7.1 leaves declining as the option, and answering `RTP/AVP` to an `RTP/SAVP` offer would
+/// be a downgrade this side chose on the caller's behalf.
+fn accepted_crypto(
+    offered: &MediaDescription,
+    ours: &[crate::crypto::Crypto],
+) -> Option<crate::crypto::Crypto> {
+    offered
+        .crypto_offers()
+        .into_iter()
+        .filter_map(|theirs| {
+            let mine = ours.iter().find(|mine| mine.suite == theirs.suite)?;
+            mine.accepting(&theirs)
+        })
+        .reduce(|best, next| {
+            if next.suite.strength() > best.suite.strength() {
+                next
+            } else {
+                best
+            }
+        })
+}
+
 fn answer_stream(
     offer: &SessionDescription,
     offered: &MediaDescription,
@@ -262,19 +333,21 @@ fn answer_stream(
         (false, _) => None,
     };
 
-    // The attribute accepted is the first offered one sipx can perform (RFC 4568 §5.1.2: "the
-    // answerer MUST accept exactly one"), and the answer carries **its** tag and suite with this
-    // side's own key. Emitting a tag of our own choosing is what makes a conformant offerer fail
-    // §5.1.3's check on the way back.
-    let answering_crypto = match (secure_offer && !dtls_offer, capabilities.crypto.as_ref()) {
-        (true, Some(ours)) => match offered.crypto().and_then(|theirs| ours.accepting(&theirs)) {
+    // RFC 4568 §5.1.2: "the answerer MUST accept exactly one". Which one is decided by
+    // **strength** and never by the order the offer listed them in — see `MediaDescription::crypto`
+    // for why, and `sipx_sip::auth::strongest` for the same rule applied to digest algorithms.
+    // The answer then carries *that attribute's* tag and suite with this side's own key; emitting
+    // a tag of our own choosing is what makes a conformant offerer fail §5.1.3's check on the way
+    // back.
+    let answering_crypto = if secure_offer && !dtls_offer {
+        match accepted_crypto(offered, &capabilities.crypto) {
             Some(accepted) => Some(accepted),
             None => return rejected(offered),
-        },
-        (true, None) => return rejected(offered),
+        }
+    } else {
         // A plain offer is answered plainly, even when this side would have preferred a key.
         // Answering `RTP/AVP` with `a=crypto` is how a stream ends up encrypted at one end only.
-        (false, _) => None,
+        None
     };
 
     // RFC 3264 §6.1: the answer lists the formats both sides support. The order is the
@@ -1047,7 +1120,7 @@ mod tests {
         let capabilities = Capabilities::g711(local(), 40000)
             .with_srtp(true)
             .with_dtls_srtp(our_fingerprint());
-        assert!(capabilities.crypto.is_none());
+        assert!(capabilities.crypto.is_empty());
         assert_eq!(capabilities.protocol(), "UDP/TLS/RTP/SAVP");
     }
 
