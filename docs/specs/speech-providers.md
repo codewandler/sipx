@@ -60,6 +60,15 @@ media clock, via the M-54 seam), and driver-fired deadlines carrying a generatio
 with a stale generation is ignored. The core crates `sipx-sip` and `sipx-sdp` are untouched by this
 epic and MUST NOT gain any speech dependency.
 
+The generation is the **driver's**, and the driver is what ignores a stale one. It arms every
+deadline in the current generation and advances the generation whenever it disarms one, so a firing
+already in flight when readiness arrived carries the previous generation; the driver MUST NOT
+deliver a `DeadlineFired` for a deadline it has already disarmed. A session MAY compare the
+generation it receives against the one it started in — that is checking the same fact a second
+time, and nothing in this contract is allowed to depend on it. Stating the owner matters because a
+provider has no other way to learn the current generation: nothing tells it when a deadline was
+armed.
+
 **Locality is a property, not a name.** A provider whose descriptor declares no network egress and
 no off-host processing MUST NOT open a network connection or move audio, text or derived data off
 the machine, in any state including failure. The descriptor claim is admitted or refused by host
@@ -264,6 +273,13 @@ with cause `ProtocolViolation`. If the drain deadline fires before `Stopped`, th
 provider's tasks and emits `Stopped` itself, marking the stop aborted; an aborted stop is a
 reportable provider defect, not a hang.
 
+The abort has a fixed order: the driver delivers `DeadlineFired` with kind drain, applies whatever
+output that produces, and aborts only if `Stopped` still has not arrived. A provider that can still
+stop itself therefore reports an unaborted `Stopped`, and only one that cannot is abandoned. The
+driver's own `Stopped` is emitted whatever the output bound says — that bound pauses *consumption
+from the provider*, and never drops, coalesces or delays a terminal, least of all the one the driver
+produced because the provider would not.
+
 ## 6. Synthesis contract
 
 | Input | Data |
@@ -303,6 +319,11 @@ provider's.
 **Production bound.** The driver grants a chunk window (§8). The provider MUST NOT have more
 unconsumed chunks outstanding than the window; `Drained` returns credit. A provider cannot run
 ahead of a slow call into unbounded audio.
+
+Credit is returned when the driver **hands a chunk on**, and at no other time. Returning it when the
+driver merely received the chunk would make the window bound the driver's own buffer rather than the
+pipeline, and the memory the bound exists to bound would move one queue along instead of being
+bounded — which is why "unconsumed" is measured at the consumer and not at the driver.
 
 **Cancellation.** Cancelling a queued request yields its `Cancelled` immediately. Cancelling a
 started request stops production within the window: at most one already-in-flight `Chunk` MAY
