@@ -24,64 +24,30 @@ use sipx_audio::{LinearResampler, Pcm, PcmError, PcmFormat};
 
 use crate::counters::DiscardMeters;
 
-/// Which side of the call an attachment observes (`docs/specs/call-audio-seam.md` §3).
+/// Which side of the call an attachment observes (`docs/specs/call-audio-seam.md` §3), and why a
+/// processor's sample timeline broke (§7).
 ///
-/// Closed by design: a call has two audio directions, and a third would be a different contract
-/// rather than a new variant of this one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum AudioDirection {
-    /// Audio decoded from the remote peer, tapped at the jitter buffer's output.
-    Inbound,
-    /// Audio produced locally for transmission, tapped after the mute gate and before encoding.
-    Outbound,
-}
+/// Both are `sipx-audio`'s: `docs/specs/call-audio-seam.md` §2 says this document "**reuses** this
+/// and mints nothing parallel", and `docs/specs/call-audio-processing.md` §3.1 and §3.3 are where
+/// the two vocabularies are defined. The deterministic analyser lives one crate down, so the types
+/// do too and this seam re-exports them — two observers of one call that named its sides
+/// differently is how a disagreement about what happened starts.
+pub use sipx_audio::analysis::{AudioDirection, DiscontinuityKind};
 
-impl std::fmt::Display for AudioDirection {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Inbound => f.write_str("inbound"),
-            Self::Outbound => f.write_str("outbound"),
-        }
-    }
-}
-
-/// Why a processor's sample timeline broke (`docs/specs/call-audio-seam.md` §7).
+/// How disruptive a break is, for coalescing several into one (§7).
 ///
-/// The vocabulary is shared with `docs/specs/call-audio-processing.md` §3.3 and
-/// `docs/specs/speech-providers.md` §5, and is extended compatibly, so a consumer writes a
-/// wildcard arm.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum DiscontinuityKind {
-    /// Upstream audio never became a frame: the decoder refused a packet.
-    Loss,
-    /// The seam's bounded-queue policy dropped frames this attachment had not read.
-    Overflow,
-    /// The seam re-anchored the timeline; the epoch restarts at sample time zero.
-    Realign,
-}
-
-impl DiscontinuityKind {
-    /// How disruptive this cause is, for coalescing several into one (§7).
-    ///
-    /// `Realign` subsumes a span because it restarts the epoch; the seam's own loss is named ahead
-    /// of upstream loss because it is the one the consumer can do something about.
-    const fn severity(self) -> u8 {
-        match self {
-            Self::Loss => 0,
-            Self::Overflow => 1,
-            Self::Realign => 2,
-        }
-    }
-}
-
-impl std::fmt::Display for DiscontinuityKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Loss => f.write_str("loss"),
-            Self::Overflow => f.write_str("overflow"),
-            Self::Realign => f.write_str("realign"),
-        }
+/// `Realign` subsumes a span because it restarts the epoch; the seam's own loss is named ahead of
+/// upstream loss because it is the one the consumer can do something about. It lives here rather
+/// than on the type because the ordering is this seam's coalescing rule, not part of the shared
+/// vocabulary the analyser reads.
+const fn severity(kind: DiscontinuityKind) -> u8 {
+    match kind {
+        DiscontinuityKind::Loss => 0,
+        DiscontinuityKind::Overflow => 1,
+        // `Realign`, and — the vocabulary being `#[non_exhaustive]` — anything later added to it,
+        // which is treated as at least as disruptive as a re-anchor until this seam is taught
+        // otherwise.
+        _ => 2,
     }
 }
 
@@ -293,7 +259,7 @@ struct Break {
 impl Break {
     /// Merge two causes into the one discontinuity a consumer sees (§7).
     fn merged(self, other: Self) -> Self {
-        let kind = if other.kind.severity() > self.kind.severity() {
+        let kind = if severity(other.kind) > severity(self.kind) {
             other.kind
         } else {
             self.kind

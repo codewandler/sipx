@@ -4,6 +4,7 @@ use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use tokio::time::Instant;
@@ -32,7 +33,7 @@ use crate::event::{CallEvent, CallEvents, EndCause, EventSink};
 use crate::extension::{self, ApplicationRequest};
 use crate::identity::OutboundIdentityPolicy;
 use crate::media_policy::{Codecs, IcePolicy, Keying, MediaPolicy, MediaProfile, NegotiatedKeying};
-use crate::signal_metrics::{SignalMetrics, SignalMetricsError};
+
 use crate::snapshot::{
     DialogNotQuiescent, DialogPersistenceError, DialogRestoreContext, DialogSnapshot,
     SessionSnapshot, SnapshotParts,
@@ -242,6 +243,51 @@ pub struct Call {
     dialog_credentials: Option<Credentials>,
     /// Case-sensitive private method tokens the application explicitly admitted.
     admitted_dialog_methods: Vec<Bytes>,
+    /// Voice-activity detection, if the application asked for it (`M-58`). Call-owned policy like
+    /// the RTCP quality hook: it is re-attached to a replacement media session rather than
+    /// stopping at a renegotiation.
+    ///
+    /// Boxed, and behind an `Option` rather than inline, because a `Call` is held across `await`
+    /// points in futures `clippy::large_futures` bounds at 16 KiB. Detection is policy most calls
+    /// never ask for, so it costs one pointer in every future that holds a call and its own size in
+    /// none of them.
+    voice: Option<Box<VoiceDetection>>,
+    /// Signal-metric reporting, if the application asked for it (`M-59`). Call-owned policy for
+    /// the same reasons as `voice`, boxed behind an `Option` for the same one.
+    metrics: Option<Box<SignalReporting>>,
+}
+
+/// One call's voice-activity detection while it is running (`M-58`).
+#[derive(Debug)]
+struct VoiceDetection {
+    /// The profile in force, retained so a media-session replacement re-attaches rather than
+    /// silently stopping at the renegotiation.
+    profile: sipx_audio::analysis::AnalysisProfile,
+    /// One observation sequence per call, shared by every watcher this call starts, so a
+    /// replacement continues the numbering instead of restarting it.
+    sequence: Arc<AtomicU64>,
+    /// Set while a watcher is running; cancelled when the call ends or its media session is
+    /// replaced.
+    stop: Option<CancellationToken>,
+    /// Completion of that watcher. Owned rather than detached for the same reason the ACK
+    /// retransmitter is: the call has to be able to prove it has stopped before saying the call is
+    /// over, because the watcher's terminal event must precede [`CallEvent::Ended`].
+    watcher: Option<OwnedTask>,
+}
+
+/// One call's signal-metric reporting while it is running (`M-59`).
+#[derive(Debug)]
+struct SignalReporting {
+    /// The profile in force, retained so a media-session replacement re-attaches rather than
+    /// silently stopping at the renegotiation.
+    profile: sipx_audio::signal::SignalReportProfile,
+    /// Set while a watcher is running; cancelled when the call ends or its media session is
+    /// replaced.
+    stop: Option<CancellationToken>,
+    /// Completion of that watcher. Owned rather than detached so a call can prove its reporting
+    /// has stopped before it says the call is over — [`CallEvent::Ended`] is the stream's last
+    /// event, and a report arriving after it would break that.
+    watcher: Option<OwnedTask>,
 }
 
 /// A call-owned task that cannot detach if the call is abandoned without explicit shutdown.
@@ -440,6 +486,8 @@ impl Call {
             // durable dialog facts. The host must install them again after restoration.
             dialog_credentials: None,
             admitted_dialog_methods: Vec::new(),
+            voice: None,
+            metrics: None,
             events,
             events_rx: Some(events_rx),
             history: None,
@@ -503,36 +551,263 @@ impl Call {
         self.media.rtcp_quality_hook()
     }
 
-    /// Start reporting deterministic signal metrics for one direction of this call's audio
-    /// (`M-59`).
+    /// Report voice activity on this call's audio as typed events (`M-58`).
     ///
-    /// Level, energy, clipping and silence over the exact sample windows
-    /// [`docs/specs/call-audio-processing.md`](../../../../docs/specs/call-audio-processing.md)
-    /// §5 defines, delivered as [`CallEvent::SignalMetrics`] on this call's event stream until
-    /// the returned [`SignalMetrics`] is stopped or dropped. The audio reaches the analyser
-    /// through `M-54`'s one call-media seam; this opens no second tap and changes nothing about
-    /// the call.
+    /// From here on the call's own event stream carries [`CallEvent::VoiceStarted`] and
+    /// [`CallEvent::VoiceEnded`] for the direction the profile names. There is no handle to hold
+    /// and nothing to poll: the transitions arrive beside `Dtmf`, `Hold` and the rest, each naming
+    /// the call, the direction, its place in this call's observation order, and where in the audio
+    /// it sat.
     ///
-    /// **Not a quality report.** Loss, jitter, round-trip time and the MOS estimate remain
-    /// [`MediaSession::quality`](sipx_media::MediaSession::quality)'s (`M-10`); this measures what
-    /// the audio contained, not how it was delivered. The two are complementary and neither
-    /// substitutes for the other.
+    /// **No speech model is loaded.** The decision is deterministic signal analysis — the integer
+    /// window predicate of
+    /// [`docs/specs/call-audio-processing.md`](../../../docs/specs/call-audio-processing.md) §5.3 —
+    /// so the same audio produces the same transitions at the same sample positions on every
+    /// machine, and a build with no speech runtime can still use it.
     ///
-    /// Several observers may run at once — one per direction is the ordinary case — within the
-    /// seam's per-session attachment bound.
+    /// The audio arrives through the one bounded seam
+    /// ([`docs/specs/call-audio-seam.md`](../../../docs/specs/call-audio-seam.md)), never a tap of
+    /// its own, so nothing here can block decode, encode, playback or capture: a consumer that
+    /// falls behind loses its own frames and is told so. Detection is call-owned policy and
+    /// survives an ordinary re-INVITE, like [`Self::set_rtcp_quality_hook`]; the replacement's
+    /// audio opens a new analysis epoch, so sample positions restart while the observation
+    /// sequence continues.
+    ///
+    /// Asking twice replaces the profile in force and re-attaches, which cuts any activity the
+    /// previous profile had open. `AnalysisProfile::new(direction, rate)` is the reference profile
+    /// of the contract's §11.1 — 20 ms windows, a 200 ms hangover — and `with_*` changes one field.
     ///
     /// # Errors
     ///
-    /// Returns [`SignalMetricsError::Profile`] when a threshold, window, cadence or queue depth is
-    /// outside the domain the specification declares, and [`SignalMetricsError::Attachment`] when
-    /// the seam refuses: an unconvertible format, a queue depth outside its own domain, a call
-    /// already carrying as many processors as the seam bounds it to, or a stopped session. The
-    /// call is unchanged either way.
-    pub fn observe_signal_metrics(
-        &self,
-        profile: sipx_audio::signal::SignalProfile,
-    ) -> std::result::Result<SignalMetrics, SignalMetricsError> {
-        crate::signal_metrics::observe(&self.media, profile, self.events.emitter())
+    /// [`Error::VoiceActivityProfile`] for a profile outside the contract's domains, and
+    /// [`Error::CallAudioProcessing`] when the seam refuses the attachment — a stopped session, or
+    /// a call already carrying as many processors as the seam bounds it to.
+    ///
+    /// Neither changes the call's audio. The profile is checked before anything is disturbed, so a
+    /// refused *profile* leaves a running detection running; a refused *attachment* is the seam's
+    /// answer after the previous watcher has already been stopped, so it leaves the call with no
+    /// detection rather than with the old one.
+    pub async fn detect_voice_activity(
+        &mut self,
+        profile: sipx_audio::analysis::AnalysisProfile,
+    ) -> Result<()> {
+        // Validated before anything is disturbed, so a refused profile leaves a running detection
+        // running and an idle call idle.
+        drop(sipx_audio::analysis::AudioAnalyzer::new(profile)?);
+        // Any watcher already running is stopped and joined first, so its terminal cut is delivered
+        // before the replacement's first transition and the two never interleave.
+        self.stop_voice_activity().await;
+        self.start_voice_activity(profile)
+    }
+
+    /// Attach one analyser to the running media session and start its watcher.
+    ///
+    /// Separate from [`Self::detect_voice_activity`] because a media-session replacement re-runs
+    /// exactly this, against the profile the call already holds.
+    fn start_voice_activity(
+        &mut self,
+        profile: sipx_audio::analysis::AnalysisProfile,
+    ) -> Result<()> {
+        // The profile is validated before the seam is touched, so a refused configuration leaves
+        // the call carrying no attachment at all.
+        let analyzer = sipx_audio::analysis::AudioAnalyzer::new(profile)?;
+        let format = sipx_audio::PcmFormat::new(profile.rate(), sipx_audio::PcmEncoding::Signed16)
+            .map_err(sipx_media::ProcessingError::from)?;
+        let processor = self
+            .media
+            .attach_processor(sipx_media::Processing::new(profile.direction(), format))?;
+        // A replacement continues this call's observation numbering rather than restarting it.
+        let sequence = self.voice.as_ref().map_or_else(
+            || Arc::new(AtomicU64::new(0)),
+            |voice| Arc::clone(&voice.sequence),
+        );
+        let reporter = crate::voice::VoiceReporter::new(
+            analyzer,
+            Arc::from(String::from_utf8_lossy(&self.dialog.id.call_id).into_owned()),
+            Arc::clone(&sequence),
+            self.events.reserved_emitter(),
+        );
+        let stop = CancellationToken::new();
+        let watcher = tokio::spawn(crate::voice::watch(processor, reporter, stop.clone()));
+        self.voice = Some(Box::new(VoiceDetection {
+            profile,
+            sequence,
+            stop: Some(stop),
+            watcher: Some(OwnedTask::new(watcher)),
+        }));
+        Ok(())
+    }
+
+    /// Signal and join the voice-activity watcher, if one is running.
+    ///
+    /// Shaped like [`Self::stop_ack_retransmission`], and for the same reason: the handle stays in
+    /// `self` while it is awaited, so cancelling the caller leaves the ownership intact rather than
+    /// detaching a task that emits into this call's event stream. Ending a call joins this **before**
+    /// [`EventSink::end`], which is what keeps [`CallEvent::Ended`] the last event on the stream.
+    async fn stop_voice_activity(&mut self) {
+        let Some(voice) = self.voice.as_mut() else {
+            return;
+        };
+        if let Some(stop) = voice.stop.take() {
+            if let Some(owner) = voice.watcher.as_mut() {
+                cancel_and_join(&stop, owner).await;
+            } else {
+                stop.cancel();
+            }
+        } else if let Some(owner) = voice.watcher.as_mut() {
+            owner.joined().await;
+        }
+        voice.watcher = None;
+    }
+
+    /// Re-attach voice-activity detection to a replacement media session.
+    ///
+    /// A renegotiation that moves the socket or the codec builds a fresh session, and the previous
+    /// one's seam attachments do not come with it. The caller stops the previous watcher first, so
+    /// its terminal cut is already on the stream; this starts the successor against the new audio,
+    /// which opens a new analysis epoch while the observation sequence continues.
+    fn resume_voice_activity(&mut self) {
+        let Some(profile) = self.voice.as_ref().map(|voice| voice.profile) else {
+            return;
+        };
+        if let Err(refusal) = self.start_voice_activity(profile) {
+            // Not fatal to the call: the renegotiation succeeded and the audio is flowing. The
+            // application stops being told about voice, and is told why here rather than silently.
+            tracing::warn!(%refusal, "voice-activity detection could not follow the media session");
+        }
+    }
+
+    /// Report deterministic signal metrics for this call's audio as typed events (`M-59`).
+    ///
+    /// From here on the call's own event stream carries [`CallEvent::SignalMetrics`] for the
+    /// direction the profile names: level, energy, clipping and silence over the exact sample
+    /// windows
+    /// [`docs/specs/call-audio-processing.md`](../../../docs/specs/call-audio-processing.md) §5
+    /// defines, coalesced into the cadence the profile declares. There is no handle to hold and
+    /// nothing to poll; each event names the call, the direction, and the epoch, rate, report
+    /// sequence, first sample and window coverage it was measured over.
+    ///
+    /// **This is signal content, not network quality.** Loss, jitter, round-trip time and the MOS
+    /// estimate remain [`MediaSession::quality`](sipx_media::MediaSession::quality)'s (`M-10`) and
+    /// are neither duplicated nor changed here. That surface says how the audio was *delivered*;
+    /// this says what it *contained*. A call with no packet loss can be clipping, and a lossy call
+    /// can carry a clean level in the audio that arrived.
+    ///
+    /// **No speech model is loaded.** The arithmetic is the same integer window arithmetic behind
+    /// [`Self::detect_voice_activity`], so the same audio produces the same numbers at the same
+    /// sample positions on every machine, and a build with no speech runtime can still use it.
+    ///
+    /// The audio arrives through the one bounded seam
+    /// ([`docs/specs/call-audio-seam.md`](../../../docs/specs/call-audio-seam.md)), never a tap of
+    /// its own, so nothing here can block decode, encode, playback or capture. Reporting is
+    /// call-owned policy and survives an ordinary re-INVITE; the replacement's audio opens a new
+    /// analysis epoch, so sample positions and report sequences restart while the reports keep
+    /// naming which epoch they belong to.
+    ///
+    /// Asking twice replaces the profile in force and re-attaches. Voice-activity detection and
+    /// metric reporting are independent: either, both or neither may run, and each has its own
+    /// analyser and its own seam attachment within the seam's per-session bound.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::SignalMetricsProfile`] for a profile outside the contract's domains or a cadence
+    /// outside 1..=[`MAX_WINDOWS_PER_REPORT`](sipx_audio::signal::MAX_WINDOWS_PER_REPORT), and
+    /// [`Error::CallAudioProcessing`] when the seam refuses the attachment — a stopped session, or
+    /// a call already carrying as many processors as the seam bounds it to.
+    ///
+    /// Neither changes the call's audio. The profile is checked before anything is disturbed, so a
+    /// refused *profile* leaves running reporting running; a refused *attachment* is the seam's
+    /// answer after the previous watcher has already been stopped, so it leaves the call with no
+    /// reporting rather than with the old one.
+    pub async fn report_signal_metrics(
+        &mut self,
+        profile: sipx_audio::signal::SignalReportProfile,
+    ) -> Result<()> {
+        // Validated before anything is disturbed, so a refused profile leaves running reporting
+        // running and an idle call idle. The reporter built here is discarded; `start_signal_metrics`
+        // builds the one that runs, after the previous watcher has been joined.
+        let _validated = sipx_audio::signal::SignalReporter::new(profile)?;
+        // Any watcher already running is stopped and joined first, so the two never interleave.
+        self.stop_signal_metrics().await;
+        self.start_signal_metrics(profile)
+    }
+
+    /// Attach one analyser and reducer to the running media session and start its watcher.
+    ///
+    /// Separate from [`Self::report_signal_metrics`] because a media-session replacement re-runs
+    /// exactly this, against the profile the call already holds.
+    fn start_signal_metrics(
+        &mut self,
+        profile: sipx_audio::signal::SignalReportProfile,
+    ) -> Result<()> {
+        // The profile is validated before the seam is touched, so a refused configuration leaves
+        // the call carrying no attachment at all.
+        let reporter = sipx_audio::signal::SignalReporter::new(profile)?;
+        let analysis = profile.analysis();
+        let analyzer = sipx_audio::analysis::AudioAnalyzer::new(analysis)?;
+        let format = sipx_audio::PcmFormat::new(analysis.rate(), sipx_audio::PcmEncoding::Signed16)
+            .map_err(sipx_media::ProcessingError::from)?;
+        let processor = self
+            .media
+            .attach_processor(sipx_media::Processing::new(analysis.direction(), format))?;
+        let metrics = crate::signal_metrics::SignalMetricsReporter::new(
+            analyzer,
+            reporter,
+            Arc::from(String::from_utf8_lossy(&self.dialog.id.call_id).into_owned()),
+            self.events.emitter(),
+        );
+        let stop = CancellationToken::new();
+        let watcher = tokio::spawn(crate::signal_metrics::watch(
+            processor,
+            metrics,
+            stop.clone(),
+        ));
+        self.metrics = Some(Box::new(SignalReporting {
+            profile,
+            stop: Some(stop),
+            watcher: Some(OwnedTask::new(watcher)),
+        }));
+        Ok(())
+    }
+
+    /// Signal and join the signal-metric watcher, if one is running.
+    ///
+    /// Shaped like [`Self::stop_voice_activity`], and for the same reason: the handle stays in
+    /// `self` while it is awaited, so cancelling the caller leaves the ownership intact rather
+    /// than detaching a task that emits into this call's event stream. Ending a call joins this
+    /// **before** [`EventSink::end`], which is what keeps [`CallEvent::Ended`] the last event.
+    async fn stop_signal_metrics(&mut self) {
+        let Some(metrics) = self.metrics.as_mut() else {
+            return;
+        };
+        if let Some(stop) = metrics.stop.take() {
+            if let Some(owner) = metrics.watcher.as_mut() {
+                cancel_and_join(&stop, owner).await;
+            } else {
+                stop.cancel();
+            }
+        } else if let Some(owner) = metrics.watcher.as_mut() {
+            owner.joined().await;
+        }
+        metrics.watcher = None;
+    }
+
+    /// Re-attach signal-metric reporting to a replacement media session.
+    ///
+    /// A renegotiation that moves the socket or the codec builds a fresh session, and the previous
+    /// one's seam attachments do not come with it. The caller stops the previous watcher first;
+    /// this starts the successor against the new audio, which opens a new analysis epoch — so no
+    /// report can ever describe the retired session's format or position.
+    fn resume_signal_metrics(&mut self) {
+        let Some(profile) = self.metrics.as_ref().map(|metrics| metrics.profile) else {
+            return;
+        };
+        if let Err(refusal) = self.start_signal_metrics(profile) {
+            // Not fatal to the call: the renegotiation succeeded and the audio is flowing. The
+            // application stops being told about the signal, and is told why here rather than
+            // silently.
+            tracing::warn!(%refusal, "signal-metric reporting could not follow the media session");
+        }
     }
 
     /// A response handle for a coupling that must answer glare while an outgoing request borrows
@@ -1021,6 +1296,11 @@ impl Call {
                 // selects on it.
                 self.session = None;
                 self.stop_ack_retransmission().await;
+                // Joined, not merely signalled: the watcher's terminal `VoiceEnded` has to be on
+                // the stream before `Ended`, which the stream promises is last (`M-58`) — and the
+                // same holds for a signal report still in flight (`M-59`).
+                self.stop_voice_activity().await;
+                self.stop_signal_metrics().await;
                 // Emitted here, at the point `ended` actually flips, rather than after the 200
                 // OK below — the call is over the moment the far end's BYE is accepted, whether
                 // or not building or sending the response then succeeds.
@@ -1272,6 +1552,10 @@ impl Call {
         self.ended = true;
         self.session = None;
         self.stop_ack_retransmission().await;
+        // See the BYE path: the watcher's terminal event must precede `Ended` (`M-58`), and no
+        // signal report may arrive after it either (`M-59`).
+        self.stop_voice_activity().await;
+        self.stop_signal_metrics().await;
         self.events.end(cause);
 
         let cseq = self.dialog.next_cseq();
@@ -2794,6 +3078,8 @@ async fn dial_with(
                     .and_then(std::result::Result::ok),
                 dialog_credentials: options.credentials.clone(),
                 admitted_dialog_methods: Vec::new(),
+                voice: None,
+                metrics: None,
             })
         }
         Err(error) => {
@@ -4296,6 +4582,8 @@ impl Dialing {
                         .and_then(std::result::Result::ok),
                     dialog_credentials: self.options.credentials.clone(),
                     admitted_dialog_methods: Vec::new(),
+                    voice: None,
+                    metrics: None,
                 })
             }
             Err(error) => {
@@ -5091,6 +5379,8 @@ pub async fn answer_early(
             .and_then(std::result::Result::ok),
         dialog_credentials: None,
         admitted_dialog_methods: Vec::new(),
+        voice: None,
+        metrics: None,
     })
 }
 
@@ -5429,6 +5719,8 @@ async fn answer_negotiated(
             .and_then(std::result::Result::ok),
         dialog_credentials: None,
         admitted_dialog_methods: Vec::new(),
+        voice: None,
+        metrics: None,
     })
 }
 

@@ -81,6 +81,7 @@ pub mod transfer;
 // Crate-private: every item in it is `pub(crate)`, and a `pub mod` whose contents are all
 // private renders as an empty page in the API reference — a promise of surface that is not there.
 mod update;
+pub mod voice;
 
 pub use call::{
     Call, Credentials, DialOptions, Dialing, MediaAddress, Served, answer, answer_at, answer_early,
@@ -119,7 +120,7 @@ pub use rel::{
     Ringing, ring, ring_early, ring_early_with, ring_early_with_policy, ring_early_with_policy_at,
     ring_offer_early, ring_offer_early_with_policy, ring_offer_early_with_policy_at,
 };
-pub use signal_metrics::{SignalMetrics, SignalMetricsError};
+pub use signal_metrics::SignalMetrics;
 pub use signalling::{SignallingCall, SignallingEvent};
 pub use snapshot::{
     DialogNotQuiescent, DialogPersistenceError, DialogRestoreContext, DialogSessionAction,
@@ -131,3 +132,4 @@ pub use subscriber::{
     EventSubscriptions, EventSubscriptionsHandle,
 };
 pub use transfer::{Referral, Replaces, Transfer, TransferState};
+pub use voice::VoiceActivity;

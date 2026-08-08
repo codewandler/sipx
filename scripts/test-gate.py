@@ -1945,5 +1945,411 @@ class TheCorpusProvenanceChecks(unittest.TestCase):
         )
 
 
+class TheStepClock(unittest.TestCase):
+    """`X-114`: the gate had no clock, so "the gate got faster" was a recollection.
+
+    `X-93` asks for protected release evidence to be made faster without weakening it, and its
+    baseline — `12m37`/`6m41`/`13m19` — exists as prose inside `X-93` itself and in no release
+    record, review or changelog. Nothing could have contradicted it, because `gate.py` measured a
+    step count and free disk and nothing else.
+
+    What is asserted here is not "the gate prints a number". It is the ways a duration stops being
+    worth recording:
+
+    * **A step whose duration is missing or unparseable is dropped.** That is the failing-first
+      case. A summary that silently skips one step reports a smaller sum than the run cost, which
+      is a plausible-looking number nobody can catch by eye — `X-66`'s argument for storing counts
+      rather than a percentage, one artifact over.
+    * **A duration with no context is not comparable to another one.** The commit, the host's CPU
+      count and whether the build cache was cold decide the number as much as the code does, and
+      `RUSTC_WRAPPER` broke the two-valued answer to the last of those.
+    * **Something starts gating on it.** A threshold turns a measurement into a target, which is
+      the rule `X-66` follows for coverage and for the same reason.
+    """
+
+    #: The three spellings the fixtures below need, written here as well as in `gate.py` — the same
+    #: bargain `NOT_A_RESULT` above strikes, and for the same reason. Reaching through the module
+    #: for them would make every case in this class fail with an `AttributeError` about a constant
+    #: instead of with its own claim, and the failing-first case has to say what is missing.
+    #: `test_every_cache_state_and_outcome_says_what_it_means` asserts the two copies agree.
+    GREEN = "green"
+    NOT_STARTED = "not started"
+    WARM = "warm"
+
+    #: A well-formed record, in the shape the run writes. Built per test so a case can break one
+    #: field and leave the rest legitimate — a fixture that is wrong in two ways proves neither.
+    def record(self, **overrides) -> dict:
+        base = {
+            "commit": "0" * 40,
+            "measured_at": "2026-08-08",
+            "host": {"cpu_count": 20, "load_average": 4.5},
+            "cache": {
+                "state": self.WARM,
+                "why": "the build directory already held artifacts",
+                "compiler_wrapper": "",
+            },
+            # 63 s and 62 s rather than two round numbers: they render as `1m03s` and `1m02s`, so
+            # an assertion about one of them cannot be satisfied by the other.
+            "wall_clock_seconds": 63.0,
+            "measured_seconds": 62.0,
+            "steps": [
+                {"name": "test", "seconds": 40.0, "outcome": self.GREEN},
+                {"name": "clippy", "seconds": 20.0, "outcome": self.GREEN},
+                {"name": "fmt", "seconds": 2.0, "outcome": self.GREEN},
+            ],
+        }
+        base.update(overrides)
+        return base
+
+    def setUp(self):
+        self.gate = gate()
+
+    def problems(self, record) -> list:
+        """`gate.timing_problems`, or a failure that names what is absent.
+
+        Called through `getattr` so the commit this story starts from reports the missing
+        instrumentation rather than an `AttributeError` about a name nobody has heard of.
+        """
+        checker = getattr(self.gate, "timing_problems", None)
+        self.assertIsNotNone(
+            checker,
+            "gate.py has no timing record at all, so a step whose duration is missing or "
+            "unparseable is dropped from the summary without a word, and `the gate got faster` "
+            "stays a recollection (X-114)",
+        )
+        return checker(record)
+
+    def report(self, record) -> str:
+        renderer = getattr(self.gate, "timing_report", None)
+        self.assertIsNotNone(renderer, "gate.py reports no timings")
+        return self.gate._ANSI.sub("", renderer(record))
+
+    # -- the failing-first case ----------------------------------------------------------------
+
+    def test_a_step_whose_duration_is_missing_or_unparseable_is_reported(self):
+        """The defect, stated as a test.
+
+        Both spellings, because they arrive from different directions: a run that never timed a
+        step writes no `seconds`, and a record edited or merged by hand writes `6m41` where a
+        number belongs. Either one, filtered out of the arithmetic with a comprehension that skips
+        what it cannot read, produces a total that is quietly too small and looks fine.
+        """
+        broken = self.record(
+            steps=[
+                {"name": "test", "seconds": 40.0, "outcome": self.GREEN},
+                {"name": "clippy", "outcome": self.GREEN},
+                {"name": "docs site", "seconds": "6m41", "outcome": self.GREEN},
+            ]
+        )
+        problems = self.problems(broken)
+        for step in ("clippy", "docs site"):
+            with self.subTest(step=step):
+                self.assertTrue(
+                    any(step in problem for problem in problems),
+                    f"a step whose duration cannot be read was accepted in silence, so the "
+                    f"published sum is short by however long `{step}` took; problems={problems}",
+                )
+
+    def test_a_dropped_step_is_caught_by_the_arithmetic(self):
+        """The same defect from the other end, and the one a per-field check cannot see.
+
+        A record can be internally well-formed and still describe a run it does not add up to: drop
+        one row and every remaining row is a valid duration. `coverage-report.py` checks its
+        per-crate rows against its workspace row for exactly this reason — the page is rendered from
+        the record, so editing the record moves the page and a byte-compare notices nothing.
+        """
+        problems = self.problems(
+            self.record(
+                steps=[
+                    {"name": "test", "seconds": 40.0, "outcome": self.GREEN},
+                    {"name": "clippy", "seconds": 20.0, "outcome": self.GREEN},
+                ]
+            )
+        )
+        self.assertTrue(
+            problems,
+            "a record whose steps sum to less than the total it states was accepted, so a step "
+            "removed from the list costs nothing and the published figure is short",
+        )
+
+    def test_the_summary_names_a_step_it_could_not_time(self):
+        """Not timed is not the same as free, and the summary must not let the two look alike.
+
+        A run truncated by the disk guard never starts its remaining steps. Those steps have no
+        duration and must appear anyway — a table of 31 rows for a 40-step gate reads as a gate
+        with 31 steps, which is the shape of every measurement defect this repository has filed.
+        """
+        record = self.record(
+            steps=[
+                {"name": "test", "seconds": 40.0, "outcome": self.GREEN},
+                {"name": "clippy", "seconds": 20.0, "outcome": self.GREEN},
+                {"name": "fmt", "seconds": 2.0, "outcome": self.GREEN},
+                {"name": "docs site", "outcome": self.NOT_STARTED},
+            ]
+        )
+        self.assertEqual([], self.problems(record), "a step that never started is not a defect")
+        report = self.report(record)
+        self.assertIn(
+            "docs site",
+            report,
+            "a step the run never reached is absent from the timing summary, so the reader counts "
+            "the rows and gets a gate that is one step smaller than it is",
+        )
+
+    # -- what makes two runs comparable --------------------------------------------------------
+
+    def test_a_record_states_its_commit_cpu_count_and_cache_state(self):
+        """The three the story names. A duration without them is not comparable to another one."""
+        for field, broken in (
+            ("commit", self.record(commit="")),
+            ("cpu_count", self.record(host={"cpu_count": 0, "load_average": 1.0})),
+            ("cache", self.record(cache={"state": "", "why": "", "compiler_wrapper": ""})),
+        ):
+            with self.subTest(field=field):
+                self.assertTrue(
+                    self.problems(broken),
+                    f"a record with no {field} was accepted; the duration in it cannot be "
+                    f"compared with any other duration, which is the whole use X-93 has for it",
+                )
+
+    def test_a_commit_that_is_not_a_git_object_name_is_refused(self):
+        """`806d460` and `806d4602b00…` are the same commit spelled two ways, and only one of them
+        can be looked up years later without the repository in front of you."""
+        self.assertTrue(self.problems(self.record(commit="806d460")))
+
+    def test_a_compiler_cache_in_front_of_rustc_is_not_a_cold_run(self):
+        """`RUSTC_WRAPPER` broke the two-valued answer, and this is the story's explicit ask.
+
+        An empty `target/` used to mean every crate was compiled in this run. With `sccache` in
+        front of rustc an empty `target/` means nothing of the sort: compilation is served from a
+        cache this run did not fill, so the number is not comparable with a `cold` baseline taken
+        before the wrapper existed. Recording both as `cold` is how X-93 would conclude the gate got
+        faster from a change to nobody's code.
+        """
+        state = getattr(self.gate, "cache_state", None)
+        self.assertIsNotNone(state, "gate.py does not classify the build cache")
+        cold, _ = state(target_is_warm=False, wrapper="")
+        wrapped, why = state(target_is_warm=False, wrapper="/usr/bin/sccache")
+        warm, _ = state(target_is_warm=True, wrapper="")
+        self.assertEqual(self.gate.CACHE_COLD, cold)
+        self.assertNotEqual(
+            cold,
+            wrapped,
+            "a run behind a compiler cache was recorded as cold, so it will be compared against a "
+            "baseline that compiled every crate and the difference will be read as a speed-up",
+        )
+        self.assertNotEqual(warm, wrapped)
+        self.assertIn(
+            "sccache",
+            why,
+            "the record does not name the wrapper standing in front of rustc, so a reader cannot "
+            "tell which cache served the build",
+        )
+
+    def test_the_timing_file_does_not_make_the_next_run_look_warm(self):
+        """Instrumentation that changes what it measures is worse than none.
+
+        The record is written into the build directory, which is also the thing "cold" is read off.
+        Counting it would make every run after the first report a warm cache on a checkout that has
+        never compiled anything — and `X-93` would then compare a genuinely cold baseline against a
+        figure the clock itself relabelled.
+        """
+        import tempfile
+
+        target = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(__import__("shutil").rmtree, target, True)
+        (target / "CACHEDIR.TAG").write_text("Signature: 8a477f597d28d172\n", encoding="utf-8")
+        (target / self.gate.TIMINGS_NAME).write_text("{}\n", encoding="utf-8")
+        self.assertFalse(
+            self.gate.target_has_artifacts(target),
+            "a build directory holding nothing but this script's own output was read as warm",
+        )
+        (target / "debug").mkdir()
+        self.assertTrue(
+            self.gate.target_has_artifacts(target),
+            "a build directory holding a real profile was read as cold",
+        )
+
+    def test_every_cache_state_and_outcome_says_what_it_means(self):
+        """A marker with no explanation is a password, and passwords get typed without thinking."""
+        self.assertEqual(self.GREEN, self.gate.OUTCOME_GREEN)
+        self.assertEqual(self.NOT_STARTED, self.gate.OUTCOME_NOT_STARTED)
+        self.assertEqual(self.WARM, self.gate.CACHE_WARM)
+        for name, meaning in self.gate.CACHE_STATES.items():
+            with self.subTest(cache=name):
+                self.assertTrue(meaning.strip(), f"cache state `{name}` says nothing about itself")
+        for name, meaning in self.gate.OUTCOMES.items():
+            with self.subTest(outcome=name):
+                self.assertTrue(meaning.strip(), f"outcome `{name}` says nothing about itself")
+
+    # -- the two totals ------------------------------------------------------------------------
+
+    def test_the_wall_clock_is_reported_separately_from_the_sum_of_steps(self):
+        """Parallelism and serialization are indistinguishable from one number.
+
+        The gate runs its steps one after another today, so the sum sits just under the wall clock
+        and the gap is the gate's own work. The moment a step fans out, the sum goes above the wall
+        clock — and a report that printed one figure could not tell anyone that had happened.
+        """
+        report = self.report(self.record())
+        self.assertIn(
+            "1m02s", report, "the summary does not state the sum of the step durations"
+        )
+        self.assertIn("1m03s", report, "the summary does not state the total wall clock")
+
+    def test_the_steps_are_ordered_by_cost(self):
+        """The expensive tail has to be visible without reading a log — 40 steps in run order is a
+        log."""
+        report = self.report(self.record())
+        order = [line for line in report.splitlines() if line.startswith("  ")]
+        positions = {}
+        for name in ("test", "clippy", "fmt"):
+            found = [index for index, line in enumerate(order) if line.strip().startswith(name)]
+            self.assertTrue(found, f"`{name}` is not in the timing summary")
+            positions[name] = found[0]
+        self.assertLess(positions["test"], positions["clippy"])
+        self.assertLess(positions["clippy"], positions["fmt"])
+
+    # -- nothing gates on a duration -----------------------------------------------------------
+
+    def test_no_duration_is_a_finding(self):
+        """`X-66`'s rule, in a second place: a threshold turns a measurement into a target.
+
+        Ten hours is not a defect in the record. If it ever becomes one, somebody has given the
+        gate a deadline, and the next implementor's remedy is to split a step rather than to make
+        anything faster.
+        """
+        slow = self.record(
+            wall_clock_seconds=36000.0,
+            measured_seconds=36000.0,
+            steps=[{"name": "test", "seconds": 36000.0, "outcome": self.GREEN}],
+        )
+        self.assertEqual([], self.problems(slow), "a slow run was reported as a finding")
+
+    def test_the_summary_states_that_nothing_gates_on_it(self):
+        """Asserted about the printed words, the way `coverage-report.py`'s disclaimers are.
+
+        The sentence is the reason the measurement is allowed to exist, so it is not decoration a
+        later edit can quietly drop.
+        """
+        self.assertIn(self.gate.NO_THRESHOLD, self.report(self.record()))
+
+    def test_a_slow_step_does_not_change_what_the_gate_exits(self):
+        """The property itself, run rather than read: the exit code comes from the steps."""
+        import contextlib
+        import io
+        from unittest import mock
+
+        quick = self.gate.Step("a quick step", "gate", ("true",))
+        slow = self.gate.Step("a slower step", "gate", ("bash", "-c", "sleep 0.2"))
+        out, err = io.StringIO(), io.StringIO()
+        with (
+            mock.patch.object(
+                self.gate, "free_bytes", return_value=self.gate.REQUIRED_FREE_BYTES * 4
+            ),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
+            code = self.gate.run([quick, slow])
+        self.assertEqual(self.gate.EXIT_GREEN, code, out.getvalue() + err.getvalue())
+
+    # -- the record is written, not only printed ------------------------------------------------
+
+    def test_a_run_writes_a_record_a_later_run_can_be_compared_against(self):
+        """The half that outlives the terminal. `X-93` needs a file, not a scrollback buffer."""
+        import contextlib
+        import io
+        import json
+        import tempfile
+        from unittest import mock
+
+        destination = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(__import__("shutil").rmtree, destination, True)
+        path = destination / "timings.json"
+        out, err = io.StringIO(), io.StringIO()
+        with (
+            mock.patch.object(
+                self.gate, "free_bytes", return_value=self.gate.REQUIRED_FREE_BYTES * 4
+            ),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
+            self.gate.run([self.gate.Step("a step", "gate", ("true",))], timings=path)
+        self.assertTrue(path.exists(), f"the run wrote no timing record:\n{out.getvalue()}")
+        record = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            [],
+            self.problems(record),
+            "the record this gate writes does not satisfy the checker it ships with",
+        )
+        self.assertEqual(["a step"], [entry["name"] for entry in record["steps"]])
+        self.assertIn(str(path), out.getvalue(), "the run does not say where it wrote the record")
+
+    def test_a_record_that_cannot_be_written_does_not_redden_the_gate(self):
+        """Instrumentation that can fail a green tree is worse than no instrumentation.
+
+        Same reasoning as the rule above it: the exit code is a claim about the tree, and an
+        unwritable directory is a claim about the machine.
+        """
+        import contextlib
+        import io
+        from unittest import mock
+
+        out, err = io.StringIO(), io.StringIO()
+        with (
+            mock.patch.object(
+                self.gate, "free_bytes", return_value=self.gate.REQUIRED_FREE_BYTES * 4
+            ),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
+            code = self.gate.run(
+                [self.gate.Step("a step", "gate", ("true",))],
+                timings=pathlib.Path("/proc/nowhere/timings.json"),
+            )
+        self.assertEqual(
+            self.gate.EXIT_GREEN,
+            code,
+            "a gate that could not write its own timing file reported the tree as broken",
+        )
+
+    # -- the steps the run really has ------------------------------------------------------------
+
+    def test_the_gate_times_every_step_it_runs(self):
+        """A clock on some of the steps answers `where did the time go` with a shrug."""
+        import contextlib
+        import io
+        from unittest import mock
+
+        steps = [
+            self.gate.Step("first", "gate", ("true",)),
+            self.gate.Step("second", "gate", ("false",)),
+            self.gate.Step(
+                "third",
+                "gate",
+                ("bash", "-c", f"exit {self.gate.STEP_NOT_A_RESULT}"),
+                not_a_result="it could not reach what it checks",
+            ),
+        ]
+        out, err = io.StringIO(), io.StringIO()
+        with (
+            mock.patch.object(
+                self.gate, "free_bytes", return_value=self.gate.REQUIRED_FREE_BYTES * 4
+            ),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
+            self.gate.run(steps)
+        printed = self.gate._ANSI.sub("", out.getvalue())
+        for step in steps:
+            with self.subTest(step=step.name):
+                self.assertIn(
+                    step.name,
+                    printed.split("timings", 1)[-1],
+                    f"`{step.name}` has no row in the timing summary, so its cost is invisible "
+                    f"and the sum is short by it",
+                )
+
+
 if __name__ == "__main__":
     sys.exit(0 if unittest.main(exit=False, verbosity=2).result.wasSuccessful() else 1)

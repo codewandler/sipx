@@ -1,14 +1,15 @@
 //! Signal metrics on a live call (`M-59`): level, clipping and silence reported as typed
 //! [`CallEvent`]s over `M-54`'s one call-media seam.
 //!
-//! These run against two connected calls on loopback rather than against the processor in
+//! These run against two connected calls on loopback rather than against the reporter in
 //! isolation, because what is worth proving here is the *carriage*: that the numbers a call
-//! reports describe the audio that call actually carried, that they name the direction, epoch,
-//! sequence, sample position and window coverage they were measured over, and that two calls
-//! running at once never report each other's samples.
+//! reports describe the audio that call actually carried, that they name the call, direction,
+//! epoch, sequence, sample position and window coverage they were measured over, and that two
+//! calls running at once never report each other's audio.
 //!
-//! The arithmetic itself is pinned by `sipx-audio`'s `signal_metrics.rs` vectors against
-//! `docs/specs/call-audio-processing.md` §11; nothing is re-derived here.
+//! The arithmetic is pinned by `sipx-audio`'s `signal_metrics.rs` against
+//! `docs/specs/call-audio-processing.md` §11, and the reporting policy by this module's own unit
+//! tests. Nothing is re-derived here.
 
 #![allow(
     clippy::unwrap_used,
@@ -16,13 +17,15 @@
     clippy::panic,
     clippy::indexing_slicing
 )]
+// `caller`/`callee` and their endpoints are the vocabulary every other call test in this crate
+// uses; renaming them here to satisfy a similarity heuristic would make this the odd one out.
+#![allow(clippy::similar_names)]
 
 use std::net::IpAddr;
 use std::time::Duration;
 
-use sipx_audio::signal::{
-    SignalDirection, SignalObservation, SignalProfile, SignalReport,
-};
+use sipx_audio::analysis::{AnalysisProfile, AudioDirection};
+use sipx_audio::signal::{SignalObservation, SignalReport, SignalReportProfile};
 use sipx_call::{Call, CallEvent, CallEvents, answer, dial};
 use sipx_sip::{Host, HostName, Uri};
 use sipx_transport::{Config, Handle, Incoming, Target, bind};
@@ -72,28 +75,25 @@ async fn connected() -> (Call, Call) {
     (caller, callee)
 }
 
-/// A profile that measures one packet's worth of transmitted audio per window.
-fn outbound_profile(rate: u32) -> SignalProfile {
-    SignalProfile::new(SignalDirection::Outbound, rate)
-        .with_window_ms(20)
-        .with_clip_samples(8)
-        .with_windows_per_report(1)
+/// One window of transmitted audio per report, at the session's own rate.
+fn outbound(rate: u32) -> SignalReportProfile {
+    SignalReportProfile::new(
+        AnalysisProfile::new(AudioDirection::Outbound, rate).with_window_ms(20),
+    )
 }
 
 /// The next signal report on this stream, bounded so a wiring mistake fails instead of hanging.
-async fn next_report(events: &mut CallEvents) -> (SignalDirection, SignalReport) {
+async fn next_report(events: &mut CallEvents) -> (String, AudioDirection, SignalReport) {
     let deadline = tokio::time::Instant::now() + ARRIVAL_BOUND;
     loop {
         let event = tokio::time::timeout_at(deadline, events.recv())
             .await
             .expect("no timeout waiting for a signal report")
             .expect("the call's event stream ended before a report arrived");
-        if let CallEvent::SignalMetrics {
-            direction,
-            observation: SignalObservation::Report(report),
-        } = event
+        if let CallEvent::SignalMetrics(metrics) = event
+            && let Some(report) = metrics.report()
         {
-            return (direction, report);
+            return (metrics.call_id().to_owned(), metrics.direction(), *report);
         }
     }
 }
@@ -107,18 +107,20 @@ async fn a_call_reports_the_level_and_clipping_of_the_audio_it_carried() {
 
     let rate = caller.media().audio_rate();
     let per_packet = caller.media().samples_per_packet();
-    let _observer = caller
-        .observe_signal_metrics(outbound_profile(rate))
-        .expect("the seam accepts one observer");
+    caller
+        .report_signal_metrics(outbound(rate))
+        .await
+        .expect("the seam accepts the attachment");
 
     // Full scale, so the expected facts are unambiguous: every sample clips, the peak is the
     // largest positive magnitude, and a constant signal has no variance and is therefore not
     // activity.
-    caller.play(&vec![i16::MAX; per_packet * 4]).await;
+    assert!(caller.play(&vec![i16::MAX; per_packet * 4]).await);
 
-    let (direction, report) = next_report(&mut events).await;
+    let (call_id, direction, report) = next_report(&mut events).await;
 
-    assert_eq!(direction, SignalDirection::Outbound);
+    assert!(!call_id.is_empty(), "the report names its own call");
+    assert_eq!(direction, AudioDirection::Outbound);
     assert_eq!(report.rate, rate);
     assert_eq!(report.epoch, 0, "the first epoch of this call");
     assert_eq!(report.sequence, 0, "the first report of that epoch");
@@ -139,7 +141,7 @@ async fn a_call_reports_the_level_and_clipping_of_the_audio_it_carried() {
 }
 
 /// Coverage is contiguous and monotonic: consecutive reports name consecutive windows and the
-/// sample positions that follow from them, so an application can place every fact on a timeline
+/// sample positions that follow from them, so an application places every fact on a timeline
 /// without knowing the cadence.
 #[tokio::test]
 async fn consecutive_reports_cover_consecutive_windows_without_a_gap() {
@@ -148,14 +150,15 @@ async fn consecutive_reports_cover_consecutive_windows_without_a_gap() {
 
     let rate = caller.media().audio_rate();
     let per_packet = caller.media().samples_per_packet();
-    let _observer = caller
-        .observe_signal_metrics(outbound_profile(rate))
-        .expect("the seam accepts one observer");
+    caller
+        .report_signal_metrics(outbound(rate))
+        .await
+        .expect("attaches");
 
-    caller.play(&vec![1_000i16; per_packet * 6]).await;
+    assert!(caller.play(&vec![1_000i16; per_packet * 6]).await);
 
-    let (_, first) = next_report(&mut events).await;
-    let (_, second) = next_report(&mut events).await;
+    let (_, _, first) = next_report(&mut events).await;
+    let (_, _, second) = next_report(&mut events).await;
 
     assert_eq!(second.epoch, first.epoch, "one uninterrupted measurement");
     assert_eq!(second.sequence, first.sequence + 1);
@@ -165,12 +168,32 @@ async fn consecutive_reports_cover_consecutive_windows_without_a_gap() {
     assert_eq!(second.dc_offset_windows, 1, "a constant offset is DC");
 }
 
-/// Two calls at once: each observer reports its own call's audio and nothing of the other's.
-///
-/// The per-call isolation the epic requires, proved by giving the two calls signals that cannot be
-/// confused — full scale against silence — and asserting neither ever sees the other's.
+/// The cadence is what bounds a call's event rate: four windows of audio, one event.
 #[tokio::test]
-async fn two_calls_never_report_each_others_samples() {
+async fn the_reporting_cadence_bounds_the_events_a_call_produces() {
+    let (mut caller, _callee) = connected().await;
+    let mut events = caller.events().expect("the stream is taken once");
+
+    let rate = caller.media().audio_rate();
+    let per_packet = caller.media().samples_per_packet();
+    caller
+        .report_signal_metrics(outbound(rate).with_windows_per_report(4))
+        .await
+        .expect("attaches");
+
+    assert!(caller.play(&vec![i16::MAX; per_packet * 8]).await);
+
+    let (_, _, report) = next_report(&mut events).await;
+    assert_eq!(report.windows, 4);
+    assert_eq!(report.samples, (u64::from(rate) / 50) * 4);
+    assert_eq!(report.clipping_windows, 4);
+    assert_eq!(report.first_window, 0);
+}
+
+/// Two calls at once: each reports its own audio and nothing of the other's, and each report says
+/// which call it came from.
+#[tokio::test]
+async fn two_calls_never_report_each_others_audio() {
     let (mut loud, _loud_callee) = connected().await;
     let (mut quiet, _quiet_callee) = connected().await;
 
@@ -179,124 +202,148 @@ async fn two_calls_never_report_each_others_samples() {
 
     let rate = loud.media().audio_rate();
     let per_packet = loud.media().samples_per_packet();
-    let _loud_observer = loud
-        .observe_signal_metrics(outbound_profile(rate))
+    loud.report_signal_metrics(outbound(rate))
+        .await
         .expect("attaches");
-    let _quiet_observer = quiet
-        .observe_signal_metrics(outbound_profile(rate).with_silence_amplitude(64))
+    quiet
+        .report_signal_metrics(outbound(rate))
+        .await
         .expect("attaches");
 
-    loud.play(&vec![i16::MAX; per_packet * 4]).await;
-    quiet.play(&vec![0i16; per_packet * 4]).await;
+    assert!(loud.play(&vec![i16::MAX; per_packet * 4]).await);
+    assert!(quiet.play(&vec![0i16; per_packet * 4]).await);
 
-    for _ in 0..2 {
-        let (_, report) = next_report(&mut loud_events).await;
-        assert_eq!(report.peak, i32::from(i16::MAX));
-        assert_eq!(report.silent_windows, 0);
-    }
-    for _ in 0..2 {
-        let (_, report) = next_report(&mut quiet_events).await;
-        assert_eq!(report.peak, 0);
-        assert_eq!(report.silent_windows, 1);
-        assert_eq!(report.clipped_samples, 0);
-    }
+    let (loud_id, _, loud_report) = next_report(&mut loud_events).await;
+    assert_eq!(loud_report.peak, i32::from(i16::MAX));
+    assert_eq!(loud_report.silent_windows, 0);
+
+    let (quiet_id, _, quiet_report) = next_report(&mut quiet_events).await;
+    assert_eq!(quiet_report.peak, 0);
+    assert_eq!(quiet_report.silent_windows, 1);
+    assert_eq!(quiet_report.clipped_samples, 0);
+
+    assert_ne!(loud_id, quiet_id, "two calls, two identities");
 }
 
-/// Stopping an observer is an event, not a duration: `stop` returns when the attachment is
-/// released, and nothing further is reported for it.
+/// A profile outside the declared domains is refused before anything is attached, and the call
+/// carries on reporting under the profile it already had.
 #[tokio::test]
-async fn stopping_an_observer_completes_and_ends_the_reporting() {
+async fn a_refused_profile_leaves_running_reporting_running() {
     let (mut caller, _callee) = connected().await;
     let mut events = caller.events().expect("the stream is taken once");
 
     let rate = caller.media().audio_rate();
     let per_packet = caller.media().samples_per_packet();
-    let observer = caller
-        .observe_signal_metrics(outbound_profile(rate))
+    caller
+        .report_signal_metrics(outbound(rate))
+        .await
         .expect("attaches");
 
-    caller.play(&vec![i16::MAX; per_packet * 2]).await;
-    let (_, first) = next_report(&mut events).await;
-    assert_eq!(first.clipping_windows, 1);
-    assert_eq!(
-        observer.refused_frames(),
-        0,
-        "the seam's own sequencing is exactly what the analyser accepts"
-    );
-
-    // `stop` joins the observer's task, so every event it will ever emit has been emitted by the
-    // time this returns. Draining here therefore leaves a *final* state: anything that turned up
-    // afterwards would have had to be emitted by a task that has already finished.
-    observer.stop().await;
-    while events.try_recv().is_some() {}
-
-    assert!(caller.play(&vec![i16::MAX; per_packet * 4]).await);
-    let mut seen = 0usize;
-    while let Some(event) = events.try_recv() {
-        seen += 1;
-        assert!(
-            !matches!(event, CallEvent::SignalMetrics { .. }),
-            "a stopped observer must report nothing further: {event:?}"
-        );
-    }
     assert!(
-        seen > 0,
-        "the playback's own completion event proves the stream is still live"
+        caller
+            .report_signal_metrics(outbound(rate).with_windows_per_report(0))
+            .await
+            .is_err(),
+        "a report over no windows is not a measurement"
     );
+    assert!(
+        caller
+            .report_signal_metrics(SignalReportProfile::new(AnalysisProfile::new(
+                AudioDirection::Outbound,
+                0,
+            )))
+            .await
+            .is_err(),
+        "rate 0 is outside the linear-PCM domain"
+    );
+
+    assert!(caller.play(&vec![i16::MAX; per_packet * 2]).await);
+    let (_, _, report) = next_report(&mut events).await;
+    assert_eq!(report.clipping_windows, 1, "the first profile still runs");
 }
 
-/// A profile outside the specification's domains is refused, and the call carries on.
+/// Voice-activity detection and metric reporting are independent, and both may run at once on one
+/// call without either one's analyser touching the other's.
 #[tokio::test]
-async fn a_refused_profile_leaves_the_call_running() {
+async fn voice_detection_and_metric_reporting_run_side_by_side() {
     let (mut caller, _callee) = connected().await;
     let mut events = caller.events().expect("the stream is taken once");
 
     let rate = caller.media().audio_rate();
     let per_packet = caller.media().samples_per_packet();
+    caller
+        .detect_voice_activity(AnalysisProfile::new(AudioDirection::Outbound, rate))
+        .await
+        .expect("voice detection attaches");
+    caller
+        .report_signal_metrics(outbound(rate))
+        .await
+        .expect("metric reporting attaches beside it");
 
-    assert!(
-        caller
-            .observe_signal_metrics(outbound_profile(rate).with_window_ms(0))
-            .is_err(),
-        "a zero window is not a measurement"
-    );
-    assert!(
-        caller
-            .observe_signal_metrics(outbound_profile(rate).with_queue_capacity(1))
-            .is_err(),
-        "a queue below the declared minimum is refused"
-    );
+    // Full-swing modulation: `active` by the variance predicate, and unmistakable in the level.
+    let modulated: Vec<i16> = (0..per_packet * 4)
+        .map(|index| if index % 2 == 0 { 8_192 } else { -8_192 })
+        .collect();
+    assert!(caller.play(&modulated).await);
 
-    let _observer = caller
-        .observe_signal_metrics(outbound_profile(rate))
-        .expect("a valid profile still attaches");
-    caller.play(&vec![i16::MAX; per_packet * 2]).await;
-    let (_, report) = next_report(&mut events).await;
+    let (_, _, report) = next_report(&mut events).await;
+    assert_eq!(report.peak, 8_192);
+    assert_eq!(report.active_windows, 1);
+    assert_eq!(report.clipping_windows, 0);
+}
+
+/// Ending the call stops reporting before `Ended`, which the stream promises is its last event.
+#[tokio::test]
+async fn no_report_arrives_after_the_call_has_ended() {
+    let (mut caller, _callee) = connected().await;
+    let mut events = caller.events().expect("the stream is taken once");
+
+    let rate = caller.media().audio_rate();
+    let per_packet = caller.media().samples_per_packet();
+    caller
+        .report_signal_metrics(outbound(rate))
+        .await
+        .expect("attaches");
+
+    assert!(caller.play(&vec![i16::MAX; per_packet * 2]).await);
+    let (_, _, report) = next_report(&mut events).await;
     assert_eq!(report.clipping_windows, 1);
+
+    caller.hang_up().await.expect("hangs up");
+
+    let mut seen_end = false;
+    while let Some(event) = events.try_recv() {
+        assert!(!seen_end, "an event arrived after Ended: {event:?}");
+        seen_end = matches!(event, CallEvent::Ended(_));
+    }
+    assert!(seen_end, "the call reported that it ended");
 }
 
-/// Both directions can be observed at once, and each names itself.
+/// A silence transition reaches the application on a live call, and a silent stretch is reported
+/// as silent rather than as absent.
 #[tokio::test]
-async fn both_directions_can_be_observed_at_once() {
+async fn a_silent_call_reports_silence() {
     let (mut caller, _callee) = connected().await;
     let mut events = caller.events().expect("the stream is taken once");
 
     let rate = caller.media().audio_rate();
     let per_packet = caller.media().samples_per_packet();
-    let _outbound = caller
-        .observe_signal_metrics(outbound_profile(rate))
-        .expect("attaches to transmitted audio");
-    let _inbound = caller
-        .observe_signal_metrics(
-            outbound_profile(rate)
-                .with_window_ms(20)
-                .with_windows_per_report(1),
-        )
-        .expect("a second attachment is within the seam's bound");
+    caller
+        .report_signal_metrics(outbound(rate))
+        .await
+        .expect("attaches");
 
-    caller.play(&vec![i16::MAX; per_packet * 2]).await;
+    assert!(caller.play(&vec![0i16; per_packet * 4]).await);
 
-    let (direction, report) = next_report(&mut events).await;
-    assert_eq!(direction, SignalDirection::Outbound);
-    assert_eq!(report.peak, i32::from(i16::MAX));
+    let (_, _, report) = next_report(&mut events).await;
+    assert_eq!(report.peak, 0);
+    assert_eq!(report.silent_windows, 1);
+    assert_eq!(report.rms, 0);
+    assert!(
+        !matches!(
+            SignalObservation::Report(report),
+            SignalObservation::SilenceElapsed { .. }
+        ),
+        "a report is not a transition"
+    );
 }

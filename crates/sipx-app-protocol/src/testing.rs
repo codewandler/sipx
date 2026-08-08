@@ -7,8 +7,8 @@
 
 use crate::document::{DtmfMode, Gather, Instruction, Source, TransferTarget, Verb};
 use crate::event::{
-    CallSnapshot, CallState, DialOutcome, Direction, EndCause, EventKind, GatherReason, Leg,
-    TransferState,
+    AudioDirection, CallSnapshot, CallState, DialOutcome, Direction, EndCause, EventKind,
+    GatherReason, Leg, TransferState, VoiceEndCause,
 };
 use crate::interpreter::Callback;
 
@@ -26,6 +26,40 @@ pub fn one_of_every_event() -> Vec<EventKind> {
         EventKind::Dtmf {
             digit: '5',
             duration_ms: 160,
+        },
+        EventKind::VoiceStarted {
+            direction: AudioDirection::Inbound,
+            sequence: 0,
+            sample_time: 0,
+            sample_rate: 8_000,
+        },
+        EventKind::VoiceEnded {
+            direction: AudioDirection::Inbound,
+            sequence: 1,
+            sample_time: 160,
+            sample_rate: 8_000,
+            cause: VoiceEndCause::Hangover,
+        },
+        EventKind::SignalMetrics {
+            direction: AudioDirection::Inbound,
+            epoch: 0,
+            sequence: 3,
+            sample_time: 480,
+            sample_rate: 8_000,
+            samples: 160,
+            windows: 1,
+            peak: 32_767,
+            rms: 32_767,
+            clipped_samples: 160,
+            clipping_windows: 1,
+            active_windows: 0,
+            silent_windows: 0,
+        },
+        EventKind::SignalSilence {
+            direction: AudioDirection::Inbound,
+            epoch: 0,
+            sample_time: 640,
+            sample_rate: 8_000,
         },
         EventKind::PlaybackFinished {
             instruction_id: "p1".to_owned(),
