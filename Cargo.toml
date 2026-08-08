@@ -1,8 +1,12 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-# The fuzz crate needs a nightly toolchain and libfuzzer; it is built by its own CI job.
-exclude = ["fuzz"]
+# The fuzz crate needs a nightly toolchain and libfuzzer; it is built by its own CI job. The
+# browser module needs `#[unsafe(no_mangle)]` for its twelve WebAssembly exports, which
+# `unsafe_code = "forbid"` below refuses — so it lives outside the workspace too, keeping the
+# non-negotiable intact for every crate that answers to it. `scripts/check-wasm-kernel.sh` builds
+# it; `wasm/src/lib.rs` explains it.
+exclude = ["fuzz", "wasm"]
 
 [workspace.package]
 version = "1.0.0-rc.3"

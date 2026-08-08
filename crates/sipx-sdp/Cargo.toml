@@ -10,8 +10,18 @@ authors.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+default = ["sdes-keys"]
+## Generating RFC 4568 SDES master keys. On by default, and every native consumer keeps it.
+## Parsing, comparing and answering an `a=crypto` line is not behind it — only minting a key is,
+## because that is the crate's one and only draw on an operating-system entropy source, and
+## `rand` refuses to compile for `wasm32-unknown-unknown`. The browser-audio profile never
+## carries `a=crypto` at all (`docs/specs/webrtc-audio.md` §4.5), so the kernel that drops this
+## feature loses nothing it is allowed to do.
+sdes-keys = ["dep:rand"]
+
 [dependencies]
-rand.workspace = true
+rand = { workspace = true, optional = true }
 bytes.workspace = true
 thiserror.workspace = true
 # RFC 8122 fingerprints. RustCrypto, and `subtle` so a fingerprint comparison does not hand an

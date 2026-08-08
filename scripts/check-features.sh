@@ -196,6 +196,47 @@ else
     echo "ok"
 fi
 
+# `sipx-sip` and `sipx-sdp` each carry one feature whose whole job is to be turned off: both name
+# the crate's only draw on an operating-system entropy source, and the browser kernel (`S-41`)
+# cannot have one. A build that only ever runs with defaults would not notice the seam closing.
+entropy_free=(
+    "sipx-sip identity"
+    "sipx-sdp sdes-keys"
+)
+
+for pair in "${entropy_free[@]}"; do
+    crate="${pair%% *}"
+    feature="${pair##* }"
+    for features in "" "$feature"; do
+        label="$crate ${features:-<none>}"
+        printf '  %-24s ' "$label"
+        if cargo check --quiet -p "$crate" --no-default-features \
+            ${features:+--features "$features"} 2>/tmp/sipx-features.$$; then
+            echo "ok"
+        else
+            echo "FAILED"
+            cat /tmp/sipx-features.$$
+            status=1
+        fi
+        rm -f /tmp/sipx-features.$$
+    done
+done
+
+# Same discipline as the `sipx-ua` graph assertion above: building is not the claim. A kernel that
+# compiled while still resolving `rand` would satisfy every `cargo check` here and violate §4.7's
+# no-fallback rule on the target that matters.
+printf '  %-24s ' "sipx-wasm no entropy dep"
+if cargo tree --quiet -p sipx-wasm --edges normal --prefix none \
+    2>/dev/null | grep -qE '^(rand|getrandom|tokio) '; then
+    echo "FAILED"
+    echo "    the browser kernel resolves an entropy source or a runtime:"
+    cargo tree -p sipx-wasm --edges normal --prefix none \
+        2>/dev/null | grep -E '^(rand|getrandom|tokio) ' | sed 's/^/      /'
+    status=1
+else
+    echo "ok"
+fi
+
 if [ "$status" -eq 0 ]; then
     echo "features: every combination builds"
 fi

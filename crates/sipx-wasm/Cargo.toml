@@ -1,0 +1,45 @@
+[package]
+name = "sipx-wasm"
+description = "Sans-IO browser session kernel: the sipx.browser.v1 WebAssembly ABI and control plane"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+# Not published to crates.io. The kernel's distribution channel is the `@sipx/browser` npm
+# package, which carries the compiled `sipx_browser.wasm` asset (`docs/specs/browser-sdk.md`
+# §7.1); a separately published rlib would be a second front door onto an ABI whose whole point
+# is that the glue and the module are versioned together by `sipx_abi_version`. `A-17` revisits
+# this when it packages the artifact.
+publish = false
+
+[dependencies]
+# Deliberately three, and deliberately with `default-features = false`. Every crate reachable
+# from here has to compile for `wasm32-unknown-unknown`, which rules out an operating-system
+# entropy source, a clock and a socket — see `docs/specs/browser-sdk.md` §3.1 and §4.1. The
+# feature seams in the two sipx crates exist for exactly this build. Spelled out rather than
+# `workspace = true` for the reason `sipx-media` spells out `sipx-transport`: Cargo refuses
+# `default-features = false` on a workspace dependency that does not set it, and setting it in
+# the workspace table would turn `identity` and `sdes-keys` off for the crates that want them.
+sipx-sip = { path = "../sipx-sip", version = "1.0.0-rc.3", default-features = false }
+sipx-sdp = { path = "../sipx-sdp", version = "1.0.0-rc.3", default-features = false }
+bytes.workspace = true
+# The control plane is RFC 8259 JSON (`docs/specs/browser-sdk.md` §5). Used for *parsing* host
+# documents only: events are written by `json::Writer` because §5.1 pins their field order, and
+# a serialiser that is free to reorder fields cannot be held to a byte vector.
+serde_json.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+# §9.1 pins every vector by SHA-256, and a test that checks the bytes without checking the hash
+# is a test that a one-octet drift still passes.
+sha2.workspace = true
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true

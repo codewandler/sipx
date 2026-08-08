@@ -10,15 +10,26 @@ authors.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+default = ["identity"]
+## RFC 8224/8225 authenticated identity and `PASSporT`. On by default, and every native
+## consumer keeps it: the seam exists so a target without an operating-system entropy source
+## can drop it. `p256` reaches `getrandom`, which refuses to compile for
+## `wasm32-unknown-unknown` — and a browser kernel that signs no `PASSporT` should not be
+## carrying an elliptic-curve implementation into the page anyway (`docs/specs/browser-sdk.md`
+## §3.1). Turning it off removes `sipx_sip::identity`; the `P-Asserted-Identity` header types in
+## `sipx_sip::headers` are unrelated and stay.
+identity = ["dep:p256", "dep:base64", "dep:serde_json"]
+
 [dependencies]
 bytes.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 md-5.workspace = true
 sha2.workspace = true
-p256.workspace = true
-base64.workspace = true
-serde_json.workspace = true
+p256 = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 
 [dev-dependencies]
 # A dev-dependency cycle: sipx-testkit depends on this crate. Cargo permits it, and the

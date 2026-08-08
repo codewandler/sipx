@@ -1,0 +1,49 @@
+[package]
+name = "sipx-browser-wasm"
+description = "The sipx.browser.v1 WebAssembly module: exported entry points over the sipx-wasm kernel"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Its own workspace root, stated rather than implied, for the reason `fuzz/Cargo.toml` states it:
+# the root manifest's `exclude` says the same thing only for a checkout that sits at the top of the
+# filesystem walk, and in a git worktree nested inside another checkout cargo walks past the
+# excluding manifest, finds the outer one, and refuses to build.
+[workspace]
+
+[lib]
+# The shipped asset. `docs/specs/browser-sdk.md` §7.1 names it `sipx_browser.wasm`; the file the
+# linker emits is `sipx_browser_wasm.wasm` and the packaging step in `A-17` renames it.
+crate-type = ["cdylib"]
+
+[dependencies]
+# Every line of logic is over there, in the workspace, under `unsafe_code = "forbid"`. This package
+# exists only because a WebAssembly export needs `#[unsafe(no_mangle)]` — see the module docs.
+sipx-wasm = { path = "../crates/sipx-wasm" }
+
+[lints.rust]
+missing_docs = "warn"
+unreachable_pub = "warn"
+# Deliberately **not** `forbid`, and this is the one package in the repository where that is true.
+# The allowance buys exactly twelve `#[unsafe(no_mangle)]` attributes and no `unsafe` block; see
+# `src/lib.rs`.
+unsafe_code = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+indexing_slicing = "warn"
+
+[profile.release]
+# A browser downloads this. `opt-level = "s"` and fat LTO are worth more here than the last few
+# percent of throughput in a state machine that runs once per signalling message.
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
