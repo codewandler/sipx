@@ -210,6 +210,19 @@ interrupt wins. The documented process bound for a positive answer budget is the
 these two values followed by the endpoint's causal task-join barrier; the error MUST NOT describe
 the answer budget alone as total elapsed time.
 
+The same value is also the ceiling over target resolution.
+[`sip-target-resolution.md`](sip-target-resolution.md) already bounds a lookup twice — one deadline
+per question and one over the whole resolution — and a positive `--timeout <S>` **MUST** lower both
+under itself rather than run a second clock beside them, so a name nothing answers for cannot spend
+the resolver's own whole-resolution bound before the command's clock is consulted at all. Zero
+states no deadline and leaves those bounds where §3.5's zero leaves transaction expiry. Every
+command carrying a deadline follows this rule: `load --timeout <S>` over the one resolution its
+calls share, a `scenario` dial frame's `timeout_ms` — or `--timeout <S>` when the frame omits it —
+over that command's own, `register --timeout <S>` over whatever the attempt has left (§3.5), and
+`peers --expires <S>`, which states no attempt deadline, over the subscription lifetime it asks
+for. The invitation budget itself still starts at the INVITE: resolution is bounded *by* the stated
+deadline, not subtracted *from* it, so the documented process bound above is unchanged.
+
 Cancellation is one owned operation with this state table:
 
 | State | Input | Required action | Next state |

@@ -56,7 +56,13 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
 
     let password = options.password.clone();
 
-    let resolver = crate::destination::Resolver::system();
+    // The invitation budget is read here, before the first thing that can wait, because it is the
+    // ceiling over resolution too: `dial --timeout 5` against a name nothing answers for must give
+    // up in five seconds, not spend `T-38`'s own eight looking it up first. Zero states no
+    // deadline and leaves those bounds to the resolver, exactly as it leaves expiry to the
+    // transaction layer.
+    let attempt = Duration::from_secs(options.timeout);
+    let resolver = crate::destination::Resolver::within((!attempt.is_zero()).then_some(attempt));
     let candidates = match resolver
         .resolve(&to, None, transport, &options.signalling)
         .await
@@ -138,7 +144,6 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
     // The bound is handed to the library rather than wrapped around it. Dropping the call
     // future partway through would leave the far end believing it is in a call, and only code
     // inside the exchange can send the CANCEL that stops it ringing.
-    let attempt = Duration::from_secs(options.timeout);
     let cancellation = Duration::from_secs(options.cancel_timeout);
 
     let mut call_options = sipx_call::DialOptions::new(from, media_address)

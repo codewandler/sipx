@@ -149,7 +149,12 @@ pub(crate) async fn run(command: LoadOptions, format: Format) -> Exit {
         Ok(transport) => transport,
         Err(message) => return fail(format, Exit::Usage, &message),
     };
-    let resolver = crate::destination::Resolver::system();
+    // The setup bound the run states for each of its calls is the ceiling over the one lookup they
+    // all share: a run whose calls may take one second to set up must not spend `T-38`'s eight
+    // resolving before the first of them is even placed.
+    let resolver = crate::destination::Resolver::within(
+        (!limits.setup_timeout.is_zero()).then_some(limits.setup_timeout),
+    );
     let candidates = match resolver
         .resolve(&to, None, transport, &command.signalling)
         .await
