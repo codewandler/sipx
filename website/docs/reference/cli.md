@@ -108,20 +108,22 @@ Resolution keeps the identity you asked for. TLS and WSS connect to the selected
 the name from the URI (or `--tls-server-name`), never the address; a `sips:` URI and an explicitly
 secure transport never fall back to a cleartext candidate.
 
-The three ways a named destination can fail are separate answers, because they have separate fixes:
+The three ways a named destination can fail are separate answers, because they have separate fixes.
+Anything resolution refused is reported with `error` beginning `target resolution failed:`,
+followed by which of them it was:
 
-| What happened | `status` / exit | `error` says |
+| What happened | `status` / exit | `error` continues |
 |---|---|---|
 | The zone answered, and has no usable record | `failed` (1) | `no usable candidate for <host>` |
 | Nothing established an answer | `failed` (1) | `DNS lookup unavailable for <question>` |
 | A question or the whole resolution ran out of time | `timeout` (5) | `DNS lookup timed out for <question>`, or `SIP target resolution timed out` |
-| The name resolved and the peer refused the connection | `failed` (1) | the transport cause, such as `transport: io: Connection refused` |
+| The name resolved and the peer refused the connection | `failed` (1) | *(not a resolution failure)* the transport cause, such as `transport: io: Connection refused` |
 
-A deadline therefore has its own exit code, and the two remaining cases are told apart by `error`
-without waiting: a DNS answer that cannot produce a candidate is reported as `target resolution
-failed`, while a connection failure names the transport error and no resolution at all. `register`
-adds `registration_limit_ms` only when its *own* deadline expired, so a name that will not resolve
-is never presented as a registrar that did not answer.
+A deadline therefore has its own exit code, and the two remaining cases are told apart without
+waiting by whether `error` opens with `target resolution failed:` at all — a connection failure
+names the transport error and no resolution. `register` adds `registration_limit_ms` only when its
+*own* deadline expired, so a name that will not resolve is never presented as a registrar that did
+not answer.
 
 `SIPX_NAMESERVER` asks a specific resolver instead of the host's configured ones — an IP address,
 optionally with a port, defaulting to 53. It is how a wrong zone is told from an unreachable

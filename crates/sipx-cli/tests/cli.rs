@@ -3047,7 +3047,8 @@ fn the_named_target_resolution_contract_is_documented() {
         // What bounds it. Both halves, because a per-question wait is not a whole-resolution one.
         "two seconds",
         "eight seconds",
-        // The three ways it ends, told apart without reading English prose out of `error`.
+        // The three ways it ends, and the prefix that separates the two sharing an exit code.
+        "target resolution failed:",
         "no usable candidate",
         "DNS lookup timed out",
         // Which resolver was asked, and how to ask a different one.
