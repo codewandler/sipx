@@ -41,6 +41,8 @@ timeout.
   to bound the attempt itself. The reported consequence, a scheduled check blocking roughly 32
   seconds against a dead registrar, is unfixed.
 
+- 2026-08-08: **readiness audit — ready as written**, no blocking gaps found.
+
 ## Notes
 
 - `P-17` did this for `dial` (bounded completion including cancellation cleanup); reuse its shape and

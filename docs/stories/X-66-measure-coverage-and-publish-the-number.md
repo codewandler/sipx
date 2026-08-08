@@ -3,7 +3,7 @@ id: X-66
 title: Measure coverage and publish the number
 pillar: Build
 status: ready
-priority: 8
+priority: 6
 design:
 epic: conformance
 areas: [scripts, ci]
@@ -36,6 +36,12 @@ suite not reach" has an answer that does not depend on somebody reading 79 test 
 
 ## Progress
 - (not started)
+
+- 2026-08-08: **readiness audit — ready as written**, with one constraint the implementor must not
+  violate: no coverage tool is pinned anywhere in the repo today, and `docs/roadmap.md` explicitly
+  refuses a v1 gate built on coverage, while the generated region of `docs/maturity.md` already says
+  "Nothing here measures whether the tests are good, only that they pass." The number is generated
+  and published; it is never asserted, never gated on, and never presented as a quality claim.
 
 ## Notes
 - Found by the 2026-08-04 capability review: there is no `cargo llvm-cov` or tarpaulin step anywhere

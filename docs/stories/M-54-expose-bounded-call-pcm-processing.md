@@ -36,3 +36,6 @@ reusing M-43's unopinionated format conversion rather than creating speech-speci
 ## Progress
 
 - Backlog. Depends on A-25 and M-43; shared by both M16 epics.
+- 2026-08-08: **readiness audit — ready.** One instruction for the implementor: the seam
+  specification is in scope, and the loss policy derives from `call-audio-processing.md` §8.3
+  together with `speech-providers.md` §8 rather than being invented here.

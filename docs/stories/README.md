@@ -101,7 +101,6 @@ unmet.
 ## Next (ready — take the top one unless the user named a story)
 
 ### Conformance
-- [X-93 — Make protected release evidence faster without weakening it](X-93-make-protected-release-evidence-faster.md) · Build · measure cache and preflight changes against the 12m37 cold beta gate · follow-up
 - [X-66 — Measure coverage and publish the number](X-66-measure-coverage-and-publish-the-number.md) · Build · 1756 test attributes and no measurement of what they reach · a number that is generated, never asserted · follow-up
 
 ### demand-led capability work
@@ -114,14 +113,11 @@ _sipx's backlog has been derived from RFCs, from our own review findings, and fr
 ### local live-call speech
 _A live call on a machine with a local accelerator should be able to transcribe received speech and_
 - [M-54 — Expose bounded call PCM processing and resampling](M-54-expose-bounded-call-pcm-processing.md) · Media · after A-25 and M-43 · shared seam for local speech and deterministic analysis
-- [A-28 — Isolate speech data and resources with no default retention](A-28-isolate-speech-data-and-resources.md) · Application · after A-25 · gates provider delivery · explicit opt-in for retention or off-host processing
+- [A-39 — Build the speech provider contract skeleton](A-39-build-the-speech-provider-contract-skeleton.md) · Application · A-25 specified it and nothing implements it · the registry, session types and selection order every later speech story needs
 
 ### media security profiles
 _sipx implements exactly one SRTP protection profile:_
 - [M-41 — Negotiate AEAD SRTP protection profiles](M-41-negotiate-aead-srtp-protection-profiles.md) · Media · RFC 7714 · one profile shipped today · AEAD-only peers cannot negotiate media with sipx at all · follow-up
-
-### Quic
-- [T-13 — Verify QUIC against a real peer](T-13-verify-quic-against-a-real-peer.md) · Signalling · track: quic · T-12 delivered the transport; independent-peer evidence remains
 
 ## Blocked
 - [M-16 — Implement ICE](M-16-ice.md) · Media · epic tracker · split into M-19 … M-24 · spec is docs/specs/ice.md, written first
@@ -158,6 +154,9 @@ _Applications need small, predictable facts about live audio even when no speech
 - [M-61 — Harden call-audio analysis against adversarial input](M-61-harden-call-audio-analysis.md) · Media · after M-57 · hostile audio, bounded resources, cross-call isolation and no retention
 - [X-106 — Measure call-audio analysis accuracy and resource cost](X-106-measure-call-audio-analysis.md) · Build · after M-58 through M-61 · versioned corpus, error rates, event latency, CPU and memory
 
+### Conformance
+- [X-93 — Make protected release evidence faster without weakening it](X-93-make-protected-release-evidence-faster.md) · Build · measure cache and preflight changes against the 12m37 cold beta gate · follow-up
+
 ### custom call-audio DSP
 _Applications need to shape live call audio without forking the media runtime: ordinary gain and_
 - [A-34 — Publish a runnable custom call-DSP example](A-34-publish-custom-call-dsp-example.md) · Application · M18 exit after M-67 and X-109 · live graph, custom fixture, effects/noise reduction, bypass
@@ -184,6 +183,7 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 _A live call on a machine with a local accelerator should be able to transcribe received speech and_
 - [A-26 — Emit speech-recognition events through the application SDK](A-26-emit-speech-recognition-sdk-events.md) · Application · after C-3, C-5, A-25, M-54 and M-55 · ordered utterance and provider lifecycle
 - [A-27 — Control synthesized call speech through the application SDK](A-27-control-synthesized-call-speech.md) · Application · after A-25, M-17, M-56 and M-58 · bounded playback, cancellation and activity-aware ducking
+- [A-28 — Isolate speech data and resources with no default retention](A-28-isolate-speech-data-and-resources.md) · Application · after A-25 · gates provider delivery · explicit opt-in for retention or off-host processing
 - [M-55 — Ship a practical local offline speech-recognition provider](M-55-ship-local-offline-speech-recognition.md) · Media · after A-25, A-28 and M-54 · accelerator path plus defined CPU behavior
 - [M-56 — Ship a practical local offline speech-synthesis provider](M-56-ship-local-offline-speech-synthesis.md) · Media · after A-25, A-28 and M-54 · accelerator path plus defined CPU behavior
 - [X-104 — Publish a runnable local live-call speech example and measurements](X-104-publish-local-call-speech-example.md) · Build · M16 exit after X-105 · accelerator when available and bounded CPU fixture everywhere
@@ -201,6 +201,9 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [A-33 — Enforce schema idempotency and confirmation for model actions](A-33-enforce-realtime-action-policy.md) · Application · after A-22 · application owns policy, timeouts and consequential-action confirmation
 - [X-107 — Prove the Realtime phone against mock and opt-in live services](X-107-prove-openai-realtime-test-service.md) · Build · after A-30 through A-33 · extend A-21 deterministic CI and A-23's bounded live proof
 - [X-108 — Publish the OpenAI Realtime testkit phone and measurements](X-108-publish-openai-realtime-testkit-phone.md) · Build · M17 exit after X-107 · runnable phone, policy UI and bounded cost/rate/latency evidence
+
+### Quic
+- [T-13 — Verify QUIC against a real peer](T-13-verify-quic-against-a-real-peer.md) · Signalling · track: quic · T-12 delivered the transport; independent-peer evidence remains
 
 ### Video
 - [M-40 — Decide whether video belongs in sipx](M-40-decide-whether-video-belongs-in-sipx.md) · Media · post-beta admission gate; the current vision says video is a non-goal, so no implementation precedes this decision

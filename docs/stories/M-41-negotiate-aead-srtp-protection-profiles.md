@@ -48,6 +48,16 @@ establish media with sipx.
 ## Progress
 - (not started)
 
+- 2026-08-08: **readiness audit — ready, with four corrections for the implementor.** There is half a
+  seam: `sipx-sdp::crypto::Suite` and `sipx-media::dtls::Profile` are both single-variant enums that
+  already carry `key_and_salt_len()`, but the profile is **discarded at `SrtpKeys`** (only byte pairs
+  survive) and `sipx-rtp::srtp` has no profile concept — its cipher is a type alias, its lengths are
+  `pub const`, and `derive()` takes fixed-size arrays. The largest single piece is not the ciphers:
+  it is turning `Capabilities::crypto: Option<Crypto>` into a strongest-first list and replacing the
+  `find_map` with a max-by-strength fold. `aes-gcm` must be added as a RustCrypto dependency, not
+  OpenSSL. This story's two file pointers are stale; the spec rewrite is in scope, and so is the
+  SDES list change this story never names.
+
 ## Notes
 - Whether `AEAD_AES_256_GCM` earns its place or `128` alone closes the practical gap is a call this
   story makes with evidence; the design does not pre-empt it.

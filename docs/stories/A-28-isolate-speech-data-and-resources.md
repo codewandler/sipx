@@ -2,8 +2,8 @@
 id: A-28
 title: Isolate speech data and resources with no default retention
 pillar: Application
-status: ready
-priority: 5
+status: backlog
+priority:
 design: docs/designs/local-speech.md
 epic: local-speech
 areas: [app-sdk, speech, privacy, security, m16]
@@ -37,3 +37,8 @@ host policy for every operation that retains data or sends it off the machine.
 ## Progress
 
 - Backlog. Follows A-25 and precedes the shipped providers.
+- 2026-08-08: **readiness audit — the subject of this story does not exist yet.** `A-25` delivered a
+  specification only: there is no provider registry, session type or speech logging anywhere under
+  `crates/*/src`. Acceptance rows 3, 4 and 5 have nothing to run against, and row 2's "visible
+  through call events" depends on `A-26`, which has not started. Deferred out of the rc.4 wave
+  behind a new predecessor that builds the contract skeleton the spec describes.

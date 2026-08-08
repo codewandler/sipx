@@ -2,8 +2,8 @@
 id: X-93
 title: Make protected release evidence faster without weakening it
 pillar: Build
-status: ready
-priority: 7
+status: backlog
+priority:
 design: docs/specs/release-workflow.md
 epic: conformance
 areas: [release, ci]
@@ -55,6 +55,14 @@ Pages binding, and immutable-tag authority.
   finally `sipx-cli`. The checksum-bound resume path kept this safe, but a human had to read each
   429 deadline, rerun and approve the protected environment. The beta.3 workflow must turn that
   observed registry behavior into bounded controller policy rather than rediscovering it live.
+
+- 2026-08-08: **readiness audit — split required before implementation.** The `12m37`/`6m41`/`13m19`
+  baseline exists only as prose in this file: it appears in no release record, review or changelog,
+  and there is no machine-readable timing store. `scripts/gate.py` has **no clock at all** — it
+  reports a step banner, a step count and disk, nothing temporal — so acceptance row 3 cannot be met
+  until step-timing instrumentation exists, and that instrumentation is the real first story. Row 5
+  (registry 429 pacing in `release.py`) shares nothing with rows 1-4 and belongs on its own. Row 6
+  needs a spec edit because `check-release-workflow.py` greps the spec text. Deferred out of rc.4.
 
 ## Notes
 

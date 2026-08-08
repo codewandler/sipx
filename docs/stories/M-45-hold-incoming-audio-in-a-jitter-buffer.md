@@ -40,6 +40,11 @@ depth is bounded and observable rather than growing into latency.
 ## Progress
 - (not started)
 
+- 2026-08-08: **readiness audit — ready.** Two clarifications: the `media-runtime.md` §4 counter
+  specification edit is in scope, and closing this story as "characterised, no code change needed"
+  is an acceptable outcome if the measurement says so — the story asks for the buffer to be bounded
+  and observable, not for it to be rewritten.
+
 ## Notes
 - Two independent field reports in the demand survey, one comparing unfavourably against a desktop
   softphone. It is the difference between "audio works" and "audio sounds right", and it is the kind
