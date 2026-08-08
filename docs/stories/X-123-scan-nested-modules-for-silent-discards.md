@@ -2,8 +2,8 @@
 id: X-123
 title: Scan nested modules for silent discards
 pillar: Build
-status: ready
-priority: 1
+status: done
+priority:
 design:
 epic: test-surfaces
 areas: [sipx-transport, sipx-call]
@@ -21,15 +21,15 @@ Make the §12.1 discard guard reach every source file in a crate, not only the o
 
 ## Acceptance
 
-- [ ] `crates/sipx-transport/tests/discards.rs` walks a crate's sources recursively, so nested
+- [x] `crates/sipx-transport/tests/discards.rs` walks a crate's sources recursively, so nested
       modules are scanned.
-- [ ] A failing-first test proves the guard reports an unexplained discard placed in a nested
+- [x] A failing-first test proves the guard reports an unexplained discard placed in a nested
       module — it does not today.
-- [ ] The scan asserts it found a plausible number of files, so a future layout change cannot make
+- [x] The scan asserts it found a plausible number of files, so a future layout change cannot make
       it silently scan nothing again. The file's own documentation already argues for this: *"a
       guard that silently scans nothing is indistinguishable from a codebase with nothing to find."*
-- [ ] Every discard site the widened scan newly reveals is resolved — counter or reason — or filed.
-- [ ] `./scripts/gate.py` green.
+- [x] Every discard site the widened scan newly reveals is resolved — counter or reason — or filed.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -39,6 +39,15 @@ Make the §12.1 discard guard reach every source file in a crate, not only the o
   into exactly that layout, and `C-7` added `coupling/`, so the guard stopped covering the largest
   module in the workspace at the moment it became worth covering. `M-77` deliberately placed
   `audio_feed.rs` at the top level of `src/` so its own work stayed under the scan.
+
+- 2026-08-08: implemented. `sources_of` now walks the tree instead of listing one directory, and
+  the widened scan immediately revealed **seven unexplained discard sites**, all in
+  `crates/sipx-call/src/call/mod.rs` — two capability-refusal logs from `M-58`/`M-59`'s
+  renegotiation follow-up, and five best-effort teardown awaits on error paths. Each carries a
+  `// discard:` reason rather than a counter: none is a media frame, so counting them would put a
+  per-call capability ending in a frame-loss statistic. A `sipx-call`-specific assertion now fails
+  if the scan ever covers no nested module again, because the previous shape returned a
+  plausible-looking file list while covering none of `call/` or `coupling/`.
 
 ## Notes
 

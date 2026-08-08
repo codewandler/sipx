@@ -128,17 +128,45 @@ fn sources_of(crate_name: &str) -> Option<Vec<PathBuf>> {
     if !directory.is_dir() {
         return None;
     }
-    let mut files: Vec<PathBuf> = std::fs::read_dir(&directory)
-        .unwrap_or_else(|error| panic!("{crate_name} has a src directory: {error}"))
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
-        .collect();
+    // Walked, not listed. `X-67` moved the call module into `src/call/` and `C-7` added
+    // `src/coupling/`, and a single `read_dir` stopped covering nine files at the moment the
+    // largest module in the workspace became worth covering. A guard that silently scans less
+    // than it claims is the failure this file's own documentation warns about.
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut pending = vec![directory.clone()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir)
+            .unwrap_or_else(|error| panic!("{crate_name} has a src directory: {error}"))
+        {
+            let path = entry
+                .unwrap_or_else(|error| panic!("{crate_name} source entry is readable: {error}"))
+                .path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                files.push(path);
+            }
+        }
+    }
     files.sort();
     assert!(
         files.len() > 5,
         "the scan found almost no source files in {crate_name}, so it is looking in the wrong \
          place: {files:?}"
     );
+    // A crate whose sources are nested must actually be walked. `sipx-call` keeps `call/` and
+    // `coupling/` below `src/`, and a flat `read_dir` returned a plausible-looking list while
+    // covering none of them — a scan that is narrowed rather than broken reports nothing and
+    // looks identical to a clean codebase.
+    if crate_name == "sipx-call" {
+        assert!(
+            files
+                .iter()
+                .any(|path| path.parent() != Some(directory.as_path())),
+            "the scan covered no nested module in {crate_name}, so it is listing one directory \
+             rather than walking the tree"
+        );
+    }
     Some(files)
 }
 

@@ -671,8 +671,9 @@ impl Call {
             return;
         };
         if let Err(refusal) = self.start_voice_activity(profile) {
-            // Not fatal to the call: the renegotiation succeeded and the audio is flowing. The
-            // application stops being told about voice, and is told why here rather than silently.
+            // discard: not fatal to the call — the renegotiation succeeded and the audio is
+            // flowing. The application stops being told about voice, and is told why here rather
+            // than silently. No counter: this is a per-call capability ending, not a media frame.
             tracing::warn!(%refusal, "voice-activity detection could not follow the media session");
         }
     }
@@ -803,9 +804,9 @@ impl Call {
             return;
         };
         if let Err(refusal) = self.start_signal_metrics(profile) {
-            // Not fatal to the call: the renegotiation succeeded and the audio is flowing. The
-            // application stops being told about the signal, and is told why here rather than
-            // silently.
+            // discard: not fatal to the call — the renegotiation succeeded and the audio is
+            // flowing. The application stops being told about the signal, and is told why here
+            // rather than silently. No counter: a capability ending, not a media frame.
             tracing::warn!(%refusal, "signal-metric reporting could not follow the media session");
         }
     }
@@ -1823,6 +1824,9 @@ where
                     let handled = match call.handle(&message).await {
                         Ok(handled) => handled,
                         Err(error) => {
+                            // discard: the call is already failing and this error is the one returned; a
+                            // hang-up or join failure on the way out cannot improve it and must not
+                            // replace the cause the caller needs.
                             stop_work.cancel();
                             let _ = call.hang_up().await;
                             let _ = work.as_mut().await;
@@ -1842,6 +1846,9 @@ where
                     }
                 } else {
                     stop_work.cancel();
+                    // discard: the call is already failing and this error is the one returned; a
+                    // hang-up or join failure on the way out cannot improve it and must not
+                    // replace the cause the caller needs.
                     let _ = call.hang_up().await;
                     let _ = work.as_mut().await;
                     return Err(Error::Transport(sipx_transport::Error::EndpointClosed));
@@ -1863,6 +1870,9 @@ where
             }
             () = sleep_until(deadline) => {
                 if let Err(error) = call.on_session_deadline().await {
+                    // discard: the call is already failing and this error is the one returned; a
+                    // hang-up or join failure on the way out cannot improve it and must not
+                    // replace the cause the caller needs.
                     stop_work.cancel();
                     let _ = work.as_mut().await;
                     return Err(error);
