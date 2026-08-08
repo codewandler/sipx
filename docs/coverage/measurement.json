@@ -1,0 +1,225 @@
+{
+  "command": [
+    "cargo",
+    "+nightly",
+    "llvm-cov",
+    "--workspace",
+    "--all-features",
+    "--branch",
+    "--ignore-filename-regex",
+    "/tests/|/examples/|/benches/|/fuzz/|/target/",
+    "--json",
+    "--summary-only"
+  ],
+  "commit": "fc4fe499b39b70381c2b97246b937e4ad574ff4d",
+  "crates": {
+    "sipx-app": {
+      "branches": {
+        "covered": 471,
+        "total": 754
+      },
+      "functions": {
+        "covered": 646,
+        "total": 743
+      },
+      "lines": {
+        "covered": 5978,
+        "total": 7232
+      }
+    },
+    "sipx-app-protocol": {
+      "branches": {
+        "covered": 168,
+        "total": 226
+      },
+      "functions": {
+        "covered": 206,
+        "total": 223
+      },
+      "lines": {
+        "covered": 2209,
+        "total": 2508
+      }
+    },
+    "sipx-audio": {
+      "branches": {
+        "covered": 101,
+        "total": 122
+      },
+      "functions": {
+        "covered": 141,
+        "total": 156
+      },
+      "lines": {
+        "covered": 1061,
+        "total": 1127
+      }
+    },
+    "sipx-call": {
+      "branches": {
+        "covered": 1050,
+        "total": 1657
+      },
+      "functions": {
+        "covered": 1310,
+        "total": 1425
+      },
+      "lines": {
+        "covered": 11441,
+        "total": 13098
+      }
+    },
+    "sipx-cli": {
+      "branches": {
+        "covered": 558,
+        "total": 872
+      },
+      "functions": {
+        "covered": 609,
+        "total": 787
+      },
+      "lines": {
+        "covered": 6208,
+        "total": 7668
+      }
+    },
+    "sipx-media": {
+      "branches": {
+        "covered": 638,
+        "total": 888
+      },
+      "functions": {
+        "covered": 968,
+        "total": 1005
+      },
+      "lines": {
+        "covered": 9265,
+        "total": 9784
+      }
+    },
+    "sipx-rtp": {
+      "branches": {
+        "covered": 186,
+        "total": 204
+      },
+      "functions": {
+        "covered": 225,
+        "total": 230
+      },
+      "lines": {
+        "covered": 2259,
+        "total": 2290
+      }
+    },
+    "sipx-sdp": {
+      "branches": {
+        "covered": 197,
+        "total": 242
+      },
+      "functions": {
+        "covered": 373,
+        "total": 393
+      },
+      "lines": {
+        "covered": 2785,
+        "total": 2857
+      }
+    },
+    "sipx-sip": {
+      "branches": {
+        "covered": 916,
+        "total": 1142
+      },
+      "functions": {
+        "covered": 1070,
+        "total": 1121
+      },
+      "lines": {
+        "covered": 8231,
+        "total": 8626
+      }
+    },
+    "sipx-testkit": {
+      "branches": {
+        "covered": 177,
+        "total": 244
+      },
+      "functions": {
+        "covered": 376,
+        "total": 407
+      },
+      "lines": {
+        "covered": 2732,
+        "total": 2984
+      }
+    },
+    "sipx-transport": {
+      "branches": {
+        "covered": 739,
+        "total": 1018
+      },
+      "functions": {
+        "covered": 939,
+        "total": 1005
+      },
+      "lines": {
+        "covered": 9723,
+        "total": 10477
+      }
+    },
+    "sipx-ua": {
+      "branches": {
+        "covered": 635,
+        "total": 996
+      },
+      "functions": {
+        "covered": 590,
+        "total": 631
+      },
+      "lines": {
+        "covered": 5540,
+        "total": 6167
+      }
+    }
+  },
+  "excluded": [
+    {
+      "pattern": "/tests/",
+      "why": "test code is executed by definition, so counting it measures the suite against itself: the figure would rise for writing tests and never fall for writing untested code"
+    },
+    {
+      "pattern": "/examples/",
+      "why": "the examples are compiled by the gate and executed by the guides' own checks, not by the suite this measures"
+    },
+    {
+      "pattern": "/benches/",
+      "why": "benchmark harnesses are measurement scaffolding, and their own execution says nothing about the shipped code"
+    },
+    {
+      "pattern": "/fuzz/",
+      "why": "the fuzz targets are a separate cargo workspace with its own nightly campaign; a target the suite never invokes would read as unreached code that is in fact exercised elsewhere"
+    },
+    {
+      "pattern": "/target/",
+      "why": "generated code \u2014 build-script output is compiled from the build directory, and it is written rather than authored, so its reached fraction is not a fact about this repository"
+    }
+  ],
+  "measured_at": "2026-08-08",
+  "tool": "cargo-llvm-cov",
+  "tool_version": "cargo-llvm-cov 0.8.7",
+  "toolchain": "rustc 1.99.0-nightly (26ae60a9e 2026-07-28)",
+  "totals": {
+    "branches": {
+      "covered": 5836,
+      "total": 8365
+    },
+    "functions": {
+      "covered": 7453,
+      "total": 8126
+    },
+    "lines": {
+      "covered": 67432,
+      "total": 74818
+    }
+  }
+}
