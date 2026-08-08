@@ -1,5 +1,5 @@
 ---
-id: M-84
+id: M-85
 title: Refuse a header extension that disagrees with itself, at the send boundary
 pillar: Media
 status: backlog
@@ -83,3 +83,9 @@ written and the far end rejects it, silently, with no counter on either side.
   `crates/sipx-media/src/session.rs:2425` (`send_encoded`).
 - Priority above `M-81`'s because the failure is silent and touches confidentiality on an encrypted
   leg, and below anything attacker-reachable because it is not.
+
+- 2026-08-08: renumbered from `M-84` on filing; that id was allocated in the same wave to carrying
+  calibrated thresholds onto the application wire. Only the id moved. This remains the more serious
+  half of what `M-81` uncovered: an extension whose length word overstates its bytes while keeping
+  the computed header inside the packet is refused by nothing, and puts a plaintext run of media on
+  the wire under all three protection profiles.
