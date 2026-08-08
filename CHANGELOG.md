@@ -7,6 +7,208 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+This boundary answers two independent external sweeps of the published `1.0.0-rc.2` artifacts —
+run from fresh clones against the released musl archive and a pinned registry install, with security
+explicitly out of scope — and lands the work those sweeps made ready. Twenty-five findings across
+call lifecycle, endpoint reachability, timeout honesty, refusal signalling, automation contracts and
+published onboarding are fixed, one codec and one resolver are added, and the largest module in the
+workspace is split without moving a public path. It remains a prerelease on the same terms as
+`rc.2`: Supported APIs still receive migration guidance when they change, Experimental APIs may
+change without it, and stable promotion still requires independent application use.
+
+### Added
+
+- **Every outbound command now reaches a named SIP target without an external lookup.** A normative
+  contract turns a `sip:`/`sips:` URI, optional explicit port and optional transport selection into
+  bounded ordered candidates: NAPTR chooses the transport, SRV the host and port, A/AAAA the
+  addresses, while literal IPv4 and IPv6 targets bypass even resolver setup. `dial`, `register`,
+  `load`, registrar-backed `peers` and `scenario` share one resolver with a two-second per-question
+  and eight-second overall deadline, finite lookup/record/candidate limits, a sixteen-attempt serial
+  connection budget and one cross-record cache. The original hostname stays the TLS/WSS verification
+  identity unless a validated server name explicitly replaces it, a `sips:` URI never falls back to
+  a cleartext candidate, and "the server said no records" stays distinguishable from "the question
+  could not be asked".
+
+- **Calls negotiate and carry G.722.** The codec is native fixed-point sub-band ADPCM, built into
+  every configuration with no feature gate, and verified bit-exactly against the ITU-T Appendix II
+  digital test sequences — both encoder runs and all nine decoder runs — from a committed corpus
+  with a re-verifying import script. RFC 3551 §4.5.2's inconsistency is structural rather than a
+  special case at one call site: 16 kHz audio drives packet sizing, PCM conversion, capture, WAV
+  headers, device audio and recording durations, while the RTP timestamp advances at 8000. A bare
+  static payload type 9 with no `a=rtpmap` is accepted, as is `9 G722/8000` and a dynamic number
+  matched by its rtpmap rather than by the number. Preference sits below Opus and above G.711 and is
+  stated in the offer/answer documentation instead of implied by list order; `--codec g722` selects
+  it in every build.
+
+- **Long-running commands survive supervisor termination, not just Ctrl-C.** `dial`, `answer`,
+  `load` and `load-responder` route interactive interrupt and, on Unix, SIGTERM through one
+  cancellation path: admission closes first, dialog, media and transport work joins within the
+  command's configured bound, and exactly one terminal record follows any earlier readiness record.
+  The first signal is reported as `stop_signal: "interrupt"` or `"terminate"`, a repeated supported
+  signal cannot shorten the cleanup bound or duplicate the terminal report, and a clean stop exits 0.
+  Platform support is typed rather than silently promised.
+
+- **One verbosity level narrates the same call lifecycle in every role.** `answer -v` names the
+  caller after admission and the terminal cause after joined teardown, and `load -v` reports two
+  aggregate records built from the same facts as its result rather than one line per attempted call.
+  Progress comes from the typed state transitions that construct the result, so the first terminal
+  cause supplies both the result word and exactly one end record even when causes race. INFO stays
+  on stderr in text and JSON modes, and no result schema changed to support it.
+
+- **Every shipped call verb has a guide with a compiled example.** Hold and resume, blind transfer,
+  attended transfer, sending and collecting DTMF, playback, recording and two-leg coupling each have
+  a site guide whose sample is inlined byte-exactly from a real file under
+  `crates/sipx-call/examples/` and compiled with the workspace, and the fit list links every
+  capability it claims to the guide that shows it. The application-host program example is surfaced
+  by name with its run command; the fuzz-seed generator and the fixture certificate authority stay
+  deliberately internal, with the reason recorded rather than left implicit.
+
+- **The published onboarding path is checked source rather than transcribed prose.** A
+  registry-shaped consumer crate compiles the displayed answer example from exactly the displayed
+  dependency snippet, so the snippet cannot omit a package the example imports. Generated
+  workspace-version content uses a markdown-safe form whose complete sentence and version are
+  asserted in the built HTML, and a repository check refuses generated markers placed where the
+  renderer would split them again.
+
+- **Two contracts are specified ahead of the code that will implement them.** Interchangeable local
+  speech providers define recognition and synthesis session contracts, a discovery descriptor
+  covering identity, offline status, languages, voices, formats and devices, endpoint-default versus
+  per-call override precedence with a typed refusal order, lifecycle events kept disjoint from SIP
+  failures, and conformance vectors for both interfaces. Deterministic real-time call-audio
+  processing defines a sans-I/O frame contract whose windows and hangovers are sample counts derived
+  from the declared rate, with integer predicates, typed reset versus refusal, explicit memory, CPU
+  and queue bounds with a deterministic overflow marker, and sample-level vectors. Neither ships
+  code, and both name the shared media attachment that later work must reuse instead of adding a
+  second tap.
+
+### Changed
+
+- **The CLI is parsed once by a declarative typed command model.** The handwritten raw-argument
+  scanner, its hand-maintained valued/numeric flag registries, the string lookup facade and every
+  production `std::env::args` read are gone, and a repository check fails if those shapes return.
+  **An option a command does not define is now a usage error (exit 2) naming the flag, instead of
+  being silently discarded** — a script that passed `register --timeout 3` previously ran an
+  unbounded registration and got no indication the flag was ignored. Non-Unicode input is refused as
+  a usage error rather than panicking before `main`. Command and option names, aliases,
+  repeatability and ordering, environment fallbacks, defaults, help and version success, JSON/text
+  separation and exit codes are preserved deliberately; the generated CLI reference is synchronized
+  from parser-owned help, so no second hand-written flag inventory remains.
+
+- **`dial` names its cancellation allowance instead of hiding it inside `--timeout`.** `--timeout`
+  remains the invitation-answer phase; the CANCEL cleanup that follows expiry or Ctrl-C is now
+  `--cancel-timeout <S>`, default 2, where `0` performs no timed cancellation wait. The result
+  reports the measured invitation and cleanup facts — whether CANCEL was admitted, a crossed final
+  response arrived, the transaction completed, or the allowance was exhausted — and never claims the
+  configured invitation threshold alone was the process's elapsed bound. A script that treated
+  `--timeout` as the total process budget should now set both values.
+
+- **The bounded load tools share one workload vocabulary and default to signalling on both sides.**
+  `load` no longer starts media unconditionally against a signalling-only responder; generated media
+  is `--mode generated-media`, selected explicitly and symmetrically on both commands. Incompatible
+  explicit modes are refused before dialog admission with a 488 and a failed terminal result, an
+  invalid local mode is refused before any I/O with exit 2, and an internal call or media worker
+  error stops admission, joins owned calls and reports `failed` instead of being labelled an
+  operator interrupt.
+
+- **`scenario`'s process exit tells a supervisor whether the stream succeeded.** Any malformed frame,
+  refused command or failed operation now exits 1 after every correlated envelope is flushed and one
+  terminal `scenario.stream.completed` or `scenario.stream.failed` event is emitted, so a later
+  success cannot hide an earlier refusal; a deliberately successful SIP `reject` is still a completed
+  operation and a clean empty stream is an explicit completed no-op. The canonical flat frame
+  `{"id":"dial-1","command":"dial","uri":"…"}` is documented in parser-owned help and the public
+  reference with a copyable dial/wait/hangup/shutdown transcript. The nested one-key-per-command
+  shape the old help implied is not accepted, `do` remains a compatibility alias only when `command`
+  is absent, `wait_for`'s required `timeout_ms` is documented, and duplicate correlation IDs are
+  refused.
+
+- **The call module is six modules.** Hold and resume, ICE restart, offer/answer settlement,
+  transfer, re-INVITE and session timers moved into private siblings under
+  `crates/sipx-call/src/call/`, leaving the `Call` type and its lifecycle in `call/mod.rs`. **No
+  public path, name or signature moves:** the all-features rustdoc item listing is byte-identical to
+  the merge base and the whole suite passes with no edit under `tests/`. It is a pure move — no
+  behaviour change and no cleanup rides along; the only non-verbatim lines are per-module imports,
+  private-to-`pub(super)` widenings and module docs.
+
+### Fixed
+
+- **A confirmed call follows the dialog it owns.** `dial` and `answer` share one inbound-dialog pump
+  that prioritizes a queued remote BYE over interrupt and local completion, keeps answering crossed
+  requests during teardown, and joins transport routes, dialog tasks, media and device workers to
+  zero before emitting one terminal result. Previously a peer's BYE was ignored: the answerer stayed
+  alive for its full ten-second local duration after the caller hung up at two, an interrupted
+  process emitted no terminal record at all, and reported call duration was wrong. The same pump
+  dequeues ACK promptly, so the INVITE 2xx stops retransmitting once the ACK arrives while
+  pre-ACK retransmission still happens. Simultaneous remote BYE and local stop originates at most one
+  BYE and cannot duplicate terminal output; a pending invitation still CANCELs rather than
+  manufacturing a BYE before a dialog exists.
+
+- **`dial` returns near its configured budget.** Requests for 1, 2, 3, 5 and 8 seconds previously
+  returned at roughly 3, 4, 5, 7 and 10 — one unreported two-second cancellation tail behind an
+  error naming only the requested timeout. Expiry now sends CANCEL when a client transaction exists
+  and reaches a finite join barrier even when neither CANCEL nor INVITE is answered, a final
+  response before the deadline wins and one after it cannot turn the result back into success, and
+  no fixed wall-clock wait substitutes for transaction completion.
+
+- **An initial offer the media policy cannot accept is refused on the wire.** A valid offer outside
+  the selected codec policy now receives a transaction-owned 488 and malformed SDP a 400, each with
+  the normal To tag, matching transaction identifiers and Content-Length, sent before local teardown
+  and correctly retransmitted or absorbed. Previously the answerer logged "no codec in common" with
+  `messages_in: 1` and `messages_out: 0` and the caller waited out its whole invitation timeout;
+  the caller now reports `rejected`/exit 3 promptly. Failure to transmit a rejection is observable
+  as a send failure and cannot increment a successful-response counter, and an unacceptable
+  re-INVITE still keeps working media.
+
+- **A refused connection is reported as a transport failure, not a SIP timeout.** The endpoint
+  queues its typed connection or handshake cause before the transaction's error event and call
+  setup preserves it, so a closed stream port fails promptly with `failed`/exit 1 and an actionable
+  cause instead of `timeout`/exit 5 and "no final response to the INVITE". A non-answering UDP peer
+  still follows the invitation timeout and exits 5, and TLS-verification and WebSocket-handshake
+  controls prove the mapping is by typed cause rather than elapsed time or string matching.
+
+- **Negotiated telephone events arrive as typed receive events.** RFC 4733 digits carried on the
+  negotiated payload type reach the scenario actor as exactly one ordered event per digit with
+  wire-derived duration facts; continuation packets, repeated end bits, duplicates and reordering
+  cannot produce a second event. Previously `send_dtmf` completed on the sender while the remote
+  `call.dtmf` wait expired. Packets on an unnegotiated payload cannot become digits, a full digit
+  queue drops and counts rather than growing, a stalled consumer cannot block RTP or RTCP work, and
+  call replacement, hold/resume and teardown reset receive state so a prior stream cannot leak into
+  the next correlation scope.
+
+- **A multiplexed browser offer that also carries candidates for the unused RTCP component is
+  accepted.** Component-two candidates are no longer treated as contradicting `a=rtcp-mux`; they are
+  bounded by line and count, dropped before the ICE agent sees them, and the answering call builds
+  its remote description from the filtered result, so one socket, one nominated pair and one runtime
+  component remain. Offers with no viable component-one path, no `a=rtcp-mux`, component-two only or
+  over the bound stay typed refusals, as does a component-two candidate in an answer after mux is
+  selected, and the source-address, ICE-generation, fingerprint and key-state gates are unchanged.
+
+- **A recording destination that cannot be created is refused before signalling.** `dial` and
+  `answer`, in both WAV option spellings, share one reservation that exclusively creates a sibling
+  temporary at preflight without truncating an existing final file, writes and syncs the complete
+  WAV, then installs it atomically. Previously a short call connected and completed before the
+  command discovered that the requested recording's parent directory did not exist. Cancellation,
+  remote hangup, media failure and write failure leave no orphan temporary or handle, and a
+  destination lost after preflight fails honestly without discarding an already finalized recording.
+
+- **Build-capability gaps are refused before any network I/O, and `version --json` emits JSON.**
+  Codec, media-security, profile, ICE and device selections validate their compiled capability
+  before destination resolution, transport bind, file or device open and any datagram, failing as
+  usage (exit 2) naming the missing `opus`, `dtls` or `device-audio` feature. Previously an
+  unavailable codec against an unreachable peer surfaced only as an invitation timeout, so whether
+  the local binary could honour the request depended on the peer answering. `version --json` now
+  emits one stable object through the common report builder instead of the plain text a JSON
+  consumer used to receive, and neither form accepts a positional argument.
+
+- **A structured result cannot contain a duplicate field.** Report fields are stored in
+  order-preserving unique storage that makes a repeated key unrepresentable, requested and
+  negotiated media each own their fields, and a recursive decoder rejects repeated members at the
+  root, nested and inside arrays for every versioned result producer. A successful browser-audio
+  call previously emitted `media_profile` twice, which ordinary parsers hid by keeping one value.
+
+- **Progress records carry no terminal escape sequences unless stderr is a terminal.** Colour is
+  enabled only for a terminal and never when `NO_COLOR` is set. The escapes sat between a field name
+  and its value, so a caller counting `event="call.ended"` read a completed call as a missing one.
+
 ## [1.0.0-rc.2] — 2026-08-05
 
 This is the first published release candidate for stable 1.0. It integrates the post-beta.7
