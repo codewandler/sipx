@@ -75,6 +75,9 @@ appeared twice before anyone named it.
 - [A-38 — Publish and verify the second release candidate](A-38-publish-and-verify-rc3.md) · Application · after X-113 · the post-rc.2 wave as one immutable prerelease · no stable-1.0 claim widens
 - [M-70 — Accept multiplexed browser offers with unused component candidates](M-70-accept-multiplexed-browser-offers-with-unused-component-candidates.md) · Media · external review finding 9 · a second browser engine reaches SDP then fails the multiplexed profile
 - [M-72 — Prove the AEAD SRTP key derivation against an independent peer](M-72-prove-the-aead-srtp-key-derivation-against-a-peer.md) · Media · RFC 7714 publishes no KDF vector · a wrong salt placement makes two sipx endpoints interoperate with each other and nobody else, and every round-trip test still passes
+- [M-79 — Carry the header extension through the relay path](M-79-carry-the-extension-through-the-relay-path.md) · Media · M-75 preserved the extension at the packet layer, but Encoded carries only a payload type and bytes, so bridge and conference still drop it
+- [P-28 — Report the same fields across every outcome](P-28-report-the-same-fields-across-every-outcome.md) · Phone · register's success report carries aor and its failure report does not, so no script can match on it across both
+- [X-119 — Pace registry publication within its rate limit](X-119-pace-registry-publication-within-its-rate-limit.md) · Build · split out of X-93 · the 429 pacing row shares nothing with the rest of that story
 
 ## Next (ready — take the top one unless the user named a story)
 
@@ -84,11 +87,9 @@ _The measure of this stack's reach is what can be built on it **without writing 
 
 ### Conformance
 - [X-125 — See what only the non-Linux jobs compile](X-125-see-what-only-the-non-linux-jobs-compile.md) · Build · two CI jobs were red for a day over a cfg that disagreed with its only caller · the Linux gate compiles the caller, so it cannot see it
-- [X-119 — Pace registry publication within its rate limit](X-119-pace-registry-publication-within-its-rate-limit.md) · Build · split out of X-93 · the 429 pacing row shares nothing with the rest of that story
 - [X-93 — Make protected release evidence faster without weakening it](X-93-make-protected-release-evidence-faster.md) · Build · measure cache and preflight changes against the 12m37 cold beta gate · follow-up
 
 ### Reliable diagnostic automation
-- [P-28 — Report the same fields across every outcome](P-28-report-the-same-fields-across-every-outcome.md) · Phone · register's success report carries aor and its failure report does not, so no script can match on it across both
 - [P-29 — Fund every phase from one process budget](P-29-fund-every-phase-from-one-process-budget.md) · Phone · P-26 bounded resolution BY the deadline rather than subtracting it FROM the deadline, so the worst case is two phases of the stated value
 - [P-30 — Bound the first NOTIFY in a registrar subscription](P-30-bound-the-first-notify-in-a-registrar-subscription.md) · Phone · peers --registrar waits Timer N — 64*T1, 32 seconds — with no operator control · the dominant unbounded wait once resolution is bounded
 
@@ -102,7 +103,6 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 ### Media
 _Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
 - [M-78 — Guard public enums by reachability, not by name](M-78-guard-public-enums-by-reachability.md) · Media · widening the guard from Error-suffixed names to every pub enum reports 149 workspace-wide and 49 on the media path, most of them pub inside private modules
-- [M-79 — Carry the header extension through the relay path](M-79-carry-the-extension-through-the-relay-path.md) · Media · M-75 preserved the extension at the packet layer, but Encoded carries only a payload type and bytes, so bridge and conference still drop it
 - [M-74 — Guard public data enums against exhaustive matching](M-74-guard-public-data-enums-against-exhaustive-matching.md) · Media · the non_exhaustive check only matches enums whose name ends in Error, so MediaProfile, IcePolicy, Keying and RtcpMode are unguarded
 
 ### supported test surfaces
