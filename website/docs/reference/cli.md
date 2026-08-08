@@ -324,9 +324,12 @@ sipx load sip:load@192.0.2.1:5060 --rate 10 --concurrency 32 --calls 100 --seed 
 | `--tls-key <FILE>` | Mutual-TLS client private key; requires `--tls-cert` |
 
 At least one of `--calls` and `--duration` is required; when both are present, the first reached
-closes admission. Reaching a bound or receiving a supported process stop signals all owned calls to
-end and waits for their cleanup before emitting the summary. Cleanup has a 40-second failure bound,
-longer than the SIP transaction ceiling; exhaustion exits 1 and reports `status: "failed"`.
+closes admission. A bound closes admission only: the calls it admitted are waited for, so
+`--calls 1` reports the call it placed rather than a cancellation of it. A supported process stop is
+the other instruction and signals every owned call to end at once. Either way the summary follows
+that cleanup. Cleanup has a 40-second failure bound, longer than the SIP transaction ceiling; calls
+still running when a bound's wait exhausts it are asked to end and funded for the same budget again
+to acknowledge, and exhausting that too exits 1 and reports `status: "failed"`.
 
 The default sends bodyless INVITE/2xx/ACK/BYE dialogs and creates no SDP, RTP socket or media task,
 matching `load-responder`'s default. Select `--mode generated-media` on both commands for the

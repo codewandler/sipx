@@ -3828,11 +3828,11 @@ async fn a_load_run_that_reaches_no_address_reports_what_it_attempted() {
                 "1",
                 "--concurrency",
                 "1",
-                // Two, because a count bound is also an instruction to end the calls it owns: the
-                // last admitted call races the cleanup request it triggers, and a one-call run
-                // measures that race rather than the candidate pass.
+                // One, since `T-44`: a count bound closes admission without cancelling the call it
+                // admitted, so the smallest run there is measures the candidate pass rather than a
+                // race against its own cleanup.
                 "--calls",
-                "2",
+                "1",
                 "--timeout",
                 "5",
             ],
@@ -3968,10 +3968,10 @@ async fn load_reaches_a_target_whose_first_address_is_dead() {
             "1",
             "--concurrency",
             "1",
-            // Two, for the reason the counting test above gives: the last admitted call races the
-            // cleanup its own admission requests, so only the earlier one measures the pass.
+            // One, for the reason the counting test above gives: since `T-44` the call a bound
+            // admits is drained rather than cancelled, so one of them measures the pass.
             "--calls",
-            "2",
+            "1",
             "--timeout",
             "5",
         ],
@@ -5328,6 +5328,92 @@ async fn start_mode_responder(
     )
     .expect("readiness JSON");
     (child, lines, ready)
+}
+
+/// `T-44`: the smallest run an operator can type reports the call it placed.
+///
+/// `--calls 1` is what somebody types to check that a target answers at all, and it is the run this
+/// defect was worst in. A count bound limits *admission*; the harness read it as an instruction to
+/// end the calls it had just admitted, and the only call there is has not finished setting up when
+/// the bound is reached — so the run measured that race instead of the call.
+///
+/// The peer's own summary is asserted beside the generator's, and that is what makes the reading
+/// unambiguous rather than a matter of interpretation: the responder admitted, established and
+/// completed one dialog while `load` reported a timeout for it. One of those two records was wrong
+/// about a call that demonstrably happened.
+///
+/// Both modes, because they were red differently and only one of them visibly. `generated-media`
+/// lost the call outright. `signalling` survived by accident — its cancellation path waits for the
+/// INVITE's first observation, and a peer whose first message is the 200 hands that back — so it
+/// was one provisional response away from the same answer.
+#[tokio::test]
+async fn a_one_call_load_run_reports_the_call_its_peer_answered() {
+    let _scenario = process_scenario().await;
+
+    for mode in ["signalling", "generated-media"] {
+        let (mut responder, mut lines, ready) = start_mode_responder(mode, "1", "1").await;
+        let address = ready["address"].as_str().expect("readiness address");
+        // A failure bound on a one-call run that never returns, scaled like every other wait here.
+        let output = tokio::time::timeout(
+            bound(Duration::from_secs(15)),
+            sipx()
+                .args([
+                    "load",
+                    &format!("sip:load@{address}"),
+                    "--mode",
+                    mode,
+                    "--rate",
+                    "1",
+                    "--concurrency",
+                    "1",
+                    "--calls",
+                    "1",
+                    "--timeout",
+                    "5",
+                    "--json",
+                ])
+                .output(),
+        )
+        .await
+        .expect("the one-call run is bounded")
+        .expect("load runs");
+        let load: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("load summary JSON");
+        let summary: serde_json::Value = serde_json::from_str(
+            &tokio::time::timeout(bound(Duration::from_secs(10)), lines.next_line())
+                .await
+                .expect("responder summary is bounded")
+                .expect("responder summary can be read")
+                .expect("responder summary exists"),
+        )
+        .expect("responder summary JSON");
+        let complaint = drain_stderr(&mut responder).await;
+        let responder_status =
+            tokio::time::timeout(bound(Duration::from_secs(5)), responder.wait())
+                .await
+                .expect("responder exit is bounded")
+                .expect("responder exits");
+
+        assert_eq!(
+            summary["counts"]["established"], 1,
+            "{mode}: the peer answered the one call, so the generator has something to report on: \
+             {summary}"
+        );
+        assert_eq!(
+            load["outcomes"]["connected"], 1,
+            "{mode}: load: {load}; responder: {summary}"
+        );
+        assert_eq!(load["outcomes"]["timed_out"], 0, "{mode}: {load}");
+        assert_eq!(load["outcomes"]["attempted"], 1, "{mode}: {load}");
+        assert_eq!(load["status"], "completed", "{mode}: {load}");
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{mode}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(responder_status.code(), Some(0), "{mode}: {complaint}");
+    }
 }
 
 /// Generated media remains an explicit symmetric workload and still supplies real RTP snapshots.
