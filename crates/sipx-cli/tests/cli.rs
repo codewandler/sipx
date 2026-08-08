@@ -3061,6 +3061,200 @@ fn the_named_target_resolution_contract_is_documented() {
     }
 }
 
+/// `P-26`: a stated deadline is the ceiling over target resolution, not something the resolver's
+/// own bounds are added to. `T-38` allows any one question two seconds; a command told to give up
+/// in one has to give up in one, or the flag is describing a phase rather than the command.
+///
+/// The fixture reads the question and never answers it, so nothing here is an unreachable resolver
+/// or an ICMP failure — only a deadline can end these runs, and the elapsed time is what says
+/// whose deadline it was. Every outbound command is checked, because an operator who scripts two
+/// of them from one cron line cannot have one of them overshoot.
+#[tokio::test]
+async fn every_command_deadline_is_the_ceiling_over_target_resolution() {
+    let _scenario = process_scenario().await;
+    let dns = fixture_nameserver().await;
+
+    // One second asked for, against `T-38`'s two-second per-question bound. Anything from two
+    // seconds up is the resolver's own policy deciding when the command ends, which is the defect.
+    let overshot = Duration::from_millis(1_700);
+    let uri = format!("sip:bob@{SILENT}");
+    let aor = format!("sip:alice@{SILENT}");
+
+    for (command, arguments) in [
+        (
+            "dial",
+            vec!["dial", uri.as_str(), "--timeout", "1", "--duration", "0"],
+        ),
+        (
+            "load",
+            vec![
+                "load",
+                uri.as_str(),
+                "--rate",
+                "1",
+                "--concurrency",
+                "1",
+                "--calls",
+                "1",
+                "--timeout",
+                "1",
+            ],
+        ),
+        (
+            // `peers` states no attempt deadline; the subscription lifetime it asks for is the
+            // only duration the caller gives it, and a subscription that may live one second must
+            // not spend longer than that finding where to send itself.
+            "peers",
+            vec!["peers", "--registrar", aor.as_str(), "--expires", "1"],
+        ),
+    ] {
+        // Both renderings, because `T-39`'s three-way distinction is a promise to a person reading
+        // stderr as well as to a script parsing it.
+        for json in [false, true] {
+            let started = std::time::Instant::now();
+            let output = through_nameserver(&dns, &arguments, json).await;
+            let elapsed = started.elapsed();
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+            // `T-39`'s distinction, unchanged: a deadline is its own exit, and the prefix is what
+            // separates a resolution failure from a connection failure that shares exit 1.
+            assert_eq!(
+                output.status.code(),
+                Some(5),
+                "{command}: a resolution that ran out of time is a timeout, not a failure: {stderr}"
+            );
+            assert_eq!(
+                reported(&stderr, "status", json).as_deref(),
+                Some("timeout"),
+                "{command}: {stderr}"
+            );
+            assert!(
+                reported(&stderr, "error", json)
+                    .is_some_and(|error| error.starts_with("target resolution failed:")),
+                "{command}: resolution is what ran out of time, and the prefix is what says so: \
+                 {stderr}"
+            );
+            assert!(
+                output.stdout.is_empty(),
+                "{command}: a failure must not land on stdout: {:?}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            assert!(
+                elapsed < overshot,
+                "{command} answered after {elapsed:?}, which is the resolver's own bound rather \
+                 than the one second it was given"
+            );
+        }
+    }
+
+    // `scenario` derives its resolver from the deadline of the `dial` command in front of it: one
+    // long-lived actor places many calls, and a budget fixed when the process started is the wrong
+    // one for every call after the first.
+    let started = std::time::Instant::now();
+    let output = scenario_through_nameserver(
+        &dns,
+        &format!(
+            "{{\"id\":\"dial-1\",\"command\":\"dial\",\"uri\":\"sip:bob@{SILENT}\",\
+             \"timeout_ms\":1000}}\n\
+             {{\"id\":\"shutdown-1\",\"command\":\"shutdown\"}}\n"
+        ),
+    )
+    .await;
+    let elapsed = started.elapsed();
+    let lines = scenario_lines(&output);
+    let refusal = lines
+        .iter()
+        .find(|line| {
+            line["event"]["type"] == "scenario.command.refused" && line["event"]["id"] == "dial-1"
+        })
+        .unwrap_or_else(|| panic!("the dial has to be refused: {lines:?}"));
+    assert!(
+        refusal["event"]["message"]
+            .as_str()
+            .is_some_and(|message| message.starts_with("target resolution failed:")),
+        "the refusal names resolution as the cause: {refusal}"
+    );
+    assert!(
+        elapsed < overshot,
+        "scenario answered after {elapsed:?}, which is the resolver's own bound rather than the \
+         one second the dial command was given"
+    );
+}
+
+/// Run one finite stdin scenario whose only resolver is the fixture nameserver.
+async fn scenario_through_nameserver(dns: &Nameserver, script: &str) -> std::process::Output {
+    use tokio::io::AsyncWriteExt as _;
+
+    let mut child = sipx()
+        .args(["scenario", "--local", "127.0.0.1:0"])
+        .env("SIPX_NAMESERVER", dns.address.to_string())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("scenario starts");
+    let mut stdin = child.stdin.take().expect("scenario stdin is piped");
+    stdin
+        .write_all(script.as_bytes())
+        .await
+        .expect("scenario script writes");
+    drop(stdin);
+    // A failure bound: a resolution deadline that stopped being obeyed hangs this assertion rather
+    // than the job it runs in.
+    tokio::time::timeout(Duration::from_secs(25), child.wait_with_output())
+        .await
+        .expect("a named dial is bounded")
+        .expect("scenario exits")
+}
+
+/// `P-26`: every deadline the public page publishes has to say what it covers, and the inventory
+/// is read off the page rather than listed here — a command that gains a deadline and says nothing
+/// about resolution fails this, where a hand-kept list would let it pass by omission.
+#[test]
+fn every_published_command_deadline_states_that_it_covers_resolution() {
+    let reference = include_str!("../../../website/docs/reference/cli.md");
+    let mut checked: Vec<&str> = Vec::new();
+    for (command, section) in reference_sections(reference) {
+        // `peers` states no attempt deadline. Its requested subscription lifetime is the only
+        // duration its caller gives it, so that is the row that has to carry the statement.
+        let deadline = if command == "peers" {
+            "| `--expires <S>`"
+        } else {
+            "| `--timeout <S>`"
+        };
+        let Some(row) = section.iter().find(|line| line.starts_with(deadline)) else {
+            continue;
+        };
+        assert!(
+            row.contains("resolution"),
+            "`sipx {command}` publishes a deadline that does not say it covers target \
+             resolution: {row}"
+        );
+        checked.push(command);
+    }
+    checked.sort_unstable();
+    assert_eq!(
+        checked,
+        ["dial", "load", "peers", "register", "scenario"],
+        "the page's deadline inventory changed; every command carrying one must state what it \
+         covers"
+    );
+}
+
+/// The public page's command sections: the command name, and the lines belonging to it.
+fn reference_sections(reference: &str) -> Vec<(&str, Vec<&str>)> {
+    let mut sections: Vec<(&str, Vec<&str>)> = Vec::new();
+    for line in reference.lines() {
+        if let Some(rest) = line.strip_prefix("## `sipx ") {
+            let name = rest.split([' ', '`']).next().unwrap_or_default();
+            sections.push((name, Vec::new()));
+        } else if let Some((_, body)) = sections.last_mut() {
+            body.push(line);
+        }
+    }
+    sections
+}
+
 /// The acceptance test for P-3 and P-4: two `sipx` processes, a real call, and a recording
 /// that contains the audio that was played.
 #[tokio::test]

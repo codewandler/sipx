@@ -219,7 +219,20 @@ async fn discover(options: &PeersOptions, registrar: &str) -> Result<Vec<Peer>, 
         parsed.scheme().is_secure(),
     )
     .map_err(|message| (Exit::Usage, message))?;
-    let resolver = crate::destination::Resolver::system();
+    // Refused before the lookup rather than after it: an interval that cannot subscribe is
+    // knowable without asking anyone, and it is also the bound the lookup is held under.
+    let expires = Duration::from_secs(options.expires);
+    if expires.is_zero() {
+        return Err((
+            Exit::Usage,
+            "--expires must be positive for a registrar subscription".to_owned(),
+        ));
+    }
+    // This command states no attempt deadline, so the lifetime it asks the registrar for is the
+    // only duration its caller gives it. A subscription that may live one second must not spend
+    // `T-38`'s eight finding where to send itself, and a generous lifetime — the 3600-second
+    // default among them — leaves the resolver's own bounds exactly where they were.
+    let resolver = crate::destination::Resolver::within(Some(expires));
     let candidates = resolver
         .resolve(
             &parsed,
@@ -233,13 +246,6 @@ async fn discover(options: &PeersOptions, registrar: &str) -> Result<Vec<Peer>, 
         .map_err(|error| (error.exit(), error.to_string()))?
         .clone();
     selection = selection.negotiated(selected.transport);
-    let expires = Duration::from_secs(options.expires);
-    if expires.is_zero() {
-        return Err((
-            Exit::Usage,
-            "--expires must be positive for a registrar subscription".to_owned(),
-        ));
-    }
     let local = options.local;
     let mut transport_config = TransportConfig::new(local);
     transport_config.sent_by =

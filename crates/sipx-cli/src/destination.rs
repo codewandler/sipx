@@ -35,7 +35,7 @@ pub(crate) struct Resolver {
 
 impl Resolver {
     /// Read the process' configured nameservers, or the one `SIPX_NAMESERVER` names.
-    pub(crate) fn system() -> Self {
+    fn system() -> Self {
         let policy = ResolutionPolicy::default();
         Self {
             dns: configured(policy)
@@ -53,8 +53,27 @@ impl Resolver {
     /// answers after the answer stopped being wanted, and both bounds would then be honest about
     /// different things. So the budget is pushed down into the same policy rather than raced
     /// against it: neither resolution deadline may exceed what the attempt has left.
-    pub(crate) fn within(budget: Duration) -> Self {
-        let mut resolver = Self::system();
+    ///
+    /// `None` is a command that states no deadline at all, and `T-38`'s own two bounds are then
+    /// the whole of it. It is spelled here rather than at the call sites so that a command which
+    /// gains a deadline later cannot keep an unbounded resolver by forgetting to say so.
+    pub(crate) fn within(budget: Option<Duration>) -> Self {
+        Self::system().narrowed(budget)
+    }
+
+    /// The same nameserver client, and the same cache, under one attempt's budget.
+    ///
+    /// `scenario` is one process placing many calls, each with its own deadline; building a client
+    /// per `dial` would throw away what the previous lookups established — including the negative
+    /// answers — between calls the actor is expected to place back to back.
+    pub(crate) fn narrowed(&self, budget: Option<Duration>) -> Self {
+        let mut resolver = Self {
+            dns: self.dns.clone(),
+            policy: self.policy,
+        };
+        let Some(budget) = budget else {
+            return resolver;
+        };
         // Never zero: `resolve_uri_bounded` refuses a deadline that cannot bound work, and a
         // caller with nothing left to spend has already given up before reaching here.
         let ceiling = budget.max(Duration::from_millis(1));
@@ -123,7 +142,7 @@ fn configured(policy: ResolutionPolicy) -> std::io::Result<DnsResolver> {
     })?;
     // The client's own per-question wait is the outer resolution bound rather than the
     // per-question one, so the deadline that fires — and is therefore the one reported — is always
-    // sipx's own. `Resolver::within` only ever lowers those, so this stays true under a command
+    // sipx's own. `Resolver::narrowed` only ever lowers those, so this stays true under a command
     // deadline too.
     DnsResolver::for_nameserver(address, policy.resolution_timeout)
 }
@@ -297,7 +316,47 @@ mod tests {
                 source.contains(".resolve("),
                 "outbound command {name} bypasses destination::Resolver"
             );
+            // `P-26`: the budget is not optional at the call site. `system()` is private for this
+            // reason, and naming it here keeps the reason findable from the command that would
+            // have wanted it.
+            assert!(
+                source.contains("Resolver::within(") || source.contains(".narrowed("),
+                "outbound command {name} resolves without stating the deadline it resolves under"
+            );
         }
+    }
+
+    /// The clamp, at the two boundaries that matter: a budget wider than `T-38`'s own bounds
+    /// changes nothing, and a narrower one becomes both of them.
+    #[test]
+    fn a_budget_is_a_ceiling_over_both_resolution_deadlines() {
+        let default = ResolutionPolicy::default();
+
+        let generous = Resolver::within(Some(Duration::from_secs(60)));
+        assert_eq!(
+            generous.policy.resolution_timeout,
+            default.resolution_timeout
+        );
+        assert_eq!(generous.policy.lookup_timeout, default.lookup_timeout);
+
+        let tight = Resolver::within(Some(Duration::from_millis(500)));
+        assert_eq!(tight.policy.resolution_timeout, Duration::from_millis(500));
+        assert_eq!(tight.policy.lookup_timeout, Duration::from_millis(500));
+
+        let stated_none = Resolver::within(None);
+        assert_eq!(
+            stated_none.policy.resolution_timeout,
+            default.resolution_timeout
+        );
+
+        // Derived from a resolver rather than from the process: same client, tighter policy.
+        let derived = stated_none.narrowed(Some(Duration::from_secs(1)));
+        assert_eq!(derived.policy.resolution_timeout, Duration::from_secs(1));
+        assert_eq!(derived.policy.lookup_timeout, Duration::from_secs(1));
+        assert_eq!(
+            stated_none.policy.resolution_timeout, default.resolution_timeout,
+            "narrowing produces a resolver rather than changing the one it came from"
+        );
     }
 
     #[test]
