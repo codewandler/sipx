@@ -112,6 +112,8 @@ _sipx's backlog has been derived from RFCs, from our own review findings, and fr
 - [P-26 — Cover resolution in every command deadline](P-26-cover-resolution-in-every-command-deadline.md) · Phone · dial --timeout starts its clock after resolution · a slow name can spend the resolver's eight seconds before the invitation is even sent
 - [P-27 — Make every command exit a join barrier](P-27-make-every-command-exit-a-join-barrier.md) · Phone · P-25 added the join on register's deadline path only · every other exit still reports before its work is observably finished
 - [P-28 — Report the same fields across every outcome](P-28-report-the-same-fields-across-every-outcome.md) · Phone · register's success report carries aor and its failure report does not, so no script can match on it across both
+- [P-29 — Fund every phase from one process budget](P-29-fund-every-phase-from-one-process-budget.md) · Phone · P-26 bounded resolution BY the deadline rather than subtracting it FROM the deadline, so the worst case is two phases of the stated value
+- [P-30 — Bound the first NOTIFY in a registrar subscription](P-30-bound-the-first-notify-in-a-registrar-subscription.md) · Phone · peers --registrar waits Timer N — 64*T1, 32 seconds — with no operator control · the dominant unbounded wait once resolution is bounded
 
 ### Edge / B2BUA
 _A programmable SIP and media edge — transports, endpoints and routes, with dialog bridging and_
