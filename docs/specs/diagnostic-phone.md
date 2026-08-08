@@ -312,6 +312,41 @@ builders. These stack-owned fields **MUST** be refused: `Via`, `Route`, `Record-
 `Max-Forwards`, `Call-ID`, `CSeq`, `From`, `To`, `Contact` and `Content-Length`. The command reports
 the refused name before binding or dialing.
 
+### 3.5 Registration attempt deadline
+
+`register --timeout <S>` is one budget over a whole registration attempt: destination resolution,
+connection, the initial REGISTER transaction, the authenticated retry, a stale-nonce retry after
+that, and every further resolved candidate. It defaults to 20 seconds and carries `dial`'s flag
+name and units, because the two verbs are read by the same operator on the same line. Zero
+delegates expiry to the client transaction layer, where each transaction owns 64·T1 of its own
+(RFC 3261 §17.1.2.2) and a challenged attempt therefore has two of them.
+
+The budget is pushed into the bounded resolver's policy rather than run beside it: neither §2's
+per-lookup deadline nor its whole-resolution deadline may exceed what the attempt has left, so one
+clock decides the outcome. Each resolved candidate is funded from what remains rather than from a
+fresh copy of the budget.
+
+Expiry has no CANCEL to send — §9.1 gives CANCEL to INVITE alone — so the client transaction is
+abandoned rather than negotiated to an end. The command MUST then join what the attempt owned
+before emitting its terminal record; endpoint shutdown cancels the transaction and lookup tasks and
+waits on their tracker, which is a causal barrier rather than a wall-clock wait. The REGISTER may
+still be delivered and the registrar may still record a binding. The command MUST NOT claim one,
+and the agent MUST discard what the abandoned attempt learned about GRUUs and push support
+(RFC 5627 §5.2), exactly as a rejection discards it.
+
+Timeout text and JSON contain the same fields: `status=timeout`, `aor`, an actionable `error`,
+`registration_limit_ms` — the deadline as the caller stated it, never the slice one candidate was
+funded from — and the measured `registration_elapsed_ms` and `cleanup_ms`. Durations use the
+monotonic clock. Exit status separates the three outcomes without reading English: a deadline is
+`timeout`/exit 5, a registrar's refusal keeps the exit its SIP status maps to, and a transport
+failure is `failed`/exit 1. The registration path MUST NOT rewrite a concrete transport failure as
+an unanswered request — the same rule §3 states for outbound setup, and the reason a refused
+connection must not wait out a deadline it has already answered.
+
+`--keep-alive` bounds the initial attempt only; refreshes afterwards are governed by the granted
+lease. `--wake` sends RFC 8599 §4.1.3's binding-refresh REGISTER as a second attempt, bounded by
+the same stated deadline measured from when that exchange begins.
+
 ## 4. Interactive protocol
 
 `sipx scenario` reads one JSON object per line and writes the existing versioned JSON event envelope

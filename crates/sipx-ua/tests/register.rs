@@ -416,6 +416,72 @@ async fn a_wrong_password_fails_without_retrying_forever() {
     );
 }
 
+/// `P-25`: the bound is over the *attempt*, not over one transaction.
+///
+/// A registrar that challenges and then goes quiet costs two client transactions, and RFC 3261
+/// §17.1.2.2 gives each of them 64·T1 of its own — so a caller who asked for five seconds and got
+/// a per-transaction bound would be answered somewhere after sixty. The paused clock is the
+/// measurement: nothing here waits on wall time, and the assertion is which of the two schedules
+/// ended the attempt.
+#[tokio::test(start_paused = true)]
+async fn a_bounded_attempt_covers_the_authentication_retry() {
+    let (registrar, mut incoming) =
+        bind(TransportConfig::new("127.0.0.1:0".parse().expect("valid")))
+            .await
+            .expect("binds");
+    let target = Target::udp(registrar.local_addr());
+    let mut ua = agent(target, Some(Credentials::new(USERNAME, PASSWORD))).await;
+
+    // The clone answers; the original stays in scope so the registrar's socket outlives the
+    // attempt. A closed port would answer the client with ICMP rather than with silence, which
+    // is a transport failure and a different test.
+    let responder = registrar.clone();
+    let serving = tokio::spawn(async move {
+        let initial = incoming.recv().await.expect("the initial REGISTER arrives");
+        responder
+            .respond(
+                &initial.key,
+                challenge_with(&initial.request, "nonce-1", false),
+            )
+            .await
+            .expect("challenges");
+        incoming
+            .recv()
+            .await
+            .expect("the authenticated retry arrives");
+        // and is never answered: the retry's own schedule is the one this deadline pre-empts.
+    });
+
+    let started = tokio::time::Instant::now();
+    let outcome = ua.register_within(Duration::from_secs(5)).await;
+    let elapsed = started.elapsed();
+    serving.await.expect("the registrar task joins");
+
+    assert!(
+        matches!(
+            outcome,
+            Err(sipx_ua::Error::AttemptTimeout { limit }) if limit == Duration::from_secs(5)
+        ),
+        "the attempt's own deadline is what expired: {outcome:?}"
+    );
+    assert!(
+        elapsed >= Duration::from_secs(5),
+        "the whole budget is spent before giving up: {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(32),
+        "gave up after {elapsed:?}, which is a transaction's schedule rather than the caller's"
+    );
+    assert!(
+        ua.gruus().is_empty(),
+        "an abandoned attempt claims no address for a binding it does not have"
+    );
+    assert!(
+        ua.push_support().purr().is_none(),
+        "nor anything the registrar said about a binding that was never recorded"
+    );
+}
+
 /// Being challenged with no credentials configured is a distinct, named failure rather than a
 /// generic one: the fix is different.
 #[tokio::test]

@@ -2220,6 +2220,232 @@ async fn register_over_a_flow_keeps_it_and_a_push_wakes_it() {
     );
 }
 
+/// `P-25`: `--timeout` bounds the whole registration attempt, so a scheduled check against a
+/// registrar that swallows the REGISTER returns on the schedule it was given rather than on RFC
+/// 3261's 32-second non-INVITE transaction expiry. Both output formats carry the same facts, and
+/// the deadline is reported as a measured pair rather than as a bare failure.
+#[tokio::test]
+async fn register_bounds_a_black_holing_registrar_on_its_own_deadline() {
+    let _scenario = process_scenario().await;
+    let registrar = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("binds");
+    let address = registrar.local_addr().expect("has an address");
+
+    // A black hole rather than an unbound port: the datagram is read, so nothing about this run
+    // is a lookup or an ICMP failure, and nothing ever answers. Only the command's own deadline
+    // can end it.
+    let swallowed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = std::sync::Arc::clone(&swallowed);
+    let black_hole = tokio::spawn(async move {
+        let mut buf = vec![0u8; 65_535];
+        while let Ok((length, _)) = registrar.recv_from(&mut buf).await {
+            if buf[..length].starts_with(b"REGISTER") {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    });
+
+    for json in [false, true] {
+        let (output, elapsed) =
+            timed_register(&["--target", &address.to_string(), "--timeout", "1"], json).await;
+
+        assert_eq!(
+            output.status.code(),
+            Some(5),
+            "a bounded attempt that ran out of time exits timeout: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "a failure must not land on stdout: {:?}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if json {
+            assert_bounded_attempt_json(&stderr);
+        } else {
+            assert_bounded_attempt_text(&stderr);
+        }
+        // The whole point of the story: 32 seconds is the transaction's schedule, one second was
+        // ours. Anything in between is the flag being ignored again.
+        assert!(
+            elapsed < Duration::from_secs(15),
+            "gave up after {elapsed:?}, which is the transaction's schedule rather than ours"
+        );
+    }
+
+    black_hole.abort();
+    assert!(
+        swallowed.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+        "each run must have reached the registrar, or the deadline bounded a lookup instead"
+    );
+}
+
+/// Run `sipx register` to completion, reporting how long the process actually took.
+///
+/// The outer bound is a failure bound: a deadline that stopped being obeyed hangs this assertion
+/// rather than the job it runs in.
+async fn timed_register(arguments: &[&str], json: bool) -> (std::process::Output, Duration) {
+    let mut command = sipx();
+    command
+        .args(["register", "sip:alice@example.com"])
+        .args(arguments);
+    if json {
+        command.arg("--json");
+    }
+    let started = std::time::Instant::now();
+    let output = tokio::time::timeout(Duration::from_secs(15), command.output())
+        .await
+        .expect("the stated deadline bounds the attempt")
+        .expect("register runs");
+    (output, started.elapsed())
+}
+
+/// The deadline's JSON facts: what was asked for, what it cost, and what cleaning up cost.
+fn assert_bounded_attempt_json(stderr: &str) {
+    assert!(stderr.contains("\"status\":\"timeout\""), "{stderr}");
+    assert!(
+        stderr.contains("\"registration_limit_ms\":1000"),
+        "{stderr}"
+    );
+    let report: serde_json::Value = serde_json::from_str(
+        stderr
+            .lines()
+            .find(|line| line.starts_with('{'))
+            .expect("the timeout is one JSON object on stderr"),
+    )
+    .expect("the timeout report parses");
+    assert_eq!(report["aor"], "sip:alice@example.com");
+    assert!(
+        report["registration_elapsed_ms"]
+            .as_u64()
+            .is_some_and(|value| value >= 1_000),
+        "the attempt phase is measured, not assumed: {report}"
+    );
+    assert!(
+        report["cleanup_ms"].as_u64().is_some(),
+        "dropping and joining the attempt is measured too: {report}"
+    );
+}
+
+/// The same facts in the other format, which is the half a person reads.
+fn assert_bounded_attempt_text(stderr: &str) {
+    // Read the fields rather than a rendered line: the text form pads names to the widest one, so
+    // asserting on the spacing would break whenever a field is added beside them.
+    let field = |name: &str| {
+        stderr
+            .lines()
+            .find_map(|line| line.strip_prefix(name).map(|value| value.trim().to_owned()))
+    };
+    assert_eq!(field("status").as_deref(), Some("timeout"), "{stderr}");
+    assert_eq!(
+        field("aor").as_deref(),
+        Some("sip:alice@example.com"),
+        "{stderr}"
+    );
+    assert_eq!(
+        field("registration_limit_ms").as_deref(),
+        Some("1000"),
+        "{stderr}"
+    );
+    assert!(
+        field("registration_elapsed_ms")
+            .is_some_and(|value| value.parse::<u64>().is_ok_and(|elapsed| elapsed >= 1_000)),
+        "the attempt phase is measured in text too: {stderr}"
+    );
+    assert!(field("cleanup_ms").is_some(), "{stderr}");
+}
+
+/// `P-25`: the three ways a registration attempt can end stay distinguishable without parsing
+/// English. Silence is the command's own deadline, a refusal is the registrar's answer, and a
+/// connection nothing accepted is a local transport failure — 5, 3 and 1.
+#[tokio::test]
+async fn register_tells_a_deadline_a_refusal_and_a_transport_failure_apart_by_exit_status() {
+    let _scenario = process_scenario().await;
+
+    let silent = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("binds");
+    let silent_address = silent.local_addr().expect("has an address");
+    let (timed_out, _) = timed_register(
+        &["--target", &silent_address.to_string(), "--timeout", "1"],
+        true,
+    )
+    .await;
+    assert_eq!(timed_out.status.code(), Some(5));
+    let silence = String::from_utf8_lossy(&timed_out.stderr);
+    assert!(silence.contains("\"status\":\"timeout\""), "{silence}");
+
+    let refusing = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("binds");
+    let refusing_address = refusing.local_addr().expect("has an address");
+    let answering = tokio::spawn(async move {
+        let (request, source) = next_register(&refusing, "a REGISTER to refuse").await;
+        let field = |name: &str| header_line(&request, name);
+        let response = format!(
+            "SIP/2.0 404 Not Found\r\n{}\r\n{}\r\n{}\r\n{}\r\n{}\r\nContent-Length: 0\r\n\r\n",
+            field("Via"),
+            field("To"),
+            field("From"),
+            field("Call-ID"),
+            field("CSeq"),
+        );
+        refusing
+            .send_to(response.as_bytes(), source)
+            .await
+            .expect("refuses");
+    });
+    let (rejected, _) = timed_register(
+        &["--target", &refusing_address.to_string(), "--timeout", "10"],
+        true,
+    )
+    .await;
+    answering.await.expect("the registrar task joins");
+    assert_eq!(
+        rejected.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    let refusal = String::from_utf8_lossy(&rejected.stderr);
+    assert!(refusal.contains("\"status\":\"rejected\""), "{refusal}");
+    assert!(
+        !refusal.contains("registration_limit_ms"),
+        "an answer that arrived invents no deadline fields: {refusal}"
+    );
+
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").expect("reserves a loopback port");
+    let unreachable = closed.local_addr().expect("reserved address");
+    drop(closed);
+    let (failed, elapsed) = timed_register(
+        &[
+            "--target",
+            &unreachable.to_string(),
+            "--transport",
+            "tcp",
+            "--timeout",
+            "10",
+        ],
+        true,
+    )
+    .await;
+    assert_eq!(
+        failed.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&failed.stderr)
+    );
+    let transport = String::from_utf8_lossy(&failed.stderr);
+    assert!(transport.contains("\"status\":\"failed\""), "{transport}");
+    assert!(transport.contains("transport:"), "{transport}");
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "a refused connection is an answer about the address, not silence to wait out: {elapsed:?}"
+    );
+}
+
 #[tokio::test]
 async fn version_obeys_the_selected_output_contract() {
     let _scenario = process_scenario().await;

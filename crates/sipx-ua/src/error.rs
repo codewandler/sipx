@@ -15,6 +15,18 @@ pub enum Error {
     /// The transaction ended without a final response — a timeout or a transport failure.
     #[error("no final response")]
     NoResponse,
+    /// The caller's deadline for a whole registration attempt expired.
+    ///
+    /// Distinct from [`Error::NoResponse`], which is one client transaction reaching its own
+    /// expiry: this is the budget a caller placed over the *attempt* — the initial REGISTER and
+    /// any authentication retry — and it can fire while a transaction is still waiting. Both are
+    /// "nothing answered in time", so a caller that only classifies may treat them alike; the
+    /// distinction is what lets a report say which schedule the run was held to.
+    #[error("the registration attempt did not complete within {}ms", limit.as_millis())]
+    AttemptTimeout {
+        /// The deadline the caller gave.
+        limit: std::time::Duration,
+    },
     /// The server challenged and no credentials were configured.
     #[error("the server requires credentials and none were configured")]
     CredentialsRequired,
