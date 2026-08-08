@@ -322,6 +322,10 @@ pub(crate) struct RegisterOptions {
     /// Requested lease in seconds.
     #[arg(long, default_value_t = 3600, value_name = "S", value_parser = parse_seconds)]
     pub(crate) expires: u64,
+    /// Attempt timeout in seconds, over resolution and every transaction; zero delegates to the
+    /// transaction layer.
+    #[arg(long, default_value_t = 20, value_name = "S", value_parser = parse_seconds)]
+    pub(crate) timeout: u64,
     /// Local address to bind.
     #[arg(long, default_value = "0.0.0.0:0")]
     pub(crate) local: SocketAddr,

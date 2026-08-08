@@ -1,6 +1,7 @@
 //! Shared outbound SIP destination resolution for command adapters.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use sipx_sip::{Host, Uri};
@@ -29,6 +30,27 @@ impl Resolver {
                 .map_err(|source| source.to_string()),
             policy: ResolutionPolicy::default(),
         }
+    }
+
+    /// A system resolver whose own deadlines fit inside a command's remaining budget.
+    ///
+    /// `T-38`/`T-39` already bound resolution: one deadline per question and one over the whole
+    /// of it. A command that also has a deadline over the *attempt* must not start a second clock
+    /// beside those — a resolver still entitled to eight seconds inside a two-second attempt
+    /// answers after the answer stopped being wanted, and both bounds would then be honest about
+    /// different things. So the budget is pushed down into the same policy rather than raced
+    /// against it: neither resolution deadline may exceed what the attempt has left.
+    pub(crate) fn within(budget: Duration) -> Self {
+        let mut resolver = Self::system();
+        // Never zero: `resolve_uri_bounded` refuses a deadline that cannot bound work, and a
+        // caller with nothing left to spend has already given up before reaching here.
+        let ceiling = budget.max(Duration::from_millis(1));
+        resolver.policy.resolution_timeout = resolver.policy.resolution_timeout.min(ceiling);
+        resolver.policy.lookup_timeout = resolver
+            .policy
+            .lookup_timeout
+            .min(resolver.policy.resolution_timeout);
+        resolver
     }
 
     /// Resolve the request URI or an explicit next hop without changing the request URI.

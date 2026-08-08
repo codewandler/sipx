@@ -308,6 +308,7 @@ Register with a registrar: `sipx register sip:alice@example.com`
 | `--password <P>` | Password. Prefer the `SIPX_PASSWORD` environment variable — argv is world-readable |
 | `--target <ADDR>` | Where to send, if not derived from the AOR (`host:port`) |
 | `--expires <S>` | Lease to ask for, in seconds (default 3600) |
+| `--timeout <S>` | Give up if the registration has not completed in this many seconds (default 20). Same flag and units as `dial`, over the whole attempt: resolution, connection, the REGISTER transaction and any authentication retry. `0` waits as long as the transaction layer does — 32 seconds per transaction |
 | `--local <ADDR>` | Local address to bind (default `0.0.0.0:0`) |
 | `--transport <T>` | Use `udp`, `tcp`, `tls`, `ws`, or `wss` (default `udp`) |
 | `--tcp` | Legacy alias for `--transport tcp` |
@@ -331,6 +332,16 @@ Report fields: `status`, `aor`, `expires`, `refresh_in` — plus `flow` under `-
 flags (whether the registrar named the same push service, RFC 8599 §8.2). `--wake` adds a second
 report line with `status: "woken"` and, when the registrar assigned one, `purr`. Explicit transport
 selection adds `requested_transport` and `negotiated_transport` to the registration result.
+
+An attempt that runs out of time exits `timeout` (5) and reports `registration_limit_ms`, measured
+`registration_elapsed_ms` and measured `cleanup_ms` beside `aor` and `error` — the same fields in
+text and JSON, on stderr like every other failure. `cleanup_ms` is the join of what the abandoned
+attempt owned, so the stated deadline is never presented as the whole of the elapsed process time.
+Those fields are what keep a deadline distinguishable from a registrar that answered: a refusal
+exits `rejected` (3) or `unauthorized` (4) with its SIP status, and a connection nothing accepted
+exits `failed` (1) with the transport cause, neither of them waiting for the deadline. `--keep-alive`
+refreshes after a bounded attempt succeeds — the deadline bounds the attempt, not the lifetime of a
+registration being kept — and `--wake`'s binding refresh is a second attempt bounded the same way.
 
 Combinations that cannot work are usage errors (exit 2), never parsed and dropped: half a push
 pair, `--push-param` alone, `--wake` without the push flags, `--instance` without `--outbound`,

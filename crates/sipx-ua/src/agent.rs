@@ -464,12 +464,60 @@ impl UserAgent {
         })
     }
 
+    /// As [`UserAgent::woken`], under one deadline covering that binding refresh.
+    ///
+    /// §4.1.3's refresh is a registration attempt like any other, and a caller holding a deadline
+    /// over its own work has one over this too — a push whose refresh never completes leaves it
+    /// waiting for a request down a flow that was never created. The budget behaves exactly as
+    /// [`UserAgent::register_within`]'s.
+    pub async fn woken_within(&mut self, budget: Duration) -> Result<crate::push::Pending> {
+        let lease = self.register_within(budget).await?;
+        Ok(crate::push::Pending {
+            lease,
+            purr: self.push_support.purr().map(str::to_owned),
+        })
+    }
+
+    /// Register under one deadline covering the whole attempt.
+    ///
+    /// [`UserAgent::register`] is bounded by the client transaction's own expiry, once per
+    /// transaction: an initial REGISTER and its authenticated retry are two transactions and
+    /// therefore two schedules, and RFC 3261 §17.1.2.2 makes each of them 64·T1 — 32 seconds at
+    /// the default T1. `budget` is one bound over all of them, which is what a caller running a
+    /// registration check on a schedule actually has: a time by which it needs an answer, not a
+    /// number of transactions it is willing to fund.
+    ///
+    /// There is no CANCEL to send when it expires. §9.1 gives CANCEL to INVITE alone, so an
+    /// expired budget abandons the transaction instead of negotiating an end to it: the REGISTER
+    /// may still arrive and the registrar may still record the binding, and this agent claims
+    /// none of it. What it learned about GRUUs and push support is discarded exactly as a
+    /// rejection discards it — keeping it would publish an address for a registration this agent
+    /// does not have (RFC 5627 §5.2). Joining the transaction task itself belongs to the endpoint
+    /// that owns it, through [`sipx_transport::Handle::shutdown`].
+    ///
+    /// A zero budget expires on the first poll rather than falling back to an unbounded wait. A
+    /// caller that wants the transaction layer's own schedule asks for it by calling
+    /// [`UserAgent::register`], which is the shape that has no deadline to state.
+    pub async fn register_within(&mut self, budget: Duration) -> Result<Lease> {
+        // The borrow ends with the timeout future, so the abandoned attempt is already dropped
+        // by the time this tidies up after it.
+        if let Ok(result) = tokio::time::timeout(budget, self.register()).await {
+            return result;
+        }
+        self.gruus = gruu::Gruus::default();
+        self.push_support = crate::push::Support::default();
+        Err(Error::AttemptTimeout { limit: budget })
+    }
+
     /// Register, answering a challenge if one comes.
     ///
     /// One retry, not a loop. A second challenge after credentials were supplied means the
     /// credentials are wrong — unless the server says the nonce was merely stale, which is a
     /// different thing and is retried. Looping on a genuine rejection is how a client locks
     /// out the account it is trying to use.
+    ///
+    /// The bound here is the client transaction's, once per transaction. Use
+    /// [`UserAgent::register_within`] when the attempt as a whole has a deadline.
     pub async fn register(&mut self) -> Result<Lease> {
         self.registration.advance();
         let mut request = self.registration.request()?;
@@ -568,7 +616,17 @@ impl UserAgent {
             .endpoint
             .send(request, self.config.target.clone())
             .await?;
-        let response = responses.final_response().await.ok_or(Error::NoResponse)?;
+        let Some(response) = responses.final_response().await else {
+            // The endpoint queues the concrete driver cause before the transport-error event that
+            // ends the stream, so a refused connection, a failed handshake or a stream that closed
+            // under the request is available here as itself. Reporting those as `NoResponse` would
+            // say a reachable registrar stayed silent, which is a different problem with a
+            // different fix — and, for a caller holding a deadline, it is the difference between
+            // "retry later" and "this address is wrong".
+            return Err(responses
+                .take_transport_error()
+                .map_or(Error::NoResponse, Error::Transport));
+        };
         Ok(registrar::interpret(&response, &self.registration))
     }
 

@@ -39,6 +39,11 @@ pub(crate) async fn run(options: RegisterOptions, format: Format) -> Exit {
 
     let password = options.password.clone();
 
+    // The attempt's clock starts here, before the first thing that can wait: a deadline that
+    // began at the transaction would leave resolution outside the bound the caller stated, and a
+    // registrar whose name resolves slowly is one of the ways a scheduled check overshoots.
+    let attempt = Attempt::new(Duration::from_secs(options.timeout));
+
     // Validated before any socket is opened, and every combination that cannot work is refused:
     // a flag that parses and is dropped is worse than one that errors (`P-7` was filed for
     // exactly that shape), so `--wake` without a push service, half a push pair, or an
@@ -56,7 +61,10 @@ pub(crate) async fn run(options: RegisterOptions, format: Format) -> Exit {
         Err(message) => return fail(format, Exit::Usage, &message),
     };
 
-    let resolver = crate::destination::Resolver::system();
+    let resolver = match attempt.remaining() {
+        Some(remaining) => crate::destination::Resolver::within(remaining),
+        None => crate::destination::Resolver::system(),
+    };
     let candidates = match resolver
         .resolve(
             &parsed_aor,
@@ -125,7 +133,7 @@ pub(crate) async fn run(options: RegisterOptions, format: Format) -> Exit {
     // as typed, so a caller matching on it does not have to.
     let aor = format!("sip:{user}@{domain}");
 
-    match register_candidates(&handle, &ua_config, &candidates).await {
+    match register_candidates(&handle, &ua_config, &candidates, &attempt).await {
         Ok((mut agent, lease, negotiated_transport)) => {
             let mut report = transport.report(
                 Report::new()
@@ -157,8 +165,10 @@ pub(crate) async fn run(options: RegisterOptions, format: Format) -> Exit {
                 // §4.1.3: a push is answered with a binding-refresh REGISTER, and only then is
                 // there a flow for the request the push was sent for. `woken` is that ordering;
                 // when to call it is the application's, and this flag is the CLI acting as its
-                // own push service for one ring.
-                if let Err(exit) = report_wake(&mut agent, format, &aor).await {
+                // own push service for one ring. It is a second exchange, so it gets the stated
+                // deadline over again rather than whatever the first attempt left behind: a
+                // budget already spent would refuse the refresh instead of bounding it.
+                if let Err(exit) = report_wake(&mut agent, format, &aor, &attempt).await {
                     return exit;
                 }
             }
@@ -172,7 +182,54 @@ pub(crate) async fn run(options: RegisterOptions, format: Format) -> Exit {
             }
             Exit::Success
         }
+        Err(error @ sipx_ua::Error::AttemptTimeout { .. }) => {
+            report_attempt_timeout(format, export, &handle, &attempt, &aor, &error).await
+        }
         Err(error) => report_failure(format, &error),
+    }
+}
+
+/// The caller's bound over one registration attempt, and the single clock it is measured on.
+///
+/// `--timeout 0` keeps the pre-`P-25` behaviour and is `limit: None` here: the clock still runs,
+/// so the report can say how long the attempt took, but nothing expires. Everything that can wait
+/// — resolution, the transaction, the authenticated retry, each further candidate — is funded
+/// from this one budget rather than given a schedule of its own, which is what makes the number
+/// the caller typed the number the command obeys.
+#[derive(Debug)]
+struct Attempt {
+    started: tokio::time::Instant,
+    limit: Option<Duration>,
+}
+
+impl Attempt {
+    fn new(limit: Duration) -> Self {
+        Self {
+            started: tokio::time::Instant::now(),
+            limit: (!limit.is_zero()).then_some(limit),
+        }
+    }
+
+    /// How long the attempt has been running.
+    fn elapsed(&self) -> Duration {
+        self.started.elapsed()
+    }
+
+    /// What is left of the budget, or `None` when the caller asked for no deadline.
+    fn remaining(&self) -> Option<Duration> {
+        self.limit.map(|limit| limit.saturating_sub(self.elapsed()))
+    }
+
+    /// The deadline as it is reported and as the expiry names it.
+    fn limit(&self) -> Duration {
+        self.limit.unwrap_or_default()
+    }
+
+    /// The failure for a budget with nothing left in it.
+    fn expired(&self) -> sipx_ua::Error {
+        sipx_ua::Error::AttemptTimeout {
+            limit: self.limit(),
+        }
     }
 }
 
@@ -180,19 +237,70 @@ async fn register_candidates(
     handle: &sipx_transport::Handle,
     config: &Config,
     candidates: &[sipx_transport::Target],
+    attempt: &Attempt,
 ) -> Result<(UserAgent, sipx_ua::Lease, sipx_transport::TransportKind), sipx_ua::Error> {
     let mut last_transport = None;
     for target in candidates.iter().take(crate::destination::MAX_ATTEMPTS) {
-        let mut attempt = config.clone();
-        attempt.target = target.clone();
-        let mut agent = UserAgent::new(handle.clone(), attempt);
-        match agent.register().await {
+        let mut candidate = config.clone();
+        candidate.target = target.clone();
+        let mut agent = UserAgent::new(handle.clone(), candidate);
+        // Each candidate is funded from what the deadline has left, never from a fresh copy of
+        // it: sixteen candidates with a budget each would multiply the bound the caller stated by
+        // sixteen, which is the shape of overshoot this story exists to remove.
+        let outcome = match attempt.remaining() {
+            Some(remaining) if remaining.is_zero() => return Err(attempt.expired()),
+            Some(remaining) => agent.register_within(remaining).await,
+            None => agent.register().await,
+        };
+        match outcome {
             Ok(lease) => return Ok((agent, lease, target.transport)),
             Err(error @ sipx_ua::Error::Transport(_)) => last_transport = Some(error),
+            // Restated with the deadline the caller typed rather than the slice of it this
+            // candidate was funded from: "did not complete within 999ms" describes an accounting
+            // detail, and the person reading it asked for one second.
+            Err(sipx_ua::Error::AttemptTimeout { .. }) => return Err(attempt.expired()),
             Err(error) => return Err(error),
         }
     }
     Err(last_transport.unwrap_or(sipx_ua::Error::NoResponse))
+}
+
+/// Report an attempt that ran out of time, after joining what it left running.
+///
+/// The join is here and not at the caller because terminal output is a barrier: nothing this
+/// invocation started may still be running when a script reads the result. A REGISTER has no
+/// CANCEL to send, so the abandoned transaction is stopped by shutting the endpoint down, which
+/// cancels its tasks and waits on their tracker — a causal join, not a wall-clock wait. It is
+/// measured beside the deadline so the report never claims the stated limit was the whole of the
+/// process's elapsed time when it was not.
+async fn report_attempt_timeout(
+    format: Format,
+    export: crate::counters::Export,
+    handle: &sipx_transport::Handle,
+    attempt: &Attempt,
+    aor: &str,
+    error: &sipx_ua::Error,
+) -> Exit {
+    let elapsed = attempt.elapsed();
+    let joining = tokio::time::Instant::now();
+    handle.shutdown().await;
+    let cleanup = joining.elapsed();
+
+    let report = Report::new()
+        .text("status", Exit::Timeout.as_str())
+        .text("aor", aor)
+        .text("error", error.to_string())
+        .millis("registration_limit_ms", attempt.limit())
+        .millis("registration_elapsed_ms", elapsed)
+        .millis("cleanup_ms", cleanup);
+    let report = match export.into_report(report) {
+        Ok(report) => report,
+        Err(message) => return fail(format, Exit::Failed, &message),
+    };
+    // stderr, like every other failure: nothing that is not a registration result may land where
+    // the next stage of a pipeline will parse it as one.
+    eprintln!("{}", report.render(format));
+    Exit::Timeout
 }
 
 /// What the reachability flags asked for: an Outbound flow (RFC 5626), a push service to be
@@ -295,8 +403,17 @@ fn reachability(options: &RegisterOptions) -> Result<Reachability, String> {
 /// A wake is reported as its own line rather than as fields on the registration's, because it is
 /// a second exchange with the registrar: what was true after registering stays true, and a caller
 /// reading the stream sees both answers instead of one overwritten by the other.
-async fn report_wake(agent: &mut UserAgent, format: Format, aor: &str) -> Result<(), Exit> {
-    match agent.woken().await {
+async fn report_wake(
+    agent: &mut UserAgent,
+    format: Format,
+    aor: &str,
+    attempt: &Attempt,
+) -> Result<(), Exit> {
+    let woken = match attempt.limit {
+        Some(limit) => agent.woken_within(limit).await,
+        None => agent.woken().await,
+    };
+    match woken {
         Ok(pending) => {
             let mut report = Report::new()
                 .text("status", "woken")
@@ -327,7 +444,10 @@ fn report_failure(format: Format, error: &sipx_ua::Error) -> Exit {
         sipx_ua::Error::AuthenticationFailed | sipx_ua::Error::CredentialsRequired => {
             Exit::Unauthorized
         }
-        sipx_ua::Error::NoResponse => Exit::Timeout,
+        // Both are "nothing answered in time", and a script branching on the exit code must not
+        // have to know which schedule ran out. `report_attempt_timeout` is what tells them apart,
+        // in fields rather than in a second exit code.
+        sipx_ua::Error::NoResponse | sipx_ua::Error::AttemptTimeout { .. } => Exit::Timeout,
         _ => Exit::Failed,
     };
     fail(format, exit, &error.to_string())
