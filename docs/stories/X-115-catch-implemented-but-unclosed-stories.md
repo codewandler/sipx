@@ -2,7 +2,7 @@
 id: X-115
 title: Catch implemented but unclosed stories
 pillar: Build
-status: ready
+status: in-progress
 priority: 23
 design:
 epic: conformance
@@ -21,14 +21,14 @@ selection cannot re-dispatch finished work.
 
 ## Acceptance
 
-- [ ] A check reports every story whose `status` is `backlog` or `ready` while its `## Acceptance`
+- [x] A check reports every story whose `status` is `backlog` or `ready` while its `## Acceptance`
       rows are fully or near-fully ticked, naming the story and the counts.
-- [ ] The check distinguishes the benign case — a story mid-implementation whose implementor has
+- [x] The check distinguishes the benign case — a story mid-implementation whose implementor has
       ticked rows as it goes — from the defect, so it reports rather than fails where the state is
       legitimately transient. State the rule it uses and why.
-- [ ] A failing-first test builds a story fixture in each state and proves the check reports the
+- [x] A failing-first test builds a story fixture in each state and proves the check reports the
       unclosed one and stays quiet for the others.
-- [ ] The check runs where a human will see it before selection, not only in the gate.
+- [x] The check runs where a human will see it before selection, not only in the gate.
 - [ ] `./scripts/gate.py` green, with any new CI job registered as a gate step or in
       `NOT_RUN_LOCALLY` with a reason.
 
@@ -41,6 +41,22 @@ selection cannot re-dispatch finished work.
   contract six downstream stories already cite by section and vector ID. A sweep of the tree found
   `A-16` was the only story in that shape, so this is a guard against recurrence rather than a
   cleanup of a widespread defect.
+- 2026-08-08: `scripts/check-story-closure.py`, with `scripts/test-story-closure.py` beside it and
+  the pre-commit hook running it on every commit that touches `docs/stories/`. **The rule**: report
+  a story whose `status` is `backlog` or `ready`, whose Acceptance has at least one ticked row and
+  at most one outstanding, in the **committed** board rather than the working tree. Each clause
+  answers one half of row 2 — `in-progress` and `blocked` are the lifecycle's own words for a story
+  somebody is holding, two outstanding rows is real work left, and a working-tree tick is an
+  implementation in flight. The thresholds are calibrated against this board's history rather than
+  chosen: swept over 926 committed story states on `main`'s first-parent history the rule fires
+  four times across three stories, all of them the same defect (`A-16` twice, `X-12`, `X-29`), and
+  it stays quiet through `X-29`'s deliberate 3-of-6 partial landing. It reports and does not fail,
+  because two of those three were closed by the very next commit — a gate step would have been red
+  on the commit that landed `X-29`'s completed work.
+- 2026-08-08: row 5 is not ticked. `scripts/gate.py` was fenced for this story, so the
+  `story closure tests` step that would run the new suite could not be added, and the full gate was
+  not run here — one wave gate covers the wave. `./scripts/gate.py --check`, `test-gate.py`,
+  `maturity.py --check`, `check-provenance.sh` and `check-docs-links.py` are green.
 
 ## Notes
 
