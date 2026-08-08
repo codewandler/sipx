@@ -100,6 +100,12 @@ properties and never by a product identity. `resources` values are estimates for
 the binding guarantee is behavioral — a provider that cannot meet its declared real-time profile
 refuses setup with the measured requirement (M-55/M-56) rather than degrading silently.
 
+A voice's **declared properties** are stable lowercase tokens and nothing more. No step of §4 reads
+them, so a property can never quietly become the reason one voice was selected over another; a voice
+is chosen by the identity the host wrote in the selection document and by nothing else. They exist
+so discovery can report what a provider says about a voice beyond the tags it speaks, and a
+consumer that does not understand a token ignores it.
+
 Execution devices are described by capability because selection by marketing name is not portable
 and not checkable. A device entry states what it is (`Cpu`/`Accelerator`), how much memory it
 offers, and how many concurrent real-time sessions the provider declares for it; M-55/M-56 must

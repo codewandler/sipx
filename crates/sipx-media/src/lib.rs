@@ -37,6 +37,10 @@
 //!   call without explicit DTLS-SRTP policy.
 //! - [`Bridge`] and [`Conference`] — real and tested over sessions **you** own; a `Call` does not hand
 //!   out its `MediaSession`, so two calls cannot be bridged yet (`C-6`).
+//! - [`speech`] — the provider *contract* of `docs/specs/speech-providers.md` and nothing behind
+//!   it. No recogniser, synthesiser, model or accelerator dependency ships in this crate, and no
+//!   call gains the ability to transcribe or speak by depending on it; the types exist so `M-55`,
+//!   `M-56` and downstream replacements are written against one document (`A-39`).
 
 pub mod bridge;
 pub mod browser;
@@ -46,6 +50,7 @@ pub mod dtls;
 pub mod ice;
 pub mod processing;
 pub mod session;
+pub mod speech;
 
 pub use bridge::Bridge;
 pub use conference::{Conference, ConferenceError};
