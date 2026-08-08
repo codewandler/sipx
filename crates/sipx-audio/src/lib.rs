@@ -22,6 +22,15 @@
 //! recognition. Live frames reach it through `sipx-media`'s one bounded call seam, never through a
 //! tap of its own. `docs/specs/call-audio-processing.md` is the contract it implements.
 //!
+//! **The custom call-DSP contract lives in [`dsp`]** (`M-63`). It is the one deterministic frame
+//! transform that built-in effects, noise reduction and application-supplied processors all
+//! implement — same trait, same capability declaration, same conformance harness, no crate-private
+//! door. Like [`analysis`] it is sans-I/O and allocation-free: output, observations and scratch are
+//! lent by the caller, and time is the sample position and rate given as input. What it adds is a
+//! declaration of *where* a processor may run — see `ExecutionProfile`, which states for each of
+//! the three profiles what it does and does not promise about stalling RTP.
+//! `docs/specs/custom-call-dsp.md` is the contract it implements.
+//!
 //! RFC 4733 DTMF is not here either, and never was: telephone-events are an RTP payload format
 //! rather than audio samples, and they live in `sipx-rtp`.
 //!
@@ -55,6 +64,7 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 pub mod analysis;
+pub mod dsp;
 pub mod g711;
 pub mod g722;
 pub mod l16;
