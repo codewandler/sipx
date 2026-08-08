@@ -138,6 +138,38 @@ class TheRepositoryItself(unittest.TestCase):
             with self.subTest(crate=name):
                 self.assertIn(name, self.published)
 
+    def test_every_breakable_public_struct_is_non_exhaustive_or_argued_at_the_type(self):
+        """`M-80`'s failing-first API assertion: additive fields must stay additive.
+
+        Before `M-80` this reported six types, `Encoded` and `Packet` among them — the two whose
+        field additions in `M-75` and `M-79` broke in-tree literals and are the reason the rule
+        exists at all.
+        """
+        self.assertEqual([], guard.struct_problems(guard.guarded_structs(self.published)))
+
+    def test_the_guard_reads_structs_out_of_every_crate_it_covers(self):
+        """The blinding assertion of the enum rule above, for the struct rule.
+
+        A rule that selects nothing passes at exit 0, and `X-116` is the proof that happens by
+        accident rather than by design.
+        """
+        for name in guard.guarded_structs(self.published):
+            with self.subTest(crate=name):
+                self.assertGreater(len(guard.breakable_structs(name)), 0)
+
+    def test_the_struct_boundary_names_crates_that_exist(self):
+        for name in guard.MEDIA_SURFACE:
+            with self.subTest(crate=name):
+                self.assertIn(name, self.published)
+
+    def test_the_struct_debt_is_reported_rather_than_suppressed(self):
+        """The remainder is a number on every run, not a list nobody reads.
+
+        A boundary that reported zero outstanding structs would mean the rule had either finished
+        or gone blind, and on this workspace it has done neither.
+        """
+        self.assertGreater(len(guard.outstanding_structs(self.published)), 0)
+
     def test_every_claim_every_crate_makes_is_backed(self):
         """`X-35`'s failing-first assertion.
 
@@ -432,8 +464,12 @@ class TheExtensibilityRule(unittest.TestCase):
         return demo_crate({"lib.rs": source})
 
 
-def demo_crate(files: dict[str, str]) -> list[str]:
-    """Run the extensibility rule over a crate laid out from `path -> source` under `src/`."""
+def demo_crate(files: dict[str, str], rule=None) -> list[str]:
+    """Run an extensibility rule over a crate laid out from `path -> source` under `src/`.
+
+    `rule` selects which of the two runs — they share the reachability walk, so both are exercised
+    against the same fixtures rather than against two copies of one.
+    """
     with tempfile.TemporaryDirectory() as directory:
         crates = pathlib.Path(directory) / "crates"
         src = crates / "sipx-demo" / "src"
@@ -445,7 +481,7 @@ def demo_crate(files: dict[str, str]) -> list[str]:
         original = guard.CRATES
         guard.CRATES = crates
         try:
-            return guard.enum_problems(["sipx-demo"])
+            return (rule or guard.enum_problems)(["sipx-demo"])
         finally:
             guard.CRATES = original
 
@@ -770,6 +806,159 @@ class TheStabilityRule(unittest.TestCase):
                 return guard.stability_problems(crate)
             finally:
                 guard.entry_point = original
+
+
+class TheStructExtensibilityRule(unittest.TestCase):
+    """`M-80`: a public field is as much of a contract as a variant, and breaks the same way.
+
+    The rule this adds had a comment arguing against itself in the file for the life of the
+    project — "a struct can add a private field without breaking a caller" — which is true of the
+    struct it describes and false of every struct that has `pub` fields. `M-75` and `M-79` are the
+    two field additions that proved it, so what is asserted below is both directions: the shape
+    that broke is reported, and the shapes that cannot break are not.
+    """
+
+    #: A struct with public fields and a published constructor, which is the shape `Encoded` and
+    #: `Packet` both have and the shape the rule is looking for.
+    BREAKABLE = (
+        "/// A payload.\n"
+        "pub struct Encoded {\n"
+        "    /// What it is encoded in.\n"
+        "    pub payload_type: u8,\n"
+        "}\n\n"
+        "impl Encoded {\n"
+        "    /// One of these.\n"
+        "    pub fn new(payload_type: u8) -> Self {\n"
+        "        Self { payload_type }\n"
+        "    }\n"
+        "}\n"
+    )
+
+    def test_a_breakable_struct_is_reported(self):
+        problems = self.problems_for(self.BREAKABLE)
+        self.assertEqual(1, len(problems))
+        self.assertIn("Encoded", problems[0])
+
+    def test_a_non_exhaustive_struct_is_not_reported(self):
+        self.assertEqual(
+            [], self.problems_for(self.BREAKABLE.replace("pub struct", "#[non_exhaustive]\npub struct"))
+        )
+
+    def test_a_struct_with_an_adjacent_reason_is_not_reported(self):
+        self.assertEqual(
+            [],
+            self.problems_for(
+                self.BREAKABLE.replace(
+                    "/// A payload.\n",
+                    "/// A payload.\n///\n/// Complete by design: the wire carries these and no more.\n",
+                )
+            ),
+        )
+
+    def test_a_distant_reason_does_not_classify_the_type(self):
+        problems = self.problems_for(
+            "/// Complete by design: this explains another item.\n"
+            "pub const EARLIER: u8 = 1;\n\n" + self.BREAKABLE
+        )
+        self.assertEqual(1, len(problems))
+
+    def test_an_enum_rationale_does_not_satisfy_the_struct_rule(self):
+        """The two phrases answer different questions, so one may not stand in for the other."""
+        problems = self.problems_for(
+            self.BREAKABLE.replace(
+                "/// A payload.\n",
+                "/// A payload.\n///\n/// Exhaustive by design: these are the complete states.\n",
+            )
+        )
+        self.assertEqual(1, len(problems))
+
+    def test_a_struct_with_no_public_field_is_not_reported(self):
+        """The sentence the old comment made, which is true of exactly this shape."""
+        self.assertEqual(
+            [], self.problems_for(self.BREAKABLE.replace("    pub payload_type", "    payload_type"))
+        )
+
+    def test_a_crate_visible_field_is_not_a_public_field(self):
+        """`pub(crate)` cannot be named from outside, so no downstream literal can name it."""
+        self.assertEqual(
+            [],
+            self.problems_for(self.BREAKABLE.replace("    pub payload_type", "    pub(crate) payload_type")),
+        )
+
+    def test_a_struct_with_no_constructor_is_not_reported(self):
+        """The type boundary: marking one of these leaves a caller no way to build it at all."""
+        self.assertEqual([], self.problems_for(self.BREAKABLE.partition("impl Encoded")[0]))
+
+    def test_another_types_constructor_does_not_hold_this_one(self):
+        """`impl EncodedBuilder` is not `impl Encoded`, however the prefix reads."""
+        problems = self.problems_for(
+            self.BREAKABLE.partition("impl Encoded")[0]
+            + "/// A builder.\npub struct EncodedBuilder {\n    /// Bits.\n    pub bits: u8,\n}\n\n"
+            "impl EncodedBuilder {\n    /// One.\n    pub fn new() -> Self {\n"
+            "        Self { bits: 0 }\n    }\n}\n"
+        )
+        self.assertEqual(1, len(problems))
+        self.assertIn("EncodedBuilder", problems[0])
+
+    def test_a_unit_struct_is_not_reported(self):
+        self.assertEqual(
+            [],
+            self.problems_for(
+                "/// A marker.\npub struct Marker;\n\n"
+                "impl Marker {\n    /// One.\n    pub fn new() -> Self {\n        Self\n    }\n}\n"
+            ),
+        )
+
+    def test_a_tuple_struct_with_a_public_field_is_reported(self):
+        problems = self.problems_for(
+            "/// A sequence number.\npub struct RSeq(pub u32);\n\n"
+            "impl RSeq {\n    /// One.\n    pub fn new(value: u32) -> Self {\n"
+            "        Self(value)\n    }\n}\n"
+        )
+        self.assertEqual(1, len(problems))
+        self.assertIn("RSeq", problems[0])
+
+    def test_a_tuple_struct_with_a_private_field_is_not_reported(self):
+        self.assertEqual(
+            [],
+            self.problems_for(
+                "/// A sequence number.\npub struct RSeq(u32);\n\n"
+                "impl RSeq {\n    /// One.\n    pub fn new(value: u32) -> Self {\n"
+                "        Self(value)\n    }\n}\n"
+            ),
+        )
+
+    def test_generics_and_a_where_clause_do_not_hide_the_body(self):
+        """`declaration` has to skip a parameter list to find the brace that opens the fields."""
+        problems = self.problems_for(
+            "/// A holder.\npub struct Holder<T>\nwhere\n    T: Clone,\n{\n"
+            "    /// The value.\n    pub value: T,\n}\n\n"
+            "impl<T: Clone> Holder<T> {\n    /// One.\n    pub fn new(value: T) -> Self {\n"
+            "        Self { value }\n    }\n}\n"
+        )
+        self.assertEqual(1, len(problems))
+        self.assertIn("Holder", problems[0])
+
+    def test_a_struct_in_an_unreachable_module_is_not_reported(self):
+        """The reachability walk is shared with the enum rule, so it holds here too."""
+        self.assertEqual(
+            [],
+            demo_crate(
+                {"lib.rs": "//! Demo.\nmod hidden;\n", "hidden.rs": self.BREAKABLE},
+                guard.struct_problems,
+            ),
+        )
+
+    def test_a_struct_re_exported_out_of_a_private_module_is_reported(self):
+        problems = demo_crate(
+            {"lib.rs": "//! Demo.\nmod hidden;\npub use hidden::Encoded;\n", "hidden.rs": self.BREAKABLE},
+            guard.struct_problems,
+        )
+        self.assertEqual(1, len(problems))
+        self.assertIn("Encoded", problems[0])
+
+    def problems_for(self, source: str) -> list[str]:
+        return demo_crate({"lib.rs": source}, guard.struct_problems)
 
 
 if __name__ == "__main__":

@@ -35,7 +35,12 @@ use crate::counters::DiscardMeters;
 const STUN_RTO: Duration = Duration::from_millis(500);
 
 /// Everything gathering needs that the sockets do not already supply.
+///
+/// `#[non_exhaustive]` on the same terms as [`Encoded`](crate::session::Encoded): build one with
+/// [`Gathering::new`] and assign the rest, which is already how a caller with an opinion about the
+/// tiebreaker works.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Gathering {
     /// Our short-term credentials for this ICE session (RFC 8839 §5.4), which go in the offer or
     /// the answer and key every check in both directions ([spec] §11.2).

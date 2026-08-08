@@ -14,8 +14,12 @@
 //! predicates are in `docs/roadmap.md`. Until then:
 //!
 //! - **Supported** — meant to be depended on. Breaking changes get a `CHANGELOG.md` entry saying what
-//!   to do instead. New enum variants and new struct fields may still appear in a minor release, so a
-//!   downstream `match` should carry a `_` arm.
+//!   to do instead. New enum variants and new struct fields may still appear in a minor release, and
+//!   the types that can grow say so: they carry `#[non_exhaustive]`, so a downstream `match` needs a
+//!   `_` arm and a downstream value is built with the type's constructor rather than a struct
+//!   literal. That is this reservation made checkable instead of merely stated — `M-80` settled it
+//!   for [`Packet`] and `sipx_media::Encoded` together, and `scripts/check-audio-claims.py` holds
+//!   the rest of this crate's constructor-bearing public types to it.
 //! - **Experimental** — may change shape or be removed without a migration note. Depend on it only if
 //!   you are prepared to follow it.
 //!

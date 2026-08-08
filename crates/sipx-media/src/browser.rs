@@ -142,7 +142,12 @@ pub fn classify_datagram(datagram: &[u8]) -> Result<IngressClass, IngressDrop> {
 }
 
 /// The exact ICE pair allowed to carry DTLS and protected media.
+///
+/// `#[non_exhaustive]` on the same terms as [`Encoded`](crate::session::Encoded): build one with
+/// [`SelectedComponent::new`] and assign the rest. What identifies a selected pair is ICE's to
+/// extend, not this crate's to close.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SelectedComponent {
     /// Bound local candidate address.
     pub local: SocketAddr,

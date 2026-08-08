@@ -109,7 +109,12 @@ impl std::fmt::Display for Digit {
 }
 
 /// One telephone-event payload.
+///
+/// `#[non_exhaustive]` on the same terms as [`Packet`](crate::packet::Packet): build one with
+/// [`Event::new`] and assign the rest. RFC 4733 §2.3's event payload is a wire shape this crate
+/// does not get to close.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Event {
     /// Which digit.
     pub digit: Digit,

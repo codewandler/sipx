@@ -29,7 +29,28 @@ pub enum RtpError {
 }
 
 /// An RTP packet.
+///
+/// # Stability
+///
+/// `#[non_exhaustive]`: build one with [`Packet::new`] and assign whatever else it needs. The
+/// fields stay `pub` and stay readable and assignable from anywhere — the attribute forbids the
+/// struct literal and nothing else, which is why [`Packet::new`] taking five of the eight fields
+/// costs a caller nothing.
+///
+/// The reason is a rate and not a prediction. This type mirrors a wire format that grows, and it
+/// has already grown twice under callers: `M-75` added [`Packet::extension`] here and `M-79` added
+/// the same field to `sipx_media::Encoded`, and each of those additive changes broke every struct
+/// literal naming the type. `M-80` marked the two **together**, because they are the two ends of
+/// one relay path and marking one would have left the other free to break the same caller in the
+/// same way for the same reason.
+///
+/// The timing is the rest of the argument. `#[non_exhaustive]` can be **removed** in any minor
+/// release without breaking a caller, and can only be **added** in a major one. Marking now keeps
+/// both answers reachable; shipping `1.0.0` unmarked would have spent the choice on the answer
+/// that two stories had already shown to be wrong. See `docs/roadmap.md`'s v1 predicate 4, which
+/// is where a contract stops being editable to fit a change.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Packet {
     /// Whether this packet marks a significant event — the start of a talkspurt, or the end of
     /// a DTMF tone.
@@ -399,5 +420,34 @@ mod tests {
         assert_eq!(sequence_distance(65_535, 0), 1);
         assert_eq!(sequence_distance(65_530, 5), 11);
         assert_eq!(sequence_distance(10, 10), 0);
+    }
+
+    #[test]
+    fn the_constructor_reaches_every_field_a_literal_could_set() {
+        // `M-80`. `Packet` is `#[non_exhaustive]`, so the literal below is the one thing a
+        // downstream crate may no longer write. What it may write is `new` plus assignments, and
+        // the attribute is only honest if the two reach the same values: an attribute that also
+        // removed reachable states would be a functional change wearing a compatibility argument.
+        //
+        // This is also the pressure that keeps it true. A field added later stops this literal
+        // compiling, so whoever adds it has to name it here — and can only make the assertion
+        // pass again by making the field reachable from `new` or from an assignment.
+        let mut built = Packet::new(96, 7, 1234, 0xDEAD_BEEF, Bytes::from_static(&[1, 2, 3]));
+        built.marker = true;
+        built.csrc = vec![0xAAAA, 0xBBBB];
+        built.extension = Some(Bytes::from_static(&[0xBE, 0xDE, 0, 0]));
+
+        let literal = Packet {
+            marker: true,
+            payload_type: 96,
+            sequence: 7,
+            timestamp: 1234,
+            ssrc: 0xDEAD_BEEF,
+            csrc: vec![0xAAAA, 0xBBBB],
+            extension: Some(Bytes::from_static(&[0xBE, 0xDE, 0, 0])),
+            payload: Bytes::from_static(&[1, 2, 3]),
+        };
+
+        assert_eq!(literal, built);
     }
 }
