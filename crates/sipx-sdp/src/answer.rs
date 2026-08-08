@@ -250,6 +250,12 @@ impl Capabilities {
 /// Build an answer to an offer.
 ///
 /// Returns a description whose media lines correspond one to one with the offer's.
+///
+/// Every attribute on an accepted stream is authored here out of [`Capabilities`]; none is echoed
+/// from the offer. So an offered `a=extmap` is answered by omission, which RFC 8285 §7 makes the
+/// answerer's way of declining an extension it does not want — and this side originates no element
+/// identifier of its own. `docs/specs/media-runtime.md` §5 builds a bridge's forwarding rule on
+/// that, and `M-82` records why.
 #[must_use]
 pub fn answer(offer: &SessionDescription, capabilities: &Capabilities) -> SessionDescription {
     let mut media = Vec::with_capacity(offer.media.len());
@@ -617,6 +623,31 @@ mod tests {
         assert_eq!(answered.media[1].port, 40000, "audio is accepted, in place");
         assert_eq!(answered.media[2].media, "application");
         assert_eq!(answered.media[2].port, 0);
+    }
+
+    /// An offered `a=extmap` is declined by omission, and nothing here originates one (`M-82`).
+    ///
+    /// A pinning test rather than a failing-first one: an answer has always been authored from
+    /// `Capabilities` rather than echoed from the offer, so no `a=extmap` could reach one. What it
+    /// stops is that becoming an echo later. The generic path matters as much as the browser
+    /// profile's here — a bridged SIP leg is answered through this function, and
+    /// `docs/specs/media-runtime.md` §5.2 rests on sipx originating no element identifier on
+    /// *either* leg.
+    #[test]
+    fn an_offered_header_extension_mapping_is_neither_echoed_nor_originated() {
+        let offered = offer(&AUDIO_OFFER.replace(
+            "a=sendrecv\r\n",
+            "a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level\r\na=sendrecv\r\n",
+        ));
+        let answered = answer(&offered, &Capabilities::g711(local(), 40000));
+        let rendered = answered.to_string_sdp();
+        assert!(
+            !rendered.contains("a=extmap"),
+            "the answer agreed to an element identifier nothing in sipx reads:\n{rendered}"
+        );
+        // The stream is answered rather than declined: an offered extension costs the peer nothing.
+        assert_eq!(answered.media[0].port, 40000);
+        assert_eq!(answered.media[0].formats, vec!["0", "8", "101"]);
     }
 
     /// The order is the offerer's. An answerer that imposes its own preference is how two

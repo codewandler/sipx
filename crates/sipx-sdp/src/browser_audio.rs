@@ -178,6 +178,11 @@ pub enum ProfileError {
 }
 
 /// Emit a complete initial offer.
+///
+/// It carries no `a=extmap`, and that is load-bearing rather than incidental: RFC 8285 §7 lets a
+/// party send only element identifiers that appeared in SDP it originated, so offering none leaves
+/// sipx with no header extension it may put on a packet. `docs/specs/media-runtime.md` §5.2 builds
+/// a bridge's forwarding rule on that empty table.
 pub fn offer(local: &BrowserAudioLocal) -> Result<SessionDescription, ProfileError> {
     validate_local(local)?;
     build(
@@ -196,6 +201,13 @@ pub fn offer(local: &BrowserAudioLocal) -> Result<SessionDescription, ProfileErr
 }
 
 /// Emit an answer preserving the offered payload numbers and order.
+///
+/// **An offered `a=extmap` is answered by omitting it, and the omission is the answer** (`M-82`).
+/// RFC 8285 §7 makes removing an `extmap` from the answer how an answerer that does not want the
+/// extension declines it, so an offer carrying header extensions is neither refused over them nor
+/// agreed to. The answer is built from local facts throughout — no attribute of the offer's is
+/// echoed — which is what keeps that true for any attribute this profile does not implement.
+/// `docs/specs/webrtc-audio.md` §4.1 and §4.5 are normative for the position.
 pub fn answer(
     offered: &SessionDescription,
     local: &BrowserAudioLocal,

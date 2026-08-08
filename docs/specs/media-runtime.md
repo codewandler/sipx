@@ -381,7 +381,118 @@ than media, so a rise in it — and in `total()` — is not evidence that any au
 the network was bounds-checked when its packet was decoded, so only an `Encoded` built by hand can
 move it.
 
-## 5. Test vectors
+## 5. A forwarded header extension, and whose numbering it is in
+
+`M-79` made a pass-through bridge forward the RTP header extension a packet arrived with, verbatim.
+`M-82` settled what that means when neither leg negotiated one, because the identifiers inside an
+RFC 8285 extension are scoped to a session and a bridge joins two.
+
+**The decision. sipx negotiates no `a=extmap` in any profile, maps no element identifier between the
+legs of a bridge, and forwards the extension byte for byte.** An offer carrying `a=extmap:` is
+answered by omitting it — [webrtc-audio.md](webrtc-audio.md) §4.1 states the browser profile's half
+of that. This is a decision and not a deferral; §5.4 names the one fact that would reopen it and
+what must happen in the same change.
+
+### 5.1 Why the identifier is the question at all
+
+RFC 3550 §5.3.1 gives the extension a 16-bit profile field whose format is defined by the profile
+the implementations are operating under. RFC 8285 defines two such fields — `0xBEDE` for the
+one-byte form and `0x100x` for the two-byte — and inside them a run of elements, each introduced by
+a **local identifier**: 1 through 14 in the one-byte form (§4.2), 1 through 255 in the two-byte form
+(§4.3).
+
+Those identifiers are local in the strict sense. RFC 8285 §5 requires that the mapping from an
+identifier to the extension's URI "MUST be performed out of band — for example, as part of an SDP
+Offer/Answer [RFC3264]", and §7 requires each to be used only once per media section. There is
+nothing in the packet that says whose numbering an identifier is in. So on a bridge the same octet
+can mean an audio level on one leg and something else entirely on the other, and **the bridge cannot
+detect the disagreement** — which is what makes this something to argue rather than something to
+fix.
+
+The case is real rather than hypothetical. RFC 8285 §7 permits a peer to put elements on the wire
+that the answer did not agree to: "Either party MAY include extensions in the stream other than
+those negotiated ... (for example, for the benefit of intermediate nodes). Only extensions that
+appeared with an identifier in the valid range in SDP originated by the sender can be sent." A
+browser that offered `a=extmap:1 …` through `:4 …` and got an answer with none may still send
+elements 1 to 4, conformantly. [webrtc-audio.md](webrtc-audio.md) §9.4's captured offer is exactly
+such a description.
+
+### 5.2 Why forwarding one is safe, in four steps
+
+**sipx originates no identifier, so a forwarded one has nothing to collide with.** By the same
+sentence of RFC 8285 §7, a sender may only send identifiers that appeared in SDP *it* originated —
+and sipx originates none, in the generic answer path or the browser profile. Its own numbering table
+is empty on every leg, in both directions. A relayed element is therefore the only element on the
+outgoing packet, and no receiver of sipx's is ever put in the position of having two meanings for
+one octet. **This is the whole safety argument's precondition**, and it is what §5.4 watches.
+
+**A far end that negotiated nothing reads nothing out of what it is handed.** It negotiated nothing
+because sipx offered and answered nothing. RFC 8285 §5 makes the out-of-band mapping the definitive
+indication that a header extension is present at all, so a conformant far end has no identifier
+bound to any URI for this session and no element to act on.
+
+**A far end that does not implement RFC 8285 skips the extension whole.** This is RFC 3550 §5.3.1's
+own design goal, stated in the section the story cites: the mechanism "is designed so that the
+header extension may be ignored by other interoperating implementations that have not been
+extended." The skip is driven by the four-octet header's length word, and §4.4 is what makes that
+word trustworthy on everything sipx encodes — so the far end finds the payload at the right offset
+whether it looks at the extension or not. RFC 8285 §4.1 makes the same property normative for the
+extensions themselves: they "MUST NOT be used to extend RTP itself in a manner that is backward
+incompatible with non-extended implementations", and metadata may ride along only "provided the RTP
+layer can function if that metadata is missing". An element the far end must act on for the call to
+work is already outside RFC 8285.
+
+**And verbatim is the only rule that is also right for the other kind of extension.** Not every
+header extension is an RFC 8285 one. RFC 3550 §5.3.1's profile field is scoped by the *profile* both
+legs are operating under — RFC 3551 for an ordinary G.711 call — and not by anything either session
+numbered. For such an extension the identifier means the same thing on both legs by definition, so
+dropping it would destroy meaning that was intact and translating it would be a category error.
+Forwarding is right for that case and harmless for the RFC 8285 case; **no other single rule is
+right for both**, which is the strongest reason this is the answer rather than a convenient one.
+
+### 5.3 What the argument does not cover, stated as limits
+
+- **It is about meaning, not about disclosure.** A bridge is two dialogs, and an element that
+  crosses it — a level measurement, an `sdes:mid`, an absolute send time — is a fact about one
+  call's endpoint delivered to the other call's. Ignorable on receipt is not the same as not
+  disclosed. sipx accepts that exposure: it is bounded by what the forwarded audio already conveys,
+  and refusing it would take `M-79`'s case with it. Recorded here so that a deployment joining two
+  trust domains can weigh it rather than discover it.
+- **It is about conformant receivers.** A far end that acts on an element it never negotiated is
+  already reading data no one agreed to send it, and nothing on the packet distinguishes such a peer
+  from a compliant one. sipx cannot detect that peer and does not claim to.
+- **It says nothing about a peer that numbers *identically* by coincidence.** Two legs that both
+  used identifier 1 for different extensions produce a packet that is correct on both by every check
+  either can apply. That is the residual case, it is unobservable from the middle, and it is
+  precisely why sipx does not *invent* a translation: a renumbering built on a guessed reading of
+  the elements would turn an unobservable coincidence into a wire effect sipx authored.
+- **It is not a claim about a conference.** A mixer's outbound packet is one this endpoint authored,
+  so it carries no contributor's extension at all; that decision and its reason live in
+  `crates/sipx-media/src/conference.rs`.
+- **It is not a claim about the off-media role.** When sipx relays descriptions and stays off the
+  media path ([call-coupling.md](call-coupling.md) §6.1), the two endpoints negotiate `extmap` with
+  *each other* — one session, one numbering — and no translation is needed or possible. The question
+  in this section arises only where sipx terminates media on both legs.
+
+### 5.4 What would reopen this, and the alternative that was weighed
+
+**The trigger is sipx originating an `a=extmap` on either leg.** The moment it does, its own
+numbering table stops being empty, §5.2's first step fails, and a forwarded identifier can collide
+with one sipx itself agreed to. Whoever teaches sipx to negotiate `extmap` — for RFC 6464 audio
+level in a mixer, for `sdes:mid`, for anything — MUST in the same change teach `Bridge`'s relay to
+map identifiers between the legs, or refuse to bridge legs whose mappings disagree. Splitting those
+two across two changes leaves a window in which sipx renumbers nothing while claiming a numbering,
+which is worse than either end state.
+
+Negotiating `extmap` now was the alternative. It was declined because negotiating an identifier is a
+claim to implement the extension it names, and sipx implements none of them: the answer would agree
+to carry metadata nothing produces or consumes, which RFC 8285 §7 already tells an answerer not to
+do ("An answerer that has no desire to receive the extension or does not understand the extension
+SHOULD remove it from the SDP answer"). It would also buy nothing for a bridge until *both* legs
+negotiate, and a leg that negotiates none is the common case on the telephone network this stack
+exists for.
+
+## 6. Test vectors
 
 | Vector | Input | Required result |
 |---|---|---|
@@ -421,3 +532,5 @@ move it.
 | D7 | PT 96 start `80e007d000000bb8decafbad030a00a0`, continuation `806007d100000bb8decafbad030a0140`, then the explicit silence expiration | one digit `3`, duration 320 timestamp units; a later end report cannot emit it again |
 | D8 | D7's start followed by receiver reset; the old worker is stopped before a replacement is admitted | no digit; a fresh marked event in the replacement generation is independent and old-worker packets cannot cross the boundary |
 | D9 | D5 bytes carried on PT 101 when SDP selected PT 96 | no receiver input and no digit |
+| E1 | a pass-through bridge whose two legs send the same one-byte element under identifier 1 and identifier 2 respectively, at the same time | each far end receives the identifier its own sender wrote, byte for byte, in both directions; §5's decision, and the extension is the only one on the packet |
+| E2 | a browser-audio offer carrying `a=extmap:` lines and `a=extmap-allow-mixed` | the offer validates and is answerable; the generated answer contains no `a=extmap`, and neither does an offer sipx generates — §5.2's precondition |
