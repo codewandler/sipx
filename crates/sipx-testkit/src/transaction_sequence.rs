@@ -149,6 +149,7 @@ const fn timer_row(timer: Timer) -> usize {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod timer_coverage {
     use super::{TIMERS, timer_row};
 

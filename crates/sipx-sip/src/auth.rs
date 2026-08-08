@@ -412,6 +412,7 @@ pub fn topmost_supported(challenges: Vec<Challenge>) -> Option<Challenge> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

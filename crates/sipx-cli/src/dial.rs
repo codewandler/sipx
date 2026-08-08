@@ -68,11 +68,15 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
         .await
     {
         Ok(candidates) => candidates,
-        Err(error) => return fail(format, error.exit(), &error.to_string()),
+        Err(error) => {
+            return fail(format, crate::destination::exit(&error), &error.to_string());
+        }
     };
     let target = match crate::destination::first(&candidates) {
         Ok(target) => target.clone(),
-        Err(error) => return fail(format, error.exit(), &error.to_string()),
+        Err(error) => {
+            return fail(format, crate::destination::exit(&error), &error.to_string());
+        }
     };
     let target_addr = target.addr;
     transport = transport.negotiated(target.transport);
@@ -219,6 +223,8 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
         };
         let early_recorded = if early_media {
             let Some(session) = dialing.media() else {
+                drop(dialing);
+                handle.shutdown().await;
                 return fail(
                     format,
                     Exit::Failed,
@@ -678,6 +684,7 @@ fn with_quality(report: Report, quality: &sipx_rtp::Quality) -> Report {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use clap::Parser as _;

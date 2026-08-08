@@ -50,6 +50,12 @@
 //! Experimental** under the stricter rule in its own spec: two dissimilar applications must run
 //! against it before incompatible wire changes require a new contract name.
 
+// This crate's inline `#[cfg(test)]` modules opt out of coverage instrumentation, so the
+// published figure measures the code rather than the tests measuring it. Never set outside
+// `cargo llvm-cov`, so every other build parses this and discards it. Applied by
+// `./scripts/coverage-report.py --annotate`; `docs/coverage.md` states what it costs.
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+
 mod base64;
 mod document;
 mod error;

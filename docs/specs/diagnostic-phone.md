@@ -340,12 +340,22 @@ clock decides the outcome. Each resolved candidate is funded from what remains r
 fresh copy of the budget.
 
 Expiry has no CANCEL to send — §9.1 gives CANCEL to INVITE alone — so the client transaction is
-abandoned rather than negotiated to an end. The command MUST then join what the attempt owned
-before emitting its terminal record; endpoint shutdown cancels the transaction and lookup tasks and
-waits on their tracker, which is a causal barrier rather than a wall-clock wait. The REGISTER may
-still be delivered and the registrar may still record a binding. The command MUST NOT claim one,
-and the agent MUST discard what the abandoned attempt learned about GRUUs and push support
-(RFC 5627 §5.2), exactly as a rejection discards it.
+abandoned rather than negotiated to an end. The REGISTER may still be delivered and the registrar
+may still record a binding. The command MUST NOT claim one, and the agent MUST discard what the
+abandoned attempt learned about GRUUs and push support (RFC 5627 §5.2), exactly as a rejection
+discards it.
+
+A command's terminal record is a join barrier, on **every** exit and not only on the deadline's.
+Before emitting the record that ends it, a long-running command MUST join what it started:
+endpoint shutdown cancels the transaction, timer and lookup tasks and waits on their tracker,
+which is a causal barrier rather than a wall-clock wait. This holds for success, for a registrar's
+refusal, for a transport failure and for expiry alike — the record means the work is finished, not
+merely that the answer is known, and a script that reads counters, a capture or a port from it is
+reading a run that is over. A record that is *not* terminal is exempt and remains where it
+happens: the registration line under `--wake` or `--keep-alive` is progress, because the endpoint
+is still needed for what follows, and the barrier moves to whichever record ends the invocation.
+The exported counters travel with that terminal record, so they are the run's final numbers rather
+than a sample taken while it was still going.
 
 Timeout text and JSON contain the same fields: `status=timeout`, `aor`, an actionable `error`,
 `registration_limit_ms` — the deadline as the caller stated it, never the slice one candidate was
@@ -356,9 +366,15 @@ failure is `failed`/exit 1. The registration path MUST NOT rewrite a concrete tr
 an unanswered request — the same rule §3 states for outbound setup, and the reason a refused
 connection must not wait out a deadline it has already answered.
 
-`--keep-alive` bounds the initial attempt only; refreshes afterwards are governed by the granted
-lease. `--wake` sends RFC 8599 §4.1.3's binding-refresh REGISTER as a second attempt, bounded by
-the same stated deadline measured from when that exchange begins.
+`--keep-alive` is one registration, then refreshes. The command MUST NOT re-register a binding it
+has just been granted: the lease from the initial attempt is what the refresh schedule continues
+from, and a second REGISTER for the same binding is load the registrar was never asked for. Every
+refresh is bounded by the same stated deadline as the initial attempt — the deadline bounds each
+attempt, not the lifetime of a registration being kept — so a registrar that goes silent is
+reported on the caller's schedule instead of RFC 3261 §17.1.2.2's, which can outlast the lease
+being renewed. A zero deadline delegates the refreshes to the transaction layer exactly as it
+delegates the first attempt. `--wake` sends RFC 8599 §4.1.3's binding-refresh REGISTER as a second
+attempt, bounded by the same stated deadline measured from when that exchange begins.
 
 ## 4. Interactive protocol
 

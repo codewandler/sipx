@@ -104,6 +104,12 @@ cpal = "0.18.1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+# `coverage_nightly` is set by `cargo llvm-cov` on the crates it instruments, and by nothing else.
+# The inline `#[cfg(test)]` modules opt out of coverage instrumentation behind it (`X-116`), so
+# every build that is not a coverage run meets a cfg it never sets — declared here so that reading
+# the attribute is not also a warning. `scripts/coverage-report.py` applies and checks the rule.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage)", "cfg(coverage_nightly)"] }
+
 missing_debug_implementations = "warn"
 unreachable_pub = "warn"
 rust_2018_idioms = { level = "warn", priority = -1 }

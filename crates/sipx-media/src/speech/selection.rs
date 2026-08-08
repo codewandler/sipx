@@ -866,6 +866,7 @@ fn convertible(format: PcmFormat, call_clock: PcmFormat) -> bool {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

@@ -6,7 +6,9 @@ this document is the hand-written narrative around it.
 
 Two companions to this one: [**RFC compliance**](compliance.md) is the measured list of what
 sipx supports, generated from a registry and checked in CI; [**the RFC roadmap**](rfc-roadmap.md)
-is the order the remaining gaps close in and why.
+is the order the remaining gaps close in and why. Compliance is one of four generated reports;
+[`README.md`](README.md#the-generated-reports) indexes all of them from what exists, so that list
+cannot fall behind the way a second hand-written one here would.
 
 ## Status
 

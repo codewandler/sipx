@@ -72,11 +72,15 @@ pub(crate) async fn run(options: RegisterOptions, format: Format) -> Exit {
         .await
     {
         Ok(candidates) => candidates,
-        Err(error) => return fail(format, error.exit(), &error.to_string()),
+        Err(error) => {
+            return fail(format, crate::destination::exit(&error), &error.to_string());
+        }
     };
     let target = match crate::destination::first(&candidates) {
         Ok(target) => target.clone(),
-        Err(error) => return fail(format, error.exit(), &error.to_string()),
+        Err(error) => {
+            return fail(format, crate::destination::exit(&error), &error.to_string());
+        }
     };
     transport = transport.negotiated(target.transport);
     let local = options.local;
@@ -152,10 +156,12 @@ pub(crate) async fn run(options: RegisterOptions, format: Format) -> Exit {
                 // everywhere except this field.
                 report = report.boolean("push", agent.push_support().supports(provider));
             }
-            report = match export.into_report(report) {
-                Ok(report) => report,
-                Err(message) => return fail(format, Exit::Failed, &message),
-            };
+            // A record is this invocation's *last* only when nothing follows it. `--wake` sends a
+            // second exchange and `--keep-alive` goes on refreshing on purpose, so under either
+            // the registration line is progress and the barrier belongs to whatever ends the run.
+            if !wake && !options.keep_alive {
+                return report_joined(format, export, &handle, report).await;
+            }
             report.emit(format);
 
             if wake {
@@ -165,24 +171,28 @@ pub(crate) async fn run(options: RegisterOptions, format: Format) -> Exit {
                 // own push service for one ring. It is a second exchange, so it gets the stated
                 // deadline over again rather than whatever the first attempt left behind: a
                 // budget already spent would refuse the refresh instead of bounding it.
-                if let Err(exit) = report_wake(&mut agent, format, &aor, &attempt).await {
-                    return exit;
+                let woken = match wake_report(&mut agent, &aor, &attempt).await {
+                    Ok(woken) => woken,
+                    Err(error) => return report_failure(format, export, &handle, &error).await,
+                };
+                if !options.keep_alive {
+                    return report_joined(format, export, &handle, woken).await;
                 }
+                woken.emit(format);
             }
 
-            if options.keep_alive {
-                // `keep_registered` refreshes forever; its success type is uninhabited, so the
-                // only way out is a failure. The single-arm match says so, where an `if let`
-                // would read as though the other case were possible.
-                let Err(error) = agent.keep_registered().await;
-                return report_failure(format, &error);
-            }
-            Exit::Success
+            // `keep_registered_from` refreshes forever; its success type is uninhabited, so the
+            // only way out is a failure. The single binding says so, where an `if let` would read
+            // as though the other case were possible. It continues from the lease already granted
+            // rather than through `keep_registered`, which would register a second time for the
+            // binding this invocation has just recorded.
+            let Err(error) = agent.keep_registered_from(lease, attempt.limit).await;
+            report_failure(format, export, &handle, &error).await
         }
         Err(error @ sipx_ua::Error::AttemptTimeout { .. }) => {
             report_attempt_timeout(format, export, &handle, &attempt, &aor, &error).await
         }
-        Err(error) => report_failure(format, &error),
+        Err(error) => report_failure(format, export, &handle, &error).await,
     }
 }
 
@@ -395,41 +405,70 @@ fn reachability(options: &RegisterOptions) -> Result<Reachability, String> {
     Ok(Reachability { flow, device, wake })
 }
 
-/// Drive RFC 8599 §4.1.3's binding-refresh REGISTER and report the lease it returned.
+/// Emit this invocation's last record, once nothing it started is still running.
 ///
-/// A wake is reported as its own line rather than as fields on the registration's, because it is
-/// a second exchange with the registrar: what was true after registering stays true, and a caller
-/// reading the stream sees both answers instead of one overwritten by the other.
-async fn report_wake(
-    agent: &mut UserAgent,
+/// The barrier `report_attempt_timeout` states for the deadline, applied to the exits that reach a
+/// result: a terminal record means the work is finished, not merely that the answer is known. A
+/// registration that succeeded still owns a completed transaction the RFC keeps for Timer J, and
+/// the counters beside the result are read from the endpoint — after the shutdown, so they are the
+/// run's final numbers rather than a sample taken while it was still going.
+async fn report_joined(
     format: Format,
-    aor: &str,
-    attempt: &Attempt,
-) -> Result<(), Exit> {
-    let woken = match attempt.limit {
-        Some(limit) => agent.woken_within(limit).await,
-        None => agent.woken().await,
-    };
-    match woken {
-        Ok(pending) => {
-            let mut report = Report::new()
-                .text("status", "woken")
-                .text("aor", aor)
-                .seconds("expires", pending.lease.granted)
-                .seconds("refresh_in", pending.lease.refresh_after);
-            // §4.2: the PURR is the registrar's, assigned when it has one to give. Absent is the
-            // ordinary case, so the field appears only when it was actually handed out.
-            if let Some(purr) = &pending.purr {
-                report = report.text("purr", purr);
-            }
+    export: crate::counters::Export,
+    handle: &sipx_transport::Handle,
+    report: Report,
+) -> Exit {
+    handle.shutdown().await;
+    match export.into_report(report) {
+        Ok(report) => {
             report.emit(format);
-            Ok(())
+            Exit::Success
         }
-        Err(error) => Err(report_failure(format, &error)),
+        Err(message) => fail(format, Exit::Failed, &message),
     }
 }
 
-fn report_failure(format: Format, error: &sipx_ua::Error) -> Exit {
+/// Drive RFC 8599 §4.1.3's binding-refresh REGISTER and build the record for the lease it returned.
+///
+/// A wake is reported as its own line rather than as fields on the registration's, because it is
+/// a second exchange with the registrar: what was true after registering stays true, and a caller
+/// reading the stream sees both answers instead of one overwritten by the other. Whether that line
+/// is this invocation's last — and so whether it carries the join — belongs to the caller, which
+/// is the only place that knows whether `--keep-alive` follows.
+async fn wake_report(
+    agent: &mut UserAgent,
+    aor: &str,
+    attempt: &Attempt,
+) -> Result<Report, sipx_ua::Error> {
+    let pending = match attempt.limit {
+        Some(limit) => agent.woken_within(limit).await,
+        None => agent.woken().await,
+    }?;
+    let mut report = Report::new()
+        .text("status", "woken")
+        .text("aor", aor)
+        .seconds("expires", pending.lease.granted)
+        .seconds("refresh_in", pending.lease.refresh_after);
+    // §4.2: the PURR is the registrar's, assigned when it has one to give. Absent is the
+    // ordinary case, so the field appears only when it was actually handed out.
+    if let Some(purr) = &pending.purr {
+        report = report.text("purr", purr);
+    }
+    Ok(report)
+}
+
+/// Report a failure, after joining what the attempt left running.
+///
+/// The same barrier as `report_joined`, and for the failure that most needs it: a rejected or
+/// abandoned registration still owns its client transaction, its retransmission schedule and
+/// whatever the endpoint spawned for them, and `--capture` is still being written to. The exit
+/// code is decided before the shutdown so the error that produced it is not re-read afterwards.
+async fn report_failure(
+    format: Format,
+    export: crate::counters::Export,
+    handle: &sipx_transport::Handle,
+    error: &sipx_ua::Error,
+) -> Exit {
     let exit = match error {
         sipx_ua::Error::Rejected { status, .. } => Exit::for_status(*status),
         // A 555 is a refusal by the far end (RFC 8599 §8.1), so it exits the way every other
@@ -447,7 +486,18 @@ fn report_failure(format: Format, error: &sipx_ua::Error) -> Exit {
         sipx_ua::Error::NoResponse | sipx_ua::Error::AttemptTimeout { .. } => Exit::Timeout,
         _ => Exit::Failed,
     };
-    fail(format, exit, &error.to_string())
+    handle.shutdown().await;
+    let report = Report::new()
+        .text("status", exit.as_str())
+        .text("error", error.to_string());
+    let report = match export.into_report(report) {
+        Ok(report) => report,
+        Err(message) => return fail(format, Exit::Failed, &message),
+    };
+    // stderr, like every other failure: nothing that is not a registration result may land where
+    // the next stage of a pipeline will parse it as one.
+    eprintln!("{}", report.render(format));
+    exit
 }
 
 /// Split `sip:user@domain` into its two halves.
@@ -465,6 +515,7 @@ pub(crate) fn parse_aor(aor: &str) -> Option<(String, String)> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
@@ -648,6 +699,167 @@ mod tests {
         ])
         .expect_err("a ';' would start another parameter at the far end");
         assert!(error.contains("--push-prid"), "{error}");
+    }
+
+    /// A registrar that answers one REGISTER with `status` and then stops.
+    ///
+    /// `granted` is the binding it records: a 2xx that stores no contact is not a registration, so
+    /// the success case echoes the `Contact` the client sent with an `expires` on it, which is
+    /// what a registrar puts in the answer.
+    async fn answer_one_register(
+        registrar: tokio::net::UdpSocket,
+        status: &str,
+        granted: Option<u32>,
+    ) {
+        let mut buffer = vec![0u8; 65_535];
+        let Ok(Ok((length, source))) =
+            tokio::time::timeout(Duration::from_secs(10), registrar.recv_from(&mut buffer)).await
+        else {
+            return;
+        };
+        let request =
+            String::from_utf8_lossy(buffer.get(..length).unwrap_or_default()).into_owned();
+        let field = |name: &str| {
+            request
+                .lines()
+                .find(|line| {
+                    line.split_once(':')
+                        .is_some_and(|(head, _)| head.eq_ignore_ascii_case(name))
+                })
+                .unwrap_or_default()
+                .trim_end()
+                .to_owned()
+        };
+        let contact = match granted {
+            Some(expires) => format!("{};expires={expires}\r\n", field("Contact")),
+            None => String::new(),
+        };
+        let response = format!(
+            "SIP/2.0 {status}\r\n{}\r\n{}\r\n{}\r\n{}\r\n{}\r\n{contact}Content-Length: 0\r\n\r\n",
+            field("Via"),
+            field("To"),
+            field("From"),
+            field("Call-ID"),
+            field("CSeq"),
+        );
+        let _ = registrar.send_to(response.as_bytes(), source).await;
+    }
+
+    /// `P-27`: the terminal record is a join barrier on *every* exit, not only on the deadline
+    /// path `P-25` added. A success, a registrar's refusal and a transport failure each reported
+    /// while the endpoint that produced them was still running, so the counters beside the result
+    /// were read from an invocation that had not finished — and `--capture` was still being
+    /// written to when the command said it was done.
+    ///
+    /// The endpoint's own socket is the evidence; `crate::join_probe` explains why the probe is an
+    /// observation rather than a race.
+    #[tokio::test]
+    async fn every_exit_joins_the_endpoint_before_the_terminal_record() {
+        // Success: a registrar that records the binding and answers.
+        let registrar = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("binds");
+        let address = registrar.local_addr().expect("has an address");
+        let answering = tokio::spawn(answer_one_register(registrar, "200 OK", Some(60)));
+        let local = crate::join_probe::free_local();
+        let exit = run(
+            command(&[
+                "register",
+                "sip:alice@example.com",
+                "--target",
+                &address.to_string(),
+                "--local",
+                &local.to_string(),
+                "--expires",
+                "60",
+                "--timeout",
+                "10",
+            ])
+            .expect("valid syntax"),
+            Format::Text,
+        )
+        .await;
+        crate::join_probe::assert_released(local, "success");
+        assert_eq!(exit.code(), Exit::Success.code());
+        answering.await.expect("the registrar task joins");
+
+        // A refusal: the registrar answered, and the answer was no.
+        let registrar = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("binds");
+        let address = registrar.local_addr().expect("has an address");
+        let refusing = tokio::spawn(answer_one_register(registrar, "404 Not Found", None));
+        let local = crate::join_probe::free_local();
+        let exit = run(
+            command(&[
+                "register",
+                "sip:alice@example.com",
+                "--target",
+                &address.to_string(),
+                "--local",
+                &local.to_string(),
+                "--timeout",
+                "10",
+            ])
+            .expect("valid syntax"),
+            Format::Text,
+        )
+        .await;
+        crate::join_probe::assert_released(local, "rejection");
+        assert_eq!(exit.code(), Exit::Rejected.code());
+        refusing.await.expect("the registrar task joins");
+
+        // A transport failure: nothing accepted the connection, which is an answer about the
+        // address rather than silence to wait out.
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").expect("reserves a loopback port");
+        let unreachable = closed.local_addr().expect("reserved address");
+        drop(closed);
+        let local = crate::join_probe::free_local();
+        let exit = run(
+            command(&[
+                "register",
+                "sip:alice@example.com",
+                "--target",
+                &unreachable.to_string(),
+                "--transport",
+                "tcp",
+                "--local",
+                &local.to_string(),
+                "--timeout",
+                "10",
+            ])
+            .expect("valid syntax"),
+            Format::Text,
+        )
+        .await;
+        crate::join_probe::assert_released(local, "transport failure");
+        assert_eq!(exit.code(), Exit::Failed.code());
+
+        // And the deadline, which `P-25` already joins: it is asserted here beside the others so
+        // the four exit classes are one list rather than a rule with an exception filed elsewhere.
+        let black_hole = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("binds");
+        let address = black_hole.local_addr().expect("has an address");
+        let local = crate::join_probe::free_local();
+        let exit = run(
+            command(&[
+                "register",
+                "sip:alice@example.com",
+                "--target",
+                &address.to_string(),
+                "--local",
+                &local.to_string(),
+                "--timeout",
+                "1",
+            ])
+            .expect("valid syntax"),
+            Format::Text,
+        )
+        .await;
+        crate::join_probe::assert_released(local, "deadline");
+        assert_eq!(exit.code(), Exit::Timeout.code());
+        drop(black_hole);
     }
 
     /// The refusal is the command's answer, at the command's exit code — a usage error

@@ -162,6 +162,7 @@ jobs:
           fetch-depth: 0
       - run: ./scripts/gate.py --check
       - run: python3 scripts/test-gate.py
+      - run: python3 scripts/test-story-closure.py
       # The registry's schema guard has had a suite since X-15 and no job ran it. Both suites are
       # milliseconds and need nothing but a Python interpreter, so this is their home.
       - run: python3 scripts/test-rfc-report.py

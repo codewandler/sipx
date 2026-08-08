@@ -11,20 +11,20 @@
     "--json",
     "--summary-only"
   ],
-  "commit": "fc4fe499b39b70381c2b97246b937e4ad574ff4d",
+  "commit": "6f10b909a5dbd1424d67bb8c90fcf1db8594ef85",
   "crates": {
     "sipx-app": {
       "branches": {
-        "covered": 471,
-        "total": 754
+        "covered": 450,
+        "total": 712
       },
       "functions": {
-        "covered": 646,
-        "total": 743
+        "covered": 524,
+        "total": 621
       },
       "lines": {
-        "covered": 5978,
-        "total": 7232
+        "covered": 4740,
+        "total": 5977
       }
     },
     "sipx-app-protocol": {
@@ -33,152 +33,166 @@
         "total": 226
       },
       "functions": {
-        "covered": 206,
-        "total": 223
+        "covered": 177,
+        "total": 195
       },
       "lines": {
-        "covered": 2209,
-        "total": 2508
+        "covered": 2032,
+        "total": 2354
       }
     },
     "sipx-audio": {
       "branches": {
-        "covered": 101,
-        "total": 122
+        "covered": 167,
+        "total": 182
       },
       "functions": {
-        "covered": 141,
-        "total": 156
+        "covered": 120,
+        "total": 157
       },
       "lines": {
-        "covered": 1061,
-        "total": 1127
+        "covered": 1067,
+        "total": 1214
       }
     },
     "sipx-call": {
       "branches": {
-        "covered": 1050,
-        "total": 1657
+        "covered": 1110,
+        "total": 1763
       },
       "functions": {
-        "covered": 1310,
-        "total": 1425
+        "covered": 1193,
+        "total": 1312
       },
       "lines": {
-        "covered": 11441,
-        "total": 13098
+        "covered": 10153,
+        "total": 11957
       }
     },
     "sipx-cli": {
       "branches": {
-        "covered": 558,
-        "total": 872
+        "covered": 554,
+        "total": 854
       },
       "functions": {
-        "covered": 609,
-        "total": 787
+        "covered": 481,
+        "total": 652
       },
       "lines": {
-        "covered": 6208,
-        "total": 7668
+        "covered": 4922,
+        "total": 6330
       }
     },
     "sipx-media": {
       "branches": {
-        "covered": 638,
-        "total": 888
+        "covered": 777,
+        "total": 1054
       },
       "functions": {
-        "covered": 968,
-        "total": 1005
+        "covered": 970,
+        "total": 1052
       },
       "lines": {
-        "covered": 9265,
-        "total": 9784
+        "covered": 7676,
+        "total": 8464
       }
     },
     "sipx-rtp": {
       "branches": {
-        "covered": 186,
-        "total": 204
+        "covered": 189,
+        "total": 206
       },
       "functions": {
-        "covered": 225,
-        "total": 230
+        "covered": 111,
+        "total": 127
       },
       "lines": {
-        "covered": 2259,
-        "total": 2290
+        "covered": 1306,
+        "total": 1379
       }
     },
     "sipx-sdp": {
       "branches": {
-        "covered": 197,
-        "total": 242
+        "covered": 218,
+        "total": 264
       },
       "functions": {
-        "covered": 373,
-        "total": 393
+        "covered": 280,
+        "total": 300
       },
       "lines": {
-        "covered": 2785,
-        "total": 2857
+        "covered": 1822,
+        "total": 1912
       }
     },
     "sipx-sip": {
       "branches": {
-        "covered": 916,
-        "total": 1142
+        "covered": 912,
+        "total": 1128
       },
       "functions": {
-        "covered": 1070,
-        "total": 1121
+        "covered": 786,
+        "total": 832
       },
       "lines": {
-        "covered": 8231,
-        "total": 8626
+        "covered": 5649,
+        "total": 6020
       }
     },
     "sipx-testkit": {
       "branches": {
-        "covered": 177,
-        "total": 244
+        "covered": 175,
+        "total": 240
       },
       "functions": {
-        "covered": 376,
-        "total": 407
+        "covered": 315,
+        "total": 346
       },
       "lines": {
-        "covered": 2732,
-        "total": 2984
+        "covered": 2387,
+        "total": 2628
       }
     },
     "sipx-transport": {
       "branches": {
-        "covered": 739,
-        "total": 1018
+        "covered": 716,
+        "total": 968
       },
       "functions": {
-        "covered": 939,
-        "total": 1005
+        "covered": 635,
+        "total": 698
       },
       "lines": {
-        "covered": 9723,
-        "total": 10477
+        "covered": 6248,
+        "total": 6956
       }
     },
     "sipx-ua": {
       "branches": {
-        "covered": 635,
-        "total": 996
+        "covered": 605,
+        "total": 936
       },
       "functions": {
-        "covered": 590,
-        "total": 631
+        "covered": 410,
+        "total": 450
       },
       "lines": {
-        "covered": 5540,
-        "total": 6167
+        "covered": 3667,
+        "total": 4242
+      }
+    },
+    "sipx-wasm": {
+      "branches": {
+        "covered": 176,
+        "total": 294
+      },
+      "functions": {
+        "covered": 199,
+        "total": 223
+      },
+      "lines": {
+        "covered": 1672,
+        "total": 2047
       }
     }
   },
@@ -205,21 +219,28 @@
     }
   ],
   "measured_at": "2026-08-08",
+  "source_excluded": [
+    {
+      "attribute": "#[cfg_attr(coverage_nightly, coverage(off))]",
+      "why": "an inline `#[cfg(test)] mod` is test code in the middle of a source file, which no filename pattern can reach; this removes it from the instrumentation instead, so it leaves the figure for the same reason `/tests/` does"
+    }
+  ],
+  "test_modules_excluded": 161,
   "tool": "cargo-llvm-cov",
   "tool_version": "cargo-llvm-cov 0.8.7",
   "toolchain": "rustc 1.99.0-nightly (26ae60a9e 2026-07-28)",
   "totals": {
     "branches": {
-      "covered": 5836,
-      "total": 8365
+      "covered": 6217,
+      "total": 8827
     },
     "functions": {
-      "covered": 7453,
-      "total": 8126
+      "covered": 6201,
+      "total": 6965
     },
     "lines": {
-      "covered": 67432,
-      "total": 74818
+      "covered": 53341,
+      "total": 61480
     }
   }
 }

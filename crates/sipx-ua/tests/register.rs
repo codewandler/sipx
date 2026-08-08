@@ -395,6 +395,55 @@ async fn one_failed_refresh_is_retried_before_the_granted_lease_expires() {
     let _ = keeping.await;
 }
 
+/// `P-27`: a caller that already holds a lease continues from it rather than registering again.
+///
+/// `keep_registered` begins by registering, so the caller that had just registered — every
+/// `sipx register --keep-alive` — sent a second REGISTER for a binding the registrar had recorded
+/// moments earlier. `keep_registered_from` is that caller's entry point, and the schedule it keeps
+/// afterwards is the same one: nothing at all until the granted lease's refresh point.
+#[tokio::test(start_paused = true)]
+async fn a_kept_registration_continues_from_the_lease_it_was_handed() {
+    let (registrar, mut incoming) =
+        bind(TransportConfig::new("127.0.0.1:0".parse().expect("valid")))
+            .await
+            .expect("binds");
+    let target = Target::udp(registrar.local_addr());
+    let mut ua = agent(target, None).await;
+
+    let registering = tokio::spawn(async move {
+        let lease = ua.register().await.expect("registers");
+        (ua, lease)
+    });
+    let initial = incoming.recv().await.expect("initial REGISTER arrives");
+    registrar
+        .respond(&initial.key, granted_ok(&initial.request, 100))
+        .await
+        .expect("grants the lease");
+    let (mut ua, lease) = registering.await.expect("the registration task joins");
+    assert_eq!(lease.granted, Duration::from_secs(100));
+
+    let keeping = tokio::spawn(async move { ua.keep_registered_from(lease, None).await });
+
+    // Nothing is owed until the granted refresh point. The bound is a failure bound: a redundant
+    // registration would arrive at once, and the clock is what tells the two apart.
+    let redundant = tokio::time::timeout(Duration::from_secs(30), incoming.recv()).await;
+    assert!(
+        redundant.is_err(),
+        "a lease already granted must not be registered a second time: {redundant:?}"
+    );
+
+    // And the refresh itself still lands where the grant put it, sixty seconds further on.
+    tokio::time::advance(Duration::from_secs(60)).await; // the clock is the measurement: assert the granted refresh deadline itself
+    let refresh = incoming.recv().await.expect("refresh REGISTER arrives");
+    registrar
+        .respond(&refresh.key, granted_ok(&refresh.request, 100))
+        .await
+        .expect("accepts the refresh");
+
+    keeping.abort();
+    let _ = keeping.await;
+}
+
 /// A wrong password must fail once and stop, not loop. Looping is how a client locks out the
 /// account it is trying to use.
 #[tokio::test]

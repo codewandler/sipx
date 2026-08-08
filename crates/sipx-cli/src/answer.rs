@@ -84,6 +84,7 @@ pub(crate) async fn run(options: AnswerOptions, format: Format) -> Exit {
     // Announce the port before waiting, so a script that started this in the background knows
     // where to call without guessing or racing.
     let Some(listening) = transport.listener_addr(&handle) else {
+        handle.shutdown().await;
         return fail(
             format,
             Exit::Failed,
@@ -173,7 +174,10 @@ pub(crate) async fn run(options: AnswerOptions, format: Format) -> Exit {
     .await
     {
         Ok(call) => call,
-        Err(error) => return fail(format, Exit::Failed, &error.to_string()),
+        Err(error) => {
+            handle.shutdown().await;
+            return fail(format, Exit::Failed, &error.to_string());
+        }
     };
     progress.answered();
 
@@ -182,6 +186,8 @@ pub(crate) async fn run(options: AnswerOptions, format: Format) -> Exit {
         Ok(pcm) => pcm,
         Err(message) => {
             let _ = call.hang_up().await;
+            drop(call);
+            handle.shutdown().await;
             return fail(format, Exit::Usage, &message);
         }
     };
@@ -457,12 +463,16 @@ async fn refuse(
         (603, "Decline")
     };
     let Some(status) = StatusCode::new(code) else {
+        handle.shutdown().await;
         return fail(format, Exit::Failed, "bad status");
     };
     let builder =
         match sipx_sip::build::ResponseBuilder::to_request(&request.request, status, reason) {
             Ok(builder) => builder,
-            Err(error) => return fail(format, Exit::Failed, &error.to_string()),
+            Err(error) => {
+                handle.shutdown().await;
+                return fail(format, Exit::Failed, &error.to_string());
+            }
         };
     // RFC 3261 §8.2.6.2: every response but 100 carries a To tag — it is what lets a caller
     // behind a forking proxy tell this branch's refusal from another's.
@@ -471,7 +481,10 @@ async fn refuse(
             let to = tagged(&String::from_utf8_lossy(&to), &fresh_tag());
             match builder.set_header(&HeaderName::To, bytes::Bytes::from(to)) {
                 Ok(builder) => builder,
-                Err(error) => return fail(format, Exit::Failed, &error.to_string()),
+                Err(error) => {
+                    handle.shutdown().await;
+                    return fail(format, Exit::Failed, &error.to_string());
+                }
             }
         }
         None => builder,
@@ -482,21 +495,26 @@ async fn refuse(
             bytes::Bytes::copy_from_slice(header.raw_value()),
         ) {
             Ok(builder) => builder,
-            Err(error) => return fail(format, Exit::Failed, &error.to_string()),
+            Err(error) => {
+                handle.shutdown().await;
+                return fail(format, Exit::Failed, &error.to_string());
+            }
         };
     }
     let _ = handle.respond(&request.key, builder.build()).await;
 
-    transport
-        .report(
-            Report::new()
-                .text("status", "refused")
-                .text("caller", progress.peer())
-                .number("code", i64::from(code)),
-            request.transport,
-        )
-        .emit(format);
+    let report = transport.report(
+        Report::new()
+            .text("status", "refused")
+            .text("caller", progress.peer())
+            .number("code", i64::from(code)),
+        request.transport,
+    );
+    // Joined before the record, not after it. Emitting first told a script the call had been
+    // refused while the refusal was still the endpoint's to retransmit, which is the ordering
+    // `P-27` exists to remove.
     handle.shutdown().await;
+    report.emit(format);
     progress.finish(crate::progress::CallEnd::Refused("refused"));
     Exit::Success
 }
@@ -539,6 +557,7 @@ fn fresh_tag() -> String {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;

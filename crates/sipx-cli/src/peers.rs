@@ -241,9 +241,9 @@ async fn discover(options: &PeersOptions, registrar: &str) -> Result<Vec<Peer>, 
             &options.signalling,
         )
         .await
-        .map_err(|error| (error.exit(), error.to_string()))?;
+        .map_err(|error| (crate::destination::exit(&error), error.to_string()))?;
     let selected = crate::destination::first(&candidates)
-        .map_err(|error| (error.exit(), error.to_string()))?
+        .map_err(|error| (crate::destination::exit(&error), error.to_string()))?
         .clone();
     selection = selection.negotiated(selected.transport);
     let local = options.local;
@@ -483,6 +483,7 @@ fn parse(path: &Path, contents: &str) -> Result<Vec<Peer>, Error> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

@@ -2357,6 +2357,133 @@ fn assert_bounded_attempt_text(stderr: &str) {
     assert!(field("cleanup_ms").is_some(), "{stderr}");
 }
 
+/// Grant the binding a REGISTER asked for, and nothing else.
+///
+/// Deliberately plainer than `answer_register`: an answer carrying RFC 5626's `Require` and RFC
+/// 8599's `Feature-Caps` describes a registrar the keep-alive tests are not about, and an
+/// unnecessary `Flow-Timer` would put a second schedule beside the lease they measure.
+async fn grant_registration(
+    registrar: &tokio::net::UdpSocket,
+    request: &str,
+    source: std::net::SocketAddr,
+    expires: u32,
+) {
+    let field = |name: &str| header_line(request, name);
+    let response = format!(
+        "SIP/2.0 200 OK\r\n{}\r\n{}\r\n{}\r\n{}\r\n{}\r\n{};expires={expires}\r\n\
+         Content-Length: 0\r\n\r\n",
+        field("Via"),
+        field("To"),
+        field("From"),
+        field("Call-ID"),
+        field("CSeq"),
+        field("Contact"),
+    );
+    registrar
+        .send_to(response.as_bytes(), source)
+        .await
+        .expect("answers");
+}
+
+/// `P-27`: one invocation of `--keep-alive` is one registration, not two.
+///
+/// `register` registered through `register_candidates` and then handed the agent to
+/// `keep_registered`, whose first act is to register again — so every `sipx register --keep-alive`
+/// put a second REGISTER on the wire for a binding the registrar had just recorded, doubling the
+/// registration load of a keep-alive fleet and advancing the `CSeq` for nothing.
+#[tokio::test]
+async fn keep_alive_registers_once_per_invocation() {
+    let _scenario = process_scenario().await;
+    let registrar = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("binds");
+    let address = registrar.local_addr().expect("has an address");
+
+    let mut child = sipx()
+        .args([
+            "register",
+            "sip:alice@example.com",
+            "--target",
+            &address.to_string(),
+            "--expires",
+            "60",
+            "--keep-alive",
+            "--json",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawns");
+
+    let (first, source) = next_register(&registrar, "a REGISTER arrives").await;
+    grant_registration(&registrar, &first, source, 60).await;
+
+    // A sixty-second lease is refreshed with margin to spare, tens of seconds from here. Anything
+    // arriving in the next few seconds is a second registration rather than a refresh.
+    let mut buffer = vec![0u8; 65_535];
+    let followed =
+        tokio::time::timeout(Duration::from_secs(3), registrar.recv_from(&mut buffer)).await;
+    let _ = child.kill().await;
+    if let Ok(Ok((length, _))) = followed {
+        panic!(
+            "a second REGISTER followed the granted binding immediately: {}",
+            String::from_utf8_lossy(&buffer[..length])
+        );
+    }
+}
+
+/// `P-27`: `--timeout` bounds every registration this invocation sends, not only the first.
+///
+/// `P-25` bounded the initial attempt and left the refreshes governed by the granted lease alone,
+/// so a keep-alive client whose registrar went silent sat on RFC 3261's 32-second transaction
+/// schedule — well past the lease it was refreshing — while reporting nothing.
+#[tokio::test]
+async fn keep_alive_refreshes_are_bounded_by_the_stated_deadline() {
+    let _scenario = process_scenario().await;
+    let registrar = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("binds");
+    let address = registrar.local_addr().expect("has an address");
+
+    // A four-second lease is refreshed at half of it, so the whole exchange — grant, refresh,
+    // stated deadline — fits in a test without waiting out a realistic registration period.
+    let child = sipx()
+        .args([
+            "register",
+            "sip:alice@example.com",
+            "--target",
+            &address.to_string(),
+            "--expires",
+            "4",
+            "--timeout",
+            "2",
+            "--keep-alive",
+            "--json",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawns");
+
+    let (first, source) = next_register(&registrar, "a REGISTER arrives").await;
+    grant_registration(&registrar, &first, source, 4).await;
+    // The refresh arrives and is swallowed: only the command's own deadline can end it.
+    let (_refresh, _) = next_register(&registrar, "a refresh REGISTER arrives").await;
+
+    let output = tokio::time::timeout(Duration::from_secs(20), child.wait_with_output())
+        .await
+        .expect("the stated deadline bounds a refresh as well as the initial attempt")
+        .expect("register runs");
+    assert_eq!(
+        output.status.code(),
+        Some(5),
+        "a refresh that ran out of time is the same timeout as an initial attempt: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("\"status\":\"timeout\""), "{stderr}");
+}
+
 /// `P-25`: the three ways a registration attempt can end stay distinguishable without parsing
 /// English. Silence is the command's own deadline, a refusal is the registrar's answer, and a
 /// connection nothing accepted is a local transport failure — 5, 3 and 1.

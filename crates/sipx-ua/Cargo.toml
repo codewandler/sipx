@@ -19,7 +19,9 @@ runtime = ["dep:tokio", "dep:sipx-transport"]
 
 [dependencies]
 sipx-sip.workspace = true
-sipx-transport = { workspace = true, optional = true }
+# `destination` is behind transport's `dns` feature, and `runtime` uses it, so requiring it
+# here keeps a consumer that sets `default-features = false` on sipx-transport compiling.
+sipx-transport = { workspace = true, optional = true, features = ["dns"] }
 bytes.workspace = true
 thiserror.workspace = true
 quick-xml.workspace = true

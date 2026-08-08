@@ -656,6 +656,7 @@ fn weighted_shuffle<G: Rng + ?Sized>(mut group: Vec<Srv>, rng: &mut G) -> Vec<Sr
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

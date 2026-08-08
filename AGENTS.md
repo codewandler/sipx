@@ -71,6 +71,23 @@ from the RFC editor; if those sources cannot be reached, the gate exits `2` to r
 incomplete rather than claiming the tree passed or failed. Exit `1` means the tree has a real
 finding.
 
+## Before selecting a story
+
+```sh
+./scripts/check-story-closure.py
+```
+
+A story whose Acceptance is satisfied but whose `status` was never moved reads as available work and
+is not. `A-16` was delivered on 2026-08-05 with seven of its eight rows ticked, left at `backlog`,
+and dispatched to a second implementor three days later — over a contract six downstream stories
+already cited. This reconciles a story's status against its own Acceptance, which nothing else does:
+the gate checks that the board agrees with the frontmatter, not that the frontmatter agrees with
+itself.
+
+It is **a report and not a gate step**, deliberately, and the script's docstring carries the evidence
+for that decision along with the exact rule it uses to stay quiet about a story somebody is still
+implementing. The pre-commit hook runs it on every commit that touches `docs/stories/`.
+
 ## Keep derived artifacts synchronized
 
 When a change affects one of these sources, update its derived artifact in the same change. The gate
