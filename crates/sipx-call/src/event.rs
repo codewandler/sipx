@@ -173,6 +173,25 @@ pub enum CallEvent {
     /// substitutes for the other. The call is this stream's call; direction, epoch, report
     /// sequence, sample position and window coverage all ride the payload.
     SignalMetrics(crate::SignalMetrics),
+    /// This call's audio was connected to another call the same host owns (`C-6`).
+    ///
+    /// Emitted on both bridged calls when the bridge is made. Which call it was bridged *to* is
+    /// not on the event: the host made the connection and already knows, and naming the other
+    /// call here would put a second call's identity on a stream that is about exactly one.
+    Bridged,
+    /// This call's audio stopped crossing to the other call (`C-6`).
+    ///
+    /// Emitted exactly once per bridge, and always before this call's own [`Self::Ended`] — a
+    /// host that learned a call was bridged and never learned it was not would go on believing
+    /// its audio is somewhere else. The cause says whether the host released the bridge or the
+    /// other call ended under it.
+    ///
+    /// The call that *ends* does not get this event: its bridge ending is implied by its own
+    /// `Ended`, and queuing anything behind that would break the promise that `Ended` is last.
+    Unbridged {
+        /// Whether the bridge was released, or the other call ended.
+        cause: crate::UnbridgeCause,
+    },
     /// An application-owned method arrived inside this dialog.
     ///
     /// INFO and MESSAGE are admitted directly. A private extension token appears here only after

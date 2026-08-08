@@ -14,8 +14,9 @@
 //! A participant who has said nothing contributes silence, which is exactly right: the mix goes
 //! out on time and the quiet participant is simply quiet. The alternative — waiting for
 //! everyone — makes the whole conference as late as its worst connection.
-//! **Experimental** (`A-8`): as with [`super::bridge`], real over sessions you own and not
-//! reachable from a `Call` (`C-6`).
+//! **Experimental** (`A-8`): as with [`super::bridge`], real over sessions you own. `sipx-call`'s
+//! `CallConference` is the path here from calls a host owns (`C-6`); the shape of this type is
+//! still free to move.
 //!
 
 use std::collections::HashMap;
