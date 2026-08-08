@@ -11,11 +11,18 @@
 //! all run through the same [`CouplingState`] the media-terminating role uses; what differs is
 //! only what the two legs are made of.
 //!
-//! What this role does not do, and refuses rather than half-does: it does not originate a
-//! description of its own, so an offerless initial INVITE and an offerless re-INVITE are refused
-//! `488`, and it does not advertise `100rel`, so no peer may put an offer in a reliable
-//! provisional. Those carriers need a description sipx would have to author, and authoring one
-//! means describing a media endpoint this role does not have.
+//! The early carriers are relayed the same way (`C-8`). `100rel` is mirrored onto the target
+//! INVITE, so a reliable provisional carrying a description crosses into a reliable provisional
+//! of this coupling's own, and PRACK is correlated on both legs — sent on the target one,
+//! answered on the source one. An offerless INVITE is relayed as the offerless INVITE it is, and
+//! RFC 3262 §5's delayed offer comes back from the target endpoint with its answer supplied by
+//! the source endpoint's PRACK. In every case both descriptions belong to the endpoints; this
+//! role still authors none, which is the whole of what it exists not to do.
+//!
+//! What it still refuses rather than half-does: an offerless re-INVITE, and an offerless initial
+//! INVITE from a source that does not offer `100rel`. The second is not a policy choice — with
+//! no reliable provisional the delayed offer has to travel in the `2xx` and its answer in the
+//! ACK, a carrier this stack does not implement on either side (`C-9`).
 
 use std::collections::VecDeque;
 use std::net::IpAddr;
@@ -26,10 +33,13 @@ use sipx_sdp::relay::DescriptionRelay;
 use sipx_sdp::session::Origin;
 use sipx_sip::build::{RequestBuilder, ResponseBuilder};
 use sipx_sip::headers::CSeq;
+use sipx_sip::rel::{Numbering, Offered, RAck, Received, Sequence};
+use sipx_sip::transaction::TuEvent;
 use sipx_sip::{HeaderName, Method, Request, Response, StatusCode, Uri};
 use sipx_transport::{Handle, Incoming, Target};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
 use super::{
     CouplingEnd, CouplingState, DEFERRED_CAPACITY, FailureAction, Leg, OfferAction, OfferAxis,
@@ -39,12 +49,21 @@ use crate::call::{
     reack_retransmitted_2xx, sleep_until, withdraw,
 };
 use crate::dialog::Dialog;
+use crate::dispatch::CouplingInvitation;
 use crate::{Call, Calls, Error, Invitation, Result};
 
 /// RFC 3261 §17.2.1 timers for retransmitting an INVITE's 2xx until its ACK.
 const T1: Duration = Duration::from_millis(500);
 const T2: Duration = Duration::from_secs(4);
 const TIMER_H: Duration = Duration::from_secs(32);
+
+/// What this role does inside a dialog it couples (RFC 3261 §20.5).
+///
+/// PRACK is on the list because the reliable-provisional carrier is relayed; REFER, INFO and
+/// NOTIFY are not, because nothing here would know what to do with them. An advertisement wider
+/// than the behaviour is worse than a narrow one — a peer that reads it and is then refused has
+/// been told two different things by the same element.
+const ALLOW: &[u8] = b"INVITE, ACK, BYE, CANCEL, UPDATE, PRACK";
 
 /// How an off-media coupling places its target leg.
 ///
@@ -84,6 +103,92 @@ impl OffMediaOptions {
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
         self
+    }
+}
+
+/// The carriers that run before either dialog of this coupling is confirmed (`C-8`).
+///
+/// RFC 3262's reliable provisional and PRACK, and RFC 3264's delayed offer. None of them changes
+/// what the role does with a description — the endpoint's own bytes with one line replaced — so
+/// what this holds is only the bookkeeping the two carriers need: the numbering of the
+/// provisionals this side *sends* on the source leg (§3), the ordering of the ones it *receives*
+/// on the target leg (§4), and the target PRACK that may not leave until the source has supplied
+/// the answer §5 says it owes.
+#[derive(Debug)]
+struct EarlyCarriers {
+    /// The source INVITE's `CSeq`, which every `RAck` arriving on that leg must name (§7.2).
+    source_invite_cseq: u32,
+    /// The target INVITE's `CSeq`, which every `RAck` this side sends must name.
+    target_invite_cseq: u32,
+    /// Whether the source INVITE carried an offer.
+    ///
+    /// It decides which half of RFC 3264 a target provisional's description is, and therefore
+    /// whether the PRACK acknowledging it owes a description back (§5).
+    source_offered: bool,
+    /// The numbering of the reliable provisionals this side sends on the source leg (§3).
+    numbering: Numbering,
+    /// The ordering of the ones it receives on the target leg (§4).
+    seen: Sequence,
+    /// Stops the retransmission of the provisional last sent on the source leg.
+    retransmission: Option<CancellationToken>,
+    /// The target early dialog a reliable provisional established (RFC 3261 §12.1.1).
+    dialog: Option<Dialog>,
+    /// The `RSeq` of a target provisional whose PRACK is held for the source's answer (§5).
+    held: Option<u32>,
+    /// Whether the initial offer/answer exchange settled before either dialog was confirmed.
+    settled: bool,
+    /// The highest `CSeq` seen from the source before its dialog existed.
+    remote_cseq: Option<u32>,
+    /// Source-leg requests that arrived while the target INVITE was still outstanding.
+    deferred: VecDeque<Incoming>,
+}
+
+impl EarlyCarriers {
+    fn new(source: &Incoming, target: &Request, source_offered: bool) -> Self {
+        Self {
+            source_invite_cseq: sequence_of(&source.request, &Method::Invite).unwrap_or(1),
+            target_invite_cseq: sequence_of(target, &Method::Invite).unwrap_or(1),
+            source_offered,
+            // §3: the first number "MUST be between 1 and 2**31 - 1", chosen uniformly. It is a
+            // per-transaction secret as much as a counter: a predictable one lets an off-path
+            // attacker forge the PRACK that stops the retransmissions.
+            numbering: Numbering::starting_at({
+                use rand::Rng as _;
+                rand::rng().random_range(1..=sipx_sip::rel::MAX_FIRST_RSEQ)
+            }),
+            seen: Sequence::default(),
+            retransmission: None,
+            dialog: None,
+            held: None,
+            settled: false,
+            remote_cseq: None,
+            deferred: VecDeque::new(),
+        }
+    }
+
+    /// Stop retransmitting the provisional this side last sent on the source leg.
+    fn acknowledged(&mut self) {
+        if let Some(stop) = self.retransmission.take() {
+            stop.cancel();
+        }
+    }
+
+    /// The sequence number the target leg's early dialog reached, if one exists.
+    fn target_cseq(&self) -> Option<u32> {
+        self.dialog.as_ref().map(|dialog| dialog.local_cseq)
+    }
+
+    /// The source-leg requests this phase set aside, handed to the confirmed leg.
+    fn take_deferred(&mut self) -> VecDeque<Incoming> {
+        std::mem::take(&mut self.deferred)
+    }
+}
+
+impl Drop for EarlyCarriers {
+    fn drop(&mut self) {
+        // A retransmission task outlives this value otherwise, and would go on resending a
+        // provisional for an invitation that has since been answered or abandoned.
+        self.acknowledged();
     }
 }
 
@@ -169,6 +274,15 @@ impl OffMediaCoupling {
     /// Cancellation remains this object's responsibility for as long as it holds the invitation:
     /// a CANCEL that arrives while the target INVITE is outstanding withdraws that INVITE,
     /// including the case where its 2xx crossed the CANCEL.
+    ///
+    /// An offerless source INVITE is relayed as one, and RFC 3262 §5's delayed offer is carried
+    /// back on the reliable-provisional axis. That axis is the only one there is here: with no
+    /// `100rel` on the source leg the offer would have to travel in the `2xx` and its answer in
+    /// the ACK, which this returns [`Error::Sdp`] for rather than half-relaying.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the early carriers and the confirmation they lead to are one sequence"
+    )]
     pub async fn dial(
         invitation: Invitation,
         calls: &Calls,
@@ -177,10 +291,13 @@ impl OffMediaCoupling {
         to: &Uri,
         options: &OffMediaOptions,
     ) -> Result<Self> {
+        let reliability = Offered::in_request(&invitation.request().request);
         let mut two_relay = DescriptionRelay::new(fresh_origin(options.origin_address));
-        let relayed = match source_offer(invitation.request())
-            .and_then(|offer| two_relay.relay(offer).map_err(Error::Relay))
-        {
+        let relayed = match source_offer(invitation.request(), reliability).and_then(|offer| {
+            offer
+                .map(|offer| two_relay.relay(offer).map_err(Error::Relay))
+                .transpose()
+        }) {
             Ok(relayed) => relayed,
             Err(error) => {
                 invitation
@@ -190,15 +307,39 @@ impl OffMediaCoupling {
             }
         };
 
-        let invitation = invitation.into_coupling();
+        let mut invitation = invitation.into_coupling();
         let mut state = CouplingState::new();
-        let _relay = state.begin_offer(Leg::One, OfferAxis::InitialInvite);
+        if relayed.is_some() {
+            let _relay = state.begin_offer(Leg::One, OfferAxis::InitialInvite);
+        }
         let cancellation = invitation.cancellation();
+        let tag = invitation.tag();
 
-        let invite = offer_invite(endpoint, &target, to, options, &relayed)?;
+        let invite = offer_invite(
+            endpoint,
+            &target,
+            to,
+            options,
+            relayed.as_deref(),
+            reliability,
+        )?;
         let mut responses = endpoint.send(invite.clone(), target.clone()).await?;
+
+        let mut one_relay = DescriptionRelay::new(fresh_origin(options.origin_address));
+        let mut early = EarlyCarriers::new(&invitation.incoming, &invite, relayed.is_some());
         let response = tokio::select! {
-            response = await_final(&mut responses, options.timeout) => response,
+            response = await_confirmation(
+                endpoint,
+                &mut invitation,
+                &mut responses,
+                &invite,
+                &target,
+                (&mut one_relay, &mut two_relay),
+                &mut state,
+                &mut early,
+                &tag,
+                options.timeout,
+            ) => response,
             () = cancellation.cancelled() => {
                 let _cleanup = withdraw(
                     endpoint,
@@ -215,9 +356,23 @@ impl OffMediaCoupling {
         let response = match response {
             Ok(response) => response,
             Err(error) => {
-                invitation
-                    .refuse(endpoint, 503, "Service Unavailable")
-                    .await?;
+                // The target INVITE may still be outstanding — an early carrier that could not
+                // be relayed says nothing about whether the far end is still ringing — so it is
+                // withdrawn before the source leg is given its final response.
+                let _cleanup = withdraw(
+                    endpoint,
+                    &invite,
+                    target.clone(),
+                    &mut responses,
+                    &normal_clearing_reason(),
+                    options.cancellation_timeout,
+                )
+                .await;
+                let (status, reason) = match error {
+                    Error::Relay(_) | Error::Sdp(_) => (488, "Not Acceptable Here"),
+                    _ => (503, "Service Unavailable"),
+                };
+                invitation.refuse(endpoint, status, reason).await?;
                 return Err(error);
             }
         };
@@ -234,7 +389,14 @@ impl OffMediaCoupling {
         }
 
         let mut two = match confirm_target(
-            endpoint, calls, &invite, &response, target, responses, two_relay,
+            endpoint,
+            calls,
+            &invite,
+            &response,
+            target,
+            responses,
+            two_relay,
+            early.target_cseq(),
         )
         .await
         {
@@ -247,8 +409,17 @@ impl OffMediaCoupling {
             }
         };
 
-        let one_relay = DescriptionRelay::new(fresh_origin(options.origin_address));
-        let one = accept_source(endpoint, invitation, one_relay, response.body(), &mut two).await?;
+        let one = accept_source(
+            endpoint,
+            invitation,
+            one_relay,
+            response.body(),
+            &mut early,
+            &mut two,
+        )
+        .await?;
+        // A no-op when a reliable provisional already settled the exchange, which is the point:
+        // the early carriers use the same policy object rather than a second one.
         let _completed = state.complete(Leg::One);
         state.confirm(Leg::Two);
         state.confirm(Leg::One);
@@ -496,10 +667,253 @@ impl OffMediaCoupling {
     }
 }
 
+/// Drive the target INVITE to its final response, relaying the early carriers on the way.
+///
+/// Both inboxes are read here for the same reason the confirmed driver reads both: a reliable
+/// provisional arrives on the target leg and the PRACK answering the one this side relayed
+/// arrives on the source leg, and neither can wait for the other to finish. Source-leg requests
+/// this phase has no answer for are set aside rather than dropped, and the confirmed leg
+/// inherits them.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the early phase borrows exactly the coupling state it is allowed to touch"
+)]
+async fn await_confirmation(
+    endpoint: &Handle,
+    invitation: &mut CouplingInvitation,
+    responses: &mut sipx_transport::Responses,
+    invite: &Request,
+    target: &Target,
+    relays: (&mut DescriptionRelay, &mut DescriptionRelay),
+    state: &mut CouplingState,
+    early: &mut EarlyCarriers,
+    tag: &str,
+    timeout: Option<Duration>,
+) -> Result<Response> {
+    let (one_relay, two_relay) = relays;
+    let confirming = async {
+        let mut source_closed = false;
+        loop {
+            tokio::select! {
+                event = responses.next() => {
+                    let Some(event) = event else { return Err(Error::NoResponse) };
+                    let TuEvent::Response(response) = event else { continue };
+                    if response.status.is_final() {
+                        return Ok(*response);
+                    }
+                    relay_provisional(
+                        endpoint, invitation, &response, invite, target, state, one_relay, early,
+                        tag,
+                    )
+                    .await?;
+                }
+                received = invitation.requests.recv(),
+                    if !source_closed && early.deferred.len() < DEFERRED_CAPACITY =>
+                {
+                    let Some(request) = received else {
+                        source_closed = true;
+                        continue;
+                    };
+                    if request.request.method == Method::Prack {
+                        relay_prack(endpoint, &request, target, state, two_relay, early).await?;
+                    } else {
+                        // Nothing this phase can answer: an UPDATE belongs to the confirmed
+                        // driver, which is where `accept_source` hands these on to.
+                        early.deferred.push_back(request);
+                    }
+                }
+            }
+        }
+    };
+    match timeout {
+        Some(limit) => tokio::time::timeout(limit, confirming)
+            .await
+            .unwrap_or(Err(Error::NoResponse)),
+        None => confirming.await,
+    }
+}
+
+/// Relay a reliable provisional from the target leg onto the source leg (RFC 3262).
+///
+/// The description it carries is the target endpoint's own, and it reaches the source endpoint
+/// with only its `o=` line replaced — the same mapping the confirmed carriers use. Which half of
+/// RFC 3264 it is depends on whether the source INVITE offered, and that decides the one thing
+/// this carrier adds: whether the PRACK acknowledging it owes a description back (§5).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "relaying one provisional touches both legs' relays, numbering and policy"
+)]
+async fn relay_provisional(
+    endpoint: &Handle,
+    invitation: &CouplingInvitation,
+    response: &Response,
+    invite: &Request,
+    target: &Target,
+    state: &mut CouplingState,
+    one_relay: &mut DescriptionRelay,
+    early: &mut EarlyCarriers,
+    tag: &str,
+) -> Result<()> {
+    // §5 permits a description only in a *reliable* provisional, so an unreliable one carries
+    // nothing this role could relay and reaches the source leg as nothing at all.
+    let Some(rseq) = crate::rel::reliable_sequence(response) else {
+        return Ok(());
+    };
+    // §4: a retransmission "MUST be discarded", and one arriving out of order "MUST NOT be
+    // acknowledged with a PRACK, and MUST NOT be processed further".
+    if early.seen.accept(rseq) != Received::Acknowledge {
+        return Ok(());
+    }
+    if early.dialog.is_none() {
+        // §4: "the provisional response MUST establish a dialog if one is not yet created", and
+        // the PRACK has to go inside it — a UAS with no matching transaction is what a PRACK sent
+        // outside one reaches.
+        early.dialog = Some(Dialog::from_response(invite, response).ok_or(Error::NoDialog)?);
+    }
+    // §3: this side may not number a second reliable provisional while the first is
+    // unacknowledged. Leaving this one unrelayed also leaves it un-PRACKed, so the target
+    // retransmits and eventually fails its own invitation — an honest end to a source leg that
+    // has stopped acknowledging.
+    let Some(number) = early.numbering.allocate() else {
+        return Ok(());
+    };
+    // Mapped before the source leg is told anything. A description this side cannot put in front
+    // of the other endpoint stops here: the caller withdraws the target invitation and refuses
+    // the source one, rather than relaying a description it would have had to invent.
+    let mapped = match description_or_none(response.body()) {
+        Some(carried) => Some(one_relay.relay(carried?).map_err(Error::Relay)?),
+        None => None,
+    };
+
+    let provisional = source_provisional(
+        endpoint,
+        &invitation.incoming,
+        tag,
+        response,
+        number,
+        mapped.as_deref(),
+    )?;
+    endpoint
+        .respond(&invitation.incoming.key, provisional.clone())
+        .await?;
+    early.acknowledged();
+    let stop = CancellationToken::new();
+    tokio::spawn(crate::rel::retransmit_until_pracked(
+        endpoint.clone(),
+        invitation.incoming.key.clone(),
+        provisional,
+        stop.clone(),
+    ));
+    early.retransmission = Some(stop);
+
+    if mapped.is_some() && !early.source_offered {
+        // §5: the INVITE offered nothing, so this description is the delayed offer and its
+        // answer travels in PRACK. The target PRACK is held until the source supplies one.
+        match state.begin_offer(Leg::Two, OfferAxis::ReliableProvisional) {
+            OfferAction::Relay { .. } => {}
+            OfferAction::Refuse { .. } => return Err(Error::NoDialog),
+        }
+        early.held = Some(rseq);
+        return Ok(());
+    }
+    if mapped.is_some() {
+        // The INVITE offered, so this is the answer to it and the exchange settles here.
+        let _settled = state.complete(Leg::One);
+        early.settled = true;
+    }
+    let invite_cseq = early.target_invite_cseq;
+    let dialog = early.dialog.as_mut().ok_or(Error::NoDialog)?;
+    prack_target(endpoint, dialog, target, rseq, invite_cseq, None).await
+}
+
+/// Answer a PRACK on the source leg, and release the target one it may have been holding.
+///
+/// The correlation is RFC 3262 §3's: same dialog, and an `RAck` naming the number this side
+/// allocated together with the source INVITE's own `CSeq` and method. One that matches nothing
+/// gets `481` rather than silence, which is what tells a peer the two sides disagree instead of
+/// leaving its transaction to look like a lost packet.
+async fn relay_prack(
+    endpoint: &Handle,
+    incoming: &Incoming,
+    target: &Target,
+    state: &mut CouplingState,
+    two_relay: &mut DescriptionRelay,
+    early: &mut EarlyCarriers,
+) -> Result<()> {
+    let acknowledged = incoming
+        .request
+        .headers
+        .typed::<RAck>()
+        .and_then(std::result::Result::ok)
+        .is_some_and(|ack| {
+            early
+                .numbering
+                .acknowledge(&ack, early.source_invite_cseq, Method::Invite.as_bytes())
+        });
+    if !acknowledged {
+        respond(
+            endpoint,
+            incoming,
+            481,
+            "Call/Transaction Does Not Exist",
+            None,
+        )
+        .await?;
+        return Ok(());
+    }
+    early.remote_cseq = early
+        .remote_cseq
+        .max(sequence_of(&incoming.request, &Method::Prack));
+    early.acknowledged();
+    let Some(rseq) = early.held.take() else {
+        respond(endpoint, incoming, 200, "OK", None).await?;
+        return Ok(());
+    };
+
+    // §5: the source INVITE offered nothing, so the answer to the relayed offer is in this PRACK
+    // and nowhere else. Mapped on the leg it arrived on, before the target leg is told anything:
+    // one this side cannot carry is refused here and the target never sees a PRACK at all.
+    let mapped = description_or_none(incoming.request.body())
+        .unwrap_or_else(|| {
+            Err(Error::Sdp(
+                "the PRACK answering a delayed offer carried no description".to_owned(),
+            ))
+        })
+        .and_then(|answer| two_relay.relay(answer).map_err(Error::Relay));
+    let answer = match mapped {
+        Ok(answer) => answer,
+        Err(error) => {
+            let _settled = state.fail(Leg::Two);
+            respond(endpoint, incoming, 488, "Not Acceptable Here", None).await?;
+            return Err(error);
+        }
+    };
+    let invite_cseq = early.target_invite_cseq;
+    let dialog = early.dialog.as_mut().ok_or(Error::NoDialog)?;
+    let relayed = prack_target(endpoint, dialog, target, rseq, invite_cseq, Some(&answer)).await;
+    match relayed {
+        Ok(()) => {
+            let _settled = state.complete(Leg::Two);
+            early.settled = true;
+            respond(endpoint, incoming, 200, "OK", None).await?;
+            Ok(())
+        }
+        Err(error) => {
+            let _settled = state.fail(Leg::Two);
+            respond(endpoint, incoming, 488, "Not Acceptable Here", None).await?;
+            Err(error)
+        }
+    }
+}
+
 /// Take ownership of the confirmed target dialog: register its inbox and acknowledge its 2xx.
 ///
 /// Every path after the 2xx must acknowledge it. Returning without one leaves the far end
 /// retransmitting for 32 seconds and then tearing down a dialog this side already reported.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "confirmation inherits the early dialog's numbering along with the 2xx"
+)]
 async fn confirm_target(
     endpoint: &Handle,
     calls: &Calls,
@@ -508,11 +922,20 @@ async fn confirm_target(
     target: Target,
     responses: sipx_transport::Responses,
     relay: DescriptionRelay,
+    early_cseq: Option<u32>,
 ) -> Result<OffMediaLeg> {
-    let dialog = Dialog::from_response(invite, response).ok_or(Error::NoDialog)?;
+    let mut dialog = Dialog::from_response(invite, response).ok_or(Error::NoDialog)?;
     let leg_target = in_dialog_target(&dialog, target);
     let inbox = calls.register(&dialog);
+    // Built before the early numbering is carried across: the ACK for a 2xx repeats the INVITE's
+    // own sequence number rather than taking a new one (RFC 3261 §13.2.2.4).
     let ack = build_ack(endpoint, &dialog, &leg_target)?;
+    // RFC 3261 §12.2.1.1: a PRACK sent while this dialog was early consumed a number in the same
+    // sequence space, and a dialog rebuilt from the 2xx would hand that number out a second time
+    // — putting the first in-dialog request behind one the peer has already seen.
+    if let Some(early_cseq) = early_cseq {
+        dialog.local_cseq = dialog.local_cseq.max(early_cseq);
+    }
     endpoint
         .send_directly(ack.clone(), leg_target.clone())
         .await?;
@@ -537,22 +960,45 @@ async fn confirm_target(
 ///
 /// The target already has a confirmed dialog by this point, so every failure here ends it before
 /// returning: an acceptance this side could not send does not make that ownership disappear.
+///
+/// The `2xx` carries a description only when one is still owed. An exchange RFC 3262 §5 already
+/// settled in a reliable provisional is complete, and repeating it here would be a renegotiation
+/// neither endpoint asked for; a `2xx` with no description and no settled exchange is a target
+/// that never answered at all, which is a failure rather than an acceptance.
 async fn accept_source(
     endpoint: &Handle,
-    invitation: crate::dispatch::CouplingInvitation,
+    invitation: CouplingInvitation,
     mut relay: DescriptionRelay,
     answer: &[u8],
+    early: &mut EarlyCarriers,
     two: &mut OffMediaLeg,
 ) -> Result<OffMediaLeg> {
     let tag = invitation.tag();
+    let settled = early.settled;
     // Everything fallible runs before the invitation is claimed, so a crossing CANCEL can still
     // end an invitation this acceptance turned out not to be able to answer.
-    let prepared = description(answer)
-        .and_then(|answer| relay.relay(answer).map_err(Error::Relay))
-        .and_then(|answer| accept(endpoint, &invitation.incoming, &tag, &answer))
+    let prepared = description_or_none(answer)
+        .map_or_else(
+            || {
+                settled.then_some(None).ok_or_else(|| {
+                    Error::Sdp(
+                        "the target accepted without ever answering the relayed offer".to_owned(),
+                    )
+                })
+            },
+            |answer| {
+                answer
+                    .and_then(|answer| relay.relay(answer).map_err(Error::Relay))
+                    .map(Some)
+            },
+        )
+        .and_then(|answer| accept(endpoint, &invitation.incoming, &tag, answer.as_deref()))
         .and_then(|accepted| {
-            let dialog =
+            let mut dialog =
                 Dialog::from_request(&invitation.incoming.request, &tag).ok_or(Error::NoDialog)?;
+            // A PRACK answered while the dialog was early already advanced the peer's sequence
+            // space, and forgetting that would accept a replay of it as a fresh request.
+            dialog.remote_cseq = dialog.remote_cseq.max(early.remote_cseq);
             let sequence = sequence_of(&invitation.incoming.request, &Method::Invite)
                 .ok_or(Error::NoDialog)?;
             Ok((accepted, dialog, sequence))
@@ -588,7 +1034,9 @@ async fn accept_source(
             next: now + T1,
             deadline: now + TIMER_H,
         }),
-        deferred: VecDeque::new(),
+        // Requests the early phase had no answer for. Set aside rather than dropped: the
+        // confirmed driver is where an UPDATE that raced the target's 2xx belongs.
+        deferred: early.take_deferred(),
         ended: false,
     })
 }
@@ -677,13 +1125,35 @@ fn fresh_origin(address: IpAddr) -> Origin {
     Origin::new(address, id, 1)
 }
 
-fn source_offer(incoming: &Incoming) -> Result<&str> {
-    if incoming.request.body().is_empty() {
+/// The source INVITE's own offer, or `None` when it is a delayed one this role may relay.
+///
+/// An offerless INVITE is a delayed offer, and relaying it needs somewhere for the target's own
+/// offer to come back: RFC 3262 §5's reliable provisional, which RFC 3262 §3 forbids unless the
+/// source said it supports the extension. Without that there is one carrier left — the offer in
+/// the `2xx` and its answer in the ACK — and this stack implements it on neither side, so it is
+/// refused here rather than begun and abandoned halfway.
+fn source_offer(incoming: &Incoming, reliability: Offered) -> Result<Option<&str>> {
+    let Some(body) = description_or_none(incoming.request.body()) else {
+        if reliability.supported || reliability.required {
+            return Ok(None);
+        }
         return Err(Error::Sdp(
-            "an off-media coupling relays descriptions and has none of its own to offer".to_owned(),
+            "an offerless INVITE with no 100rel leaves no carrier for the target's own offer"
+                .to_owned(),
         ));
+    };
+    body.map(Some)
+}
+
+/// A body as text, or `None` when there is no body at all.
+///
+/// The two are different answers: an empty body is a message that negotiates nothing, and a body
+/// that will not decode is one this role cannot carry.
+fn description_or_none(body: &[u8]) -> Option<Result<&str>> {
+    if body.is_empty() {
+        return None;
     }
-    description(incoming.request.body())
+    Some(description(body))
 }
 
 fn description(body: &[u8]) -> Result<&str> {
@@ -699,13 +1169,20 @@ fn sequence_of(request: &Request, method: &Method) -> Option<u32> {
         .map(|cseq| cseq.sequence)
 }
 
-/// The target INVITE, carrying the source endpoint's own description.
+/// The target INVITE, carrying the source endpoint's own description if it wrote one.
+///
+/// `100rel` is mirrored rather than asserted. RFC 3262 §3 lets the target put a description in a
+/// reliable provisional only if this request says the extension is supported, and a description
+/// arriving there can be relayed onward only if the source leg will accept one too. Claiming
+/// support the source never offered would leave this role holding a description with nowhere to
+/// put it — and putting it somewhere is the only thing it does.
 fn offer_invite(
     endpoint: &Handle,
     target: &Target,
     to: &Uri,
     options: &OffMediaOptions,
-    offer: &str,
+    offer: Option<&str>,
+    reliability: Offered,
 ) -> Result<Request> {
     let via = format!(
         "SIP/2.0/{} {};rport;branch={}",
@@ -713,7 +1190,7 @@ fn offer_invite(
         endpoint.sent_by_for(target.transport),
         sipx_transport::new_branch()
     );
-    let builder = RequestBuilder::new(Method::Invite, to.clone())
+    let mut builder = RequestBuilder::new(Method::Invite, to.clone())
         .header(HeaderName::Via, Bytes::from(via))?
         .header(
             HeaderName::To,
@@ -733,18 +1210,119 @@ fn offer_invite(
             Bytes::from(contact_for(endpoint, target.transport)),
         )?
         .max_forwards(70)
-        // No `100rel`: a reliable provisional may carry an offer, and answering one needs a
-        // description this role does not author. RFC 3262 §3 forbids the far end sending one
-        // unless this request says it is supported.
-        .header(
-            HeaderName::Allow,
-            Bytes::from_static(b"INVITE, ACK, BYE, CANCEL, UPDATE"),
-        )?
-        .header(
-            HeaderName::ContentType,
-            Bytes::from_static(b"application/sdp"),
-        )?
-        .body(Bytes::from(offer.to_owned()));
+        .header(HeaderName::Allow, Bytes::from_static(ALLOW))?;
+    if reliability.supported || reliability.required {
+        builder = builder.header(HeaderName::Supported, Bytes::from_static(b"100rel"))?;
+    }
+    if reliability.required {
+        builder = builder.header(HeaderName::Require, Bytes::from_static(b"100rel"))?;
+    }
+    if let Some(offer) = offer {
+        builder = builder
+            .header(
+                HeaderName::ContentType,
+                Bytes::from_static(b"application/sdp"),
+            )?
+            .body(Bytes::from(offer.to_owned()));
+    }
+    Ok(builder.build())
+}
+
+/// PRACK a reliable provisional on the target leg (RFC 3262 §4).
+///
+/// `answer` is present in exactly one case: RFC 3262 §5's, where the INVITE offered nothing and
+/// "the UAC ... MUST generate an answer in the PRACK". It is the source endpoint's own
+/// description with one line replaced, never a re-serialization of it — an off-media element may
+/// not normalize a description it is only carrying.
+async fn prack_target(
+    endpoint: &Handle,
+    leg: &mut Dialog,
+    target: &Target,
+    rseq: u32,
+    invite_cseq: u32,
+    answer: Option<&str>,
+) -> Result<()> {
+    let cseq = leg.next_cseq();
+    let (local, remote) = leg.local_and_remote();
+    let (uri, routes) = leg.request_target();
+    let ack = RAck {
+        rseq,
+        cseq: invite_cseq,
+        method: Method::Invite.as_bytes().to_vec(),
+    };
+    let via = format!(
+        "SIP/2.0/{} {};rport;branch={}",
+        target.transport.as_str(),
+        endpoint.sent_by_for(target.transport),
+        sipx_transport::new_branch()
+    );
+    let mut builder = RequestBuilder::new(Method::Prack, uri)
+        .header(HeaderName::Via, Bytes::from(via))?
+        .header(HeaderName::To, Bytes::from(remote))?
+        .header(HeaderName::From, Bytes::from(local))?
+        .header(HeaderName::CallId, Bytes::from(leg.id.call_id.clone()))?
+        .cseq(cseq, &Method::Prack)?
+        .header(HeaderName::RAck, Bytes::from(ack.to_string()))?
+        .max_forwards(70);
+    if let Some(answer) = answer {
+        builder = builder
+            .header(
+                HeaderName::ContentType,
+                Bytes::from_static(b"application/sdp"),
+            )?
+            .body(Bytes::from(answer.to_owned()));
+    }
+    let request = add_routes(builder, &routes)?.build();
+    let mut responses = endpoint.send(request, target.clone()).await?;
+    // §3: a matching PRACK "MUST be responded to with a 2xx". A 481 means the target has no
+    // record of the provisional this side just acknowledged, which is worth surfacing: the two
+    // legs would otherwise go on disagreeing about which description is in force.
+    match responses.final_response().await {
+        Some(response) if response.status.is_success() => Ok(()),
+        Some(response) => Err(Error::Rejected {
+            status: response.status.code(),
+            reason: String::from_utf8_lossy(&response.reason).into_owned(),
+        }),
+        None => Err(Error::NoResponse),
+    }
+}
+
+/// The reliable provisional this coupling sends on the source leg (RFC 3262 §3).
+///
+/// The status and reason are the target's own, because this is a relay rather than a progress
+/// report of its own making, and the description — when the target wrote one — reaches the
+/// source endpoint with only its `o=` line replaced.
+fn source_provisional(
+    endpoint: &Handle,
+    incoming: &Incoming,
+    tag: &str,
+    relayed: &Response,
+    rseq: u32,
+    body: Option<&str>,
+) -> Result<Response> {
+    let Some(to) = incoming.request.headers.value(&HeaderName::To) else {
+        return Err(Error::NoDialog);
+    };
+    let to = format!("{};tag={tag}", String::from_utf8_lossy(&to));
+    let target = Target::new(incoming.source, incoming.transport);
+    let mut builder =
+        ResponseBuilder::to_request(&incoming.request, relayed.status, relayed.reason.clone())?
+            .set_header(&HeaderName::To, Bytes::from(to))?
+            .header(
+                HeaderName::Contact,
+                Bytes::from(contact_for(endpoint, target.transport)),
+            )?
+            .header(HeaderName::Require, Bytes::from_static(b"100rel"))?
+            .header(HeaderName::RSeq, Bytes::from(rseq.to_string()))?
+            .header(HeaderName::Allow, Bytes::from_static(ALLOW))?;
+    if let Some(body) = body {
+        builder = builder
+            .header(
+                HeaderName::ContentType,
+                Bytes::from_static(b"application/sdp"),
+            )?
+            .body(Bytes::from(body.to_owned()));
+    }
     Ok(builder.build())
 }
 
@@ -787,28 +1365,35 @@ fn in_dialog_offer(
         .build())
 }
 
-/// The initial 2xx, with the relayed answer and this side's dialog tag.
-fn accept(endpoint: &Handle, incoming: &Incoming, tag: &str, answer: &str) -> Result<Response> {
+/// The initial 2xx, with this side's dialog tag and the relayed answer when one is still owed.
+fn accept(
+    endpoint: &Handle,
+    incoming: &Incoming,
+    tag: &str,
+    answer: Option<&str>,
+) -> Result<Response> {
     let Some(to) = incoming.request.headers.value(&HeaderName::To) else {
         return Err(Error::NoDialog);
     };
     let to = format!("{};tag={tag}", String::from_utf8_lossy(&to));
     let status = StatusCode::new(200).ok_or(Error::NoDialog)?;
     let target = Target::new(incoming.source, incoming.transport);
-    Ok(
-        ResponseBuilder::to_request(&incoming.request, status, "OK")?
-            .set_header(&HeaderName::To, Bytes::from(to))?
-            .header(
-                HeaderName::Contact,
-                Bytes::from(contact_for(endpoint, target.transport)),
-            )?
+    let mut builder = ResponseBuilder::to_request(&incoming.request, status, "OK")?
+        .set_header(&HeaderName::To, Bytes::from(to))?
+        .header(
+            HeaderName::Contact,
+            Bytes::from(contact_for(endpoint, target.transport)),
+        )?
+        .header(HeaderName::Allow, Bytes::from_static(ALLOW))?;
+    if let Some(answer) = answer {
+        builder = builder
             .header(
                 HeaderName::ContentType,
                 Bytes::from_static(b"application/sdp"),
             )?
-            .body(Bytes::from(answer.to_owned()))
-            .build(),
-    )
+            .body(Bytes::from(answer.to_owned()));
+    }
+    Ok(builder.build())
 }
 
 /// The 2xx to an in-dialog offer, carrying the peer endpoint's own description.
@@ -899,19 +1484,5 @@ async fn end_leg(endpoint: &Handle, leg: &mut OffMediaLeg) {
         Err(error) => {
             tracing::warn!(%error, "could not end an off-media coupled dialog");
         }
-    }
-}
-
-/// The target's final response, or the reason there will not be one.
-async fn await_final(
-    responses: &mut sipx_transport::Responses,
-    timeout: Option<Duration>,
-) -> Result<Response> {
-    let final_response = async { responses.final_response().await.ok_or(Error::NoResponse) };
-    match timeout {
-        Some(limit) => tokio::time::timeout(limit, final_response)
-            .await
-            .unwrap_or(Err(Error::NoResponse)),
-        None => final_response.await,
     }
 }

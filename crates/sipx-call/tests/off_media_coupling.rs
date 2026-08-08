@@ -1,9 +1,14 @@
-//! Coupling two dialogs while staying off the media path (`C-7`, RFC 7092 §3.1.3).
+//! Coupling two dialogs while staying off the media path (`C-7`, `C-8`, RFC 7092 §3.1.3).
 //!
 //! The peers here are deliberately asymmetric. The source is a raw socket, so the exact bytes it
 //! offers are known and can be compared against what the target receives. The target is an
 //! ordinary sipx call with a real media session, so the RTP it sends is real and has somewhere to
 //! go. Nothing in between binds a media port: what proves that is where the packets arrive.
+//!
+//! `C-8` adds the carriers that run *before* either dialog is confirmed — RFC 3262's reliable
+//! provisional and PRACK, and the delayed offer of an offerless INVITE — and their proofs take
+//! the same shape: real audio, from the target endpoint's own session, arriving at the port the
+//! source endpoint's own description named, while both dialogs are still early.
 
 #![allow(
     clippy::unwrap_used,
@@ -202,6 +207,130 @@ fn in_dialog(
             .body(Bytes::from(body.to_owned()));
     }
     builder.build()
+}
+
+/// A source INVITE that offers RFC 3262's `100rel`, with or without a description.
+///
+/// The two shapes it takes are the two early carriers: an INVITE that offers, whose answer may
+/// come back in a reliable provisional, and an offerless one, whose *offer* comes back there
+/// instead (RFC 3262 §5).
+fn early_source_invite(source: &Handle, call_id: &'static str, body: Option<&str>) -> Request {
+    let mut builder = RequestBuilder::new(
+        Method::Invite,
+        Uri::sip(Host::Name(HostName::new("edge.example").unwrap())),
+    )
+    .header(HeaderName::Via, via(source))
+    .unwrap()
+    .header(HeaderName::To, "<sip:edge.example>")
+    .unwrap()
+    .header(HeaderName::From, "<sip:caller@example.net>;tag=source")
+    .unwrap()
+    .header(HeaderName::CallId, call_id)
+    .unwrap()
+    .cseq(1, &Method::Invite)
+    .unwrap()
+    .header(HeaderName::Supported, "100rel")
+    .unwrap()
+    .header(
+        HeaderName::Contact,
+        format!("<sip:caller@{}>", source.local_addr()),
+    )
+    .unwrap()
+    .max_forwards(70);
+    if let Some(body) = body {
+        builder = builder
+            .header(HeaderName::ContentType, "application/sdp")
+            .unwrap()
+            .body(Bytes::from(body.to_owned()));
+    }
+    builder.build()
+}
+
+/// The PRACK acknowledging a reliable provisional this coupling sent (RFC 3262 §7.2).
+fn prack_for(
+    source: &Handle,
+    invite: &Request,
+    provisional: &Response,
+    cseq: u32,
+    body: Option<&str>,
+) -> Request {
+    let rseq = provisional
+        .headers
+        .typed::<sipx_sip::rel::RSeq>()
+        .expect("the relayed provisional is numbered")
+        .expect("its RSeq parses")
+        .0;
+    let value = |name: &HeaderName| {
+        Bytes::from(
+            invite
+                .headers
+                .value(name)
+                .unwrap_or_else(|| panic!("the INVITE carries {name:?}"))
+                .into_owned(),
+        )
+    };
+    let mut builder = RequestBuilder::new(Method::Prack, invite.uri.clone())
+        .header(HeaderName::Via, via(source))
+        .unwrap()
+        .header(
+            HeaderName::To,
+            Bytes::from(
+                provisional
+                    .headers
+                    .value(&HeaderName::To)
+                    .expect("the provisional established an early dialog")
+                    .into_owned(),
+            ),
+        )
+        .unwrap()
+        .header(HeaderName::From, value(&HeaderName::From))
+        .unwrap()
+        .header(HeaderName::CallId, value(&HeaderName::CallId))
+        .unwrap()
+        .cseq(cseq, &Method::Prack)
+        .unwrap()
+        .header(HeaderName::RAck, format!("{rseq} 1 INVITE"))
+        .unwrap()
+        .header(
+            HeaderName::Contact,
+            format!("<sip:caller@{}>", source.local_addr()),
+        )
+        .unwrap()
+        .max_forwards(70);
+    if let Some(body) = body {
+        builder = builder
+            .header(HeaderName::ContentType, "application/sdp")
+            .unwrap()
+            .body(Bytes::from(body.to_owned()));
+    }
+    builder.build()
+}
+
+/// The next reliable provisional on a transaction, skipping anything sent unreliably.
+async fn next_reliable_provisional(responses: &mut sipx_transport::Responses) -> Response {
+    tokio::time::timeout(BOUND, async {
+        loop {
+            match responses.next().await {
+                Some(sipx_sip::transaction::TuEvent::Response(response))
+                    if response.status.is_provisional()
+                        && response.headers.typed::<sipx_sip::rel::RSeq>().is_some() =>
+                {
+                    return *response;
+                }
+                Some(_) => {}
+                None => {
+                    panic!("the source INVITE transaction ended without a reliable provisional")
+                }
+            }
+        }
+    })
+    .await
+    .expect("a reliable provisional reaches the source leg")
+}
+
+/// Whether a request offers RFC 3262's option tag at all.
+fn offers_100rel(incoming: &Incoming) -> bool {
+    sipx_sip::rel::Offered::in_request(&incoming.request).supported
 }
 
 fn cancel_for(invite: &Request) -> Request {
@@ -1028,4 +1157,553 @@ async fn a_source_cancel_withdraws_the_owned_target_invitation() {
             .code(),
         487
     );
+}
+
+/// `C-8`'s failing-first acceptance test for the reliable-provisional carrier (RFC 3262).
+///
+/// `C-7` foreclosed this by not offering `100rel` on the target INVITE, so no peer could put a
+/// description in a provisional at all. Here the option tag crosses, the target answers the
+/// source's offer in a reliable `183`, and that answer is relayed into a reliable `183` of this
+/// coupling's own. PRACK is correlated on both legs: this side sends one on the target leg and
+/// answers one on the source leg.
+///
+/// The proof is causal and it happens while both dialogs are still early — before any `200` has
+/// been sent on either leg. Real audio leaves the target endpoint's own early session and
+/// arrives on a socket this test bound, at the port the source's own description named. None of
+/// it could happen without the answer that crossed in the provisional.
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the reliable provisional, both PRACKs and the early media are one causal vector"
+)]
+async fn a_reliable_provisional_answer_crosses_both_legs_and_early_media_follows_it() {
+    let (edge, edge_incoming) = endpoint().await;
+    let mut pumped = pump(&edge, edge_incoming);
+    let edge_addr = edge.local_addr();
+
+    let source_media = UdpSocket::bind("127.0.0.1:0").await.expect("binds");
+    let source_port = source_media.local_addr().expect("bound").port();
+    let offer = endpoint_offer(source_port, 1);
+
+    let (source, _source_incoming) = endpoint().await;
+    let invite = early_source_invite(&source, "off-media-reliable", Some(&offer));
+    let mut source_responses = source
+        .send(invite.clone(), Target::udp(edge_addr))
+        .await
+        .expect("the source INVITE leaves");
+    let invitation = pumped.invitation().await;
+
+    let (target_endpoint, target_incoming) = endpoint().await;
+    let mut target_pumped = pump(&target_endpoint, target_incoming);
+    let calls = pumped.calls.clone();
+    let edge_for_coupling = edge.clone();
+    let target = Target::udp(target_endpoint.local_addr());
+    let to = Uri::sip(Host::Name(HostName::new("callee.example").expect("valid")));
+    let coupling_task = tokio::spawn(async move {
+        Box::pin(OffMediaCoupling::dial(
+            invitation,
+            &calls,
+            &edge_for_coupling,
+            target,
+            &to,
+            &OffMediaOptions::new("<sip:edge@example.net>", loopback()),
+        ))
+        .await
+        .expect("the off-media coupling reaches the target")
+    });
+
+    let target_invitation = target_pumped.invitation().await;
+    assert!(
+        offers_100rel(target_invitation.request()),
+        "`100rel` is no longer stripped from the target INVITE (RFC 3262 §3)"
+    );
+    let relayed = String::from_utf8_lossy(target_invitation.request().request.body()).into_owned();
+    assert_eq!(
+        without_origin(&relayed),
+        without_origin(&offer),
+        "the source description still crosses unchanged apart from its origin"
+    );
+
+    // The target answers in the provisional, which binds and starts its own early session.
+    let mut ringing = sipx_call::ring_early(
+        &target_endpoint,
+        target_invitation.request(),
+        183,
+        "Session Progress",
+        loopback(),
+    )
+    .await
+    .expect("the target answers the source offer in a reliable provisional");
+    let target_port = ringing
+        .media()
+        .expect("the early answer started the target's session")
+        .local_addr()
+        .port();
+    let (target_invite, mut target_inbox) = target_invitation.into_parts();
+
+    // The relayed reliable provisional: the target endpoint's own answer, on the source leg.
+    let provisional = next_reliable_provisional(&mut source_responses).await;
+    assert_eq!(provisional.status.code(), 183);
+    let relayed_answer = String::from_utf8_lossy(provisional.body()).into_owned();
+    assert!(
+        relayed_answer.contains(&format!("m=audio {target_port}")),
+        "the source is told to send audio to the target endpoint's own port: {relayed_answer}"
+    );
+
+    // PRACK on the target leg. RFC 3262 §5: the INVITE offered, so this one owes no description.
+    let target_prack = next_request(&mut target_inbox, "the coupling's PRACK").await;
+    assert_eq!(target_prack.request.method, Method::Prack);
+    assert!(
+        target_prack.request.body().is_empty(),
+        "the INVITE offered, so its provisional's PRACK carries no second description"
+    );
+    assert!(
+        ringing
+            .on_prack(&target_prack)
+            .await
+            .expect("the target adopts the relayed PRACK")
+    );
+
+    // PRACK on the source leg, correlated against the number this coupling allocated.
+    let mut prack_responses = source
+        .send(
+            prack_for(&source, &invite, &provisional, 2, None),
+            Target::udp(edge_addr),
+        )
+        .await
+        .expect("the source PRACK leaves");
+    assert_eq!(
+        final_response(&mut prack_responses, "the source PRACK")
+            .await
+            .status
+            .code(),
+        200,
+        "the source PRACK is correlated and acknowledged on the leg it arrived on"
+    );
+
+    // The causal claim, taken while neither leg has been answered: the target endpoint's early
+    // session sends real audio to the port the source's own description named.
+    let samples = vec![8_000_i16; 1_600];
+    let early = ringing
+        .media()
+        .expect("the target's early session is running");
+    let (played, heard) = tokio::join!(
+        early.play(&samples, 160),
+        first_rtp(
+            &source_media,
+            "the target's early audio reaches the source endpoint directly"
+        ),
+    );
+    assert!(played, "the target endpoint finishes its early audio");
+    assert_eq!(heard.payload_type, 0);
+    assert!(
+        heard.payload.iter().any(|byte| *byte != 0xFF),
+        "what arrived is the audio the target played, not µ-law silence"
+    );
+
+    // And the call still confirms on top of the exchange the provisional settled.
+    let mut target_call = sipx_call::answer_early(&target_endpoint, &target_invite, &mut ringing)
+        .await
+        .expect("the target answers on the early session");
+    let mut coupling = coupling_task.await.expect("the coupling task finishes");
+    assert_eq!(
+        next_request(&mut target_inbox, "the target's acceptance is acknowledged")
+            .await
+            .request
+            .method,
+        Method::Ack
+    );
+    let accepted = final_response(&mut source_responses, "the source INVITE").await;
+    assert_eq!(accepted.status.code(), 200);
+    assert!(
+        accepted.body().is_empty(),
+        "the exchange completed in the provisional, so the 200 renegotiates nothing"
+    );
+    source
+        .send_directly(
+            in_dialog(&source, &invite, &provisional, &Method::Ack, 1, None),
+            Target::udp(edge_addr),
+        )
+        .await
+        .expect("the source acknowledges");
+
+    let running = tokio::spawn(async move {
+        let end = coupling.run().await;
+        (end, coupling)
+    });
+    let mut bye_responses = source
+        .send(
+            in_dialog(&source, &invite, &provisional, &Method::Bye, 3, None),
+            Target::udp(edge_addr),
+        )
+        .await
+        .expect("the source BYE leaves");
+    let relayed_bye = next_request(&mut target_inbox, "the relayed BYE").await;
+    assert!(
+        target_call
+            .handle(&relayed_bye)
+            .await
+            .expect("the target answers the relayed BYE")
+    );
+    assert_eq!(
+        final_response(&mut bye_responses, "the source BYE")
+            .await
+            .status
+            .code(),
+        200
+    );
+    let (end, _coupling) = running.await.expect("the coupling driver finishes");
+    assert_eq!(
+        end.expect("the coupling ends cleanly"),
+        CouplingEnd::Bye(Leg::One)
+    );
+}
+
+/// `C-8`'s failing-first acceptance test for the delayed offer (RFC 3264 §5, RFC 3262 §5).
+///
+/// `C-7` refused an offerless INVITE `488`, because answering one means originating a
+/// description. It does not: the offerless INVITE is relayed *as* an offerless INVITE, the
+/// target supplies the offer in its reliable provisional, and the source's PRACK supplies the
+/// answer. Each description is still one endpoint's own, and the coupling still authors none.
+///
+/// The proof is again causal and again early: the target's session — which exists only because
+/// the relayed PRACK carried the source's answer to it — sends audio to the port that answer
+/// named, on a socket this test bound.
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the delayed offer, both PRACKs and the early media are one causal vector"
+)]
+async fn an_offerless_invite_is_relayed_as_a_delayed_offer_and_early_media_follows_it() {
+    let (edge, edge_incoming) = endpoint().await;
+    let mut pumped = pump(&edge, edge_incoming);
+    let edge_addr = edge.local_addr();
+
+    let source_media = UdpSocket::bind("127.0.0.1:0").await.expect("binds");
+    let source_port = source_media.local_addr().expect("bound").port();
+
+    let (source, _source_incoming) = endpoint().await;
+    let invite = early_source_invite(&source, "off-media-delayed", None);
+    let mut source_responses = source
+        .send(invite.clone(), Target::udp(edge_addr))
+        .await
+        .expect("the offerless source INVITE leaves");
+    let invitation = pumped.invitation().await;
+
+    let (target_endpoint, target_incoming) = endpoint().await;
+    let mut target_pumped = pump(&target_endpoint, target_incoming);
+    let calls = pumped.calls.clone();
+    let edge_for_coupling = edge.clone();
+    let target = Target::udp(target_endpoint.local_addr());
+    let to = Uri::sip(Host::Name(HostName::new("callee.example").expect("valid")));
+    let coupling_task = tokio::spawn(async move {
+        Box::pin(OffMediaCoupling::dial(
+            invitation,
+            &calls,
+            &edge_for_coupling,
+            target,
+            &to,
+            &OffMediaOptions::new("<sip:edge@example.net>", loopback()),
+        ))
+        .await
+        .expect("the off-media coupling relays the delayed offer")
+    });
+
+    let target_invitation = target_pumped.invitation().await;
+    assert!(
+        target_invitation.request().request.body().is_empty(),
+        "an offerless INVITE is relayed as one rather than refused 488"
+    );
+    assert!(
+        offers_100rel(target_invitation.request()),
+        "RFC 3262 §5 puts the delayed offer in a reliable provisional, which needs the option tag"
+    );
+
+    let mut ringing = sipx_call::ring_offer_early(
+        &target_endpoint,
+        target_invitation.request(),
+        183,
+        "Session Progress",
+        loopback(),
+        sipx_sdp::Direction::SendRecv,
+    )
+    .await
+    .expect("the target originates its offer in the reliable provisional");
+    let (target_invite, mut target_inbox) = target_invitation.into_parts();
+
+    let provisional = next_reliable_provisional(&mut source_responses).await;
+    let relayed_offer = String::from_utf8_lossy(provisional.body()).into_owned();
+    assert!(
+        relayed_offer.contains("m=audio"),
+        "the target's own offer reaches the source leg: {relayed_offer}"
+    );
+    assert!(
+        poll_fn(|cx| Poll::Ready(target_inbox.poll_recv(cx).is_pending())).await,
+        "the target PRACK waits for the answer only the source can give"
+    );
+
+    // The source answers the relayed offer, naming the socket it owns.
+    let answer = sipx_sdp::answer(
+        &sipx_sdp::parse(&relayed_offer).expect("the relayed offer parses"),
+        &sipx_sdp::Capabilities::g711(loopback(), source_port),
+    )
+    .to_string_sdp();
+    let mut prack_responses = source
+        .send(
+            prack_for(&source, &invite, &provisional, 2, Some(&answer)),
+            Target::udp(edge_addr),
+        )
+        .await
+        .expect("the source PRACK leaves");
+
+    let target_prack = next_request(&mut target_inbox, "the relayed PRACK").await;
+    assert_eq!(target_prack.request.method, Method::Prack);
+    assert_eq!(
+        without_origin(&body_of(&target_prack)),
+        without_origin(&answer),
+        "the source's answer crosses unchanged apart from its origin"
+    );
+    assert!(
+        ringing
+            .on_prack(&target_prack)
+            .await
+            .expect("the target adopts the relayed answer")
+    );
+    assert!(ringing.has_early_session());
+    assert_eq!(
+        final_response(&mut prack_responses, "the source PRACK")
+            .await
+            .status
+            .code(),
+        200
+    );
+
+    let samples = vec![8_000_i16; 1_600];
+    let early = ringing
+        .media()
+        .expect("the relayed answer started the target's session");
+    let (played, heard) = tokio::join!(
+        early.play(&samples, 160),
+        first_rtp(
+            &source_media,
+            "the target's early audio reaches the source endpoint directly"
+        ),
+    );
+    assert!(played, "the target endpoint finishes its early audio");
+    assert_eq!(heard.payload_type, 0);
+    assert!(
+        heard.payload.iter().any(|byte| *byte != 0xFF),
+        "what arrived is the audio the target played, not µ-law silence"
+    );
+
+    let mut target_call = sipx_call::answer_early(&target_endpoint, &target_invite, &mut ringing)
+        .await
+        .expect("the target answers on the early session");
+    let mut coupling = coupling_task.await.expect("the coupling task finishes");
+    assert_eq!(
+        next_request(&mut target_inbox, "the target's acceptance is acknowledged")
+            .await
+            .request
+            .method,
+        Method::Ack
+    );
+    let accepted = final_response(&mut source_responses, "the source INVITE").await;
+    assert_eq!(accepted.status.code(), 200);
+    source
+        .send_directly(
+            in_dialog(&source, &invite, &provisional, &Method::Ack, 1, None),
+            Target::udp(edge_addr),
+        )
+        .await
+        .expect("the source acknowledges");
+
+    let running = tokio::spawn(async move {
+        let end = coupling.run().await;
+        (end, coupling)
+    });
+    let mut bye_responses = source
+        .send(
+            in_dialog(&source, &invite, &provisional, &Method::Bye, 3, None),
+            Target::udp(edge_addr),
+        )
+        .await
+        .expect("the source BYE leaves");
+    let relayed_bye = next_request(&mut target_inbox, "the relayed BYE").await;
+    assert!(
+        target_call
+            .handle(&relayed_bye)
+            .await
+            .expect("the target answers the relayed BYE")
+    );
+    assert_eq!(
+        final_response(&mut bye_responses, "the source BYE")
+            .await
+            .status
+            .code(),
+        200
+    );
+    let (end, _coupling) = running.await.expect("the coupling driver finishes");
+    assert_eq!(
+        end.expect("the coupling ends cleanly"),
+        CouplingEnd::Bye(Leg::One)
+    );
+}
+
+/// `C-7`'s refusal invariant, on the new carrier: a description that cannot be mapped is decided
+/// before the peer leg is told anything.
+///
+/// The description arrives in the target's reliable provisional, so *its* source leg is the
+/// target one — and a `1xx` cannot be refused. What can be, and is, refused is propagation: the
+/// source leg never receives a provisional carrying it, the target invitation this coupling owns
+/// is withdrawn, and the source INVITE gets a final `488` instead.
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the malformed provisional and the withdrawal it causes are one sequence"
+)]
+async fn an_unmappable_provisional_never_reaches_the_peer_leg() {
+    let (edge, edge_incoming) = endpoint().await;
+    let mut pumped = pump(&edge, edge_incoming);
+    let edge_addr = edge.local_addr();
+
+    let source_media = UdpSocket::bind("127.0.0.1:0").await.expect("binds");
+    let source_port = source_media.local_addr().expect("bound").port();
+    let offer = endpoint_offer(source_port, 1);
+
+    let (source, _source_incoming) = endpoint().await;
+    let invite = early_source_invite(&source, "off-media-bad-provisional", Some(&offer));
+    let mut source_responses = source
+        .send(invite, Target::udp(edge_addr))
+        .await
+        .expect("the source INVITE leaves");
+    let invitation = pumped.invitation().await;
+
+    // A raw target, so the malformed reliable provisional is this test's own bytes.
+    let (target_endpoint, mut target_incoming) = endpoint().await;
+    let calls = pumped.calls.clone();
+    let edge_for_coupling = edge.clone();
+    let target = Target::udp(target_endpoint.local_addr());
+    let to = Uri::sip(Host::Name(HostName::new("callee.example").expect("valid")));
+    let coupling_task = tokio::spawn(async move {
+        Box::pin(OffMediaCoupling::dial(
+            invitation,
+            &calls,
+            &edge_for_coupling,
+            target,
+            &to,
+            &OffMediaOptions::new("<sip:edge@example.net>", loopback()),
+        ))
+        .await
+    });
+
+    let target_invite = next_request(&mut target_incoming, "the relayed INVITE").await;
+    let provisional = ResponseBuilder::to_request(
+        &target_invite.request,
+        StatusCode::new(183).expect("valid status"),
+        "Session Progress",
+    )
+    .expect("the provisional builds")
+    .set_header(
+        &HeaderName::To,
+        Bytes::from(format!(
+            "{};tag=target",
+            String::from_utf8_lossy(
+                &target_invite
+                    .request
+                    .headers
+                    .value(&HeaderName::To)
+                    .expect("the relayed INVITE has To")
+            )
+        )),
+    )
+    .expect("the dialog tag is valid")
+    .header(
+        HeaderName::Contact,
+        Bytes::from(format!("<sip:callee@{}>", target_endpoint.local_addr())),
+    )
+    .expect("valid Contact")
+    .header(HeaderName::Require, Bytes::from_static(b"100rel"))
+    .expect("valid Require")
+    .header(HeaderName::RSeq, Bytes::from_static(b"1"))
+    .expect("valid RSeq")
+    .header(
+        HeaderName::ContentType,
+        Bytes::from_static(b"application/sdp"),
+    )
+    .expect("valid Content-Type")
+    .body(Bytes::from_static(b"v=0\r\nthis is not a description\r\n"))
+    .build();
+    target_endpoint
+        .respond(&target_invite.key, provisional)
+        .await
+        .expect("the malformed provisional leaves");
+
+    // Answer the withdrawal so the coupling's cleanup completes promptly.
+    let withdrawing = tokio::spawn(async move {
+        let cancel = next_request(&mut target_incoming, "the withdrawing CANCEL").await;
+        assert_eq!(cancel.request.method, Method::Cancel);
+        let ok = ResponseBuilder::to_request(
+            &cancel.request,
+            StatusCode::new(200).expect("valid status"),
+            "OK",
+        )
+        .expect("the CANCEL acknowledgement builds")
+        .build();
+        target_endpoint
+            .respond(&cancel.key, ok)
+            .await
+            .expect("the CANCEL is answered");
+        let terminated = ResponseBuilder::to_request(
+            &target_invite.request,
+            StatusCode::new(487).expect("valid status"),
+            "Request Terminated",
+        )
+        .expect("the 487 builds")
+        .set_header(
+            &HeaderName::To,
+            Bytes::from("<sip:callee.example>;tag=target"),
+        )
+        .expect("the dialog tag is valid")
+        .build();
+        target_endpoint
+            .respond(&target_invite.key, terminated)
+            .await
+            .expect("the withdrawn INVITE is terminated");
+    });
+
+    // Everything the source leg was told, up to and including its final response.
+    let mut carried = Vec::new();
+    let final_status = tokio::time::timeout(BOUND, async {
+        loop {
+            match source_responses.next().await {
+                Some(sipx_sip::transaction::TuEvent::Response(response)) => {
+                    if response.status.is_final() {
+                        return response.status.code();
+                    }
+                    carried.push(String::from_utf8_lossy(response.body()).into_owned());
+                }
+                Some(_) => {}
+                None => panic!("the source INVITE ended without a final response"),
+            }
+        }
+    })
+    .await
+    .expect("the source INVITE receives a final response");
+
+    assert!(
+        carried.iter().all(String::is_empty),
+        "no provisional carried the description that never mapped: {carried:?}"
+    );
+    assert_eq!(
+        final_status, 488,
+        "the source leg is refused rather than told a description this side could not map"
+    );
+    assert!(
+        matches!(
+            coupling_task.await.expect("the coupling task finishes"),
+            Err(sipx_call::Error::Relay(_))
+        ),
+        "the refusal is the typed relay error, not a generic failure"
+    );
+    withdrawing.await.expect("the withdrawal completes");
 }

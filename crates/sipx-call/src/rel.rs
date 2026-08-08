@@ -5,7 +5,6 @@
 //! answering side — retransmitting a `180 Ringing` until the caller says it got there.
 
 use std::net::IpAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -16,6 +15,7 @@ use sipx_sip::transaction::TransactionKey;
 use sipx_sip::update;
 use sipx_sip::{HeaderName, Method, Response, StatusCode};
 use sipx_transport::{Handle, Incoming, Target};
+use tokio_util::sync::CancellationToken;
 
 use crate::call::{Early, EarlyOffer, MediaAddress};
 use crate::dialog::{Dialog, strip_header_params};
@@ -154,7 +154,7 @@ pub struct Ringing {
     invite_cseq: u32,
     numbering: Numbering,
     reliable: bool,
-    stop: Option<Arc<tokio::sync::Notify>>,
+    stop: Option<CancellationToken>,
     acknowledged: bool,
     /// The early dialog the provisional created (RFC 3261 §12.1.1).
     ///
@@ -346,7 +346,7 @@ impl Ringing {
         if matched {
             self.acknowledged = true;
             if let Some(stop) = self.stop.take() {
-                stop.notify_waiters();
+                stop.cancel();
             }
         }
         negotiated?;
@@ -359,7 +359,7 @@ impl Drop for Ringing {
         // Retransmissions outlive this value otherwise, and would go on resending a `180` for a
         // call that has since been answered or abandoned.
         if let Some(stop) = self.stop.take() {
-            stop.notify_waiters();
+            stop.cancel();
         }
     }
 }
@@ -702,12 +702,12 @@ async fn ring_with(
     endpoint.respond(&incoming.key, response.clone()).await?;
 
     let stop = reliable.then(|| {
-        let stop = Arc::new(tokio::sync::Notify::new());
+        let stop = CancellationToken::new();
         tokio::spawn(retransmit_until_pracked(
             endpoint.clone(),
             incoming.key.clone(),
             response,
-            Arc::clone(&stop),
+            stop.clone(),
         ));
         stop
     });
@@ -774,11 +774,16 @@ async fn refuse_bad_extension(endpoint: &Handle, incoming: &Incoming) -> Result<
 /// **does not cap at T2**. The RFC explains why: ACK retransmissions are triggered by receiving
 /// a 2xx, but PRACK is sent once and independently of further 1xx, so a fast repeat buys
 /// nothing after the first few and only adds traffic.
-async fn retransmit_until_pracked(
+///
+/// `stop` is a [`CancellationToken`] rather than a notification because the two have different
+/// behaviour for the case that matters: an acknowledgement arriving before this task first polls.
+/// A notification with no waiter is lost, and the loop would go on resending for the full 32
+/// seconds; a cancelled token is still cancelled whenever it is next read.
+pub(crate) async fn retransmit_until_pracked(
     endpoint: Handle,
     key: TransactionKey,
     response: Response,
-    stop: Arc<tokio::sync::Notify>,
+    stop: CancellationToken,
 ) {
     let deadline = tokio::time::Instant::now() + GIVE_UP;
     let mut interval = T1;
@@ -788,7 +793,7 @@ async fn retransmit_until_pracked(
             return;
         }
         tokio::select! {
-            () = stop.notified() => return,
+            () = stop.cancelled() => return,
             () = tokio::time::sleep_until(wake) => {}
         }
         if endpoint.respond(&key, response.clone()).await.is_err() {
