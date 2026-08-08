@@ -159,6 +159,20 @@ pub enum CallEvent {
         /// the call's audio finishing.
         cause: sipx_audio::analysis::VoiceEndCause,
     },
+    /// A deterministic signal-metric observation for one side of this call's audio (`M-59`).
+    ///
+    /// Level, energy, clipping and silence, shaped out of the same analyser's per-window facts
+    /// that produce [`Self::VoiceStarted`] — the integer window arithmetic of
+    /// [`docs/specs/call-audio-processing.md`](../../../docs/specs/call-audio-processing.md) §5,
+    /// coalesced into the reporting cadence the profile declares. Emitted only after
+    /// [`Call::report_signal_metrics`](crate::Call::report_signal_metrics) has been asked for.
+    ///
+    /// **This is signal content, not network quality.** Loss, jitter, round-trip time and the MOS
+    /// estimate are `M-10`'s RTP/RTCP snapshot ([`sipx_media::MediaSession::quality`]); nothing
+    /// here describes packet delivery, no field of that snapshot changes meaning, and neither
+    /// substitutes for the other. The call is this stream's call; direction, epoch, report
+    /// sequence, sample position and window coverage all ride the payload.
+    SignalMetrics(crate::SignalMetrics),
     /// An application-owned method arrived inside this dialog.
     ///
     /// INFO and MESSAGE are admitted directly. A private extension token appears here only after

@@ -127,6 +127,12 @@ pub enum Error {
     /// A voice-activity profile was refused before anything was attached to the call (`M-58`).
     #[error("voice activity profile: {0}")]
     VoiceActivityProfile(#[from] sipx_audio::analysis::AnalysisError),
+    /// A signal-metric reporting profile was refused before anything was attached (`M-59`).
+    ///
+    /// Either the analysis half is outside a domain `call-audio-processing.md` §5.1 declares, or
+    /// the reporting cadence is outside its own.
+    #[error("signal metrics profile: {0}")]
+    SignalMetricsProfile(#[from] sipx_audio::signal::SignalProfileError),
     /// The call's bounded PCM processing seam refused an attachment (`M-54`).
     #[error("call audio processing: {0}")]
     CallAudioProcessing(#[from] sipx_media::ProcessingError),

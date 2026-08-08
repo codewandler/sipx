@@ -410,6 +410,11 @@ impl Call {
             // renegotiation — and the successor is started against the new audio.
             self.stop_voice_activity().await;
             self.resume_voice_activity();
+            // Signal-metric reporting is call-owned policy on the same terms (`M-59`). The
+            // successor's audio opens a new analysis epoch, so no report can describe the retired
+            // session's format or position.
+            self.stop_signal_metrics().await;
+            self.resume_signal_metrics();
         }
         self.current = to;
         Ok(())

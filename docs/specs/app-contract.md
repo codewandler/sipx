@@ -124,6 +124,8 @@ and never carries fields the host uses to route (`Via`, `Route`, `CSeq`, …). `
 | `call.dtmf` | `digit`, `duration_ms` | an RFC 4733 event ended |
 | `call.voice.started` | `direction` (`inbound · outbound`), `sequence`, `sample_time`, `sample_rate` | deterministic signal analysis found voice on one side of the call's audio |
 | `call.voice.ended` | `sequence`, `sample_time`, `sample_rate`, `direction`, `cause` (`hangover · cut`) | that voice stopped, at the end of the last active window |
+| `call.signal.metrics` | `direction`, `epoch`, `sequence`, `sample_time`, `sample_rate`, `samples`, `windows`, `peak`, `rms`, `clipped_samples`, `clipping_windows`, `active_windows`, `silent_windows` | a reporting period of the call's audio completed |
+| `call.signal.silence` | `direction`, `epoch`, `sample_time`, `sample_rate` | unbroken silence in the call's audio reached the configured timeout |
 | `call.playback.finished` | `instruction_id`, `completed` | a `play` ran out or was cut |
 | `call.gather.finished` | `instruction_id`, `digits`, `reason` (`terminator · max · timeout`) | a `gather` resolved |
 | `call.recording.finished` | `instruction_id`, `duration_ms` | a `record` resolved |
@@ -146,6 +148,31 @@ did. Which call an observation belongs to is the envelope's own §5.2 `call.id`,
 repeated here. The normative analysis behind them is
 [call-audio-processing.md](call-audio-processing.md) §5.3 and §6; a host that emits neither is
 conformant, because both are reported only where an application asked for detection.
+
+**[sipx]** The two signal events report **what the audio contained, never how it was delivered**.
+Packet loss, jitter, round-trip time and the MOS estimate are the media stack's RTP/RTCP surface and
+appear nowhere in this vocabulary; a call losing no packets at all can be clipping, and a lossy call
+can carry a clean level in the audio that arrived. They are the same deterministic integer window
+arithmetic as the voice events — [call-audio-processing.md](call-audio-processing.md) §5.3, §6 and
+§10 — and load no speech model either.
+
+`sample_time` and `sample_rate` mean exactly what they mean on the voice events. `epoch` counts the
+measurement runs of one call: it advances whenever the analysis timeline restarts, which is what
+makes a sample position unambiguous even though positions restart with it, and it is the field that
+says a report cannot be describing an earlier stretch of the call or an earlier format. `sequence`
+orders the reports within one epoch and restarts with it. `samples` and `windows` are the coverage
+the other fields were measured over; `peak` and `rms` are levels in signed 16-bit sample amplitude,
+where 32,768 is the magnitude of the most negative representable sample, and `rms` is exactly
+`floor(sqrt(floor(Σs² / samples)))` — an integer quadratic mean of the coverage, deliberately not an
+ITU-T P.56 active speech level. The remaining `*_windows` fields count how many of the covered
+windows carried that fact.
+
+The raw per-window accumulators the host computes — the signed sample sum, the energy, the covering
+window index, and the impulse and DC-offset window counts — deliberately stay in process. The wire
+carries the derived facts an application acts on; adding one of the others later is a *field*
+addition, which §4 already requires both sides to tolerate, and so needs no new wire line. As with
+the voice events, a host that emits neither of these is conformant: they are reported only where an
+application asked for them.
 
 ## 6. Instructions (app → host)
 

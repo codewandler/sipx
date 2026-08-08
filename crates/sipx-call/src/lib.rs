@@ -72,6 +72,7 @@ mod media_policy;
 pub mod notifier;
 pub mod publication;
 pub mod rel;
+pub mod signal_metrics;
 mod signalling;
 mod snapshot;
 pub mod subscriber;
@@ -119,6 +120,7 @@ pub use rel::{
     Ringing, ring, ring_early, ring_early_with, ring_early_with_policy, ring_early_with_policy_at,
     ring_offer_early, ring_offer_early_with_policy, ring_offer_early_with_policy_at,
 };
+pub use signal_metrics::SignalMetrics;
 pub use signalling::{SignallingCall, SignallingEvent};
 pub use snapshot::{
     DialogNotQuiescent, DialogPersistenceError, DialogRestoreContext, DialogSessionAction,

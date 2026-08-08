@@ -56,6 +56,7 @@ pub mod mix;
 #[cfg(feature = "opus")]
 pub mod opus;
 pub mod pcm;
+pub mod signal;
 pub mod wav;
 
 pub use g711::{alaw_decode, alaw_encode, ulaw_decode, ulaw_encode};
