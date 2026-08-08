@@ -4790,18 +4790,40 @@ async fn bounded_load_stops_at_the_call_limit_and_emits_one_stable_summary() {
 }
 
 /// P-18: the two bounded-load commands are documented as a pair, so their neutral defaults must
-/// drive the same bodyless signalling workload. Both summaries prove the requested admission and
-/// concurrency bounds were exercised, then prove that every owned resource drained.
+/// drive the same bodyless signalling workload. Both summaries prove the requested concurrency was
+/// carried and every requested call completed, then prove that every owned resource drained.
+///
+/// The responder's admission ceiling is deliberately above the generator's concurrency here and is
+/// not what this test measures; see the derivation at `max_active` below.
 #[cfg(unix)]
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn default_load_pair_completes_the_requested_signalling_workload() {
     let _scenario = process_scenario().await;
+    // The generator's in-flight ceiling, and the number of dialogs the responder must therefore
+    // carry at once for this workload to have been driven at all.
+    let concurrency: u64 = 8;
+    // Twice that, and the factor is derived rather than tuned: it is headroom for the dialog a
+    // retiring call has left behind. The responder frees a slot when its worker future ends, which
+    // is strictly after it has put the 200 on the wire for that dialog's BYE; the generator frees
+    // its own slot on receiving that same 200 and places the replacement INVITE immediately. Every
+    // retiring call is therefore counted by both ends for as long as the machine takes to schedule
+    // the responder's accept loop, and all `concurrency` of them may retire together.
+    //
+    // At an equal ceiling that put admission control on the happy path, and `connected` measured
+    // the scheduler: at two CPU burners per core this test refused a call in 4 of 10 runs, always
+    // a 503 with `active_high_water` exactly at the ceiling — the responder honouring its own
+    // contract, not failing (`X-126`). The headroom is not a tolerance and does not weaken
+    // anything below; it removes a limit that was never what this test is about.
+    let max_active = concurrency * 2;
+    let concurrency_arg = concurrency.to_string();
+    let max_active_arg = max_active.to_string();
     let mut command = sipx();
     command
         .args([
             "load-responder",
             "--max-active",
-            "8",
+            &max_active_arg,
             "--calls",
             "20",
             "--cleanup",
@@ -4825,8 +4847,11 @@ async fn default_load_pair_completes_the_requested_signalling_workload() {
     .expect("readiness JSON");
     let address = ready["address"].as_str().expect("readiness address");
 
+    // Twenty one-second calls eight at a time is a little over two seconds of work; fifteen is the
+    // bound on a `load` that never returns at all, scaled like every other wait in this file
+    // because a busy machine takes longer to run the same process, not longer to hang.
     let output = tokio::time::timeout(
-        Duration::from_secs(15),
+        bound(Duration::from_secs(15)),
         sipx()
             .args([
                 "load",
@@ -4834,7 +4859,7 @@ async fn default_load_pair_completes_the_requested_signalling_workload() {
                 "--rate",
                 "100",
                 "--concurrency",
-                "8",
+                &concurrency_arg,
                 "--calls",
                 "20",
                 "--call-duration",
@@ -4886,7 +4911,8 @@ async fn default_load_pair_completes_the_requested_signalling_workload() {
         "load: {load}; responder: {responder_summary}"
     );
     assert_eq!(load["outcomes"]["failed"], 0, "{load}");
-    assert_eq!(load["outcomes"]["peak_concurrency"], 8, "{load}");
+    assert_eq!(load["outcomes"]["rejected"], 0, "{load}");
+    assert_eq!(load["outcomes"]["peak_concurrency"], concurrency, "{load}");
 
     assert_eq!(responder_status.code(), Some(0), "{complaint}");
     assert_eq!(responder_summary["mode"], "signalling");
@@ -4895,7 +4921,19 @@ async fn default_load_pair_completes_the_requested_signalling_workload() {
     assert_eq!(responder_summary["counts"]["invitations"], 20);
     assert_eq!(responder_summary["counts"]["established"], 20);
     assert_eq!(responder_summary["counts"]["completed"], 20);
-    assert_eq!(responder_summary["counts"]["active_high_water"], 8);
+    // A range rather than an equality, and both ends carry a claim. At least `concurrency` proves
+    // the responder really did carry the workload the generator asked for; no more than
+    // `max_active` proves admission control still held. The exact figure inside that band is the
+    // count of retiring dialogs the accept loop had not joined yet, which is the scheduling detail
+    // this test stopped asserting on.
+    let high_water = responder_summary["counts"]["active_high_water"]
+        .as_u64()
+        .expect("active_high_water is a count");
+    assert!(
+        (concurrency..=max_active).contains(&high_water),
+        "responder carried {high_water} dialogs at once, outside {concurrency}..={max_active}: \
+         {responder_summary}"
+    );
     assert_eq!(responder_summary["post_drain"]["active_dialogs"], 0);
     assert_eq!(responder_summary["post_drain"]["dispatcher_routes"], 0);
     assert_eq!(responder_summary["post_drain"]["endpoint_transactions"], 0);
