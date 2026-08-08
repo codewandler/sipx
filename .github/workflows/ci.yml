@@ -478,6 +478,20 @@ jobs:
   # enforced by nothing, so two fresh violations landed in the wave after the sweep that declared
   # the workspace clean — one of them in production code. This reads the shape rather than the
   # word `sleep`, over `src/` as well as `tests/`, and needs no toolchain to do it.
+  wasm:
+    name: wasm kernel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The targets and the runtime are installed explicitly rather than assumed: this job's whole
+      # value is proving the kernel builds without an operating system under it, and a host that
+      # happened to have them would hide the one failure it exists to catch.
+      - run: rustup target add wasm32-unknown-unknown wasm32-wasip1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasmtime
+      - run: ./scripts/check-wasm-kernel.sh
+
   fixed-sleep:
     name: fixed-sleep rule
     runs-on: ubuntu-latest

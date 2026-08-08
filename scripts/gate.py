@@ -110,7 +110,12 @@ NOT_RUN_LOCALLY = {
 
 #: Run commands that are runner provisioning rather than checks. Kept deliberately short: every
 #: prefix here is a command the drift check stops looking at.
-IGNORED_RUN_PREFIXES = ("sudo",)
+#:
+#: `rustup target add` earns its place for the same reason `sudo` does: it installs a toolchain
+#: component the job then checks something with. A developer already has the target or the script
+#: tells them to add it, so mirroring it as a gate step would assert an installation rather than a
+#: property of the tree.
+IGNORED_RUN_PREFIXES = ("sudo", "rustup target add")
 
 
 def gate_steps(msrv: str) -> list[Step]:
@@ -322,6 +327,10 @@ def gate_steps(msrv: str) -> list[Step]:
             toolchain=msrv,
         ),
         Step("feature matrix", "features", ("./scripts/check-features.sh",)),
+        # X-120: `S-41` built this checker and nothing ran it, so the artifact claims —
+        # no imports, the ABI export names, the size bound — were unenforced while the
+        # kernel tests passed. 18s warm, so it belongs local rather than CI-only.
+        Step("wasm kernel", "wasm", ("./scripts/check-wasm-kernel.sh",)),
         Step("docs site", "site", ("./scripts/build-docs.sh",)),
     ]
 

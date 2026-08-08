@@ -2351,5 +2351,31 @@ class TheStepClock(unittest.TestCase):
                 )
 
 
+class TheWasmKernelStep(unittest.TestCase):
+    """`S-41` built the checker and nothing ran it (`X-120`).
+
+    The kernel's own tests catch a behaviour regression. What they cannot catch is the *artifact*
+    drifting — an import appearing, an ABI export being renamed, the module outgrowing its size
+    bound — which is what `check-wasm-kernel.sh` exists to assert.
+    """
+
+    def test_the_gate_runs_the_wasm_kernel_checker(self) -> None:
+        names = [step.name for step in gate().gate_steps("1.88.0")]
+        self.assertIn(
+            "wasm kernel",
+            names,
+            "check-wasm-kernel.sh exists and is green, but nothing runs it, so the module's "
+            "artifact guarantees are unenforced",
+        )
+
+    def test_the_wasm_step_is_not_declared_ci_only(self) -> None:
+        self.assertNotIn(
+            "wasm",
+            gate().NOT_RUN_LOCALLY,
+            "the checker runs in about 18 seconds warm, so it belongs in the local gate rather "
+            "than behind a CI-only reason",
+        )
+
+
 if __name__ == "__main__":
     sys.exit(0 if unittest.main(exit=False, verbosity=2).result.wasSuccessful() else 1)
