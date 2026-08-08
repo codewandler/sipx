@@ -689,7 +689,7 @@ This is the same classification ICE relies on ([ice.md](ice.md) §1); it is impl
 sipx offers three profiles in `use_srtp`, **strongest first** (RFC 5764 §4.1.1: the client sends
 them "in preference order"):
 
-| | `SRTP_AEAD_AES_256_GCM` | `SRTP_AEAD_AES_128_GCM` | `SRTP_AES128_CM_SHA1_80` |
+| | `SRTP_AEAD_AES_256_GCM` | `SRTP_AEAD_AES_128_GCM` | `SRTP_AES128_CM_HMAC_SHA1_80` |
 |---|---|---|---|
 | Wire value | `{0x00, 0x08}` | `{0x00, 0x07}` | `{0x00, 0x01}` |
 | cipher | AES_256_GCM | AES_128_GCM | AES_128_CM |
@@ -706,10 +706,14 @@ The remaining profiles §4.1.2 defines are not offered: the two NULL profiles en
 `SRTP_AES128_CM_HMAC_SHA1_32` needs a 32-bit tag the transform in §4 does not implement. **A profile
 list is a promise**, so the list holds exactly what `srtp::Profile` can key — derived from that type
 rather than written out, and checked by
-`every_offered_profile_maps_to_a_transform_that_can_be_keyed`. *(The counter-mode name sipx uses is
-OpenSSL's spelling, which is not RFC 5764's; see §12.4.)*
+`every_offered_profile_maps_to_a_transform_that_can_be_keyed`.
 
-`SRTP_AES128_CM_SHA1_80` stays in the list because §4.1.2 makes it mandatory to implement. It is
+**The names above are the registry's**, for all three rows (`M-73`). RFC 5764 §4.1.2 spells `0x0001`
+with the `HMAC_`; OpenSSL's `use_srtp` option table spells the same identifier without it, and that
+one substitution happens at the library boundary in `dtls::openssl::openssl_name` rather than in the
+type. §12.4 has the reasoning and the failure mode that shape it.
+
+`SRTP_AES128_CM_HMAC_SHA1_80` stays in the list because §4.1.2 makes it mandatory to implement. It is
 offered **last**, which is the whole of the change: last means "if nothing better is common", not
 "not offered".
 
@@ -1121,24 +1125,55 @@ caller was its own test suite, and `docs/compliance.md` could not tell that from
 which is `M-28`'s pattern, and the reason the registry note for RFC 4568 carried a **"Still
 missing"** sentence until this landed rather than claiming the MUSTs end to end.
 
-### 12.4 The protection profile is named in OpenSSL's spelling — open
+### 12.4 The protection profile was named in OpenSSL's spelling — **fixed by `M-73`**
 
-`Profile::as_str()` returns `SRTP_AES128_CM_SHA1_80` and its documentation says that is "the name as
-the IANA registry and every DTLS API spell it". The IANA *DTLS-SRTP Protection Profiles* registry and
-RFC 5764 §4.1.2 both spell 0x0001 `SRTP_AES128_CM_HMAC_SHA1_80`; the string in the code is OpenSSL's.
+`Profile::as_str()` returned `SRTP_AES128_CM_SHA1_80` and its documentation said that was "the name
+as the IANA registry and every DTLS API spell it". The IANA *DTLS-SRTP Protection Profiles* registry
+and RFC 5764 §4.1.2 both spell 0x0001 `SRTP_AES128_CM_HMAC_SHA1_80`; the string in the code was
+OpenSSL's. Nothing on the wire was wrong — the wire carries `id()`, which is `0x0001` — and the
+string was correct for the one implementation that consumed it. But `Handshake` is a public trait
+whose reason for existing is a second DTLS implementation, and an implementor reading that doc
+comment and looking the name up in the registry would not find a match.
 
-Nothing on the wire is wrong — the wire carries `id()`, which is `0x0001` — and the string is
-correct for the one implementation that consumes it. But `Handshake` is a public trait whose reason
-for existing is a second DTLS implementation, and an implementor reading that doc comment and
-looking the name up in the registry will not find a match. **Owner: a new story**, in `sipx-media`:
-either rename to the registry's spelling and map to OpenSSL's at the call site, or keep the string
-and stop the doc claiming it is IANA's.
-
-`M-41` did **not** close this and deliberately did not widen it. The two AEAD names it added,
+`M-41` did not close it and deliberately did not widen it: the two AEAD names it added,
 `SRTP_AEAD_AES_128_GCM` and `SRTP_AEAD_AES_256_GCM`, are RFC 7714 §14.2's own spellings and happen
-to be what the DTLS library uses as well, so the discrepancy is now confined to the one
-counter-mode row rather than being a pattern. Renaming that row is still a behaviour change for the
-`dtls` feature and belongs to the story that owns it.
+to be what the DTLS library uses as well, so the discrepancy stayed confined to the one
+counter-mode row rather than becoming a pattern.
+
+**`M-73` took the first of the two options recorded here** — rename to the registry's spelling and
+translate at the call site — rather than the second, which would have kept the string and softened
+the doc. The reason is that the second option leaves the type asserting a library's vocabulary in
+its public API while the row beside it asserts IANA's, and a reader has no way to tell which is
+which. So `Profile::as_str()` now returns `SRTP_AES128_CM_HMAC_SHA1_80`, and
+`dtls::openssl::openssl_name` is the one place the shorter spelling exists.
+
+**The translation is two-way, and that is the part that had to be got right.** Names leave through
+`offered_profiles` and come back through `selected_srtp_profile`, so `from_openssl_name` is the
+inverse rather than `Profile::parse` — matching a returned name against the registry's spelling
+would fail *after* a handshake that succeeded, and surface as `NoProfile`. And `Profile::parse` is
+deliberately **not** lenient: OpenSSL's spelling is `None` there. A lenient parse would be one more
+place a name and a transform could be paired by guesswork, which is what
+[media-runtime-safety](../designs/media-runtime-safety.md) forbids.
+
+The failure mode being avoided is worth naming, because it is not a downgrade. `set_tlsext_use_srtp`
+matches each name against OpenSSL's own table and rejects the **whole list** on one unknown name, so
+a registry spelling passed to it does not negotiate a weaker profile — it negotiates none, on every
+DTLS-SRTP call, in both roles. `openssl_accepts_every_name_in_the_offered_list` puts the real list
+through `set_tlsext_use_srtp`, so the library and not the test is what says the names are known, and
+`two_endpoints_key_srtp_by_handshaking_on_the_media_path` (`crates/sipx-media/tests/dtls_srtp.rs`)
+still keys a real handshake on two real sockets. **Neither is an independent implementation** — the
+one test that is, `a_real_peer_accepts_media_sipx_encrypted_with_dtls_srtp` in
+`crates/sipx-cli/tests/interop_srtp.rs`, is `#[ignore]`d and needs a peer container, so it has not
+been run against this rename.
+
+`0x0001` is unchanged and asserted beside the name in
+`the_counter_mode_profile_is_spelled_as_the_registry_spells_it`, which is the whole of the
+compatibility argument: **the wire did not move.** What did move is the string a caller of
+`Profile::as_str()` receives and the string `Profile::parse()` accepts — an API change for the
+`dtls` feature, recorded as such in the CHANGELOG. A downstream implementor of `Handshake` that
+fed its own library's name to `Profile::parse` gets `None`, and therefore a refused call rather
+than a mis-keyed one; the remedy is to translate at that implementation's boundary, as
+`dtls::openssl` does.
 
 ### 12.5 The SRTCP index started at 1 — **fixed by `M-25`**
 

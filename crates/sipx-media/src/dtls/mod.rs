@@ -118,17 +118,32 @@ impl Profile {
         .find(|profile| profile.transform() == transform)
     }
 
-    /// The name as the IANA registry and every DTLS API spell it.
+    /// The name as the IANA *DTLS-SRTP Protection Profiles* registry spells it.
+    ///
+    /// One spelling, from one source: RFC 5764 §4.1.2 for `0x0001` and RFC 7714 §14.2 for the two
+    /// AEAD identifiers, which is what the registry carries for all three. A DTLS library's own
+    /// option syntax is a different namespace and need not agree — one does not, for `0x0001` —
+    /// and reconciling it is that library's boundary's job (the `openssl` module here), not this
+    /// type's. The alternative is what `docs/specs/srtp.md` §12.4 recorded: a name an implementor
+    /// of [`Handshake`] cannot look up, because it belongs to a library they may not be using.
+    ///
+    /// Nothing here reaches the wire. RFC 5764 §4.1.1 carries [`Self::id`]'s two octets; the name
+    /// exists for APIs and for diagnostics.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Aes128CmHmacSha1_80 => "SRTP_AES128_CM_SHA1_80",
+            Self::Aes128CmHmacSha1_80 => "SRTP_AES128_CM_HMAC_SHA1_80",
             Self::AeadAes128Gcm => "SRTP_AEAD_AES_128_GCM",
             Self::AeadAes256Gcm => "SRTP_AEAD_AES_256_GCM",
         }
     }
 
-    /// The profile a `use_srtp` name selects, if it is one sipx can perform.
+    /// The profile a registered `use_srtp` name selects, if it is one sipx can perform.
+    ///
+    /// Registered names only, and [`Self::as_str`]'s spelling exactly: a library's own name for a
+    /// profile is `None` here. That refusal is the safe direction — it surfaces as
+    /// `openssl::DtlsError::NoProfile` and keys nothing, where a lenient match would be one more
+    /// place a name and a transform could be paired by guesswork.
     #[must_use]
     pub fn parse(name: &str) -> Option<Self> {
         Self::strongest_first()
@@ -492,7 +507,31 @@ mod tests {
         assert_eq!(profile.key_and_salt_len(), (16, 14));
         assert_eq!(profile.exported_len(), 60, "2 * (16 + 14)");
         assert_eq!(profile.id(), 0x0001);
-        assert_eq!(profile.as_str(), "SRTP_AES128_CM_SHA1_80");
+        assert_eq!(profile.as_str(), "SRTP_AES128_CM_HMAC_SHA1_80");
+    }
+
+    /// The counter-mode profile is spelled the way the registry spells it (RFC 5764 §4.1.2).
+    ///
+    /// IANA's *DTLS-SRTP Protection Profiles* registry and RFC 5764 §4.1.2 both spell `0x0001`
+    /// `SRTP_AES128_CM_HMAC_SHA1_80` — with the `HMAC_`. A DTLS library's own list syntax may use
+    /// a shorter spelling, and one does; that is a name for its API and not for this registry, so
+    /// translating it belongs at that library's boundary rather than here. This assertion is what
+    /// stops the library's spelling leaking back into the type an implementor of [`Handshake`]
+    /// reads (`docs/specs/srtp.md` §12.4).
+    ///
+    /// The identifier is asserted beside it because that, not the name, is what §4.1.1 puts on the
+    /// wire: the rename must not move it.
+    #[test]
+    fn the_counter_mode_profile_is_spelled_as_the_registry_spells_it() {
+        assert_eq!(
+            Profile::Aes128CmHmacSha1_80.as_str(),
+            "SRTP_AES128_CM_HMAC_SHA1_80"
+        );
+        assert_eq!(
+            Profile::parse("SRTP_AES128_CM_HMAC_SHA1_80"),
+            Some(Profile::Aes128CmHmacSha1_80)
+        );
+        assert_eq!(Profile::Aes128CmHmacSha1_80.id(), 0x0001);
     }
 
     /// RFC 7714 §14.2's registrations, spelled and numbered as IANA has them.
@@ -523,7 +562,7 @@ mod tests {
 
     /// The offered list is strongest first **and** keeps RFC 5764 §4.1.2's mandatory profile.
     ///
-    /// An endpoint that dropped `SRTP_AES128_CM_SHA1_80` to look modern would fail to key with
+    /// An endpoint that dropped `SRTP_AES128_CM_HMAC_SHA1_80` to look modern would fail to key with
     /// every peer that implements only what the RFC requires — which is most of them.
     #[test]
     fn the_offered_profile_list_is_strongest_first_and_keeps_the_floor() {
