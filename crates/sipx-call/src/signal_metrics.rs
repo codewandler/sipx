@@ -37,10 +37,10 @@
 
 use std::sync::Arc;
 
-use sipx_audio::PcmSamples;
-use sipx_audio::analysis::{AnalysisFrame, AudioAnalyzer, DiscontinuityKind};
+use sipx_audio::analysis::AudioAnalyzer;
 use sipx_media::{PcmFrame, PcmProcessor};
 
+use crate::audio_feed::AudioFeed;
 use crate::event::{CallEvent, Emitter};
 
 /// The vocabulary a signal-metric event is written in, re-exported from the modules that define
@@ -104,23 +104,10 @@ impl SignalMetrics {
 /// the whole reporting policy is exercised by feeding it frames.
 #[derive(Debug)]
 pub(crate) struct SignalMetricsReporter {
-    analyzer: AudioAnalyzer,
+    feed: AudioFeed,
     reporter: sipx_audio::signal::SignalReporter,
     call_id: Arc<str>,
     emitter: Emitter,
-    /// The frame number handed to the analyser, which counts only frames it accepted. The seam's
-    /// own sequence is checked below and then left behind: a frame this module declines to forward
-    /// must not derange the analyser's sequence expectation.
-    fed: u64,
-    /// The last seam sequence seen, for detecting a gap the seam failed to flag.
-    seam_sequence: Option<u64>,
-    /// A break owed to the analyser before the next frame's samples are measured.
-    ///
-    /// Set when audio that should have been measured was not — a frame this module could not
-    /// forward, or one the analyser refused. Carrying it forward is what keeps the *quantitative*
-    /// promise of a report: a period that spanned the hole would name coverage it never measured,
-    /// which is a worse answer than restarting the epoch and saying so.
-    owed: Option<DiscontinuityKind>,
 }
 
 impl SignalMetricsReporter {
@@ -131,89 +118,23 @@ impl SignalMetricsReporter {
         emitter: Emitter,
     ) -> Self {
         Self {
-            analyzer,
+            feed: AudioFeed::new(analyzer),
             reporter,
             call_id,
             emitter,
-            fed: 0,
-            seam_sequence: None,
-            owed: None,
         }
     }
 
     /// Feed one frame the seam delivered.
+    ///
+    /// A frame the feed could not offer is not silently skipped: it owes the analyser a break,
+    /// which the next accepted frame carries, so no report can sum across the hole and claim
+    /// coverage of samples that never reached the analyser. Nothing is reduced until then, because
+    /// nothing changed.
     pub(crate) fn observe(&mut self, frame: &PcmFrame) {
-        let PcmSamples::Signed16(samples) = frame.pcm().samples() else {
-            // discard: unreachable through `Call`, which always attaches at signed 16-bit — the
-            // depth the analyser's contract is written in. Converting here instead would make this
-            // a second place where call audio is reinterpreted. The audio is still owed to the
-            // analyser, so the next frame carries the break rather than a report claiming to have
-            // measured samples that never reached it.
-            self.owed = Some(DiscontinuityKind::Loss);
-            return;
-        };
-        self.observe_samples(
-            frame.direction(),
-            frame.sequence(),
-            frame.discontinuity().map(sipx_media::Discontinuity::kind),
-            samples,
-        );
-    }
-
-    /// The body of [`Self::observe`], reachable without a live media session.
-    fn observe_samples(
-        &mut self,
-        direction: AudioDirection,
-        seam_sequence: u64,
-        discontinuity: Option<DiscontinuityKind>,
-        samples: &[i16],
-    ) {
-        if samples.is_empty() {
-            // discard: an empty frame measures nothing and the analyser refuses one by contract
-            // (§7.3). Nothing is owed, because nothing was lost.
-            return;
+        if self.feed.offer(frame) {
+            self.report(frame.direction());
         }
-
-        // The seam counts every frame it offered, delivered or dropped, and always flags a gap
-        // (seam §4). An unflagged gap is a defect in the seam rather than a loss to smooth over,
-        // so it is named `Loss` here instead of being handed to the analyser as a legal stream —
-        // which is what stops a report claiming coverage of windows nobody measured.
-        // A break owed from a frame that never reached the analyser is named before anything the
-        // seam declared, and the more disruptive of the two wins — the seam's vocabulary is closed
-        // and `Realign` subsumes a span (its §7).
-        let mut discontinuity = match (discontinuity, self.owed.take()) {
-            (Some(declared), Some(DiscontinuityKind::Loss)) => Some(declared),
-            (declared, owed) => declared.or(owed),
-        };
-        let unflagged_gap = discontinuity.is_none()
-            && self
-                .seam_sequence
-                .is_some_and(|previous| seam_sequence > previous.saturating_add(1));
-        if unflagged_gap {
-            tracing::debug!(
-                seam_sequence,
-                "the call PCM seam skipped a frame without flagging it"
-            );
-            discontinuity = Some(DiscontinuityKind::Loss);
-        }
-        self.seam_sequence = Some(seam_sequence);
-
-        let mut frame = AnalysisFrame::new(direction, self.fed, samples);
-        if let Some(kind) = discontinuity {
-            frame = frame.with_discontinuity(kind);
-        }
-        if let Err(refusal) = self.analyzer.process(&frame) {
-            // discard: the seam's contract makes every refusal here a defect in this join rather
-            // than in the caller's audio, so it is reported and the stream continues at the next
-            // frame — carrying the break these unmeasured samples left, so no later report can sum
-            // across the hole and claim coverage of them.
-            tracing::debug!(%refusal, "the call audio analyser refused a seam frame");
-            self.owed = Some(DiscontinuityKind::Loss);
-            return;
-        }
-        self.fed = self.fed.saturating_add(1);
-
-        self.report(direction);
     }
 
     /// Reduce whatever the analyser produced and emit what the reducer completed.
@@ -224,9 +145,9 @@ impl SignalMetricsReporter {
     /// pattern), and an in-session clock change arrives as a `Realign` — so in practice this is
     /// constant for the attachment's life.
     fn report(&mut self, direction: AudioDirection) {
-        let window = self.analyzer.window_samples();
+        let window = self.feed.window_samples();
         let mut produced: Vec<SignalObservation> = Vec::new();
-        for observation in self.analyzer.drain() {
+        for observation in self.feed.drain() {
             // Voice transitions are `M-58`'s reading of the same windows and are not signal
             // metrics; the reducer returns `None` for them.
             if let Some(signal) = self.reporter.observe(&observation, window) {
@@ -282,7 +203,7 @@ pub(crate) async fn watch(
 mod tests {
     use super::*;
 
-    use sipx_audio::analysis::AnalysisProfile;
+    use sipx_audio::analysis::{AnalysisProfile, DiscontinuityKind};
     use sipx_audio::signal::SignalReporter;
 
     use crate::event::EventSink;
@@ -310,8 +231,25 @@ mod tests {
         (reporter, sink, events)
     }
 
+    /// [`SignalMetricsReporter::observe`] without a live media session: the same two steps on the
+    /// same feed, entered at the samples rather than at a [`PcmFrame`].
+    fn observe_samples(
+        reporter: &mut SignalMetricsReporter,
+        direction: AudioDirection,
+        seam_sequence: u64,
+        discontinuity: Option<DiscontinuityKind>,
+        samples: &[i16],
+    ) {
+        if reporter
+            .feed
+            .offer_samples(direction, seam_sequence, discontinuity, samples)
+        {
+            reporter.report(direction);
+        }
+    }
+
     fn feed(reporter: &mut SignalMetricsReporter, sequence: u64, samples: &[i16]) {
-        reporter.observe_samples(AudioDirection::Inbound, sequence, None, samples);
+        observe_samples(reporter, AudioDirection::Inbound, sequence, None, samples);
     }
 
     fn drained(events: &mut CallEvents) -> Vec<SignalMetrics> {

@@ -221,6 +221,14 @@ the final concrete transport error. This vocabulary lets command adapters map in
 usage exit, deadline to timeout, and DNS/connection failure to a non-zero operational exit without
 parsing an error string.
 
+`attempted` is attempted-so-far and never attempted-in-total. The caller's operation deadline is
+the ceiling over the connection-attempt phase as well as over resolution, so a serial pass may end
+with candidates it never reached; a count that meant "how many there were" would report such a name
+as ruled out when nothing ruled it out. The failure therefore also retains how many candidates
+resolution produced. Equal counts mean the attempt budget or the list was spent and no candidate
+accepted — a statement about the name. A smaller `attempted` is a statement about the budget, and
+says nothing about the untried tail, which §6 already keeps as diagnostic evidence.
+
 ## 9. Deterministic vectors
 
 In these vectors `id` is the secure service identity, `q` is the ordered query list and `=>` is the

@@ -113,11 +113,19 @@ async fn main() -> ExitCode {
         Some(Command::Peers(options)) => peers::run(options, format).await,
         Some(Command::Scenario(options)) => scenario::run(options).await,
         Some(Command::Version(_)) => {
+            // The compiled feature set is reported to `--json` and not to the text form, which is
+            // the one place this crate departs from `output`'s "both formats carry the same facts"
+            // rule. `scripts/release-artifacts.py` smoke-tests a downloaded executable by comparing
+            // its text `version` stdout byte for byte against `sipx <version>\n`, so that line is a
+            // release contract with an external checker rather than a rendering choice. The reader
+            // who needs to tell two identically versioned builds apart (`X-121`) is a script or a
+            // test, and asks in JSON.
             match format {
                 Format::Text => println!("sipx {}", env!("CARGO_PKG_VERSION")),
                 Format::Json => output::Report::new()
                     .text("status", "version")
                     .text("version", env!("CARGO_PKG_VERSION"))
+                    .list("features", preflight::features())
                     .emit(format),
             }
             Exit::Success

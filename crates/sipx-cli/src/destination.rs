@@ -11,9 +11,9 @@ use std::time::Duration;
 use sipx_sip::Uri;
 use sipx_transport::Target;
 
-use crate::output::Exit;
+use crate::output::{Exit, Report};
 
-pub(crate) use sipx_transport::destination::{Error, MAX_ATTEMPTS, first};
+pub(crate) use sipx_transport::destination::{Attempts, Error, MAX_ATTEMPTS, first};
 
 /// A resolver that also applies this command's verification and transport policy.
 #[derive(Debug)]
@@ -58,6 +58,31 @@ impl Resolver {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|message| Error::Input { message })
     }
+}
+
+/// Say how far the serial pass got, when the failure being reported came from one.
+///
+/// `T-41`: both numbers or neither. `candidates_attempted` alone cannot distinguish a name whose
+/// every address refused from a pass a deadline ended early (`P-26`) — the first is a finding about
+/// the name and the second is a finding about the budget, and an operator sent to the wrong one
+/// starts by looking at the wrong system. Every command that walks the list says it with these two
+/// field names, because a script that learned them from `register` reads them from `dial`.
+///
+/// Absent, rather than zero, for a failure that never attempted a candidate: a resolution that
+/// produced nothing, or a refusal from the far end. Zero would be a pass that ran and got nowhere.
+pub(crate) fn with_attempts(report: Report, attempts: Option<Attempts>) -> Report {
+    let Some(attempts) = attempts else {
+        return report;
+    };
+    report
+        .number(
+            "candidates_attempted",
+            i64::try_from(attempts.attempted()).unwrap_or(i64::MAX),
+        )
+        .number(
+            "candidates_resolved",
+            i64::try_from(attempts.resolved()).unwrap_or(i64::MAX),
+        )
 }
 
 /// Keep usage, DNS failure and deadline exits distinct.

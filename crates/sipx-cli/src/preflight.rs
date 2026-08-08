@@ -38,6 +38,27 @@ const fn baseline_workload(mode: WorkloadMode) {
     }
 }
 
+/// Every optional feature this binary was compiled with, named and sorted.
+///
+/// `sipx version` answers "which sipx is this", and until `X-121` it could not: two binaries built
+/// from the same commit report the same version while refusing different commands, because the
+/// capabilities [`command`] checks are chosen at compile time. A caller that has one of these on
+/// `PATH` — or spawned from a test — cannot otherwise tell which one it has short of running a
+/// command and reading the refusal, and *that* refusal is easy to read as broken hardware rather
+/// than as a build without the driver compiled in.
+pub(crate) fn features() -> Vec<&'static str> {
+    // Sorted, so two reports of the same build compare equal without the reader sorting first.
+    let compiled = [
+        ("device-audio", cfg!(feature = "device-audio")),
+        ("dtls", cfg!(feature = "dtls")),
+        ("opus", cfg!(feature = "opus")),
+    ];
+    compiled
+        .into_iter()
+        .filter_map(|(name, present)| present.then_some(name))
+        .collect()
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -100,5 +121,53 @@ mod tests {
                 .expect_err("Opus is unavailable");
             assert!(error.contains("`opus` feature"), "{error}");
         }
+    }
+
+    /// `X-121`: a feature this list forgets is a capability `sipx version` silently under-reports,
+    /// and the reader of that report has no way to notice. So the declaration is checked against
+    /// the manifest rather than maintained beside it — the next optional feature fails here on the
+    /// commit that adds it, instead of quietly narrowing what the version output means.
+    #[test]
+    fn every_declared_feature_is_reported_by_the_version_output() {
+        let manifest = include_str!("../Cargo.toml");
+        let table = manifest
+            .split("[features]\n")
+            .nth(1)
+            .expect("a [features] table")
+            .split("\n[")
+            .next()
+            .expect("the table ends at the next section");
+        let declared: Vec<&str> = table
+            .lines()
+            .filter_map(|line| line.split('=').next())
+            .map(str::trim)
+            .filter(|name| !name.is_empty() && *name != "default")
+            .collect();
+        assert!(
+            !declared.is_empty(),
+            "the manifest declares optional features"
+        );
+
+        let source = include_str!("preflight.rs");
+        for name in declared {
+            assert!(
+                source.contains(&format!("(\"{name}\", cfg!(feature = \"{name}\"))")),
+                "`{name}` is declared in Cargo.toml but absent from `features()`"
+            );
+        }
+    }
+
+    /// The reported set has to be the compiled one, not a constant that outlived a `cfg`.
+    #[test]
+    fn the_reported_set_is_this_build() {
+        assert_eq!(
+            features().contains(&"device-audio"),
+            cfg!(feature = "device-audio")
+        );
+        assert_eq!(features().contains(&"dtls"), cfg!(feature = "dtls"));
+        assert_eq!(features().contains(&"opus"), cfg!(feature = "opus"));
+        let mut sorted = features();
+        sorted.sort_unstable();
+        assert_eq!(features(), sorted, "reported in a stable order");
     }
 }

@@ -64,6 +64,9 @@
 // `./scripts/coverage-report.py --annotate`; `docs/coverage.md` states what it costs.
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
+// Crate-private for the reason `update` gives below: every item in it is `pub(crate)`, and it is
+// the shared half of `voice` and `signal_metrics` rather than a surface of its own.
+mod audio_feed;
 pub mod call;
 pub mod counters;
 pub mod coupling;

@@ -225,7 +225,13 @@ def _positive_number(value: Any, name: str) -> float:
 
 def _bounded_string(value: Any, name: str, maximum: int = MAX_IDENTIFIER_CHARS) -> str:
     require(isinstance(value, str) and bool(value), f"{name} must be a non-empty string")
-    require(len(value) <= maximum, f"{name} exceeds {maximum} characters")
+    # The length bound reads the value only when it is a string, so the two requirements stay
+    # independently removable. `scripts/test-browser-audio-proof.py` proves each assertion in this
+    # module non-vacuous by removing exactly one requirement and demanding the evidence be
+    # accepted; a successor that crashed without its predecessor would answer that with a
+    # TypeError instead, and no assertion here would be measurable.
+    text = value if isinstance(value, str) else ""
+    require(len(text) <= maximum, f"{name} exceeds {maximum} characters")
     return value
 
 
@@ -298,7 +304,10 @@ def validate_browser_result(value: Any, role: str, expected_pin: str) -> dict[st
     require(isinstance(order, list), "SIP order evidence must be an array")
     expected = ["invite", "final", "ack", "bye", "bye-final"]
     require(all(name in order for name in expected), "SIP lifecycle evidence is incomplete")
-    require([order.index(name) for name in expected] == sorted(order.index(name) for name in expected), "SIP lifecycle is out of order")
+    # Only the names actually present are placed: completeness is the requirement above, and
+    # ordering stays a separate claim that can be removed on its own. See `_bounded_string`.
+    positions = [order.index(name) for name in expected if name in order]
+    require(positions == sorted(positions), "SIP lifecycle is out of order")
     return result
 
 

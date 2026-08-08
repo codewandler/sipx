@@ -61,7 +61,12 @@ command's documented cleanup bound or produce another terminal record. A clean s
 0 after owned work joins. Handler or cleanup failure reports `failed` and exits 1.
 
 `sipx version` prints exactly `sipx <version>` in text mode. `sipx version --json` emits one object
-with `status: "version"` and the complete `version`; neither form accepts a positional argument.
+with `status: "version"`, the complete `version`, and `features` — the array of optional features
+this binary was compiled with, sorted, and empty for a default build. Two binaries built from one
+commit report the same version while refusing different commands, so `features` is how a script or
+a test tells them apart without running a command and reading the refusal. Neither form accepts a
+positional argument, and the text form carries the version only: it is compared byte for byte
+against `sipx <version>` when a downloaded release artifact is smoke-tested.
 
 Build-capability checks happen before destination resolution, local file/device setup, transport
 binding or peer traffic. Opus, DTLS-SRTP, the browser-audio profile and explicit device endpoints
@@ -124,13 +129,29 @@ followed by which of them it was:
 | The zone answered, and has no usable record | `failed` (1) | `no usable candidate for <host>` |
 | Nothing established an answer | `failed` (1) | `DNS lookup unavailable for <question>` |
 | A question or the whole resolution ran out of time | `timeout` (5) | `DNS lookup timed out for <question>`, or `SIP target resolution timed out` |
-| The name resolved and the peer refused the connection | `failed` (1) | *(not a resolution failure)* the transport cause, such as `transport: io: Connection refused` |
+| The name resolved and the peer refused the connection | `failed` (1) | *(not a resolution failure)* the transport cause, such as `transport: io: Connection refused`, with `candidates_attempted` beside it |
 
 A deadline therefore has its own exit code, and the two remaining cases are told apart without
 waiting by whether `error` opens with `target resolution failed:` at all — a connection failure
 names the transport error and no resolution. `register` adds `registration_limit_ms` only when its
 *own* deadline expired, so a name that will not resolve is never presented as a registrar that did
 not answer.
+
+A connection failure also says how far down the candidate list it got, because the transport cause
+alone cannot: `Connection refused` reads the same from a name with one dead host behind it as from
+a name where every address refused, and those are different problems with different owners.
+
+| Field | Meaning |
+|---|---|
+| `candidates_attempted` | How many candidates were attempted **before the failure**, in order |
+| `candidates_resolved` | How many resolution produced, attempted or not |
+
+Equal numbers mean the list was walked to its end: nothing behind that name accepted. A
+`candidates_attempted` lower than `candidates_resolved` means the pass stopped early — the
+command's deadline is the ceiling over the whole of it — and says nothing about the candidates it
+never reached. At most 16 are ever attempted, so a longer list stops there. Both fields appear only
+when a serial pass actually ran; a refusal from the far end and a name that did not resolve carry
+neither.
 
 `SIPX_NAMESERVER` asks a specific resolver instead of the host's configured ones — an IP address,
 optionally with a port, defaulting to 53. It is how a wrong zone is told from an unreachable
