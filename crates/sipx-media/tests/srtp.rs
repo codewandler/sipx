@@ -29,9 +29,6 @@ const EVERY_PROFILE: [Profile; 3] = Profile::STRONGEST_FIRST;
 /// A bound on failure rather than a window to measure in — see [`MediaSession::record_at_least`].
 const DELIVERY_BOUND: Duration = Duration::from_secs(10);
 
-/// How long "nothing left the socket" is given to be false before it is believed (`M-81`).
-const SILENCE: Duration = Duration::from_millis(400);
-
 /// A header extension whose embedded length word claims far more than it carries.
 ///
 /// RFC 3550 §5.3.1's shape: a profile field (`0xBEDE`, RFC 8285's one-byte form), a length in
@@ -39,8 +36,24 @@ const SILENCE: Duration = Duration::from_millis(400);
 /// follow, so the header this describes runs past the end of any packet it is written onto.
 const OVERSTATED_EXTENSION: [u8; 8] = [0xBE, 0xDE, 0x00, 0xFF, 0x10, 0xAA, 0x00, 0x00];
 
+/// The same mistake, kept **inside** the packet (`M-85`).
+///
+/// Nine words — forty octets — declared, and eight carried. On a 160-octet payload the header this
+/// describes ends at octet 52 of a 180-octet packet, so nothing runs off the end and every
+/// bounds check on the way passes. What it moves is the boundary: the thirty-two octets from 20 to
+/// 52 are media, and every reader of this packet counts them as header.
+const IN_BOUNDS_OVERSTATED_EXTENSION: [u8; 8] = [0xBE, 0xDE, 0x00, 0x09, 0x10, 0xAA, 0x00, 0x00];
+
 /// One packet's worth of µ-law at a constant amplitude, so a leak would be recognisable.
 const PAYLOAD: [u8; 160] = [0xD5; 160];
+
+/// How many identical octets in a row count as a run of plaintext µ-law.
+///
+/// Sixteen rather than two: ciphertext is uniform, so a window this long repeating one value has a
+/// probability around `2^-120` of arising by chance, while a four-octet window would show up in a
+/// couple of hundred octets of ciphertext often enough to make the assertion flap. The leak this
+/// pins is 32 octets long, which is 17 such windows.
+const PLAINTEXT_RUN: usize = 16;
 
 /// A distinctive signal: µ-law encodes a constant amplitude to a constant byte, so a recognisable
 /// byte pattern appears verbatim in an *unencrypted* payload and cannot in an encrypted one.
@@ -270,74 +283,188 @@ async fn a_packet_under_the_wrong_key_is_refused() {
     }
 }
 
-/// A packet SRTP cannot protect is dropped, and the drop is **counted** (`M-81`).
+/// One [`Encoded`] carrying `extension`, sent over an SRTP leg, and everything the far end sees:
+/// the datagram exactly as it left the socket, and the packet that decrypts out of it.
 ///
-/// `docs/specs/media-runtime.md` §4 excused this branch from a counter while every packet the send
-/// loop protected was built inside the crate. `M-79` made [`Encoded::extension`] public, which is
-/// enough to reach it: `Packet::encode` writes a caller's extension verbatim and sets the X bit, so
-/// a length word that overstates its bytes makes the header SRTP computes longer than the whole
-/// packet and `protect` refuses it.
-///
-/// Dropping is the right consequence — sending it in the clear would hand the media to everyone on
-/// the path and to nobody at the far end, which negotiated encryption. What was wrong was that the
-/// drop moved nothing: one `warn!` and a lost packet on an encrypted leg, with no number an
-/// operator could read afterwards. Both halves are asserted here, because a counter that rises
-/// while the packet also goes out would be worse than either.
-#[tokio::test]
-async fn a_packet_srtp_cannot_protect_is_counted_rather_than_lost_silently() {
-    for profile in EVERY_PROFILE {
-        let peer = UdpSocket::bind("127.0.0.1:0").await.expect("binds");
-        let peer_addr = peer.local_addr().expect("has an address");
-        let port = MediaPort::bind("127.0.0.1:0".parse().expect("valid"))
-            .await
-            .expect("binds");
+/// Nothing here asserts about the extension — the two callers below want different things from the
+/// same three facts. The session comes back so its counters can be read against the same frame.
+async fn protected_with_extension(
+    profile: Profile,
+    extension: &'static [u8],
+) -> (MediaSession, Vec<u8>, sipx_rtp::Packet) {
+    let peer = UdpSocket::bind("127.0.0.1:0").await.expect("binds");
+    let peer_addr = peer.local_addr().expect("has an address");
+    let port = MediaPort::bind("127.0.0.1:0".parse().expect("valid"))
+        .await
+        .expect("binds");
 
-        let (local_keys, _) = keys(profile);
-        let mut config = Config::new(peer_addr, Codec::Pcmu);
-        config.rtcp_interval = None;
-        config.srtp = Some(local_keys);
-        let session = port.start(config).expect("valid media setup");
+    let (local_keys, far_keys) = keys(profile);
+    let mut config = Config::new(peer_addr, Codec::Pcmu);
+    config.rtcp_interval = None;
+    config.srtp = Some(local_keys);
+    let session = port.start(config).expect("valid media setup");
 
-        // Exactly what a relay hands on, except that the extension is inconsistent with itself.
-        let mut encoded = Encoded::new(Codec::Pcmu.payload_type(), Bytes::from_static(&PAYLOAD));
-        encoded.extension = Some(Bytes::from_static(&OVERSTATED_EXTENSION));
+    // Exactly what a relay hands on, except for the extension.
+    let mut encoded = Encoded::new(Codec::Pcmu.payload_type(), Bytes::from_static(&PAYLOAD));
+    encoded.extension = Some(Bytes::copy_from_slice(extension));
+    assert!(
+        session.send_encoded(encoded).await,
+        "{profile:?}: the session took the frame"
+    );
+
+    let mut datagram = vec![0u8; 2048];
+    let (len, _) = tokio::time::timeout(DELIVERY_BOUND, peer.recv_from(&mut datagram))
+        .await
+        .unwrap_or_else(|_elapsed| {
+            panic!("{profile:?}: the frame never reached the far end at all")
+        })
+        .expect("the far end socket receives");
+    datagram.truncate(len);
+
+    let (far_key, far_salt) = far_keys.remote.clone();
+    let mut far = sipx_rtp::SrtpContext::new(profile, &far_key, &far_salt).expect("a context");
+    let plain = far
+        .unprotect(&datagram)
+        .expect("the far end can decrypt what arrived");
+    let arrived = sipx_rtp::Packet::decode(&Bytes::from(plain)).expect("what arrived is RTP");
+    (session, datagram, arrived)
+}
+
+/// How many windows of [`PLAINTEXT_RUN`] identical payload octets appear anywhere in a datagram.
+fn plaintext_runs(datagram: &[u8]) -> usize {
+    datagram
+        .windows(PLAINTEXT_RUN)
+        .filter(|window| window.iter().all(|octet| *octet == PAYLOAD[0]))
+        .count()
+}
+
+/// The session's counters once it has finished with the frame — waited for, not slept on (§4.1).
+async fn counters_after_the_frame(
+    session: &MediaSession,
+    profile: Profile,
+) -> sipx_media::MediaDiscardCounts {
+    let deadline = tokio::time::Instant::now() + DELIVERY_BOUND;
+    loop {
+        let counts = session.discard_counts();
+        if counts.total() > 0 {
+            return counts;
+        }
         assert!(
-            session.send_encoded(encoded).await,
-            "{profile:?}: the session took the frame"
+            tokio::time::Instant::now() < deadline,
+            "{profile:?}: an extension was dropped and no discard counter moved — an operator \
+             cannot see that the far end is not being sent metadata it may be relying on"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// The extension `M-81` measured — overstating far enough to run **past** the packet — no longer
+/// reaches the transform, and no longer costs the call a packet (`M-85`).
+///
+/// This is `M-81`'s fixture and `M-81`'s test, retargeted. It asserted the consequence that story
+/// could reach: `Packet::encode` wrote the extension verbatim, the header SRTP computed was longer
+/// than the whole packet, `protect` refused it, and the packet was dropped and counted as
+/// `srtp_protect_failures` instead of vanishing. Correct, and still a lost packet on a live call.
+///
+/// `M-85` refuses the extension one boundary earlier, at `Packet::encode`, which is why the
+/// assertions here are the other way round: the media arrives, the extension does not, and
+/// `srtp_protect_failures` stays where it now belongs — at zero, on a branch no caller can reach
+/// again. Kept over both fixtures because the far-past and just-inside cases are one defect and
+/// one rule, and a fix that only covered the case it was written against would leave the other
+/// half of it live.
+#[tokio::test]
+async fn an_extension_overstating_past_the_packet_costs_no_packet() {
+    for profile in EVERY_PROFILE {
+        let (session, datagram, arrived) =
+            protected_with_extension(profile, &OVERSTATED_EXTENSION).await;
+
+        assert_eq!(
+            arrived.payload.as_ref(),
+            PAYLOAD.as_slice(),
+            "{profile:?}: the media was lost with the extension that could not be written"
+        );
+        assert_eq!(
+            arrived.extension, None,
+            "{profile:?}: an extension that cannot be written self-consistently was written anyway"
+        );
+        assert_eq!(
+            plaintext_runs(&datagram),
+            0,
+            "{profile:?}: payload octets left the socket in the clear on an encrypted leg"
         );
 
-        // Ordered on the counter rather than on elapsed time: the send loop is another task, and
-        // a fixed wait would settle this on how busy the machine is (§4.1).
-        let deadline = tokio::time::Instant::now() + DELIVERY_BOUND;
-        while session.discard_counts().total() == 0 {
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "{profile:?}: SRTP refused to protect the packet and it was dropped, and no \
-                 discard counter moved — the loss is invisible to an operator"
-            );
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-
-        let counted = session.discard_counts();
+        let counted = counters_after_the_frame(&session, profile).await;
         assert_eq!(
-            counted.srtp_protect_failures, 1,
-            "{profile:?}: the packet the transform refused is counted where §4 says it is"
+            counted.malformed_extensions_dropped, 1,
+            "{profile:?}: the extension that could not be written is counted where §4 says it is"
+        );
+        assert_eq!(
+            counted.srtp_protect_failures, 0,
+            "{profile:?}: the transform was handed a packet it could not read, which `M-85` is \
+             supposed to have made impossible from public API"
         );
         assert_eq!(
             counted.total(),
             1,
-            "{profile:?}: one dropped packet moves exactly one counter"
+            "{profile:?}: one dropped extension moves exactly one counter"
         );
 
-        // And it really was dropped: nothing reached the far end, in the clear or otherwise. The
-        // window defines silence — the assertion under it is negative, so load can only make it
-        // fail — and it opens after the counter has already risen, so the send loop is known to
-        // have finished with the frame.
-        let mut datagram = vec![0u8; 2048];
-        let leaked = tokio::time::timeout(SILENCE, peer.recv_from(&mut datagram)).await;
-        assert!(
-            leaked.is_err(),
-            "{profile:?}: a packet SRTP could not protect still reached the wire"
+        session.stop();
+    }
+}
+
+/// A header extension that disagrees with itself puts **no** plaintext media on the wire (`M-85`).
+///
+/// The in-bounds half of what `M-81` found, and the worse half. An extension whose length word
+/// overstates its bytes far enough to run past the packet is refused by the transform and counted;
+/// one that overstates them and still lands inside the packet is refused by nothing. The header
+/// SRTP computes reaches 32 octets into the payload, and a header is exactly what a header is not
+/// encrypted: authenticated but sent in clear under counter mode, Associated Data under the AEAD
+/// profiles (RFC 7714 §8.2). Those 32 octets of µ-law leave the socket readable by anyone on the
+/// path, on a leg the far end negotiated encryption for.
+///
+/// Asserted on the datagram rather than on a counter, because the bytes are the defect: a counter
+/// that rose while the run still went out would be a worse outcome than no counter at all. The
+/// second half of the test decrypts what did arrive, because the promise is that the *media*
+/// survives and only the extension is dropped — a fix that silently ate the packet would satisfy
+/// the leak assertion and lose the call.
+#[tokio::test]
+async fn a_self_inconsistent_extension_puts_no_plaintext_media_on_the_wire() {
+    for profile in EVERY_PROFILE {
+        let (session, datagram, arrived) =
+            protected_with_extension(profile, &IN_BOUNDS_OVERSTATED_EXTENSION).await;
+
+        let runs = plaintext_runs(&datagram);
+        assert_eq!(
+            runs,
+            0,
+            "{profile:?}: {runs} window(s) of {PLAINTEXT_RUN} identical payload octets left the \
+             socket in the clear on an encrypted leg — the extension's length word moved the \
+             header boundary into the media (len={})",
+            datagram.len()
+        );
+
+        // And the call survived the refusal: the media is there, encrypted, with the extension
+        // that could not be written left off it.
+        assert_eq!(
+            arrived.payload.as_ref(),
+            PAYLOAD.as_slice(),
+            "{profile:?}: the payload the far end reads is not the one that was sent"
+        );
+        assert_eq!(
+            arrived.extension, None,
+            "{profile:?}: an extension that cannot be written self-consistently was written anyway"
+        );
+
+        let counted = counters_after_the_frame(&session, profile).await;
+        assert_eq!(
+            counted.malformed_extensions_dropped, 1,
+            "{profile:?}: the extension that could not be written is counted where §4 says it is"
+        );
+        assert_eq!(
+            counted.total(),
+            1,
+            "{profile:?}: one dropped extension moves exactly one counter"
         );
 
         session.stop();

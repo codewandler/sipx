@@ -50,6 +50,12 @@ pub struct Packet {
     /// Kept verbatim so a path that forwards a packet does not silently strip information the
     /// far end relied on. This crate never interprets it: RFC 8285's one- and two-byte forms are
     /// a profile's business, and inventing a reading here would be a guess with a wire effect.
+    ///
+    /// **The one thing [`Packet::encode`] does read is the length word**, because that word is
+    /// where the payload begins. A value here that fails
+    /// [`extension_is_self_consistent`] is left off the packet with the X bit
+    /// clear, and the payload goes out whole (`M-85`). Anything [`Packet::decode`] produced
+    /// passes; a value built by hand is the caller's to get right.
     pub extension: Option<Bytes>,
     /// The media.
     pub payload: Bytes,
@@ -75,7 +81,15 @@ impl Packet {
     #[must_use]
     pub fn encode(&self) -> Bytes {
         let csrc_count = self.csrc.len().min(15);
-        let extension = self.extension.as_ref().filter(|bytes| bytes.len() >= 4);
+        // Only an extension that agrees with its own length word is written (`M-85`). This is the
+        // four-octet filter that used to stand here, generalised: too short to hold a length word
+        // was only the case where the disagreement is total. The bytes are dropped rather than the
+        // packet because the payload boundary is not in doubt — `payload` says where the media is
+        // — so the media has no reason to be lost with the metadata.
+        let extension = self
+            .extension
+            .as_ref()
+            .filter(|bytes| extension_is_self_consistent(bytes));
         let extension_len = extension.map_or(0, Bytes::len);
         let mut out = BytesMut::with_capacity(
             HEADER_LEN + csrc_count * 4 + extension_len + self.payload.len(),
@@ -184,6 +198,40 @@ impl Packet {
             payload: bytes.slice(offset..end),
         })
     }
+}
+
+/// Whether a header extension's length word agrees with the bytes that follow it
+/// (RFC 3550 §5.3.1).
+///
+/// The shape is a two-octet profile field, a two-octet length counting 32-bit words, then exactly
+/// that many words — so `bytes.len() == 4 + words * 4`, and nothing else. **This is a property of
+/// the extension alone**, not of any packet: an extension that passes here can be written onto any
+/// packet, and one that fails cannot be written onto any packet at all.
+///
+/// Both directions of disagreement move the payload boundary rather than the extension's, which is
+/// why neither is tolerated. A length word that overstates makes every reader take media as header
+/// — on an encrypted leg, media a counter-mode transform then leaves unencrypted and an AEAD
+/// transform sends as Associated Data (RFC 7714 §8.2). One that understates makes readers take
+/// header as media and play it.
+///
+/// **What it does not promise.** Nothing about the *content* of those words. RFC 8285's one- and
+/// two-byte element forms, and every other profile's, are the profile's business and this crate
+/// interprets none of it, so an extension whose elements are nonsense passes here as long as its
+/// length word is right. It is not a validity check; it is the question
+/// [`Packet::encode`] has to answer before it can write the bytes.
+///
+/// Anything [`Packet::decode`] produced passes, because decode slices exactly `4 + words * 4`
+/// octets and refuses a length word that runs past the datagram. A caller building an extension by
+/// hand is the only way to reach a `false`.
+#[must_use]
+pub fn extension_is_self_consistent(bytes: &[u8]) -> bool {
+    let (Some(high), Some(low)) = (bytes.get(2).copied(), bytes.get(3).copied()) else {
+        // Under four octets there is no length word to agree with anything.
+        return false;
+    };
+    let words = usize::from(u16::from_be_bytes([high, low]));
+    // A 16-bit word count is at most 262 140 octets, so this cannot overflow.
+    bytes.len() == 4 + words * 4
 }
 
 fn read_u32(bytes: &Bytes, at: usize) -> Result<u32, RtpError> {

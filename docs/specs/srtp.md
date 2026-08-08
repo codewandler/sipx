@@ -224,6 +224,11 @@ extension is authenticated and **not** encrypted (§3.1). Measuring the header f
 encrypts part of the header and leaves part of the audio in the clear, and the packet still
 round-trips against an implementation that makes the same mistake.
 
+A sender reaches the same outcome with no arithmetic error at all, by declaring an extension length
+that disagrees with the bytes it carries: the offset moves for every reader, this transform
+included. `Packet::encode` therefore writes no such extension, which is argued in
+[media-runtime.md](media-runtime.md) §4.4.
+
 The length declared by the extension is read **fallibly**. This function is handed whatever arrived
 on a UDP socket; a declared length longer than the buffer is a typed error and a dropped datagram,
 never an index (§10).

@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use sipx_media::{Bridge, Codec, Conference, Config, MediaPort, MediaSession};
+use sipx_media::{Bridge, Codec, Conference, Config, Encoded, MediaPort, MediaSession};
 use sipx_rtp::Packet;
 use tokio::net::UdpSocket;
 
@@ -39,6 +39,13 @@ const ARRIVAL_BOUND: Duration = Duration::from_secs(10);
 /// word. The same shape `crates/sipx-rtp/tests/header_extension.rs` pins at the packet layer, so a
 /// failure here is about the relay and not about parsing.
 const EXTENSION: [u8; 8] = [0xBE, 0xDE, 0x00, 0x01, 0x10, 0xAA, 0x00, 0x00];
+
+/// The same shape with the length word wrong: nine words declared, one carried (`M-85`).
+///
+/// Only a caller can build this. A relayed extension came through `Packet::decode`, which slices
+/// exactly `4 + words * 4` octets and refuses a length word that runs past the datagram, so an
+/// extension that arrived over the network agrees with itself by construction.
+const SELF_INCONSISTENT_EXTENSION: [u8; 8] = [0xBE, 0xDE, 0x00, 0x09, 0x10, 0xAA, 0x00, 0x00];
 
 /// One packet's worth of µ-law, recognisable enough that a test could not pass on an empty
 /// payload.
@@ -182,6 +189,57 @@ async fn a_fan_out_carries_the_extension_to_every_destination() {
     source.stop();
     first.stop();
     second.stop();
+}
+
+/// On a **plain** leg the same self-inconsistent extension costs media rather than secrecy
+/// (`M-85`).
+///
+/// There is nothing to leak here — every octet is in the clear by agreement — so the harm is the
+/// boundary alone. The far end reads the payload's start from the same length word this side wrote,
+/// so it takes thirty-two octets of µ-law as header and plays a packet four fifths as long as the
+/// one that was sent. It is not a rejection and there is nothing for it to log: the packet is
+/// well formed by every check a receiver can apply, and only the sender ever knew what the
+/// boundary was supposed to be. That is why the answer has to sit on this side of the wire.
+///
+/// The assertion is the full payload rather than the absent extension, because the payload is what
+/// the call is: a fix that dropped the extension and kept the boundary would pass on the metadata
+/// and still lose the audio.
+#[tokio::test]
+async fn a_self_inconsistent_extension_costs_a_plain_leg_no_media() {
+    let (session, peer, _) = leg().await;
+
+    let mut encoded = Encoded::new(Codec::Pcmu.payload_type(), Bytes::from_static(&PAYLOAD));
+    encoded.extension = Some(Bytes::from_static(&SELF_INCONSISTENT_EXTENSION));
+    assert!(
+        session.send_encoded(encoded).await,
+        "the session is running"
+    );
+
+    let arrived = next_packet(&peer, "the frame never reached the far end at all").await;
+    assert_eq!(
+        arrived.payload.len(),
+        PAYLOAD.len(),
+        "the far end read {} octets of media as header, because the length word this side wrote \
+         says the payload starts later than it does",
+        PAYLOAD.len().saturating_sub(arrived.payload.len())
+    );
+    assert_eq!(arrived.payload.as_ref(), PAYLOAD.as_slice());
+    assert_eq!(
+        arrived.extension, None,
+        "an extension that cannot be written self-consistently was written anyway"
+    );
+
+    // The same counter as on an encrypted leg, because it is the same refusal at the same
+    // boundary: the difference between the legs is what the mistake would have cost, not what
+    // happens to it (`docs/specs/media-runtime.md` §4).
+    let counted = session.discard_counts();
+    assert_eq!(
+        counted.malformed_extensions_dropped, 1,
+        "the extension was dropped on a plain leg and nothing counted it"
+    );
+    assert_eq!(counted.total(), 1, "exactly one counter moved");
+
+    session.stop();
 }
 
 /// Half a second of a tone, packetised and carrying an extension on every packet.

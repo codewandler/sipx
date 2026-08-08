@@ -30,6 +30,20 @@ pub struct MediaDiscardCounts {
     /// It does not promise that every unsendable packet is here. A packet the socket itself
     /// refused is a send error and ends the loop; this counts only what the transform refused.
     pub srtp_protect_failures: u64,
+    /// Caller-supplied RTP header extensions left off the packet they were handed with (`M-85`).
+    ///
+    /// **The one field here that counts metadata rather than media.** The packet went out and the
+    /// payload was whole; what did not go out is the extension, because its embedded length word
+    /// disagreed with the bytes behind it and that word is where the far end reads the payload as
+    /// starting. Writing it anyway puts media where a header is expected — unencrypted on an
+    /// encrypted leg, and truncated on a plain one (`docs/specs/media-runtime.md` §4).
+    ///
+    /// Like [`Self::srtp_protect_failures`] it describes the application on this side rather than
+    /// the far end or the network: an extension that arrived over the network was bounds-checked
+    /// when its packet was decoded, so only an [`Encoded`](crate::Encoded) built by hand can move
+    /// this. It says the far end is not being sent metadata it may be relying on; it does not say
+    /// any audio was lost.
+    pub malformed_extensions_dropped: u64,
     /// RTP packets whose SSRC differed from the established stream.
     pub foreign_ssrc: u64,
     /// Complete DTMF digits refused because the application queue was full or closed.
@@ -93,6 +107,7 @@ impl MediaDiscardCounts {
             self.srtp_unprotect_failures,
             self.srtcp_unprotect_failures,
             self.srtp_protect_failures,
+            self.malformed_extensions_dropped,
             self.foreign_ssrc,
             self.dtmf_delivery_failures,
             self.unknown_payload_type,
@@ -122,6 +137,7 @@ pub(crate) struct DiscardMeters {
     pub(crate) srtp_unprotect_failures: AtomicU64,
     pub(crate) srtcp_unprotect_failures: AtomicU64,
     pub(crate) srtp_protect_failures: AtomicU64,
+    pub(crate) malformed_extensions_dropped: AtomicU64,
     pub(crate) foreign_ssrc: AtomicU64,
     pub(crate) dtmf_delivery_failures: AtomicU64,
     pub(crate) unknown_payload_type: AtomicU64,
@@ -147,6 +163,7 @@ impl DiscardMeters {
             srtp_unprotect_failures: self.srtp_unprotect_failures.load(Ordering::Relaxed),
             srtcp_unprotect_failures: self.srtcp_unprotect_failures.load(Ordering::Relaxed),
             srtp_protect_failures: self.srtp_protect_failures.load(Ordering::Relaxed),
+            malformed_extensions_dropped: self.malformed_extensions_dropped.load(Ordering::Relaxed),
             foreign_ssrc: self.foreign_ssrc.load(Ordering::Relaxed),
             dtmf_delivery_failures: self.dtmf_delivery_failures.load(Ordering::Relaxed),
             unknown_payload_type: self.unknown_payload_type.load(Ordering::Relaxed),
