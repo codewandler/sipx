@@ -380,7 +380,7 @@ struct Queue {
     lost: AtomicU64,
 }
 
-fn hold<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(crate) fn hold<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
     // A poisoned seam lock is a panic somewhere else in this process, not a reason to lose the
     // call's audio: the state behind it is a queue of frames with no invariant a panic can break.
     lock.lock()
