@@ -72,7 +72,9 @@ fn run(mut buffer: JitterBuffer, delays_ms: &[u64]) -> Outcome {
             // Arrival on the local clock, in timestamp units — the convention the RTCP
             // statistics use, so both estimates are built from the same quantity.
             let arrival = (now * u64::from(CLOCK) / 1000) as u32;
-            buffer.push_at(packet, arrival);
+            // A refusal is accounted for by `late` below rather than at the call site: this
+            // harness is comparing policies, and the count it compares them on is the buffer's.
+            let _refused_and_counted_as_late = buffer.push_at(packet, arrival);
             peak_depth = peak_depth.max(buffer.depth());
             next_arrival += 1;
         }

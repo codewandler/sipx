@@ -3849,17 +3849,30 @@ async fn receive_loop(mut input: ReceiveInput, inbound: Inbound) {
         if is_telephone_report(&packet, &config) {
             dtmf_deadline = Some(tokio::time::Instant::now() + dtmf_silence);
         }
-        buffer.push_at(packet, arrival);
+        // Refusals are a media discard like any other (`docs/specs/media-runtime.md` §4): a
+        // packet reached this session and its audio will never be heard. Which of the two it was
+        // comes from the buffer's own counters, because only it knows whether the slot had been
+        // played or the sequence was already held.
+        let late = buffer.late();
+        if !buffer.push_at(packet, arrival) {
+            if buffer.late() > late {
+                discards.jitter_late.fetch_add(1, Ordering::Relaxed);
+            } else {
+                discards.jitter_duplicates.fetch_add(1, Ordering::Relaxed);
+            }
+        }
 
-        while let Some(packet) = buffer.pop() {
+        let to = delivery(&incoming, &encoded, &relay, &discards, &taps);
+        loop {
+            // Taken around each release, because `pop` is where a gap is diagnosed: it counts
+            // the slots between the last packet played and the one it is about to release.
+            let missing = buffer.lost();
+            let Some(packet) = buffer.pop() else { break };
+            if !conceal(&to, &config, &stop, buffer.lost() - missing).await {
+                return;
+            }
             if !deliver(
-                &Delivery {
-                    audio: &incoming,
-                    encoded: &encoded,
-                    relay: &relay,
-                    discards: &discards,
-                    taps: &taps,
-                },
+                &to,
                 &mut decoding,
                 &digits,
                 &mut dtmf,
@@ -3876,6 +3889,60 @@ async fn receive_loop(mut input: ReceiveInput, inbound: Inbound) {
             }
         }
     }
+}
+
+/// The longest run of missing packets worth filling with silence.
+///
+/// In time rather than in packets, because a packet is 10 ms of audio in one codec and 60 in
+/// another, and the question this bounds is how long a hole in the timeline is still a hole.
+/// A run longer than this is not packet loss — it is a far end that stopped, was partitioned, or
+/// restarted its stream — and filling it would inject that many seconds of silence into a call
+/// that had simply gone quiet.
+const CONCEAL_LIMIT: Duration = Duration::from_millis(200);
+
+/// Fill the play-out slots of packets that never arrived (`docs/specs/media-runtime.md` §4.2).
+///
+/// Returns whether the receive loop should keep running.
+///
+/// Silence rather than an estimated waveform: it is codec-independent, it cannot invent speech
+/// nobody said, and it keeps the played timeline the length the far end sent — which is what stops
+/// a gap becoming both a click at the splice and 20 ms of accumulated drift.
+async fn conceal(to: &Delivery<'_>, config: &Config, stop: &Stop, missing: u64) -> bool {
+    if missing == 0 {
+        return true;
+    }
+    if to.relay.load(Ordering::SeqCst) {
+        // Relaying hands payloads on in the codec they arrived in, and silence would have to be
+        // encoded to join them. The far leg has its own buffer and conceals its own gaps; this
+        // one stays visible as RTCP loss rather than being papered over twice.
+        return true;
+    }
+
+    let per_packet = config.packet_duration.max(Duration::from_millis(1));
+    let limit = u64::try_from(CONCEAL_LIMIT.as_micros() / per_packet.as_micros()).unwrap_or(1);
+    // Anything past the limit is a discontinuity rather than loss. It is not filled and it is not
+    // counted here: RFC 3550's cumulative loss already carries it, and `MediaSession::quality`
+    // reports that. Inventing a counter for it would publish the same span twice.
+    let slots = missing.min(limit.max(1));
+    let silence = vec![0i16; config.samples_per_packet()];
+
+    for _ in 0..slots {
+        // The seam is told the span was lost, not offered the silence as audio
+        // (`docs/specs/call-audio-seam.md` §7). A processor adding spans to delivered lengths
+        // still reconstructs the timeline, and a speech provider is not handed invented quiet it
+        // would read as the caller pausing.
+        to.taps
+            .note_loss(AudioDirection::Inbound, config.samples_per_packet() as u64);
+        to.discards.jitter_concealed.fetch_add(1, Ordering::Relaxed);
+        let delivered = tokio::select! {
+            () = stop.wait() => false,
+            result = to.audio.send(silence.clone()) => result.is_ok(),
+        };
+        if !delivered {
+            return false;
+        }
+    }
+    true
 }
 
 /// Hand one packet's audio to the application.
@@ -5617,6 +5684,175 @@ mod tests {
             "an unknown payload must not become audio samples: {after:?}"
         );
         assert_eq!(session.discard_counts().unknown_payload_type, 1);
+    }
+
+    /// `M-45` / `docs/specs/media-runtime.md` §4.2: a packet that never arrived leaves a silent
+    /// slot, not a splice.
+    ///
+    /// Without concealment the two packets either side of a gap are handed to the application
+    /// back to back, so the played timeline is *shorter* than the one the far end sent and the
+    /// waveform steps discontinuously at the join. That step is the click; the missing 20 ms is
+    /// the drift. Both are fixed by the same thing — filling the slot — and neither is visible in
+    /// a test that only asserts audio kept flowing.
+    #[tokio::test]
+    async fn a_lost_packet_leaves_a_silent_slot_rather_than_a_splice() {
+        let raw = UdpSocket::bind(any()).await.expect("binds");
+        let mut config = Config::new(raw.local_addr().expect("address"), Codec::Pcmu);
+        // Depth 1 releases on arrival, so the release order is the arrival order and the gap is
+        // diagnosed at exactly the packet after it.
+        config.jitter_depth = 1;
+        config.jitter_max_depth = None;
+        config.dtmf_payload_type = None;
+        let session = MediaSession::start(any(), config).await.expect("starts");
+
+        // A payload that is loudly *not* silence, so a concealed slot cannot be confused with
+        // audio the far end actually sent.
+        let loud = Codec::Pcmu.decode(&[0x00]).expect("µ-law decodes")[0];
+        assert_ne!(loud, 0, "the fixture has to differ from silence");
+
+        // Sequence 3 never arrives.
+        for sequence in [1u16, 2, 4] {
+            let packet = Packet::new(
+                0,
+                sequence,
+                u32::from(sequence) * 160,
+                7,
+                Bytes::from(vec![0x00u8; 160]),
+            );
+            raw.send_to(&packet.encode(), session.local_addr())
+                .await
+                .expect("sends");
+        }
+
+        let heard = session.record_at_least(4 * 160, DELIVERY_BOUND).await;
+        assert_eq!(
+            heard.len(),
+            4 * 160,
+            "three packets and one concealed slot; a short recording is the timeline collapsing"
+        );
+        assert!(
+            heard[..320].iter().all(|&sample| sample == loud),
+            "the two packets before the gap are played unchanged"
+        );
+        assert!(
+            heard[320..480].iter().all(|&sample| sample == 0),
+            "the slot sequence 3 would have filled is silence, not the next packet"
+        );
+        assert!(
+            heard[480..].iter().all(|&sample| sample == loud),
+            "and the packet after the gap follows the silence, not the packet before it"
+        );
+        assert_eq!(
+            session.discard_counts().jitter_concealed,
+            1,
+            "one slot filled, and it says so"
+        );
+    }
+
+    /// D10: a gap longer than `CONCEAL_LIMIT` is a discontinuity, not loss.
+    ///
+    /// A far end that was partitioned for a minute comes back with a sequence number a minute
+    /// ahead. Filling that would push a minute of silence into the timeline — the exact failure
+    /// `M-45` was filed about, arrived at from the other direction.
+    #[tokio::test]
+    async fn a_gap_too_long_to_be_loss_is_not_filled_with_silence() {
+        let raw = UdpSocket::bind(any()).await.expect("binds");
+        let mut config = Config::new(raw.local_addr().expect("address"), Codec::Pcmu);
+        config.jitter_depth = 1;
+        config.jitter_max_depth = None;
+        config.dtmf_payload_type = None;
+        let session = MediaSession::start(any(), config).await.expect("starts");
+
+        // 200 ms of concealment at 20 ms a packet is ten slots. Sequence 400 is three thousand
+        // slots past sequence 1, which is a minute of audio nobody is waiting for.
+        for sequence in [1u16, 400] {
+            let packet = Packet::new(
+                0,
+                sequence,
+                u32::from(sequence) * 160,
+                7,
+                Bytes::from(vec![0x00u8; 160]),
+            );
+            raw.send_to(&packet.encode(), session.local_addr())
+                .await
+                .expect("sends");
+        }
+
+        // Two packets and the ten concealed slots the bound allows, and nothing beyond them.
+        let heard = session.record_at_least(12 * 160, DELIVERY_BOUND).await;
+        assert_eq!(
+            heard.len(),
+            12 * 160,
+            "concealment is capped at the bound, not at the gap"
+        );
+        assert_eq!(
+            session.discard_counts().jitter_concealed,
+            10,
+            "ten slots filled, and the rest left to RTCP loss"
+        );
+
+        let after = session.record_until_idle(Duration::from_millis(200)).await;
+        assert!(
+            after.is_empty(),
+            "the rest of the gap must not become audio: {} samples",
+            after.len()
+        );
+    }
+
+    /// `docs/specs/media-runtime.md` §4, vectors D11 and D12: the two ways the jitter buffer
+    /// refuses a packet are two different consequences and are counted apart.
+    ///
+    /// Before `M-45` the receive loop dropped `push_at`'s answer on the floor, so both were
+    /// invisible — a call losing audio to a buffer that was too shallow looked exactly like a
+    /// call that was fine.
+    #[tokio::test]
+    async fn a_late_packet_and_a_duplicate_are_counted_apart() {
+        let raw = UdpSocket::bind(any()).await.expect("binds");
+        let mut config = Config::new(raw.local_addr().expect("address"), Codec::Pcmu);
+        config.jitter_depth = 2;
+        config.jitter_max_depth = None;
+        config.dtmf_payload_type = None;
+        let session = MediaSession::start(any(), config).await.expect("starts");
+
+        let send = async |sequence: u16| {
+            let packet = Packet::new(
+                0,
+                sequence,
+                u32::from(sequence) * 160,
+                7,
+                Bytes::from(vec![0xFFu8; 160]),
+            );
+            raw.send_to(&packet.encode(), session.local_addr())
+                .await
+                .expect("sends");
+        };
+
+        // Depth 2 releases sequence 1 once 2 is held, so 1's slot is gone by the time its copy
+        // turns up. Sequence 2 is still held, so its copy is a duplicate rather than a late one.
+        send(1).await;
+        send(2).await;
+        send(3).await;
+        assert_eq!(
+            session.record_at_least(2 * 160, DELIVERY_BOUND).await.len(),
+            320
+        );
+
+        send(1).await;
+        send(3).await;
+
+        // Ordered on the observable effect: a fixed wait would race the receive loop under load.
+        let deadline = tokio::time::Instant::now() + DELIVERY_BOUND;
+        loop {
+            let counts = session.discard_counts();
+            if counts.jitter_late == 1 && counts.jitter_duplicates == 1 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the refusals never reached their counters: {counts:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
     }
 
     /// D9: `telephone-event` has no static number. SDP selected 96 here, so the same valid event

@@ -135,6 +135,11 @@ impl JitterBuffer {
     /// `arrival` is the local clock in the same units as the RTP timestamp — for G.711, 8000
     /// per second. The same convention as [`crate::rtcp::StreamStats::on_packet`], and for the
     /// same reason: mixing units is how a jitter estimate becomes a number that means nothing.
+    ///
+    /// `false` means the packet was refused and its audio will never be played. That is a
+    /// discard, and a caller in a media path owes it a counter — so the answer is `#[must_use]`
+    /// rather than something a later author can drop without the compiler saying so.
+    #[must_use = "a refused packet is a discard the caller has to account for"]
     pub fn push_at(&mut self, packet: Packet, arrival: u32) -> bool {
         let (timestamp, was_late) = (packet.timestamp, self.late);
         self.observe(timestamp, arrival);

@@ -40,6 +40,21 @@ pub struct MediaDiscardCounts {
     /// Frames an attached PCM processor lost under the seam's bounded-queue policy
     /// (`docs/specs/call-audio-seam.md` §6).
     pub processor_frames_lost: u64,
+    /// RTP packets the jitter buffer refused because their play-out slot had already gone.
+    ///
+    /// The audible failure the buffer exists to prevent, and the one number that says the depth
+    /// is too shallow for this network. Playing them anyway would put audio out of order, which
+    /// sounds worse than the gap they were going to fill.
+    pub jitter_late: u64,
+    /// RTP packets the jitter buffer refused because it was already holding that sequence.
+    pub jitter_duplicates: u64,
+    /// Play-out slots filled with silence because their packet never arrived
+    /// (`docs/specs/media-runtime.md` §4.2).
+    ///
+    /// Not audio this session threw away — audio it never had. It is counted here because the
+    /// consequence is the same shape as the rest: a span the far end sent that the application
+    /// did not hear, and §4's rule is that it must not be invisible.
+    pub jitter_concealed: u64,
 }
 
 impl MediaDiscardCounts {
@@ -68,6 +83,9 @@ impl MediaDiscardCounts {
             self.ice_redundant_candidates,
             self.ice_gathering_foreign_datagrams,
             self.processor_frames_lost,
+            self.jitter_late,
+            self.jitter_duplicates,
+            self.jitter_concealed,
         ]
         .into_iter()
         .fold(0, u64::saturating_add)
@@ -92,6 +110,9 @@ pub(crate) struct DiscardMeters {
     pub(crate) ice_redundant_candidates: AtomicU64,
     pub(crate) ice_gathering_foreign_datagrams: AtomicU64,
     pub(crate) processor_frames_lost: AtomicU64,
+    pub(crate) jitter_late: AtomicU64,
+    pub(crate) jitter_duplicates: AtomicU64,
+    pub(crate) jitter_concealed: AtomicU64,
 }
 
 impl DiscardMeters {
@@ -118,6 +139,9 @@ impl DiscardMeters {
                 .ice_gathering_foreign_datagrams
                 .load(Ordering::Relaxed),
             processor_frames_lost: self.processor_frames_lost.load(Ordering::Relaxed),
+            jitter_late: self.jitter_late.load(Ordering::Relaxed),
+            jitter_duplicates: self.jitter_duplicates.load(Ordering::Relaxed),
+            jitter_concealed: self.jitter_concealed.load(Ordering::Relaxed),
         }
     }
 }
