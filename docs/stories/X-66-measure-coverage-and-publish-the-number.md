@@ -32,7 +32,7 @@ suite not reach" has an answer that does not depend on somebody reading 79 test 
       same surface that states the number.
 - [x] **No coverage threshold gates the build in this story.** A ratchet is a separate decision; see
       Notes.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 - 2026-08-08: implemented on `impl/X-66`.
@@ -61,6 +61,10 @@ suite not reach" has an answer that does not depend on somebody reading 79 test 
   - Deliberately **not** done, and left as separate decisions: a staleness expiry on the recorded
     measurement (a red gate on a date with no code change behind it), a ratchet, and any per-crate
     threshold.
+  - `./scripts/gate.py`: **39 steps, all green**, exit 0. The first run was red on `docs site` for a
+    consequence of the regenerated comparison — `website/docs/reference/comparison.md` mirrors that
+    page through a generated region — and `sync-website.py --update` carried the same generated cell
+    across. Second full run green end to end.
 
 - 2026-08-08: **readiness audit — ready as written**, with one constraint the implementor must not
   violate: no coverage tool is pinned anywhere in the repo today, and `docs/roadmap.md` explicitly
