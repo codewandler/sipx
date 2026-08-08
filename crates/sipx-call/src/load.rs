@@ -102,7 +102,12 @@ pub struct BoundedPlan {
     /// ceiling so a programmatically constructed plan cannot panic. User-facing command layers
     /// should reject either value and report the invalid configuration instead.
     pub most_in_flight: usize,
-    /// Time allowed for every owned call to acknowledge stop and finish.
+    /// Time allowed for the owned calls to finish, and again for them to acknowledge stop.
+    ///
+    /// One budget, spent by at most two phases. A bound that closes admission funds the calls it
+    /// admitted for this long to end on their own; only if that overruns are they asked to clean
+    /// up, and the acknowledgement is funded for this long again before anything is aborted. An
+    /// interruption holds the signal already, so it spends the second phase only.
     pub cleanup: Duration,
 }
 
@@ -422,6 +427,13 @@ impl Drop for ActiveCall {
 /// should select that signal alongside its normal holding period, then perform its protocol cleanup
 /// before returning. The harness never detaches work: even a cleanup-budget failure aborts and joins
 /// every local task before it reports that cleanup was incomplete.
+///
+/// **A bound and an interruption end the run differently, and the difference is the point.** An
+/// interruption is an instruction to abandon the calls in flight and reaches them the moment it is
+/// made. A `calls` or `duration` bound only closes admission: the calls it admitted are drained on
+/// their own terms and are asked to clean up only if they overrun [`BoundedPlan::cleanup`]. Ending
+/// them at the bound instead cancelled the very call that reached it, since that call has not
+/// finished setting up when admission closes.
 #[allow(
     clippy::too_many_lines,
     reason = "admission and drain are one lifecycle; splitting them would make detached cleanup easier to write"
@@ -520,10 +532,22 @@ where
         });
     };
 
-    // A count or duration bound is also an instruction to end the calls it owns. A call may have
-    // connected just before admission closed; it observes this before the summary is emitted.
-    stop.request();
-    let cleanup_deadline = tokio::time::Instant::now() + plan.cleanup;
+    // A count or duration bound closes *admission*, and that is not an instruction to end the calls
+    // it just admitted. The one that reached it has typically not finished setting up when the loop
+    // breaks — there is no suspension point between spawning it and observing the bound — so a
+    // request made here is the first thing every wait inside that call sees, and the run reports a
+    // cancellation for a call the far end answered (`T-44`). What ends the run instead is the calls
+    // themselves ending; the budget below is the bound on that going wrong.
+    //
+    // Interruption is the opposite and keeps exactly what it had: it is already requested by the
+    // time the loop observes it, so the calls in flight see it at once. The request is repeated
+    // here only so the one exit that reports `Requested` without holding the signal — a semaphore
+    // closed under the harness — still behaves the way its label reads.
+    let mut settling = admission_end != AdmissionEnd::Requested;
+    if !settling {
+        stop.request();
+    }
+    let mut cleanup_deadline = tokio::time::Instant::now() + plan.cleanup;
     outcome.attempted = admitted;
     let mut cleanup_complete = true;
     while !running.is_empty() {
@@ -532,6 +556,15 @@ where
                 let _internal = account_bounded(joined, &mut outcome);
             }
             Ok(None) => break,
+            // The calls a bound admitted overran the budget for finishing on their own. Ask them to
+            // clean up — the same signal an interruption sends — and fund the acknowledgement
+            // before anything is aborted, so overrunning costs a call its holding period and not
+            // its protocol teardown.
+            Err(_) if settling => {
+                settling = false;
+                stop.request();
+                cleanup_deadline = tokio::time::Instant::now() + plan.cleanup;
+            }
             Err(_) => {
                 cleanup_complete = false;
                 let unfinished = running.len();
@@ -573,9 +606,148 @@ mod tests {
         }
     }
 
-    /// DPH-10: the count bound closes admission, signals every owned call, and the result is not
-    /// returned until all of them have acknowledged cleanup.
+    /// `T-44`: the call that reached the count bound is measured rather than cancelled.
+    ///
+    /// A bound limits how many calls are *admitted*. The last one is still setting up when the loop
+    /// observes the bound — there is no suspension point between spawning it and breaking — so a
+    /// cleanup request made there is the first thing every wait inside that call sees. `calls: 1`
+    /// could therefore never report a call that worked, and every bounded run lost its final one.
     #[tokio::test]
+    async fn the_call_that_reached_the_bound_is_measured_rather_than_cancelled() {
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&cancelled);
+        let bounded = run_bounded(
+            BoundedPlan {
+                calls: Some(1),
+                duration: None,
+                rate: 1.0,
+                seed: 3,
+                most_in_flight: 1,
+                cleanup: Duration::from_secs(1),
+            },
+            Stop::new(),
+            move |_, stop| {
+                let cancelled = Arc::clone(&seen);
+                async move {
+                    // The shape every real workload has: one suspension before the call is
+                    // established, which is exactly where a request made at admission's close
+                    // lands.
+                    tokio::task::yield_now().await;
+                    if stop.is_requested() {
+                        cancelled.fetch_add(1, Ordering::SeqCst);
+                        return Err(Cause::Timeout);
+                    }
+                    Ok(())
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(bounded.admission_end, AdmissionEnd::Calls);
+        assert_eq!(bounded.outcome.attempted, 1);
+        assert_eq!(
+            bounded.outcome.succeeded, 1,
+            "the smallest run that can be asked for reports the call it placed: {:?}",
+            bounded.outcome
+        );
+        assert_eq!(
+            cancelled.load(Ordering::SeqCst),
+            0,
+            "reaching a bound asked a call to clean up before it had done anything"
+        );
+        assert!(bounded.cleanup_complete);
+    }
+
+    /// `T-44`, the other half: the run ends when the calls the bound admitted end, not when a
+    /// budget expires.
+    ///
+    /// Waiting for them must not become waiting for a clock. A fix that let the drain's budget
+    /// elapse before reporting would satisfy the count above and make every bounded run as long as
+    /// its longest permitted call. A paused clock is what makes that legible: the elapsed time
+    /// below is admission's own pacing and nothing else.
+    #[tokio::test(start_paused = true)]
+    async fn reaching_a_bound_ends_the_run_on_its_calls_rather_than_on_its_budget() {
+        let started = tokio::time::Instant::now();
+        let bounded = run_bounded(
+            BoundedPlan {
+                calls: Some(4),
+                duration: None,
+                rate: 1000.0,
+                seed: 5,
+                most_in_flight: 4,
+                cleanup: Duration::from_secs(600),
+            },
+            Stop::new(),
+            |_, _| async { Ok::<(), Cause>(()) },
+        )
+        .await;
+
+        assert_eq!(bounded.admission_end, AdmissionEnd::Calls);
+        assert_eq!(bounded.outcome.succeeded, 4);
+        assert!(bounded.cleanup_complete);
+        // Four calls at a thousand a second is a few milliseconds of admission. Anything near the
+        // ten-minute budget is the harness waiting on a clock for calls that had already finished.
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the drain waited on its budget rather than on its calls: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// `T-44`: what a bound stopped doing, an interruption must go on doing.
+    ///
+    /// A process stop is an instruction to abandon the calls in flight, and it reaches them when it
+    /// is made — not after the drain budget that now funds a bound's wait. Under a paused clock the
+    /// difference between those two is the whole ten minutes.
+    #[tokio::test(start_paused = true)]
+    async fn an_interruption_reaches_the_calls_in_flight_when_it_is_made() {
+        let stop = Stop::new();
+        let controller = stop.clone();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let began = Arc::clone(&started);
+
+        let run = tokio::spawn(run_bounded(
+            BoundedPlan {
+                calls: Some(10_000),
+                duration: None,
+                rate: 1.0,
+                seed: 11,
+                most_in_flight: 2,
+                cleanup: Duration::from_secs(600),
+            },
+            stop,
+            move |_, stop| {
+                began.notify_one();
+                async move {
+                    stop.requested().await;
+                    Ok(())
+                }
+            },
+        ));
+
+        started.notified().await;
+        let at = tokio::time::Instant::now();
+        controller.request();
+        let bounded = run.await.expect("the bounded harness joins");
+
+        assert_eq!(bounded.admission_end, AdmissionEnd::Requested);
+        assert!(bounded.outcome.succeeded > 0);
+        assert!(bounded.cleanup_complete);
+        assert!(
+            at.elapsed() < Duration::from_secs(1),
+            "the calls in flight waited out a drain budget before being told to stop: {:?}",
+            at.elapsed()
+        );
+    }
+
+    /// DPH-10, as `T-44` left it: the count bound closes admission and drains what it admitted, and
+    /// a call that only ends when it is asked is still asked — inside the drain's budget, and
+    /// before the result is returned.
+    ///
+    /// The order is what changed. The request now follows the wait for the calls the bound
+    /// admitted instead of preceding it, so a call that would have finished on its own is never
+    /// cancelled to make it finish. Nothing is detached either way.
+    #[tokio::test(start_paused = true)]
     async fn bounded_run_reaches_its_call_bound_and_cleans_every_owned_call() {
         let cleaned = Arc::new(AtomicUsize::new(0));
         let seen = Arc::clone(&cleaned);
