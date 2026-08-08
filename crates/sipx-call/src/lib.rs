@@ -51,9 +51,12 @@
 //! multiplexed RTCP, and that required audio vocabulary. It is one bounded audio endpoint profile,
 //! not a browser API or a general WebRTC compatibility claim.
 //!
-//! Absent rather than experimental, so that nobody looks for it: **multi-party** call bridging or
-//! conferencing. A [`Coupling`] can own two calls and attach a bounded media bridge, but `Call`
-//! does not expose its `MediaSession` for arbitrary application-side mixing.
+//! **Experimental**, and new: the media coupling of calls one host owns — [`CallBridge`] connects
+//! two `Call`s so each hears the other, and [`CallConference`] mixes several of them (`C-6`). Both
+//! are the *media* coupling only; owning two dialogs as one call, with the offer relayed on every
+//! axis, is [`Coupling`]. Neither hands out a `MediaSession` or a port, and neither takes ownership
+//! of a call: a host holds its `Call`s and drives their signalling throughout. A bridge does not
+//! survive a renegotiation of either call's media and has to be remade; see [`bridge`].
 //!
 //! [`Error`] is `#[non_exhaustive]`: additive diagnostics stay additive for downstream callers, so
 //! a `match` over it carries a `_` arm.
@@ -67,7 +70,9 @@
 // Crate-private for the reason `update` gives below: every item in it is `pub(crate)`, and it is
 // the shared half of `voice` and `signal_metrics` rather than a surface of its own.
 mod audio_feed;
+pub mod bridge;
 pub mod call;
+pub mod conference;
 pub mod counters;
 pub mod coupling;
 pub mod dialog;
@@ -91,6 +96,7 @@ pub mod transfer;
 mod update;
 pub mod voice;
 
+pub use bridge::{BridgeOptions, CallBridge, DtmfBridging, UnbridgeCause};
 pub use call::{
     Call, Credentials, DialOptions, Dialing, MediaAddress, Served, answer, answer_at, answer_early,
     answer_replacing, answer_replacing_with, answer_ringing, answer_ringing_with,
@@ -99,6 +105,7 @@ pub use call::{
     dial_early, dial_early_until, dial_early_without_offer, dial_once, dial_until, serve,
     serve_until,
 };
+pub use conference::{CallConference, Participant};
 pub use counters::SignallingCounts;
 pub use coupling::transparent::{OffMediaCoupling, OffMediaOptions};
 pub use coupling::{

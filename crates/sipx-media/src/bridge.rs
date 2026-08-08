@@ -42,8 +42,9 @@
 //! A [`crate::conference::Conference`] carries nothing across either, for a reason particular to
 //! mixing that is recorded there.
 //!
-//! **Experimental** (`A-8`): real over `MediaSession`s you own, and unreachable from a `Call`,
-//! which does not hand its session out. Two calls cannot be bridged yet (`C-6`).
+//! **Experimental** (`A-8`): real over `MediaSession`s you own. `sipx-call`'s `CallBridge` is the
+//! path here from two calls a host owns (`C-6`); this type stays the media half, and its shape is
+//! still free to move.
 //!
 
 use std::sync::Arc;
@@ -109,6 +110,11 @@ impl Bridge {
     ///
     /// The sessions themselves are left running: a bridge that ended the calls it was
     /// connecting would make "put this call back on hold" impossible.
+    ///
+    /// **What this deliberately does not undo is the encoded relay it set.** A caller that means
+    /// to use either session on its own again has to `set_relay(false)` itself, because clearing
+    /// it here would clear the flag a *replacement* bridge has already set — replacing one bridge
+    /// with another drops the old one last.
     pub fn close(self) {
         self.forward.abort();
         self.reverse.abort();

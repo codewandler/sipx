@@ -32,8 +32,9 @@
 //! to decide this question again, on purpose. [`super::bridge`] is the opposite case and does
 //! forward, because there the outgoing packet carries exactly the payload that arrived.
 //!
-//! **Experimental** (`A-8`): as with [`super::bridge`], real over sessions you own and not
-//! reachable from a `Call` (`C-6`).
+//! **Experimental** (`A-8`): as with [`super::bridge`], real over sessions you own. `sipx-call`'s
+//! `CallConference` is the path here from calls a host owns (`C-6`); the shape of this type is
+//! still free to move.
 //!
 
 use std::collections::HashMap;

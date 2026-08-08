@@ -255,6 +255,12 @@ pub struct Call {
     /// Signal-metric reporting, if the application asked for it (`M-59`). Call-owned policy for
     /// the same reasons as `voice`, boxed behind an `Option` for the same one.
     metrics: Option<Box<SignalReporting>>,
+    /// The media bridge this call is one end of, if a host made one (`C-6`).
+    ///
+    /// Not ownership of the other call and not a lock over anything of this one: two counted
+    /// references to the bridge's own lifecycle, which is what lets this call tear the bridge down
+    /// and tell its peer at the moment it ends. Cleared when the bridge ends by any route.
+    bridge: Option<crate::bridge::Membership>,
 }
 
 /// One call's voice-activity detection while it is running (`M-58`).
@@ -488,6 +494,7 @@ impl Call {
             admitted_dialog_methods: Vec::new(),
             voice: None,
             metrics: None,
+            bridge: None,
             events,
             events_rx: Some(events_rx),
             history: None,
@@ -534,6 +541,54 @@ impl Call {
     /// does not share or clone the `Call`'s signalling state.
     pub fn media_handle(&self) -> Arc<MediaSession> {
         Arc::clone(&self.media)
+    }
+
+    /// Whether this call's audio is currently crossing to another call (`C-6`).
+    ///
+    /// The live answer rather than "a bridge was made": it goes false when the bridge is released,
+    /// when the other call ends, and when either call's media session is replaced by a
+    /// renegotiation — see [`crate::bridge`] for why that last one needs the bridge remade.
+    #[must_use]
+    pub fn is_bridged(&self) -> bool {
+        self.bridge
+            .as_ref()
+            .is_some_and(crate::bridge::Membership::is_connected)
+    }
+
+    /// Take this call into a bridge (`C-6`). Any previous one has already been released.
+    pub(crate) fn attach_bridge(
+        &mut self,
+        link: Arc<crate::bridge::Link>,
+        side: crate::bridge::Side,
+    ) {
+        self.bridge = Some(crate::bridge::Membership::new(link, side));
+    }
+
+    /// Leave whatever bridge this call is in, because its owner said so or is replacing it.
+    pub(crate) fn release_bridge(&mut self) {
+        if let Some(membership) = self.bridge.take() {
+            membership.release();
+        }
+    }
+
+    /// Leave whatever bridge this call is in, because *this call* is ending.
+    ///
+    /// Called from the two teardown paths immediately before `Ended` is emitted, so the surviving
+    /// call learns the bridge is over before this one's stream closes, and never after its own.
+    fn end_bridge(&mut self) {
+        if let Some(membership) = self.bridge.take() {
+            membership.call_ending();
+        }
+    }
+
+    /// An emitter for this call's stream carrying one slot it may not lose.
+    pub(crate) fn reserved_emitter(&self) -> crate::event::ReservedEmitter {
+        self.events.reserved_emitter()
+    }
+
+    /// Put an ordinary event on this call's stream from somewhere inside the crate.
+    pub(crate) fn emit(&self, event: CallEvent) {
+        self.events.emit(event);
     }
 
     /// Install or clear the application callback for peer RTCP quality reports.
@@ -1302,6 +1357,9 @@ impl Call {
                 // same holds for a signal report still in flight (`M-59`).
                 self.stop_voice_activity().await;
                 self.stop_signal_metrics().await;
+                // And the same ordering for a bridge (`C-6`): the other call is told the bridge
+                // is over before this stream's `Ended`, and this stream is told nothing more.
+                self.end_bridge();
                 // Emitted here, at the point `ended` actually flips, rather than after the 200
                 // OK below — the call is over the moment the far end's BYE is accepted, whether
                 // or not building or sending the response then succeeds.
@@ -1554,9 +1612,11 @@ impl Call {
         self.session = None;
         self.stop_ack_retransmission().await;
         // See the BYE path: the watcher's terminal event must precede `Ended` (`M-58`), and no
-        // signal report may arrive after it either (`M-59`).
+        // signal report may arrive after it either (`M-59`), and the bridged peer must be told
+        // before this stream closes (`C-6`).
         self.stop_voice_activity().await;
         self.stop_signal_metrics().await;
+        self.end_bridge();
         self.events.end(cause);
 
         let cseq = self.dialog.next_cseq();
@@ -3090,6 +3150,7 @@ async fn dial_with(
                 admitted_dialog_methods: Vec::new(),
                 voice: None,
                 metrics: None,
+                bridge: None,
             })
         }
         Err(error) => {
@@ -4594,6 +4655,7 @@ impl Dialing {
                     admitted_dialog_methods: Vec::new(),
                     voice: None,
                     metrics: None,
+                    bridge: None,
                 })
             }
             Err(error) => {
@@ -5391,6 +5453,7 @@ pub async fn answer_early(
         admitted_dialog_methods: Vec::new(),
         voice: None,
         metrics: None,
+        bridge: None,
     })
 }
 
@@ -5731,6 +5794,7 @@ async fn answer_negotiated(
         admitted_dialog_methods: Vec::new(),
         voice: None,
         metrics: None,
+        bridge: None,
     })
 }
 
