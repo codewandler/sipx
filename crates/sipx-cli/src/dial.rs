@@ -185,7 +185,10 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
         .await
         {
             Ok(dialing) => dialing,
-            Err(sipx_call::Error::Cancelled(cancellation)) if !cancellation.timed_out => {
+            Err(Unreachable {
+                error: sipx_call::Error::Cancelled(cancellation),
+                ..
+            }) if !cancellation.timed_out => {
                 return report_pending_interrupt(
                     format,
                     export,
@@ -196,8 +199,16 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
                 )
                 .await;
             }
-            Err(error) => {
-                return report_failure(format, export, &handle, &error, &mut progress).await;
+            Err(failure) => {
+                return report_failure(
+                    format,
+                    export,
+                    &handle,
+                    &failure.error,
+                    failure.attempts(),
+                    &mut progress,
+                )
+                .await;
             }
         };
         let early_media = match tokio::select! {
@@ -218,7 +229,7 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
         } {
             Ok(available) => available,
             Err(error) => {
-                return report_failure(format, export, &handle, &error, &mut progress).await;
+                return report_failure(format, export, &handle, &error, None, &mut progress).await;
             }
         };
         let early_recorded = if early_media {
@@ -264,7 +275,7 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
                 .await;
             }
             Err(error) => {
-                return report_failure(format, export, &handle, &error, &mut progress).await;
+                return report_failure(format, export, &handle, &error, None, &mut progress).await;
             }
         };
         (call, selected, early_recorded, early_media)
@@ -279,7 +290,10 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
         .await
         {
             Ok(call) => call,
-            Err(sipx_call::Error::Cancelled(cancellation)) if !cancellation.timed_out => {
+            Err(Unreachable {
+                error: sipx_call::Error::Cancelled(cancellation),
+                ..
+            }) if !cancellation.timed_out => {
                 return report_pending_interrupt(
                     format,
                     export,
@@ -290,8 +304,16 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
                 )
                 .await;
             }
-            Err(error) => {
-                return report_failure(format, export, &handle, &error, &mut progress).await;
+            Err(failure) => {
+                return report_failure(
+                    format,
+                    export,
+                    &handle,
+                    &failure.error,
+                    failure.attempts(),
+                    &mut progress,
+                )
+                .await;
             }
         };
         (call, selected, Vec::new(), false)
@@ -438,6 +460,29 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
     Exit::Success
 }
 
+/// A serial pass that failed, and how far it got.
+///
+/// The count travels beside the error rather than inside it because `sipx_call::Error` is one
+/// call's failure and knows nothing of the list this command walked — the pass is the caller's, so
+/// what it attempted is the caller's to report. `sipx-ua` carries the same pair in
+/// `Error::ConnectionFailed` for the same reason from the other side: there the pass *is* the
+/// library's.
+struct Unreachable {
+    error: sipx_call::Error,
+    attempts: crate::destination::Attempts,
+}
+
+impl Unreachable {
+    /// What the report says about the pass, if the failure came from walking one at all.
+    ///
+    /// A refusal or a response deadline stopped the pass on its first candidate and is a statement
+    /// about the peer that answered, not about how many addresses the name has; counting those
+    /// would put a number beside a failure the number does not describe.
+    fn attempts(&self) -> Option<crate::destination::Attempts> {
+        matches!(self.error, sipx_call::Error::Transport(_)).then_some(self.attempts)
+    }
+}
+
 /// Try only concrete transport failures on the next RFC 3263 candidate. SIP refusals and response
 /// deadlines belong to the transaction that was sent and are never rewritten as routing retries.
 async fn dial_candidates(
@@ -446,17 +491,22 @@ async fn dial_candidates(
     to: &Uri,
     options: &sipx_call::DialOptions,
     mut interrupted: Pin<&mut (dyn Future<Output = ()> + Send)>,
-) -> Result<(Call, sipx_transport::Target), sipx_call::Error> {
+) -> Result<(Call, sipx_transport::Target), Unreachable> {
+    let mut attempts = crate::destination::Attempts::over(candidates.len());
     let mut last_transport = None;
     for target in candidates.iter().take(crate::destination::MAX_ATTEMPTS) {
+        attempts.attempt();
         match sipx_call::dial_until(handle, target.clone(), to, options, interrupted.as_mut()).await
         {
             Ok(call) => return Ok((call, target.clone())),
             Err(error @ sipx_call::Error::Transport(_)) => last_transport = Some(error),
-            Err(error) => return Err(error),
+            Err(error) => return Err(Unreachable { error, attempts }),
         }
     }
-    Err(last_transport.unwrap_or(sipx_call::Error::NoResponse))
+    Err(Unreachable {
+        error: last_transport.unwrap_or(sipx_call::Error::NoResponse),
+        attempts,
+    })
 }
 
 async fn dial_early_candidates(
@@ -465,18 +515,23 @@ async fn dial_early_candidates(
     to: &Uri,
     options: &sipx_call::DialOptions,
     mut interrupted: Pin<&mut (dyn Future<Output = ()> + Send)>,
-) -> Result<(sipx_call::Dialing, sipx_transport::Target), sipx_call::Error> {
+) -> Result<(sipx_call::Dialing, sipx_transport::Target), Unreachable> {
+    let mut attempts = crate::destination::Attempts::over(candidates.len());
     let mut last_transport = None;
     for target in candidates.iter().take(crate::destination::MAX_ATTEMPTS) {
+        attempts.attempt();
         match sipx_call::dial_early_until(handle, target.clone(), to, options, interrupted.as_mut())
             .await
         {
             Ok(dialing) => return Ok((dialing, target.clone())),
             Err(error @ sipx_call::Error::Transport(_)) => last_transport = Some(error),
-            Err(error) => return Err(error),
+            Err(error) => return Err(Unreachable { error, attempts }),
         }
     }
-    Err(last_transport.unwrap_or(sipx_call::Error::NoResponse))
+    Err(Unreachable {
+        error: last_transport.unwrap_or(sipx_call::Error::NoResponse),
+        attempts,
+    })
 }
 
 /// Play, send digits and record for the duration of the call.
@@ -588,6 +643,7 @@ async fn report_failure(
     export: crate::counters::Export,
     handle: &sipx_transport::Handle,
     error: &sipx_call::Error,
+    attempts: Option<crate::destination::Attempts>,
     progress: &mut crate::progress::Call,
 ) -> Exit {
     let (exit, end) = match error {
@@ -601,9 +657,12 @@ async fn report_failure(
         _ => (Exit::Failed, crate::progress::CallEnd::Failed),
     };
     handle.shutdown().await;
-    let report = Report::new()
-        .text("status", exit.as_str())
-        .text("error", error.to_string());
+    let report = crate::destination::with_attempts(
+        Report::new()
+            .text("status", exit.as_str())
+            .text("error", error.to_string()),
+        attempts,
+    );
     let report = match error {
         sipx_call::Error::Cancelled(cancellation) => with_cancellation(report, cancellation),
         _ => report,

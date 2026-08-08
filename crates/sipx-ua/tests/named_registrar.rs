@@ -33,6 +33,11 @@ use tokio::net::UdpSocket;
 const RESOLVABLE: &str = "registrar.test";
 /// A name the fixture zone answers about and has no address for.
 const ABSENT: &str = "absent.test";
+/// A name the fixture zone has three addresses for, all of them loopback, so a serial pass over
+/// its candidates never puts a packet on a network.
+const SPREAD: &str = "spread.test";
+/// The last octet of each `SPREAD` address. `127.0.0.0/8` is this machine throughout.
+const SPREAD_HOSTS: [u8; 3] = [1, 2, 3];
 
 /// RFC 1035 §3.2.2 `A`.
 const A: u16 = 1;
@@ -78,23 +83,31 @@ async fn zone() -> SocketAddr {
             let Some((name, kind, end)) = question(&buffer[..length]) else {
                 continue;
             };
-            let answer: &[u8] = if kind == A && name == format!("{RESOLVABLE}.") {
-                // A pointer to the question's name, then IN A 127.0.0.1 with a one-second TTL.
-                &[0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 1, 0, 4, 127, 0, 0, 1]
+            // A pointer to the question's name, then IN A 127.0.0.<host> with a one-second TTL.
+            let record = |host: u8| [0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 1, 0, 4, 127, 0, 0, host];
+            let (count, answer): (u16, Vec<u8>) = if kind != A {
+                (0, Vec::new())
+            } else if name == format!("{RESOLVABLE}.") {
+                (1, record(1).to_vec())
+            } else if name == format!("{SPREAD}.") {
+                (
+                    u16::try_from(SPREAD_HOSTS.len()).expect("three records"),
+                    SPREAD_HOSTS.iter().flat_map(|host| record(*host)).collect(),
+                )
             } else {
-                &[]
+                (0, Vec::new())
             };
             let mut response = Vec::with_capacity(end + answer.len());
             response.extend_from_slice(&buffer[0..2]);
             // Response, recursion desired and available, no error.
             response.extend_from_slice(&[0x81, 0x80]);
             response.extend_from_slice(&[0, 1]);
-            response.extend_from_slice(&u16::from(!answer.is_empty()).to_be_bytes());
+            response.extend_from_slice(&count.to_be_bytes());
             // No authority and no additional section: an empty answer with no SOA is the
             // "could not resolve" the adapter distinguishes from a real absence.
             response.extend_from_slice(&[0, 0, 0, 0]);
             response.extend_from_slice(&buffer[12..end]);
-            response.extend_from_slice(answer);
+            response.extend_from_slice(&answer);
             let _ = socket.send_to(&response, from).await;
         }
     });
@@ -283,6 +296,88 @@ async fn resolution_failure_resolution_timeout_and_connection_failure_are_distin
         None,
         "a connection failure is not a resolution failure"
     );
+}
+
+/// `T-41`: the count reaches a library consumer, not only the diagnostic phone.
+///
+/// `library-parity` is the epic, and a capability that stops at the CLI is exactly what it exists
+/// to close. An application that can only see the last transport error cannot tell one dead host
+/// behind a name from every address behind it being unreachable — which is the same sentence the
+/// operator-facing half of this story is about, one layer down.
+///
+/// The counts are attempted and resolved rather than attempted alone, because `P-26` makes a
+/// caller's budget the ceiling over the whole serial pass: `attempted` is attempted-so-far, and it
+/// takes the second number to say whether the pass ran out of candidates or out of time.
+#[tokio::test]
+async fn a_connection_failure_reports_the_candidates_it_attempted() {
+    let nameserver = zone().await;
+    let resolver = resolver(nameserver, Duration::from_secs(4));
+
+    // A port on this machine that nothing accepts on: reserved to learn the number, then released.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").expect("reserves a loopback port");
+    let refused = closed.local_addr().expect("reserved address").port();
+    drop(closed);
+
+    let attempted = |host: &'static str| {
+        let resolver = &resolver;
+        async move {
+            let registrar = uri(format!("sip:{host}:{refused};transport=tcp"));
+            let candidates = resolver
+                .resolve(&registrar, None, None)
+                .await
+                .expect("the name resolves");
+            let agent_endpoint = endpoint().await;
+            let contact = format!("<sip:alice@{}>", agent_endpoint.local_addr());
+            let config = Config::new(
+                format!("<sip:alice@{host}>"),
+                contact,
+                registrar,
+                candidates[0].clone(),
+            );
+            let failure = UserAgent::register_candidates(agent_endpoint, config, &candidates, None)
+                .await
+                .expect_err("nothing accepts TCP on that port");
+            (candidates.len(), failure)
+        }
+    };
+
+    // One address behind the name. One host refused; there was nowhere else to go.
+    let (listed, one) = attempted(RESOLVABLE).await;
+    assert_eq!(listed, 1);
+    let sipx_ua::Error::ConnectionFailed { attempts, .. } = &one else {
+        panic!("a refused connection over a resolved name is a connection failure: {one}");
+    };
+    assert_eq!(attempts.attempted(), 1, "{one}");
+    assert_eq!(attempts.resolved(), 1, "{one}");
+    assert!(attempts.exhausted(), "{one}");
+    let single = attempts.attempted();
+
+    // Three addresses behind the name. The pass walked the ordered list to its end.
+    let (listed, every) = attempted(SPREAD).await;
+    assert_eq!(listed, 3, "the zone offers three addresses");
+    let sipx_ua::Error::ConnectionFailed { attempts, .. } = &every else {
+        panic!("a refused connection over a resolved name is a connection failure: {every}");
+    };
+    assert_eq!(attempts.attempted(), 3, "{every}");
+    assert_eq!(attempts.resolved(), 3, "{every}");
+    assert!(
+        attempts.exhausted(),
+        "nothing cut this pass short, so it is exhausted rather than abandoned: {every}"
+    );
+    assert_ne!(
+        single,
+        attempts.attempted(),
+        "the two failures must not report the same count, or the field says nothing"
+    );
+
+    // The message an application prints without matching carries it too, and still names the
+    // transport cause `T-39` published rather than a resolution that succeeded.
+    let rendered = every.to_string();
+    assert!(
+        rendered.contains("transport") && !rendered.contains("resolution"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("3 of 3"), "{rendered}");
 }
 
 /// The resolution classification behind a user agent error, if it has one.

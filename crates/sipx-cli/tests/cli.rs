@@ -2788,6 +2788,13 @@ const RESOLVES: &str = "reachable.sipx.test";
 const NEGATIVE: &str = "absent.sipx.test";
 /// A name the fixture never answers about at all.
 const SILENT: &str = "silent.sipx.test";
+/// A name the zone has three addresses for, all of them inside `127.0.0.0/8` and therefore this
+/// machine. It is what makes "how many candidates were attempted" a question with two different
+/// answers rather than a constant.
+const SPREAD: &str = "spread.sipx.test";
+/// The addresses `SPREAD` resolves to. Loopback throughout: a candidate list this test walks to
+/// the end must not put a packet on a network.
+const SPREAD_ADDRESSES: [[u8; 4]; 3] = [[127, 0, 0, 1], [127, 0, 0, 2], [127, 0, 0, 3]];
 
 /// A nameserver on loopback answering from a fixed zone, so which way a named target fails is the
 /// test's decision rather than the machine's DNS.
@@ -2893,9 +2900,14 @@ impl Question {
     fn answer(&self, datagram: &[u8]) -> Vec<u8> {
         const A: u16 = 1;
         let (rcode, answers, authority) = match self.name.as_str() {
-            RESOLVES if self.kind == A => (0u8, vec![a_record()], Vec::new()),
+            RESOLVES if self.kind == A => (0u8, vec![a_record([127, 0, 0, 1])], Vec::new()),
+            SPREAD if self.kind == A => (
+                0,
+                SPREAD_ADDRESSES.into_iter().map(a_record).collect(),
+                Vec::new(),
+            ),
             // The other address family, answered and empty rather than left unanswered.
-            RESOLVES => (0, Vec::new(), vec![soa_record()]),
+            RESOLVES | SPREAD => (0, Vec::new(), vec![soa_record()]),
             NEGATIVE => (3, Vec::new(), vec![soa_record()]),
             // No SOA. RFC 2308 §5's negative answer is exactly the part that is missing, which is
             // how a resolver that could not establish an answer is told from one that did.
@@ -2918,9 +2930,9 @@ impl Question {
     }
 }
 
-fn a_record() -> Vec<u8> {
+fn a_record(address: [u8; 4]) -> Vec<u8> {
     let mut record = record_head(1, 4);
-    record.extend_from_slice(&[127, 0, 0, 1]);
+    record.extend_from_slice(&address);
     record
 }
 
@@ -2971,6 +2983,18 @@ fn reported(stderr: &str, name: &str, json: bool) -> Option<String> {
         stderr
             .lines()
             .find_map(|line| line.strip_prefix(name).map(|value| value.trim().to_owned()))
+    }
+}
+
+/// The same, for a field the two formats do not render alike: JSON writes a count as a number and
+/// the text form writes its digits, so reading one as a string finds nothing in the other.
+fn reported_number(stderr: &str, name: &str, json: bool) -> Option<u64> {
+    if json {
+        let object: serde_json::Value =
+            serde_json::from_str(stderr.lines().find(|line| line.starts_with('{'))?).ok()?;
+        object.get(name)?.as_u64()
+    } else {
+        reported(stderr, name, json)?.parse().ok()
     }
 }
 
@@ -3179,6 +3203,131 @@ async fn a_named_call_target_reports_the_same_three_failures() {
         reported(&stderr, "error", true)
             .is_some_and(|error| error.contains("transport") && !error.contains("resolution")),
         "the name resolved; the connection is what failed: {stderr}"
+    );
+}
+
+/// `T-41`: a connection failure says how many of the resolved candidates it got through.
+///
+/// "This name resolves to one dead host" and "every address behind this name is unreachable" are
+/// different problems with different owners, and the last transport error alone reads identically
+/// for both — `Connection refused`, once, with nothing to say whether anything else was tried.
+/// `docs/specs/sip-target-resolution.md` §8 already promises the count as
+/// `ConnectionFailed { attempted, last_error }`; this is where an operator receives it.
+///
+/// The count is attempted-so-far and not attempted-in-total, which is why `candidates_resolved` is
+/// beside it: `P-26` makes a command's deadline the ceiling over the whole serial pass, so a pass
+/// can end with candidates it never reached, and one number cannot say both things.
+#[tokio::test]
+async fn a_connection_failure_reports_how_many_candidates_it_attempted() {
+    let _scenario = process_scenario().await;
+    let dns = fixture_nameserver().await;
+
+    // Reserved and released, so every candidate below is a port nothing on this machine accepts on.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").expect("reserves a loopback port");
+    let refused = closed.local_addr().expect("reserved address").port();
+    drop(closed);
+
+    for json in [false, true] {
+        let register = |host: String| {
+            let dns = &dns;
+            async move {
+                through_nameserver(
+                    dns,
+                    &[
+                        "register",
+                        "sip:alice@example.test",
+                        "--target",
+                        &host,
+                        "--transport",
+                        "tcp",
+                        "--timeout",
+                        "10",
+                    ],
+                    json,
+                )
+                .await
+            }
+        };
+
+        // One address behind the name: one host refused, and there was never anywhere else to go.
+        let one = register(format!("{RESOLVES}:{refused}")).await;
+        let stderr = String::from_utf8_lossy(&one.stderr).into_owned();
+        assert_eq!(one.status.code(), Some(1), "{stderr}");
+        assert_eq!(reported(&stderr, "status", json).as_deref(), Some("failed"));
+        let single = reported_number(&stderr, "candidates_attempted", json);
+        assert_eq!(
+            single,
+            Some(1),
+            "one host refusing is one candidate attempted: {stderr}"
+        );
+        assert_eq!(
+            reported_number(&stderr, "candidates_resolved", json),
+            Some(1),
+            "and there was one to attempt: {stderr}"
+        );
+        // `T-39`'s contract is unchanged: a connection failure is not a resolution failure, and
+        // the exit table and the prefix rule are what a script already branches on.
+        assert!(
+            reported(&stderr, "error", json).is_some_and(|error| {
+                error.contains("transport")
+                    && !error.contains("resolution")
+                    && !error.starts_with("target resolution failed:")
+            }),
+            "{stderr}"
+        );
+
+        // Three addresses behind the name: the ordered list was walked to its end. Same last
+        // transport error, entirely different finding.
+        let every = register(format!("{SPREAD}:{refused}")).await;
+        let stderr = String::from_utf8_lossy(&every.stderr).into_owned();
+        assert_eq!(every.status.code(), Some(1), "{stderr}");
+        assert_eq!(reported(&stderr, "status", json).as_deref(), Some("failed"));
+        let exhausted = reported_number(&stderr, "candidates_attempted", json);
+        assert_eq!(
+            exhausted,
+            Some(3),
+            "every address behind the name was attempted: {stderr}"
+        );
+        assert_eq!(
+            reported_number(&stderr, "candidates_resolved", json),
+            Some(3),
+            "a spent budget is attempted == resolved, which is what says the name is exhausted \
+             rather than cut short: {stderr}"
+        );
+        assert_ne!(
+            single, exhausted,
+            "the two failures must not report the same count, or the field says nothing"
+        );
+    }
+
+    // The same field through `dial`, because the two commands share the pass: an operator who
+    // only ever runs one of them must not be told a different story by it.
+    let called = through_nameserver(
+        &dns,
+        &[
+            "dial",
+            &format!("sip:bob@{SPREAD}:{refused}"),
+            "--transport",
+            "tcp",
+            "--timeout",
+            "10",
+            "--duration",
+            "0",
+        ],
+        true,
+    )
+    .await;
+    let stderr = String::from_utf8_lossy(&called.stderr).into_owned();
+    assert_eq!(called.status.code(), Some(1), "{stderr}");
+    assert_eq!(
+        reported_number(&stderr, "candidates_attempted", true),
+        Some(3),
+        "{stderr}"
+    );
+    assert_eq!(
+        reported_number(&stderr, "candidates_resolved", true),
+        Some(3),
+        "{stderr}"
     );
 }
 
@@ -6973,13 +7122,18 @@ async fn a_refused_stream_connection_exits_failed_without_waiting_for_sip_timeou
             "results stay off stdout on failure"
         );
         let failure = String::from_utf8_lossy(&output.stderr);
-        let status = if json {
-            "\"status\":\"failed\""
-        } else {
-            "status  failed"
-        };
-        assert!(failure.contains(status), "{failure}");
-        assert!(failure.contains("transport:"), "{failure}");
+        // Read as fields, not as rendered lines: the text form pads the name column to the widest
+        // field, so matching on `"status  failed"` asserted on the spacing and broke the first
+        // time a field was added beside it (`T-41`'s `candidates_attempted`).
+        assert_eq!(
+            reported(&failure, "status", json).as_deref(),
+            Some("failed"),
+            "{failure}"
+        );
+        assert!(
+            reported(&failure, "error", json).is_some_and(|error| error.contains("transport:")),
+            "{failure}"
+        );
     }
 }
 
