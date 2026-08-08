@@ -43,6 +43,42 @@ The external provenance denylist is the repository or organization secret named
 the same mandatory provenance claim as ordinary CI. An absent denylist MUST stop the release
 before package rehearsal or publication; its contents MUST NOT be stored in this repository.
 
+### 2.1 Preflight, build cache and measurement
+
+Before the gate, the workflow MUST make one read-only preflight claim: a push-triggered `ci.yml`
+run for `main` whose `head_sha` equals the peeled release tag commit exists and concluded `success`,
+and that run's `deploy docs site` job concluded `success`.
+Missing or wrong-SHA evidence MUST stop the release before the gate.
+This preflight is an ordering decision and never a proof.
+It MUST NOT probe the public site: §5's post-consumer Pages job and HTTP proof stay exactly as they
+are, because a deployment job that succeeded and a page that answers are different claims. CI
+success on the release commit
+MUST NOT be substituted for the complete gate or for any other normative proof.
+
+One Actions-managed Rust artifact cache
+MAY be restored, and only after the immutable-tag facts of §3 are established.
+Its key MUST cover the runner image, the workspace lockfile, the CI flags the gate runs under, the
+stable and MSRV toolchains, and the native libraries the optional features link; an inexact
+restore key is not permitted. The workflow MUST NOT set a shared `CARGO_TARGET_DIR`, and
+no cache may hold the isolated `CARGO_HOME` or target directories
+the helper gives package rehearsal, resume verification and the registry consumer — their
+independence is the release evidence rather than incidental build work. A cache miss, a corrupt
+entry or a failed restore
+MUST still run every one of the gate's steps:
+no release step may be conditional on a cache result, and a cache step's own failure MUST NOT end
+the release.
+
+The gate run MUST record its step timings, and that record MUST state whether the build directory
+was cold or warm. The artifact cache is
+retained only if the recorded cold and warm figures differ by at least 60 seconds.
+A Node dependency cache keyed on the exact `website/package-lock.json`
+MAY skip installation and MUST NOT skip the site, anchor or rustdoc builds;
+it is retained only if its recorded wall-time saving and its storage cost are material. Measured on
+the release runner of run `31052427439`, `npm ci` costs 34.8 s of a gate that costs 717 s to 1079 s
+across six recorded protected runs, and `website/node_modules` is 745 MiB against a 10 GB
+repository-wide Actions cache budget it would share with the Rust entry. That trade is not material,
+so no `node_modules` cache is retained and the npm download cache remains as it is.
+
 ## 3. Immutable input
 
 Before running the release helper, the workflow MUST establish all of these facts:
@@ -123,6 +159,8 @@ the workflow MUST NOT post broader publicity.
 | `RWF-7` | accept Pages without matching `head_sha`, deploy job and two probes | static check fails |
 | `RWF-8` | make the GitHub Release kind or asset set non-idempotent, unverified or inline-noted; or add broader posting | static check fails |
 | `RWF-9` | recovery omits protected environment, separate checkouts, failed-run step evidence, exact controller/tag/SHA binding, visible-byte proof or bounded frontier loop | static check fails |
+| `RWF-10` | remove the preflight, let it probe the public site, or let CI success stand in for the gate or the post-consumer Pages proof | static check fails |
+| `RWF-11` | restore the artifact cache before tag validation, widen its key or paths, set a shared `CARGO_TARGET_DIR`, condition a release step on a cache result, or stop recording the gate's timings | static check fails |
 
 These are structural tests, not evidence that GitHub or crates.io accepted a write. Actual release
 acceptance remains the run records and registry bytes produced only after explicit authorization.

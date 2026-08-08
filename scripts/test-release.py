@@ -1696,6 +1696,66 @@ class TheRegistryRateLimit(unittest.TestCase):
         self.assertEqual([("sipx-core", 0.0), ("sipx-call", 0.0)], attempts)
         self.assertEqual([], waits)
 
+    def test_a_registry_that_keeps_refusing_stops_after_the_stated_attempt_bound(self) -> None:
+        # X-93 asks for repeated 429s, and every other fixture here answers one. Three refusals in
+        # a row is the shape that separates pacing from refusal: the deadline is read, waited out,
+        # restated, and waited out again, and then the loop is out of attempts rather than out of
+        # budget. Without this the `RATE_LIMIT_RETRY_ATTEMPTS` branch is never executed at all.
+        clock, waits, injected = self.injected_clock()
+        attempts: list[tuple[str, float]] = []
+        refusals = {
+            ("sipx-core", attempt): (101, RATE_LIMITED_WITH_HEADER) for attempt in (1, 2, 3)
+        }
+        with self.assertRaises(release.ReleaseError) as refused:
+            release.publish_frontier(
+                ("sipx-core", "sipx-call"),
+                paced_dispatch(clock, attempts, refusals),
+                new_crates=("sipx-core", "sipx-call"),
+                budget_seconds=3600.0,
+                **injected,
+            )
+        message = str(refused.exception)
+        self.assertIn("still refuses publication after 3 rate-limited attempts", message)
+        self.assertIn("429", message)
+        # Every attempt waited the deadline the registry restated, and the next name in the
+        # frontier was never dispatched: a stopped run stays resumable rather than partly repeated.
+        self.assertEqual(
+            [("sipx-core", 0.0), ("sipx-core", 900.0), ("sipx-core", 1800.0)], attempts
+        )
+        self.assertEqual([900.0, 900.0], waits)
+
+    def test_a_new_name_being_paced_does_not_delay_an_existing_name_beside_it(self) -> None:
+        # The row's literal clause: an ordinary version update is not delayed *merely because*
+        # first-name creation once required pacing. The zero-wait test above proves it for a
+        # frontier with no new names at all, which cannot observe the two buckets interfering.
+        # This one mixes them and 429s the new name, so an existing name delayed by the new-crate
+        # deadline would show up as a non-zero dispatch time.
+        clock, waits, injected = self.injected_clock()
+        attempts: list[tuple[str, float]] = []
+        frontier = ("sipx-sip", "sipx-brand-new", "sipx-sdp")
+        published = release.publish_frontier(
+            frontier,
+            paced_dispatch(
+                clock, attempts, {("sipx-brand-new", 1): (101, RATE_LIMITED_WITH_HEADER)}
+            ),
+            new_crates=("sipx-brand-new",),
+            budget_seconds=3600.0,
+            **injected,
+        )
+        self.assertEqual(frontier, published)
+        self.assertEqual(
+            [
+                ("sipx-sip", 0.0),
+                ("sipx-brand-new", 0.0),
+                ("sipx-brand-new", 900.0),
+                ("sipx-sdp", 900.0),
+            ],
+            attempts,
+        )
+        # One wait, and it belongs to the new name. `sipx-sdp` is dispatched the moment the run
+        # reaches it, carrying none of the new-crate deadline.
+        self.assertEqual([900.0], waits)
+
     def test_an_ordinary_publish_failure_is_not_treated_as_a_rate_limit(self) -> None:
         clock, waits, injected = self.injected_clock()
         attempts: list[tuple[str, float]] = []
