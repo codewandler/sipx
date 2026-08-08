@@ -44,6 +44,13 @@ pub struct Packet {
     pub ssrc: u32,
     /// Sources that contributed, when a mixer combined streams.
     pub csrc: Vec<u32>,
+    /// The header extension exactly as it arrived — profile field, length word and payload —
+    /// or `None` when the packet carried none.
+    ///
+    /// Kept verbatim so a path that forwards a packet does not silently strip information the
+    /// far end relied on. This crate never interprets it: RFC 8285's one- and two-byte forms are
+    /// a profile's business, and inventing a reading here would be a guess with a wire effect.
+    pub extension: Option<Bytes>,
     /// The media.
     pub payload: Bytes,
 }
@@ -53,6 +60,7 @@ impl Packet {
     #[must_use]
     pub fn new(payload_type: u8, sequence: u16, timestamp: u32, ssrc: u32, payload: Bytes) -> Self {
         Self {
+            extension: None,
             marker: false,
             payload_type,
             sequence,
@@ -67,10 +75,18 @@ impl Packet {
     #[must_use]
     pub fn encode(&self) -> Bytes {
         let csrc_count = self.csrc.len().min(15);
-        let mut out = BytesMut::with_capacity(HEADER_LEN + csrc_count * 4 + self.payload.len());
+        let extension = self.extension.as_ref().filter(|bytes| bytes.len() >= 4);
+        let extension_len = extension.map_or(0, Bytes::len);
+        let mut out = BytesMut::with_capacity(
+            HEADER_LEN + csrc_count * 4 + extension_len + self.payload.len(),
+        );
 
-        // Version 2, no padding, no extension, and the CSRC count in the low nibble.
-        let first = 0b1000_0000 | u8::try_from(csrc_count).unwrap_or(0);
+        // Version 2, no padding, the extension bit set only when one is actually carried, and the
+        // CSRC count in the low nibble. Setting the bit without the bytes would make the next
+        // reader consume payload as an extension header.
+        let first = 0b1000_0000
+            | (u8::from(extension.is_some()) << 4)
+            | u8::try_from(csrc_count).unwrap_or(0);
         out.put_u8(first);
         out.put_u8((u8::from(self.marker) << 7) | (self.payload_type & 0x7F));
         out.put_u16(self.sequence);
@@ -78,6 +94,9 @@ impl Packet {
         out.put_u32(self.ssrc);
         for csrc in self.csrc.iter().take(csrc_count) {
             out.put_u32(*csrc);
+        }
+        if let Some(bytes) = extension {
+            out.put_slice(bytes);
         }
         out.put_slice(&self.payload);
         out.freeze()
@@ -119,6 +138,7 @@ impl Packet {
             offset += 4;
         }
 
+        let mut extension = None;
         if has_extension {
             // The extension is a 16-bit profile field, a 16-bit length in 32-bit words, then
             // that many words. The length excludes the four bytes of the header itself, which
@@ -127,9 +147,16 @@ impl Packet {
                 bytes.get(offset + 2).copied().ok_or(RtpError::Truncated)?,
                 bytes.get(offset + 3).copied().ok_or(RtpError::Truncated)?,
             ]));
+            let start = offset;
             offset = offset
                 .checked_add(4 + words * 4)
                 .ok_or(RtpError::Truncated)?;
+            if offset > bytes.len() {
+                return Err(RtpError::Truncated);
+            }
+            // Sliced, not copied, and kept whole. Dropping it here is what made a forwarding path
+            // silently strip extensions the far end had asked for (`M-75`).
+            extension = Some(bytes.slice(start..offset));
         }
 
         if offset > bytes.len() {
@@ -147,6 +174,7 @@ impl Packet {
         }
 
         Ok(Self {
+            extension,
             marker,
             payload_type,
             sequence,

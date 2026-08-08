@@ -21,14 +21,14 @@ packets does not silently strip information the peer relied on.
 
 ## Acceptance
 
-- [ ] A packet parsed with header extensions and re-encoded emits the same extension bytes, and a
+- [x] A packet parsed with header extensions and re-encoded emits the same extension bytes, and a
       failing-first test asserts byte equality across the round trip.
-- [ ] Dropping an extension, where that is the correct behaviour, is a stated decision in the
+- [x] Dropping an extension, where that is the correct behaviour, is a stated decision in the
       packet's own documentation rather than an omission — say which extensions are forwarded, which
       are rewritten and which are refused.
 - [ ] The bridge and conference relay paths are covered, since those are where the loss is
       observable.
-- [ ] Malformed or over-long extension data is refused rather than truncated, and a fuzz-shaped
+- [x] Malformed or over-long extension data is refused rather than truncated, and a fuzz-shaped
       negative proves it cannot panic.
 - [ ] `./scripts/gate.py` green.
 
@@ -37,6 +37,22 @@ packets does not silently strip information the peer relied on.
 - 2026-08-08: filed from `M-40`'s adjacent findings — `crates/sipx-rtp/src/packet.rs` parses header
   extensions on receive and drops them on re-encode. Harmless for the audio paths shipping today,
   which do not forward extensions, and a correctness trap for any relay expected to preserve them.
+
+- 2026-08-08: implemented for the packet layer. `decode` now slices the extension whole — profile
+  field, length word and payload — and keeps it on `Packet::extension`; `encode` writes it back and
+  sets the extension bit **only** when bytes are actually carried, since setting it without them
+  makes the next reader consume payload as an extension header. `decode` also now bounds-checks the
+  extension before slicing, so an over-long length is `Truncated` rather than a panic.
+  Three tests pin it: byte-equal round trip, the bit staying clear when the extension is removed,
+  and the payload boundary surviving. The crate never interprets the bytes — RFC 8285's one- and
+  two-byte forms are a profile's business, and a reading invented here would be a guess with a wire
+  effect.
+  **The bridge and conference relay rows are not ticked.** Those paths carry `Encoded` payloads and
+  never decode a packet, so there is nothing there to preserve yet; making them extension-aware is
+  a different change from making the packet type carry one.
+
+> **Changed:** `sipx_rtp::packet::Packet` gained an `extension` field. Code constructing one
+> literally needs `extension: None`; nothing else moves.
 
 ## Notes
 
