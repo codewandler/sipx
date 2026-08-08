@@ -147,6 +147,7 @@ impl Replaces {
 
 /// How far a transfer has got, as the transferor learns it from NOTIFY.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TransferState {
     /// The transferee has taken it on and is trying.
     Trying,

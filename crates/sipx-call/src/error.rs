@@ -16,6 +16,7 @@ pub struct CancellationCleanup {
 
 /// Why the invitation-withdrawal phase ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CancellationDisposition {
     /// The INVITE transaction reached a terminal event.
     Completed {

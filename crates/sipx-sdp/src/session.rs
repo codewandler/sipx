@@ -12,6 +12,10 @@ use std::net::IpAddr;
 /// RFC 8866 §5.2 and §5.7 allow a fully-qualified domain name here, not just a literal. A
 /// name is kept as written: resolving it takes a resolver, which is I/O this crate does not
 /// do, and re-emitting it verbatim is what keeps a round trip faithful.
+///
+/// Exhaustive by design: §5.2's `unicast-address` is either an address literal or a domain name,
+/// and the two exhaust it. A future address family widens [`IpAddr`], not this type — which is
+/// the reason the literal arm holds an `IpAddr` rather than one variant per family.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Address {
     /// An IP literal.
@@ -57,6 +61,10 @@ impl fmt::Display for Address {
 }
 
 /// Which way media flows, from the point of view of the description that carries it.
+///
+/// Exhaustive by design: RFC 4566 §6 defines four direction attributes and they are the whole of
+/// the question — each of the two directions is either on or off. A fifth would not be a direction
+/// but a policy about one, and belongs to whatever type states that policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Direction {
     /// Both ways. The default when no direction attribute is present (RFC 4566 §6).
@@ -239,6 +247,10 @@ pub struct MediaDescription {
 }
 
 /// Whether one media section uses a separate RTCP port or multiplexes it with RTP (RFC 5761).
+///
+/// Exhaustive by design: RFC 5761 §5.1.3 asks one yes-or-no question — does RTCP share the RTP
+/// port — and `a=rtcp-mux` is present or it is not. A third value would have to describe some
+/// port other than those two, which is `a=rtcp` (RFC 3605) and a different attribute.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RtcpMode {
     /// RTP uses the media port and RTCP uses its control port.

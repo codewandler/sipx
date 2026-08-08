@@ -84,6 +84,7 @@ pub struct EventNotification<V> {
 
 /// One application-visible event from a running subscription.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum EventSubscriptionEvent<V> {
     /// A package value was accepted from a NOTIFY.
     Notification(EventNotification<V>),

@@ -37,6 +37,7 @@ use tokio_util::sync::CancellationToken;
 /// duration, and inventing a taxonomy it cannot actually distinguish would produce a report
 /// that looks precise and is not.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
 pub enum Cause {
     /// The far end refused, with the status it gave.
     Rejected(u16),
@@ -169,6 +170,7 @@ impl Stop {
 
 /// Why the harness closed admission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AdmissionEnd {
     /// The configured call count was admitted.
     Calls,

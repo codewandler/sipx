@@ -290,6 +290,7 @@ pub enum Keying {
 /// Unlike [`Keying`], this contains no `Auto`: the compatibility policy has resolved to either
 /// plain RTP or SDES by the time a [`crate::Call`] exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum NegotiatedKeying {
     /// Plain RTP, without media encryption.
     Plain,

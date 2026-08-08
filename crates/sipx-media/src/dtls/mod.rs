@@ -30,6 +30,11 @@ pub const EXPORTER_LABEL: &str = "EXTRACTOR-dtls_srtp";
 /// One port carries three protocols at once, and §5.1.2 disambiguates them by the first byte alone.
 /// The ranges do not overlap because RTP's version-2 header puts `10` in the top two bits, DTLS
 /// content types are 20–63, and STUN's first two bits are zero.
+///
+/// Exhaustive by design: §5.1.2 partitions the whole first byte into three named ranges and
+/// everything else, and [`Arriving::Unknown`] *is* everything else. A protocol added to that port
+/// later would narrow `Unknown`, which changes what this classifier returns and not how many
+/// answers it has.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Arriving {
     /// A STUN message — first byte 0 or 1. Relevant once ICE exists; classified here because
@@ -187,6 +192,9 @@ impl Profile {
 /// holds a client write key and a server write key, and each side protects with its own and
 /// unprotects with the other's. A stack that picks the wrong one produces authentication failures
 /// on every packet, in both directions, with no clue as to the cause.
+///
+/// Exhaustive by design: a DTLS connection has one end that sends the `ClientHello` and one that
+/// answers it, and §4.2's exported key block has exactly the two write keys to match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     /// The endpoint that sent the `ClientHello` — SDP `a=setup:active`.

@@ -68,6 +68,7 @@ use crate::processing::{AudioDirection, PcmProcessor, Processing, ProcessingErro
 
 /// Which G.711 flavour a session carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Codec {
     /// µ-law, payload type 0.
     Pcmu,
@@ -96,6 +97,10 @@ pub enum Codec {
 }
 
 /// Which half of a negotiated codec could not be constructed.
+///
+/// Exhaustive by design: a codec is an encoder and a decoder, which is the argument
+/// `sipx-audio/src/opus.rs` makes for why a stack that has only one cannot offer the codec at
+/// all. A third half would be a third direction of media, and there is none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodecDirection {
     /// The encoder for media sent to the peer.
@@ -1127,6 +1132,7 @@ impl PlaybackEnd {
 /// (`docs/specs/app-contract.md` §6.2): the prompt of a gather is interruptible by definition,
 /// and a bare `play` is not unless it says so.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum Interrupt {
     /// The clip plays to its end whatever the far end presses.
     #[default]
@@ -4378,7 +4384,12 @@ async fn process_rtcp(
                 )
                 .await;
             }
-            Rtcp::Sdes(_) | Rtcp::Other { .. } => {}
+            // SDES, and any report type this build does not model: neither carries reception
+            // statistics about our stream, so there is nothing to note. A wildcard rather than
+            // the two names, because `Rtcp` is `#[non_exhaustive]` and a packet type added later
+            // is exactly as silent about us — approximating one into the quality figures would
+            // make them precise about something that never happened.
+            _ => {}
         }
     }
 }
@@ -6511,7 +6522,7 @@ mod tests {
                         .reports
                         .iter()
                         .any(|block| block.last_sender_report == expected),
-                    Rtcp::Sdes(_) | Rtcp::Other { .. } => false,
+                    _ => false,
                 });
                 if echoed {
                     return from;

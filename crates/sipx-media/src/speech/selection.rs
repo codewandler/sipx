@@ -29,7 +29,7 @@ use crate::processing::{AudioDirection, Processing};
 
 /// Whether a session may run in a format the call clock has to be converted to (§4 `conversion`).
 ///
-/// Two values and no more: `allow` and `deny` exhaust the question, so this is deliberately closed
+/// Exhaustive by design: `allow` and `deny` exhaust the question, so this is deliberately closed
 /// where the reason and output enums around it are not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Conversion {

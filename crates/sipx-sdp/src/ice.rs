@@ -105,6 +105,7 @@ impl fmt::Display for ComponentId {
 /// type and is then dropped by [`Candidate::parse`], rather than failing the description. A peer
 /// offering an ICE-TCP candidate alongside UDP ones is offering something usable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Transport {
     /// UDP, the only transport sipx checks over.
     Udp,
@@ -183,6 +184,7 @@ impl fmt::Display for Priority {
 
 /// How a candidate was obtained (RFC 8839 §5.1, RFC 8445 §5.1.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum CandidateType {
     /// A local interface address.
     Host,

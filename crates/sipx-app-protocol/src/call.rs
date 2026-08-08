@@ -79,7 +79,6 @@ pub fn event_from_call(event: &CallEvent, instruction_id: &str) -> Option<EventK
         },
         CallEvent::TransferProgress(state) => EventKind::TransferProgress {
             state: match state {
-                CallTransferState::Trying => TransferState::Trying,
                 CallTransferState::Ringing => TransferState::Ringing,
                 CallTransferState::Succeeded => TransferState::Succeeded,
                 // §5.3 spells this `failed{status}` and carries no reason phrase; the one
@@ -87,6 +86,11 @@ pub fn event_from_call(event: &CallEvent, instruction_id: &str) -> Option<EventK
                 CallTransferState::Failed { status, .. } => {
                     TransferState::Failed { status: *status }
                 }
+                // `Trying`, and any state `sipx-call` adds to a `#[non_exhaustive]` vocabulary
+                // that §5.3's closed one has no word for. One arm, because `trying` is the value
+                // that concludes nothing: reporting an unrecognised state as `succeeded` or
+                // `failed` would have the application act on an outcome that has not happened.
+                _ => TransferState::Trying,
             },
         },
         CallEvent::Hold => EventKind::Hold,

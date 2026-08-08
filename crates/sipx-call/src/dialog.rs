@@ -20,6 +20,9 @@ use sipx_sip::headers::{From as FromHeader, To};
 use sipx_sip::{HeaderName, Request, Response, Uri};
 
 /// Which side of the dialog this is.
+///
+/// Exhaustive by design: RFC 3261 §12 gives a dialog exactly two peers, and this says which one
+/// we are. A third value would describe something that is not a dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     /// We sent the INVITE.

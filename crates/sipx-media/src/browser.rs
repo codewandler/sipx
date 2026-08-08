@@ -82,6 +82,7 @@ pub(crate) async fn profile_task<F: Future>(tasks: Arc<ProfileTasks>, future: F)
 
 /// One protocol carried by the nominated component.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum IngressClass {
     /// An ICE/STUN datagram.
     Stun,
@@ -183,6 +184,7 @@ impl SelectedComponent {
 
 /// Security phase of one component generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ComponentState {
     /// ICE is checking and no media peer exists yet.
     IceChecking,
@@ -298,6 +300,12 @@ impl IngressCounts {
 }
 
 /// Result of applying both classification and the component security state.
+///
+/// Exhaustive by design: a datagram is either handed to a protocol or released, and this type
+/// exists to make that the only choice. What varies is *which* protocol and *why* it was
+/// dropped, and those are [`IngressClass`] and [`IngressDrop`] — both of which may grow without
+/// this answer gaining a third form. A disposition that was neither would be a datagram nothing
+/// accounted for, which is the state §7's fail-closed admission rule exists to prevent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IngressDisposition {
     /// The named protocol may consume this datagram now.

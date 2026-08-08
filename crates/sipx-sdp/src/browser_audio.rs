@@ -17,6 +17,9 @@ const MAX_CANDIDATES: usize = 32;
 const MAX_CANDIDATE_LINE: usize = 512;
 
 /// Which side authored a description.
+///
+/// Exhaustive by design: RFC 3264's exchange has two sides and a description is one of them.
+/// Nothing in the offer/answer model is a third author.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrowserAudioRole {
     /// The description is an offer.
@@ -75,6 +78,11 @@ pub struct BrowserAudioAnswer {
 }
 
 /// Whether a subsequent description starts another ICE generation.
+///
+/// Exhaustive by design: RFC 8839 §4.4.1.1.1 makes a restart the case where `ice-ufrag` *and*
+/// `ice-pwd` have both changed, and anything else is not one. The half-changed pair is rejected
+/// as malformed before this type is built rather than becoming a third value here, so that a
+/// caller reading `Unchanged` can rely on it meaning the session continues.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IceChange {
     /// Both credentials are unchanged.

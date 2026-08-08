@@ -28,6 +28,11 @@ pub const EVENT_LEN: usize = 4;
 pub const DEFAULT_PAYLOAD_TYPE: u8 = 101;
 
 /// A DTMF digit.
+///
+/// Exhaustive by design: DTMF is the sixteen tones of a keypad, and RFC 4733 §3.2 assigns them
+/// event codes 0 to 15 — the four shapes below partition exactly those. §3.2 keeps assigning
+/// codes above 15, but they are not DTMF: 16 is a hook flash and the rest are other tones, and
+/// widening this type to carry them would make `Digit` a name for something that is not a digit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Digit {
     /// `0`–`9`.
