@@ -80,6 +80,7 @@ pub mod transfer;
 // Crate-private: every item in it is `pub(crate)`, and a `pub mod` whose contents are all
 // private renders as an empty page in the API reference — a promise of surface that is not there.
 mod update;
+pub mod voice;
 
 pub use call::{
     Call, Credentials, DialOptions, Dialing, MediaAddress, Served, answer, answer_at, answer_early,
@@ -129,3 +130,4 @@ pub use subscriber::{
     EventSubscriptions, EventSubscriptionsHandle,
 };
 pub use transfer::{Referral, Replaces, Transfer, TransferState};
+pub use voice::VoiceActivity;
