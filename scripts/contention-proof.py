@@ -88,8 +88,15 @@ class Subject:
         return command + ("--ignored",) if ignored else command
 
 
-#: The assertions this story is about: each bounds a wall clock, and each has been seen red on a
-#: busy box at least once.
+#: The assertions this proof covers. Each has been seen red on a busy box at least once, and each
+#: is green on an idle one, which is the only property that makes a subject worth the minutes.
+#:
+#: The first three are `X-118`'s mechanism: a wall-clock bound that expired because the machine had
+#: not scheduled the process yet. The last is not, and it is here because the technique transfers
+#: even though the diagnosis did not — `X-126` was a *protocol* rejection, a 503 the responder was
+#: configured to send, and it was reproduced by loading the box exactly like this (4 of 10 runs at
+#: two burners per core). Its fixture now gives the responder headroom over the generator; running
+#: it here is what stops that headroom being quietly taken back.
 SUBJECTS = (
     Subject(
         "--test",
@@ -108,6 +115,12 @@ SUBJECTS = (
         "sipx",
         "register::tests::every_exit_joins_the_endpoint_before_the_terminal_record",
         "crates/sipx-cli/src/register.rs",
+    ),
+    Subject(
+        "--test",
+        "cli",
+        "default_load_pair_completes_the_requested_signalling_workload",
+        "crates/sipx-cli/tests/cli.rs",
     ),
 )
 
