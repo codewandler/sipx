@@ -99,6 +99,7 @@ impl ActivityWiring {
         let mut applied = 0u64;
         let mut refused = 0u64;
         let mut samples = Vec::new();
+        let mut boundaries = Vec::new();
 
         while let Some(frame) = self.frames.try_recv() {
             let rate = frame.format().sample_rate();
@@ -112,23 +113,34 @@ impl ActivityWiring {
                 continue;
             };
 
+            // §10.2's order, and the position it names. Observations are fed at the position the
+            // frame **ended**, not the one it began at: the hint's granularity is one frame and it
+            // is set *between* frames, so what the next frame is processed with is decided entirely
+            // by frames already processed. That is the only placement a reducer declaring zero
+            // latency can honestly be given.
+            let ended = position.saturating_add(carried.len() as u64);
             let analysed = AnalysisFrame::new(direction, sequence, &carried);
             if self.analyzer.process(&analysed).is_ok() {
+                let mut changed = false;
                 for observation in self.analyzer.drain() {
-                    if self.hint.observe(position, &observation).is_none() {
-                        continue;
-                    }
-                    // A change, and only a change: the door is for moving a parameter, and
-                    // re-sending the value already in force would spend a generation's queue on
-                    // saying nothing.
-                    let Some(parameter) = self.hint.parameter() else {
-                        continue;
-                    };
+                    changed |= self.hint.observe(ended, &observation).is_some();
+                }
+                // Then advance to that position, which is what arms §10.2's warm-up deferral: an
+                // opening transition inside the reducer's declared warm-up arms the hint without
+                // setting it, and the set lands at the first boundary at or after the warm-up.
+                changed |= self.hint.advance_to(ended).is_some();
+
+                // A change, and only a change: the door is for *moving* a parameter, and re-sending
+                // the value already in force would spend a generation's queue on saying nothing.
+                if let Some(parameter) = changed.then(|| self.hint.parameter()).flatten() {
                     match self
                         .graph
                         .configure(self.graph.generation(), self.stage, &[parameter])
                     {
-                        Ok(_) => applied += 1,
+                        Ok(update) => {
+                            applied += 1;
+                            boundaries.push(update.at_position());
+                        }
                         Err(_) => refused += 1,
                     }
                 }
@@ -141,6 +153,7 @@ impl ActivityWiring {
             applied,
             refused,
             samples,
+            boundaries,
         }
     }
 }
@@ -156,6 +169,7 @@ pub struct WiringOutcome {
     applied: u64,
     refused: u64,
     samples: Vec<i16>,
+    boundaries: Vec<u64>,
 }
 
 impl std::fmt::Debug for WiringOutcome {
@@ -166,6 +180,7 @@ impl std::fmt::Debug for WiringOutcome {
             .field("applied", &self.applied)
             .field("refused", &self.refused)
             .field("samples", &self.samples.len())
+            .field("boundaries", &self.boundaries)
             .finish()
     }
 }
@@ -190,6 +205,16 @@ impl WiringOutcome {
     #[must_use]
     pub const fn graph(&self) -> &DspGraph {
         &self.graph
+    }
+
+    /// The positions the applied updates landed at, in order.
+    ///
+    /// §10.2 says the hint is set *between* frames, so every one of these must be a frame boundary.
+    /// Reported rather than described, because "it lands on a boundary" is a claim a caller can
+    /// check and a comment is not.
+    #[must_use]
+    pub fn boundaries(&self) -> &[u64] {
+        &self.boundaries
     }
 
     /// The audio this pass carried, in the order it arrived.

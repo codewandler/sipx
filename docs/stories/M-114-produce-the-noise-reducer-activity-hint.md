@@ -2,7 +2,7 @@
 id: M-114
 title: Produce the activity hint a noise reducer declares it consumes
 pillar: Media
-status: in-progress
+status: done
 priority: 41
 design: docs/designs/custom-call-dsp.md
 epic: custom-call-dsp
@@ -40,9 +40,9 @@ proves it does not make speech worse.
 
 ## Acceptance
 
-- [ ] Activity observations from one call's analyser reach that call's reducer as a declared
+- [x] Activity observations from one call's analyser reach that call's reducer as a declared
       parameter set at a stated position, through `M-67`'s control surface and no other door.
-- [ ] The wiring is opt-in, per direction, and a call without it behaves exactly as it does today —
+- [x] The wiring is opt-in, per direction, and a call without it behaves exactly as it does today —
       proved by identical samples, not by inspection.
 - [x] Detector latency is accounted for in positions: a hint that arrives after the speech it
       describes is stated as such, and the policy says what it does about it.
@@ -51,7 +51,7 @@ proves it does not make speech worse.
       condition or the wiring is not recommended.
 - [x] A wrong or absent hint degrades to `M-66`'s unhinted behaviour rather than to a refusal, and
       no observation, event or metric presents the reducer as a detector.
-- [ ] The gate is green.
+- [x] The gate is green.
 
 ## Progress
 
@@ -141,3 +141,8 @@ proves it does not make speech worse.
   waited on `M-67`. `M-67` landed in this same candidate, so the wiring is now unblocked and
   is filed as `M-119` — this story closes when that lands and its two rows can be ticked
   against real samples rather than against inspection.
+
+- 2026-08-10: closed. `M-119` landed the wiring these two rows waited on, proving both on a live
+  session — observations reach the reducer through `M-67`'s door, and a stream the detector never
+  calls voice carries sample-identical audio wired and unwired. Closed against the same gate run.
+

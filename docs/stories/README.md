@@ -79,8 +79,6 @@ appeared twice before anyone named it.
 - [M-68 — Harden DSP real-time and failure isolation](M-68-harden-dsp-realtime-failure-isolation.md) · Media · after M-63/M-64 · measured budgets and explicit fail-open/fail-closed policy
 - [M-70 — Accept multiplexed browser offers with unused component candidates](M-70-accept-multiplexed-browser-offers-with-unused-component-candidates.md) · Media · external review finding 9 · a second browser engine reaches SDP then fails the multiplexed profile
 - [M-72 — Prove the AEAD SRTP key derivation against an independent peer](M-72-prove-the-aead-srtp-key-derivation-against-a-peer.md) · Media · RFC 7714 publishes no KDF vector · a wrong salt placement makes two sipx endpoints interoperate with each other and nobody else, and every round-trip test still passes
-- [M-114 — Produce the activity hint a noise reducer declares it consumes](M-114-produce-the-noise-reducer-activity-hint.md) · Media · after M-66 and M-67 · the hint is declared and honoured; nothing in the workspace sets it
-- [M-119 — Wire the activity hint through the DSP control surface](M-119-wire-the-activity-hint-through-the-dsp-control-surface.md) · Media · after M-114 and M-67 · the producer and its measurement exist; the per-call wiring needs M-67's parameter path
 - [T-33 — Bind browser WebSocket signalling](T-33-bind-browser-websocket-signalling.md) · Transport · after A-16 and S-41 · browser owns I/O, WASM core consumes bytes
 - [X-93 — Make protected release evidence faster without weakening it](X-93-make-protected-release-evidence-faster.md) · Build · measure cache and preflight changes against the 12m37 cold beta gate · follow-up
 - [X-109 — Measure custom DSP quality and real-time cost](X-109-measure-custom-dsp-quality-and-cost.md) · Build · after M-65/M-66/M-68 · exact effects, quality, cost, isolation and packaged conformance
@@ -288,6 +286,8 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [M-103 — Give `call.dial.finished` a producer](M-103-give-call-dial-finished-a-producer.md) · Media · filed by M-99 · the last §5.3 row with no producer anywhere, and the driver refuses the effect that would create the leg
 - [M-107 — Stop a PCM frame rendering its audio](M-107-stop-a-pcm-frame-rendering-its-audio.md) · Media · PcmFrame derives Debug over its samples · the same shape M-61 fixed one layer down, where it was reachable from a real refusal record
 - [M-110 — Stop an RTP packet rendering its payload](M-110-stop-an-rtp-packet-rendering-its-payload.md) · Media · after M-107 · Packet, Rtcp and SdesItem derive Debug over Bytes; M-107 redacted Encoded at the other end of the same relay path
+- [M-114 — Produce the activity hint a noise reducer declares it consumes](M-114-produce-the-noise-reducer-activity-hint.md) · Media · after M-66 and M-67 · the hint is declared and honoured; nothing in the workspace sets it
+- [M-119 — Wire the activity hint through the DSP control surface](M-119-wire-the-activity-hint-through-the-dsp-control-surface.md) · Media · after M-114 and M-67 · the producer and its measurement exist; the per-call wiring needs M-67's parameter path
 - [P-1 — Build the CLI scaffold and machine-readable output](P-1-cli-scaffold-and-output.md) · Phone
 - [P-2 — Implement `sipx register`](P-2-cli-register.md) · Phone
 - [P-3 — Implement `sipx dial`](P-3-cli-dial.md) · Phone

@@ -2,7 +2,7 @@
 id: M-119
 title: Wire the activity hint through the DSP control surface
 pillar: Media
-status: in-progress
+status: done
 priority: 42
 design: docs/designs/custom-call-dsp.md
 epic: custom-call-dsp
@@ -53,9 +53,9 @@ the same claim has to hold end to end on a call.
       refusal is typed rather than a hint that is quietly about the wrong audio.
 - [x] The per-frame parameter set does not put work, allocation or a callback on the media worker,
       and the bound is asserted rather than argued.
-- [ ] `docs/specs/call-dsp-noise-reduction.md` §10.2's placement is what the call layer actually
+- [x] `docs/specs/call-dsp-noise-reduction.md` §10.2's placement is what the call layer actually
       does, and a vector proves the hint lands on the frame boundary the spec names.
-- [ ] The gate is green.
+- [x] The gate is green.
 
 ## Progress
 
@@ -123,4 +123,19 @@ the same claim has to hold end to end on a call.
   vector proving the hint lands on the frame boundary the spec names — is not written, and row 6 is
   the gate. Until row 5 lands this story stays open, and so does `M-114`, whose first two rows are
   this story's first two.
+
+- **2026-08-10 — row 5 written, and it found a defect rows 1–4 could not see.**
+
+  Asserting *where* an update lands proved the implementation was not doing what §10.2 says. It fed
+  observations at the position each frame **began** at rather than the one it ended at, and it never
+  called `advance_to` — so the warm-up deferral §10.2 spends a paragraph justifying was never armed.
+  Every one of rows 1–4 passed throughout: updates still reached the reducer, the direction refusal
+  still held, silence still carried identical samples and the worker still lost no deadline. The
+  placement was wrong and nothing that measured *whether* it worked could tell.
+
+  `WiringOutcome::boundaries()` now reports the position each applied update landed at, and the
+  vector asserts every one is a frame boundary. Reported rather than described, because "it lands on
+  a boundary" is a claim a caller can check and a comment is not.
+
+- 2026-08-10: closed at `c05ec91`+ against a full gate run on this tree.
 

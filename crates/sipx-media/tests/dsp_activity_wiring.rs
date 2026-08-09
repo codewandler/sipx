@@ -132,6 +132,57 @@ async fn a_hint_for_one_direction_cannot_be_wired_to_the_others_graph() {
     session.shutdown().await;
 }
 
+/// Acceptance row 5: §10.2's placement is what the call layer actually does.
+///
+/// The spec says the hint is set **between** frames — observations fed at the position the frame
+/// ended, then the producer advanced to it — so every update must land on a frame boundary and none
+/// may land inside one. This is the row that caught the implementation using the position each
+/// frame *began* at and never advancing the producer at all: both are invisible until something
+/// asserts where the update landed.
+#[tokio::test]
+async fn every_update_lands_on_the_frame_boundary_the_spec_names() {
+    let (session, peer, session_addr) = session_and_peer().await;
+
+    let graph = session
+        .attach_dsp(
+            GraphPlan::new(AudioDirection::Inbound, GraphBounds::new())
+                .with_built_in(BuiltIn::SubbandSuppressor, &[])
+                .expect("the shipped suppressor is a registered stage"),
+        )
+        .expect("a validated inbound graph activates");
+    let frames = session
+        .attach_processor(Processing::new(
+            AudioDirection::Inbound,
+            PcmFormat::new(8_000, PcmEncoding::Signed16).expect("a valid format"),
+        ))
+        .expect("the seam accepts one attachment per direction");
+    let wiring = ActivityWiring::new(
+        frames,
+        AudioAnalyzer::new(AnalysisProfile::new(AudioDirection::Inbound, 8_000))
+            .expect("the reference profile is valid"),
+        ActivityHint::new(AudioDirection::Inbound, reducer(), HintPolicy::default()),
+        graph,
+        0,
+    )
+    .expect("hint, graph and seam all follow the inbound direction");
+
+    feed_active(&peer, session_addr, 40, 0).await;
+    feed(&peer, session_addr, 40, 0xff).await;
+    let outcome = wiring.run_until_idle();
+
+    assert!(
+        !outcome.boundaries().is_empty(),
+        "no update landed at all, so this proves nothing about where: {outcome:?}"
+    );
+    for at in outcome.boundaries() {
+        assert_eq!(
+            at % SAMPLES_PER_PACKET as u64,
+            0,
+            "an update landed at {at}, inside a frame rather than between two: {outcome:?}"
+        );
+    }
+}
+
 /// Acceptance row 2's second half: a call without the wiring behaves exactly as it does today.
 ///
 /// Asserted on samples rather than by inspection, because "it only runs when you ask for it" is a
