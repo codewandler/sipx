@@ -266,6 +266,12 @@ def gate_steps(msrv: str) -> list[Step]:
         # matches nothing and cargo exits 0.
         Step("contention proof tests", "gate", ("python3", "scripts/test-contention-proof.py")),
         Step("contention proof", "gate", ("./scripts/contention-proof.py", "--check")),
+        # X-142: `X-128`'s probe is the only thing that measures a processor's heap against the
+        # `state_bytes` it declares — `DSP-K9`'s other half, which reports `Unproven` under
+        # `cargo test` because `unsafe_code = "forbid"` rules out a counting allocator. It lives
+        # outside the workspace for that reason and so runs as a script. 3 s cold on a warm
+        # sccache, under a second warm, and it fails if either violating fixture goes uncaught.
+        Step("dsp heap", "dsp-heap", ("./scripts/check-dsp-heap.sh",)),
         # X-56: the RFC corpora are recovered from the RFC rather than transcribed, and each
         # importer's `--check` re-recovers and diffs it against the tree — the only thing that can
         # tell a fixture edited by hand from the RFC's own bytes, since the suites read whatever is

@@ -19,10 +19,21 @@
 # no `allow` able to override it. `heap-probe/` therefore lives outside the workspace the way
 # `wasm/` and `fuzz/` do. `heap-probe/src/main.rs` carries the full argument.
 #
-# `X-128` owns this. Not yet a `gate.py` step — see the story's Progress note.
+# `X-128` built this; `X-142` registered it as the `dsp heap` gate step and its own CI job. Cold on
+# a warm sccache it costs 3 s and 74 MB of its own `target/`; warm it is under a second.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# An absent toolchain is an incomplete run, not a finding about the code — the distinction
+# `gate.py` draws between exit 2 and exit 1, and the one `check-wasm-kernel.sh` already makes.
+# Saying "the processors leak" because cargo is missing would be the worst kind of wrong answer.
+if ! command -v cargo > /dev/null; then
+    echo "dsp-heap: cargo is not installed, so nothing was measured" >&2
+    echo "  this run proved nothing about the tree; it is not a finding about any processor" >&2
+    exit 2
+fi
+
 cd "$root/heap-probe"
 
 # `-D warnings` including the deliberate `unsafe`: the package sets `unsafe_code = "warn"` and the

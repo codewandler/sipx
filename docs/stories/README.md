@@ -75,19 +75,21 @@ appeared twice before anyone named it.
 - [A-38 — Publish and verify the second release candidate](A-38-publish-and-verify-rc3.md) · Application · after X-113 · the post-rc.2 wave as one immutable prerelease · no stable-1.0 claim widens
 - [M-60 — Calibrate and adapt audio-activity thresholds deterministically](M-60-calibrate-audio-activity-thresholds.md) · Media · after M-58 and M-59 · bounded adaptation with observable reset and limits
 - [M-64 — Attach bounded DSP graphs to calls](M-64-attach-bounded-dsp-graphs-to-calls.md) · Media · after M-54 and M-63 · ordered per-direction graphs, atomic replacement and teardown barrier
+- [M-66 — Ship interchangeable local noise reduction](M-66-ship-interchangeable-noise-reduction.md) · Media · after M-63 · optional M-58 VAD input · provider-neutral contract and local baseline
 - [M-70 — Accept multiplexed browser offers with unused component candidates](M-70-accept-multiplexed-browser-offers-with-unused-component-candidates.md) · Media · external review finding 9 · a second browser engine reaches SDP then fails the multiplexed profile
 - [M-72 — Prove the AEAD SRTP key derivation against an independent peer](M-72-prove-the-aead-srtp-key-derivation-against-a-peer.md) · Media · RFC 7714 publishes no KDF vector · a wrong salt placement makes two sipx endpoints interoperate with each other and nobody else, and every round-trip test still passes
+- [M-102 — Run a supervised DSP worker in its own process](M-102-run-a-supervised-dsp-worker-in-its-own-process.md) · Media · after M-64 · the operating-system half of the supervised-isolated profile
+- [M-103 — Give `call.dial.finished` a producer](M-103-give-call-dial-finished-a-producer.md) · Media · filed by M-99 · the last §5.3 row with no producer anywhere, and the driver refuses the effect that would create the leg
+- [M-107 — Stop a PCM frame rendering its audio](M-107-stop-a-pcm-frame-rendering-its-audio.md) · Media · PcmFrame derives Debug over its samples · the same shape M-61 fixed one layer down, where it was reachable from a real refusal record
 - [T-33 — Bind browser WebSocket signalling](T-33-bind-browser-websocket-signalling.md) · Transport · after A-16 and S-41 · browser owns I/O, WASM core consumes bytes
 - [X-93 — Make protected release evidence faster without weakening it](X-93-make-protected-release-evidence-faster.md) · Build · measure cache and preflight changes against the 12m37 cold beta gate · follow-up
+- [X-128 — Measure DSP processor heap growth](X-128-measure-processor-heap-growth.md) · Build · after M-63 · DSP-K9 reports heap growth `Unproven` because no counting allocator can be installed
+- [X-142 — Register the DSP heap probe in the gate](X-142-register-the-dsp-heap-probe-in-the-gate.md) · Build · after X-128 · `check-dsp-heap.sh` measures what `DSP-K9` could not, and nothing runs it automatically
 
 ## Next (ready — take the top one unless the user named a story)
 
 ### Reliable diagnostic automation
 - [P-30 — Bound the first NOTIFY in a registrar subscription](P-30-bound-the-first-notify-in-a-registrar-subscription.md) · Phone · peers --registrar waits Timer N — 64*T1, 32 seconds — with no operator control · the dominant unbounded wait once resolution is bounded
-
-### Media
-_Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
-- [M-107 — Stop a PCM frame rendering its audio](M-107-stop-a-pcm-frame-rendering-its-audio.md) · Media · PcmFrame derives Debug over its samples · the same shape M-61 fixed one layer down, where it was reachable from a real refusal record
 
 ## Blocked
 - [M-16 — Implement ICE](M-16-ice.md) · Media · epic tracker · split into M-19 … M-24 · spec is docs/specs/ice.md, written first
@@ -104,7 +106,7 @@ _The [app-sdk](https://github.com/codewandler/sipx/blob/main/docs/designs/app-sd
 ### Application SDK
 _The measure of this stack's reach is what can be built on it **without writing Rust**. Today the_
 - [C-9 — Carry a bridge and a conference across a renegotiation](C-9-carry-a-bridge-across-a-renegotiation.md) · Signalling · filed from C-6 · a re-INVITE, a hold/resume or an ICE restart replaces a call's MediaSession and the bridge keeps forwarding the stopped one · size S/M
-- [M-103 — Give `call.dial.finished` a producer](M-103-give-call-dial-finished-a-producer.md) · Media · filed by M-99 · the last §5.3 row with no producer anywhere, and the driver refuses the effect that would create the leg
+- [M-108 — Tell an app that a dialled leg went away](M-108-tell-an-app-that-a-dialled-leg-went-away.md) · Media · filed by M-103 · §5.2's `legs` is only ever rewritten by `call.dial.finished`, so a leg that answers and later hangs up stays in the snapshot forever
 
 ### browser audio SDK
 _Beta.4 proves that sipx can interoperate with a browser audio endpoint, but it does not let a web_
@@ -125,12 +127,10 @@ _Applications need small, predictable facts about live audio even when no speech
 ### custom call-audio DSP
 _Applications need to shape live call audio without forking the media runtime: ordinary gain and_
 - [A-34 — Publish a runnable custom call-DSP example](A-34-publish-custom-call-dsp-example.md) · Application · M18 exit after M-67 and X-109 · live graph, custom fixture, effects/noise reduction, bypass
-- [M-66 — Ship interchangeable local noise reduction](M-66-ship-interchangeable-noise-reduction.md) · Media · after M-63 · optional M-58 VAD input · provider-neutral contract and local baseline
 - [M-67 — Control call DSP graphs through the application SDK](M-67-control-dsp-graphs-through-the-sdk.md) · Media · after M-64 · typed registry and sample-boundary parameters, never SDK callbacks on media work
 - [M-68 — Harden DSP real-time and failure isolation](M-68-harden-dsp-realtime-failure-isolation.md) · Media · after M-63/M-64 · measured budgets and explicit fail-open/fail-closed policy
-- [M-102 — Run a supervised DSP worker in its own process](M-102-run-a-supervised-dsp-worker-in-its-own-process.md) · Media · after M-64 · the operating-system half of the supervised-isolated profile
+- [M-114 — Produce the activity hint a noise reducer declares it consumes](M-114-produce-the-noise-reducer-activity-hint.md) · Media · after M-66 and M-67 · the hint is declared and honoured; nothing in the workspace sets it
 - [X-109 — Measure custom DSP quality and real-time cost](X-109-measure-custom-dsp-quality-and-cost.md) · Build · after M-65/M-66/M-68 · exact effects, quality, cost, isolation and packaged conformance
-- [X-128 — Measure DSP processor heap growth](X-128-measure-processor-heap-growth.md) · Build · after M-63 · DSP-K9 reports heap growth `Unproven` because no counting allocator can be installed
 
 ### Endpoint discovery
 _sipx can call any endpoint you can already name, and cannot help you name one. `sipx dial` takes a_
@@ -151,6 +151,10 @@ _A live call on a machine with a local accelerator should be able to transcribe 
 - [M-56 — Ship a practical local offline speech-synthesis provider](M-56-ship-local-offline-speech-synthesis.md) · Media · after A-25, A-28 and M-54 · accelerator path plus defined CPU behavior
 - [X-104 — Publish a runnable local live-call speech example and measurements](X-104-publish-local-call-speech-example.md) · Build · M16 exit after X-105 · accelerator when available and bounded CPU fixture everywhere
 - [X-105 — Prove speech-provider substitution with one conformance suite](X-105-prove-speech-provider-substitution.md) · Build · after M-55, M-56, A-26, A-27 and A-28 · same suite for bundled and downstream providers
+
+### Media
+_Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
+- [M-110 — Stop an RTP packet rendering its payload](M-110-stop-an-rtp-packet-rendering-its-payload.md) · Media · after M-107 · Packet, Rtcp and SdesItem derive Debug over Bytes; M-107 redacted Encoded at the other end of the same relay path
 
 ### Bridge a call to an OpenAI realtime agent
 _Every capability sipx claims — TLS held to [sip-tls.md](../specs/sip-tls.md) §3, SRTP held to_
