@@ -76,7 +76,10 @@ appeared twice before anyone named it.
 - [M-60 — Calibrate and adapt audio-activity thresholds deterministically](M-60-calibrate-audio-activity-thresholds.md) · Media · after M-58 and M-59 · bounded adaptation with observable reset and limits
 - [M-70 — Accept multiplexed browser offers with unused component candidates](M-70-accept-multiplexed-browser-offers-with-unused-component-candidates.md) · Media · external review finding 9 · a second browser engine reaches SDP then fails the multiplexed profile
 - [M-72 — Prove the AEAD SRTP key derivation against an independent peer](M-72-prove-the-aead-srtp-key-derivation-against-a-peer.md) · Media · RFC 7714 publishes no KDF vector · a wrong salt placement makes two sipx endpoints interoperate with each other and nobody else, and every round-trip test still passes
+- [M-92 — Give the remaining public-field structs a constructor, then mark them](M-92-give-the-remaining-public-field-structs-a-constructor.md) · Media · M-80's struct guard holds 6 types; 155 reachable public-field structs workspace-wide and 29 on the media surface are still literal-constructible
+- [S-54 — One framing rule for both WebSocket message parsers](S-54-one-framing-rule-for-both-websocket-parsers.md) · Session · S-53 left the RFC 7118 §5 rule implemented twice · ws.rs already warns about exactly this
 - [T-33 — Bind browser WebSocket signalling](T-33-bind-browser-websocket-signalling.md) · Transport · after A-16 and S-41 · browser owns I/O, WASM core consumes bytes
+- [T-45 — Give each load candidate its own call identity](T-45-give-each-load-candidate-its-own-call-identity.md) · Transport · load's signalling workload reuses one Call-ID and From tag across every address of a target, so a second candidate arrives at the same server as a merged request
 - [X-93 — Make protected release evidence faster without weakening it](X-93-make-protected-release-evidence-faster.md) · Build · measure cache and preflight changes against the 12m37 cold beta gate · follow-up
 
 ## Next (ready — take the top one unless the user named a story)
@@ -89,6 +92,7 @@ appeared twice before anyone named it.
 _Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
 - [M-93 — Make a cancelled play safe to tear down](M-93-make-play-safe-to-cancel.md) · Media · aborting a task parked in MediaSession::play wedges hang_up · ten calls took over 90 s to tear down, four without
 - [M-83 — Extend the extensibility guard past the media path](M-83-extend-the-reachability-guard-past-the-media-path.md) · Media · 98 reachable public enums outside the guarded five crates · the boundary names crates, so no enum is individually excused
+- [M-96 — Fix the preamble reader's off-by-one](M-96-fix-the-preamble-reader-off-by-one.md) · Media · an item at byte 0 with no blank line above it loses the first character of its preamble · cannot fire on this tree, which is why it needs a test rather than a reader
 
 ## Blocked
 - [M-16 — Implement ICE](M-16-ice.md) · Media · epic tracker · split into M-19 … M-24 · spec is docs/specs/ice.md, written first
@@ -112,7 +116,6 @@ _Beta.4 proves that sipx can interoperate with a browser audio endpoint, but it 
 - [A-17 — Generate and package the browser SDK](A-17-generate-and-package-the-browser-sdk.md) · Application · after S-41, T-33 and M-52 · generated ABI types plus small handwritten ergonomic layer
 - [A-18 — Publish a runnable browser-audio demo](A-18-publish-a-runnable-browser-audio-demo.md) · Application · after A-17 · static public demo for register, dial, answer and non-silent audio
 - [M-52 — Adapt browser-native WebRTC audio](M-52-adapt-browser-native-webrtc-audio.md) · Media · after A-16 · reuse beta.4 profile through RTCPeerConnection, do not implement WebRTC in WASM
-- [S-54 — One framing rule for both WebSocket message parsers](S-54-one-framing-rule-for-both-websocket-parsers.md) · Session · S-53 left the RFC 7118 §5 rule implemented twice · ws.rs already warns about exactly this
 - [T-43 — Reach a real WSS endpoint from a browser fixture](T-43-reach-a-real-wss-endpoint-from-a-browser-fixture.md) · Transport · T-33's last acceptance row · needs a hosted runner's browser and WebDriver
 - [X-100 — Prove the packaged browser SDK](X-100-prove-the-packaged-browser-sdk.md) · Build · M15 exit · clean consumer, supported browser matrix, both SIP roles and fail-closed negatives
 
@@ -145,9 +148,6 @@ _sipx can call any endpoint you can already name, and cannot help you name one. 
 _A programmable SIP and media edge — transports, endpoints and routes, with dialog bridging and_
 - [C-10 — Answer a delayed offer in the 2xx and its answer in the ACK](C-10-answer-a-delayed-offer-in-the-2xx.md) · Signalling · RFC 3264 §5's other delayed-offer carrier · the only one available to a peer with no 100rel, and the reason C-8 still refuses that INVITE
 
-### Bounded endpoint resolution
-- [T-45 — Give each load candidate its own call identity](T-45-give-each-load-candidate-its-own-call-identity.md) · Transport · load's signalling workload reuses one Call-ID and From tag across every address of a target, so a second candidate arrives at the same server as a merged request
-
 ### Ice
 - [M-24 — Gather a relayed candidate from a configured relay](M-24-ice-relayed-candidate.md) · Media · ice · RFC 8656 · after M-22 · the third RFC that made M-16 impossible as one story
 
@@ -159,10 +159,6 @@ _A live call on a machine with a local accelerator should be able to transcribe 
 - [M-56 — Ship a practical local offline speech-synthesis provider](M-56-ship-local-offline-speech-synthesis.md) · Media · after A-25, A-28 and M-54 · accelerator path plus defined CPU behavior
 - [X-104 — Publish a runnable local live-call speech example and measurements](X-104-publish-local-call-speech-example.md) · Build · M16 exit after X-105 · accelerator when available and bounded CPU fixture everywhere
 - [X-105 — Prove speech-provider substitution with one conformance suite](X-105-prove-speech-provider-substitution.md) · Build · after M-55, M-56, A-26, A-27 and A-28 · same suite for bundled and downstream providers
-
-### Media
-_Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
-- [M-92 — Give the remaining public-field structs a constructor, then mark them](M-92-give-the-remaining-public-field-structs-a-constructor.md) · Media · M-80's struct guard holds 6 types; 155 reachable public-field structs workspace-wide and 29 on the media surface are still literal-constructible
 
 ### Bridge a call to an OpenAI realtime agent
 _Every capability sipx claims — TLS held to [sip-tls.md](../specs/sip-tls.md) §3, SRTP held to_
