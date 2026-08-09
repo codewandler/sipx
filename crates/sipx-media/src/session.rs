@@ -2295,8 +2295,15 @@ impl MediaSession {
         replacement.taps.adopt(&self.taps);
         // Graphs belong to the call for the same reason attachments do, and the move re-anchors
         // both directions: audio queued under a media generation that no longer exists would land
-        // in the new epoch as old audio at a new position.
-        replacement.dsp.adopt(&self.dsp);
+        // in the new epoch as old audio at a new position. A renegotiation that changed the audio
+        // format or the packetisation is the exception, and the replacement's own figures are what
+        // decides that — a chain prepared for the old rate is torn down rather than handed audio at
+        // the new one (`M-68`).
+        replacement.dsp.adopt(
+            &self.dsp,
+            sipx_audio::dsp::StreamFormat::new(replacement.audio_rate(), 1).ok(),
+            replacement.samples_per_packet(),
+        );
         let previous = std::mem::replace(self, replacement);
         self.retired.get_mut().push(previous);
         self.reap_retired().await;
@@ -3045,7 +3052,12 @@ impl MediaSession {
     ///
     /// Graphs survive a [`Self::reconfigure`]: the new generation re-anchors at position 0 with
     /// every stage reset, exactly as a seam attachment is re-anchored by a
-    /// [`crate::processing::DiscontinuityKind::Realign`].
+    /// [`crate::processing::DiscontinuityKind::Realign`]. **Unless the renegotiation changed the
+    /// audio format or the packetisation** — the two things the chain was validated, prepared and
+    /// sized against — in which case it is torn down with
+    /// [`TeardownCause::FormatChanged`] and attaching one
+    /// for the format the call now carries is the application's to do (`M-68`,
+    /// `docs/specs/call-dsp-graph.md` §5.5).
     ///
     /// # Errors
     ///
@@ -3067,7 +3079,7 @@ impl MediaSession {
             })?;
         let slot = self.dsp.slot(plan.direction());
         slot.install(plan, format, self.samples_per_packet(), false)?;
-        Ok(DspGraph::new(slot, format, self.samples_per_packet()))
+        Ok(DspGraph::new(slot))
     }
 
     /// Stop the session and release its socket.

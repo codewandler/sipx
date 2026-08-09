@@ -638,6 +638,47 @@ mod tests {
         assert!(payload.is_empty(), "nothing of that size was allocated");
     }
 
+    /// §7.4's other end of the same rule (`M-68`): a length *below* the type's fixed payload is
+    /// refused from the header too.
+    ///
+    /// The ceiling gets the attention because a huge prefix is the memory fault; this is the one
+    /// that would have the decoder read a fixed payload out of a buffer shorter than it, and it is
+    /// refused for the same reason — the type decides the arithmetic and the prefix is checked
+    /// against it, never the reverse.
+    #[test]
+    fn an_undersized_message_is_refused_from_its_header_alone() {
+        for (kind, fixed) in [
+            (TYPE_HELLO, HELLO_FIXED),
+            (TYPE_FRAME, FRAME_FIXED),
+            (TYPE_RESULT, RESULT_FIXED),
+        ] {
+            let mut wire = Vec::new();
+            wire.extend_from_slice(&MAGIC);
+            wire.push(kind);
+            wire.push(0);
+            wire.extend_from_slice(&(fixed - 1).to_be_bytes());
+            // The payload that follows is as short as the header claimed, so a decoder that read
+            // the prefix and then reached for its fixed fields would be reading past it.
+            wire.resize(HEADER + fixed as usize - 1, 0);
+            let mut payload = Vec::new();
+            let mut samples = Vec::new();
+            let fault = read_message(&mut wire.as_slice(), &mut payload, &mut samples, 160)
+                .expect_err("refused");
+            assert!(
+                matches!(
+                    fault,
+                    Fault::Refused(WorkerProtocolError::Undersized {
+                        kind: refused,
+                        declared,
+                        fixed: required,
+                    }) if refused == kind && declared == fixed - 1 && required == fixed
+                ),
+                "{kind:#04x}: {fault:?}"
+            );
+            assert!(payload.is_empty(), "no payload was read");
+        }
+    }
+
     /// §7.4: the count field and the length prefix must agree, and neither is believed alone.
     #[test]
     fn a_count_that_does_not_account_for_the_length_is_refused() {

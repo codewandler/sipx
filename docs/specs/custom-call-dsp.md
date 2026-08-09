@@ -281,6 +281,10 @@ to `M-64`'s events and `M-68`'s counters. This split is load-bearing for one of 
 obligations — an intentional glitch effect emits its own observation, an overload defect emits a
 runtime counter, and no door of this stack may present the second as the first.
 
+`M-68` implemented that half in [call-dsp-graph.md](call-dsp-graph.md) §6.4, and the split survived
+it in the strongest available sense: there is no counter a processor can move by emitting an
+observation, and no observation the runtime synthesises from a counter.
+
 ## 7. Execution profiles
 
 This is the part of the contract `M-64` implements and `M-68` proves, and the part whose wording is

@@ -382,6 +382,24 @@ pub enum TeardownCause {
     Detached,
     /// The session stopped, was shut down, or was dropped.
     SessionStopped,
+    /// A renegotiation changed the audio format or the packetisation this graph was prepared for
+    /// (`M-68`).
+    ///
+    /// A graph otherwise survives a `MediaSession::reconfigure`, because it belongs to the call
+    /// rather than to a worker generation. What it cannot survive is a change to the two things it
+    /// was *validated* against: every stage was prepared for one
+    /// [`StreamFormat`](sipx_audio::dsp::StreamFormat), and
+    /// [`docs/specs/custom-call-dsp.md`](../../../docs/specs/custom-call-dsp.md) §8.3 makes a rate
+    /// change a `prepare` and never a frame — so carrying the chain over would hand every stage
+    /// audio at a rate it never agreed to, under a declaration saying otherwise. Every buffer was
+    /// also sized from the old packetisation, and §4 forbids growing one.
+    ///
+    /// The graph is torn down rather than re-prepared, and nothing is re-attached behind the
+    /// application's back. A supervised stage cannot be re-prepared at all — its worker's `Hello`
+    /// named the old format and §7.2 forbids a silent respawn — and an inline stage's audio state
+    /// belongs to an epoch at the old rate. Attaching a graph for the new format is the
+    /// application's call to make, exactly as replacing one is.
+    FormatChanged,
     /// A stage configured [`FailureAction::TerminateClosed`] failed.
     ///
     /// The audio it was protecting does not flow: the direction is silenced rather than carrying
@@ -500,6 +518,167 @@ impl GraphBarrier {
     }
 }
 
+// -------------------------------------------------------------------------- counters ----
+
+/// What the runtime observed about one direction's processors (`M-68`).
+///
+/// Every figure here is a fact the **runtime** observed about a processor. None of them is a fact a
+/// processor observed about a frame — those are
+/// [`DspObservation`](sipx_audio::dsp::DspObservation)s, they are the processor's own vocabulary,
+/// and they never arrive here. That split is
+/// [`docs/specs/custom-call-dsp.md`](../../../docs/specs/custom-call-dsp.md) §6's and it is
+/// load-bearing rather than tidy: an effect that is *supposed* to sound broken reports a
+/// `Saturated` or a `PassedThrough` about the audio it made, and a processor that is failing its
+/// budget increments a counter here. No door of this stack may present the second as the first, so
+/// there is no counter here an intentional glitch effect can move.
+///
+/// **They are cumulative for the life of the call**, across every generation of the graph. A
+/// replacement does not reset them and neither does a teardown, which is the point: after a
+/// fail-closed teardown the graph is gone and these are what is left to say why.
+///
+/// Counters are what survives a bounded queue. [`GraphTransition`]s are the detail — which stage,
+/// which position, which generation — and the transition queue drops its oldest at capacity
+/// ([`GraphBounds::observation_capacity`]). A count cannot be dropped, so a caller that only ever
+/// reads these still knows what happened, and [`Self::transitions_dropped`] says how much detail
+/// it did not get.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct GraphCounters {
+    frames: u64,
+    deadline_misses: u64,
+    refusals: u64,
+    malformed_results: u64,
+    workers_lost: u64,
+    bypasses: u64,
+    resets: u64,
+    teardowns: u64,
+    terminal_failures: u64,
+    frames_passed_through: u64,
+    transitions_dropped: u64,
+}
+
+impl GraphCounters {
+    /// Frames this direction's graph was offered, whether or not a stage transformed one.
+    #[must_use]
+    pub const fn frames(&self) -> u64 {
+        self.frames
+    }
+
+    /// Stage-frames with no result by the configured deadline
+    /// (`docs/specs/call-dsp-graph.md` §7.2).
+    ///
+    /// Counted per stage and per frame, so a chain of two late stages counts two on one frame.
+    /// A supervised stage's pipeline filling counts here as well: "no result by the deadline" is
+    /// the same fact whatever caused it (§7.1).
+    #[must_use]
+    pub const fn deadline_misses(&self) -> u64 {
+        self.deadline_misses
+    }
+
+    /// Stage-frames an inline processor refused with a typed [`ProcessError`].
+    ///
+    /// [`ProcessError`]: sipx_audio::dsp::ProcessError
+    #[must_use]
+    pub const fn refusals(&self) -> u64 {
+        self.refusals
+    }
+
+    /// Stage-frames whose result carried a position count other than the frame's (§7.2).
+    ///
+    /// Well formed and wrong — on the wire for a supervised worker, and in the sink for an inline
+    /// processor. Distinct from [`Self::refusals`] because a processor that says no and a
+    /// processor that answers the wrong question are different defects.
+    #[must_use]
+    pub const fn malformed_results(&self) -> u64 {
+        self.malformed_results
+    }
+
+    /// Stage-frames lost to a worker that exited, crashed, was killed or failed terminally (§7.2).
+    #[must_use]
+    pub const fn workers_lost(&self) -> u64 {
+        self.workers_lost
+    }
+
+    /// Stages that spent their miss budget and stopped contributing under
+    /// [`FailureAction::BypassOpen`] (§6.1).
+    ///
+    /// One per stage per generation: a bypassed stage stays bypassed until the graph is replaced.
+    #[must_use]
+    pub const fn bypasses(&self) -> u64 {
+        self.bypasses
+    }
+
+    /// Stage resets the graph asked for because the session's own timeline broke (§6.2).
+    ///
+    /// Counted per stage, as the resets are. A processor's internal reset on a flagged frame is
+    /// the processor's own and is not counted here; this is the graph re-anchoring a whole chain.
+    #[must_use]
+    pub const fn resets(&self) -> u64 {
+        self.resets
+    }
+
+    /// Generations torn down, for any cause (§5.3).
+    #[must_use]
+    pub const fn teardowns(&self) -> u64 {
+        self.teardowns
+    }
+
+    /// Teardowns caused by a stage configured [`FailureAction::TerminateClosed`] failing (§6.1).
+    ///
+    /// A subset of [`Self::teardowns`], separated because it is the only one the call did not ask
+    /// for: the audio this direction was carrying stopped because a processor whose absence is a
+    /// policy breach was absent.
+    #[must_use]
+    pub const fn terminal_failures(&self) -> u64 {
+        self.terminal_failures
+    }
+
+    /// Frames handed on untouched because they were larger than the graph was sized for (§4).
+    ///
+    /// The graph's buffers are sized at validation from the session's packetisation and never
+    /// grown, so a longer frame passes through and the next one carries a break. A non-zero figure
+    /// here means this direction's audio is **not** being processed and nothing is failing to say
+    /// so — the reason this is a counter and not only a transition.
+    #[must_use]
+    pub const fn frames_passed_through(&self) -> u64 {
+        self.frames_passed_through
+    }
+
+    /// Transitions the bounded queue dropped before a caller drained it (§5.3).
+    ///
+    /// The queue drops its **oldest** at capacity. This is how much detail was lost; the counters
+    /// beside it are what was not.
+    #[must_use]
+    pub const fn transitions_dropped(&self) -> u64 {
+        self.transitions_dropped
+    }
+
+    /// Every stage-frame that missed, whatever the cause (§6.1's miss).
+    ///
+    /// The sum of [`Self::deadline_misses`], [`Self::refusals`], [`Self::malformed_results`] and
+    /// [`Self::workers_lost`] — the four things §6.1 counts against a stage's consecutive-miss
+    /// budget, and nothing else.
+    #[must_use]
+    pub const fn misses(&self) -> u64 {
+        self.deadline_misses
+            .saturating_add(self.refusals)
+            .saturating_add(self.malformed_results)
+            .saturating_add(self.workers_lost)
+    }
+
+    /// Count one miss under the cause the transition would name.
+    fn miss(&mut self, cause: BypassCause) {
+        let slot = match cause {
+            BypassCause::DeadlineMissed => &mut self.deadline_misses,
+            BypassCause::Refused => &mut self.refusals,
+            BypassCause::MalformedResult => &mut self.malformed_results,
+            // `Requested` is not a miss and never reaches here; counting it as a lost worker would
+            // be wrong, and a build that met a cause a later revision adds must not lose it.
+            BypassCause::WorkerLost | _ => &mut self.workers_lost,
+        };
+        *slot = slot.saturating_add(1);
+    }
+}
+
 // ------------------------------------------------------------------------------ plan ----
 
 /// One stage of a plan, before it has been validated or prepared.
@@ -577,6 +756,23 @@ impl GraphPlan {
     /// repository's gate that an application cannot add to, and `SupervisedIsolated` reaches a
     /// graph through [`Self::with_supervised`] because it is not run on the media worker at all
     /// (§3.2).
+    ///
+    /// # What this door promises, in full, because the honest description is the feature
+    ///
+    /// **It claims nothing about containment.** The processor handed here is called directly on the
+    /// media worker, by explicit selection, and sipx cannot preempt it, cannot cancel it, cannot
+    /// reap it and cannot bound its memory. A `process` call that does not return stalls the media
+    /// worker and therefore **stalls RTP for that call**, and no configured
+    /// [`ExecutionPolicy`](sipx_audio::dsp::ExecutionPolicy) changes that: the deadline, the miss
+    /// budget, the failure action and the teardown barrier are every one of them code that runs
+    /// *after* the callback returns. A processor here may copy audio it was lent, spawn work this
+    /// stack does not own, and outlive the call. One such stage anywhere in a chain makes
+    /// [`DspGraph::contains_overrun`](super::DspGraph::contains_overrun) false for the whole graph
+    /// (§3.3), and no conformance result, counter or measurement sets it true.
+    ///
+    /// [`Self::with_supervised`] is the door for an application that needs the stack to *contain* a
+    /// stall rather than to report one. It costs a process and a frame of pipeline latency, and it
+    /// is the only application-reachable profile that may make the claim.
     #[must_use]
     pub fn with_processor(mut self, processor: Box<dyn FrameProcessor + Send>) -> Self {
         self.stages.push(Planned::Inline {
@@ -674,13 +870,30 @@ impl GraphPlan {
 // ----------------------------------------------------------------------------- stage ----
 
 /// One validated, prepared stage of a live graph.
-#[derive(Debug)]
 struct Stage {
     capability: DspCapability,
     policy: ExecutionPolicy,
     kind: Running,
     misses: u32,
     bypassed: bool,
+}
+
+/// Which processor this is and how it is faring, rather than everything it declared (`M-68`).
+///
+/// The whole capability is available to a caller from its own declaration and re-rendering it here
+/// makes a stage's record longer than anything reading it wants; what a diagnostic needs is the
+/// identity, the profile — because that is what decides what this stage may claim — and the miss
+/// budget it has spent.
+impl std::fmt::Debug for Stage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Stage")
+            .field("processor", &self.capability.id())
+            .field("profile", &self.policy.profile())
+            .field("misses", &self.misses)
+            .field("bypassed", &self.bypassed)
+            .field("kind", &self.kind)
+            .finish()
+    }
 }
 
 enum Running {
@@ -756,7 +969,7 @@ impl Stage {
 // --------------------------------------------------------------------------- buffers ----
 
 /// The graph's whole workspace, allocated at validation and never on the live path.
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct Buffers {
     front: Vec<i16>,
     back: Vec<i16>,
@@ -765,10 +978,29 @@ struct Buffers {
     observation_capacity: u32,
 }
 
+/// What the workspace is, never what is in it (`M-107`, `M-68`).
+///
+/// `front`, `back` and `scratch` are the call's own audio — `front` is literally the frame the
+/// graph is carrying — so a derived rendering of this struct puts up to three frames of raw call
+/// audio into whatever record names it, at a *length that is the frame's*. Reported as shape for
+/// exactly the reason [`DspFrame`] and [`FrameSink`] are. The observations are counted rather than
+/// listed for the second half of that rule: their number is a caller's configured bound.
+impl std::fmt::Debug for Buffers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Buffers")
+            .field("carrying", &self.front.len())
+            .field("staging", &self.back.len())
+            .field("frame_capacity", &self.front.capacity())
+            .field("scratch", &self.scratch.len())
+            .field("observations", &self.observations.len())
+            .field("observation_capacity", &self.observation_capacity)
+            .finish()
+    }
+}
+
 // ------------------------------------------------------------------------ generation ----
 
 /// One live generation of one direction's chain.
-#[derive(Debug)]
 struct Live {
     generation: u64,
     format: StreamFormat,
@@ -786,6 +1018,30 @@ struct Live {
     contains_overrun: bool,
     latency_positions: u64,
     pipeline_frames: u32,
+}
+
+/// What this generation is, without restating what the slot around it already says (`M-68`).
+///
+/// `format` and `frame_samples` are omitted because they are the slot's `sizing`, which every
+/// generation of that slot shares; a record that said each of them twice would be longer without
+/// being more informative.
+#[expect(
+    clippy::missing_fields_in_debug,
+    reason = "the two omitted fields are the slot's `sizing`, rendered once there"
+)]
+impl std::fmt::Debug for Live {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Live")
+            .field("generation", &self.generation)
+            .field("stages", &self.stages)
+            .field("buffers", &self.buffers)
+            .field("position", &self.position)
+            .field("pending", &self.pending)
+            .field("contains_overrun", &self.contains_overrun)
+            .field("latency_positions", &self.latency_positions)
+            .field("pipeline_frames", &self.pipeline_frames)
+            .finish()
+    }
 }
 
 impl Live {
@@ -807,11 +1063,18 @@ impl Live {
     ///
     /// Returns the stage that failed closed, if one did. Never awaits, never blocks and never
     /// allocates (§6.3).
-    fn run(&mut self, direction: AudioDirection, samples: &mut Vec<i16>) -> Frame {
+    fn run(
+        &mut self,
+        direction: AudioDirection,
+        samples: &mut Vec<i16>,
+        counters: &mut GraphCounters,
+        journal: &mut Journal,
+    ) -> Frame {
         let positions = samples.len() as u64;
         if positions == 0 {
             return Frame::default();
         }
+        counters.frames = counters.frames.saturating_add(1);
         let generation = self.generation;
         let format = self.format;
         let position = self.position;
@@ -821,6 +1084,7 @@ impl Live {
             // the next frame carries the break, because growing a buffer here would make §4's frame
             // bound a suggestion. A session's packetisation is fixed, so this is a broken producer
             // rather than a condition to design around.
+            counters.frames_passed_through = counters.frames_passed_through.saturating_add(1);
             self.pending = Some(merge(self.pending, DiscontinuityKind::Loss));
             self.position = self.position.saturating_add(positions);
             return Frame::default();
@@ -850,6 +1114,7 @@ impl Live {
                     std::mem::swap(&mut buffers.front, &mut buffers.back);
                 }
                 StageOutcome::Missed(cause) => {
+                    counters.miss(cause);
                     downstream = Some(merge(downstream, break_for(cause)));
                     stage.misses = stage.misses.saturating_add(1);
                     if stage.misses < stage.policy.max_consecutive_misses() {
@@ -863,7 +1128,11 @@ impl Live {
                     // contract adds: an action this build does not recognise must not silence a
                     // call on a guess.
                     stage.bypassed = true;
-                    report.bypassed = Some(GraphTransition::Bypassed {
+                    counters.bypasses = counters.bypasses.saturating_add(1);
+                    // Journalled here rather than carried out on the frame's report, because more
+                    // than one stage of a chain can spend its budget on the same frame and a
+                    // report with room for one of them would silently keep the last (`M-68`).
+                    journal.push(GraphTransition::Bypassed {
                         generation,
                         at_position: position,
                         processor: stage.capability.id(),
@@ -890,10 +1159,15 @@ impl Live {
     }
 
     /// Discard every stage's sample memory and reopen the epoch at position 0 (§6.2).
-    fn realign(&mut self, kind: DiscontinuityKind) {
+    fn realign(&mut self, kind: DiscontinuityKind, counters: &mut GraphCounters) {
         for stage in &mut self.stages {
             stage.reset(DspResetCause::Discontinuity { kind });
+            // §6.1: a run of misses is a processor that does not fit its budget on this machine,
+            // and a re-anchored epoch is a different question from the one that run was asking.
+            // A bypassed stage stays bypassed: its budget was already spent, and a break in the
+            // timeline is not evidence that it will now keep up.
             stage.misses = 0;
+            counters.resets = counters.resets.saturating_add(1);
         }
         self.position = 0;
         self.pending = None;
@@ -914,9 +1188,11 @@ impl Live {
 }
 
 /// What running one frame produced besides audio.
+///
+/// One field, because a bypass is journalled where it happens: only a fail-closed teardown has to
+/// come back out, since retiring a generation needs the whole slot rather than its journal.
 #[derive(Debug, Default, Clone, Copy)]
 struct Frame {
-    bypassed: Option<GraphTransition>,
     failed_closed: Option<&'static str>,
 }
 
@@ -1009,11 +1285,24 @@ fn run_stage(
 /// Drops its **oldest** entries at capacity, and counts them: a transition is a fact about the
 /// past, and the newest are the ones a caller can still act on. That is the seam's own drop-oldest
 /// end rather than a second policy.
-#[derive(Debug)]
 struct Journal {
     entries: VecDeque<GraphTransition>,
     capacity: usize,
     dropped: u64,
+}
+
+/// How much the journal holds, not what it holds (`M-68`).
+///
+/// A transition carries no audio, so this is the milder half of the rule: what listing the entries
+/// would make configuration-dependent is the record's *length*, and the queue is up to 4,096 deep.
+impl std::fmt::Debug for Journal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Journal")
+            .field("entries", &self.entries.len())
+            .field("capacity", &self.capacity)
+            .field("dropped", &self.dropped)
+            .finish()
+    }
 }
 
 impl Journal {
@@ -1045,7 +1334,6 @@ impl Journal {
 // ------------------------------------------------------------------------------ slot ----
 
 /// One direction's graph, its journal and the signal its teardown trips.
-#[derive(Debug)]
 struct Slot {
     live: Option<Live>,
     journal: Journal,
@@ -1060,6 +1348,49 @@ struct Slot {
     failed_closed: bool,
     /// The session stopped: no new graph may attach.
     stopped: bool,
+    /// What every generation installed here has been sized and prepared for.
+    ///
+    /// Kept on the **slot** rather than on the handle because a graph outlives the session
+    /// generation that first attached it (`MediaSession::reconfigure`), and a handle that
+    /// remembered the sizing itself would go on offering a stale one to
+    /// [`super::DspGraph::replace`] for the rest of the call.
+    sizing: Option<Sizing>,
+    /// Everything the runtime has observed about this direction's processors (`M-68`).
+    ///
+    /// Cumulative for the life of the call and never reset by a replacement or a teardown, so a
+    /// caller can still read why a graph ended after it has ended.
+    counters: GraphCounters,
+}
+
+/// The format and frame one generation of a graph was validated, prepared and sized for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Sizing {
+    format: StreamFormat,
+    frame_samples: usize,
+}
+
+/// What the slot holds, in the shape a diagnostic wants it (`M-68`).
+///
+/// `torn` is omitted: it is a notification primitive whose rendering is longer than everything else
+/// here together, and what a reader wants from it — whether this direction still has a graph — is
+/// `live` already.
+#[expect(
+    clippy::missing_fields_in_debug,
+    reason = "`torn` renders longer than everything else together and says what `live` says"
+)]
+impl std::fmt::Debug for Slot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Slot")
+            .field("live", &self.live)
+            .field("journal", &self.journal)
+            .field("generation", &self.generation)
+            .field("retired", &self.retired.len())
+            .field("failed_closed", &self.failed_closed)
+            .field("stopped", &self.stopped)
+            .field("sizing", &self.sizing)
+            .field("counters", &self.counters)
+            .finish()
+    }
 }
 
 impl Default for Slot {
@@ -1072,6 +1403,8 @@ impl Default for Slot {
             torn: Arc::new(Stop::default()),
             failed_closed: false,
             stopped: false,
+            sizing: None,
+            counters: GraphCounters::default(),
         }
     }
 }
@@ -1083,6 +1416,10 @@ impl Slot {
             return;
         };
         outgoing.cancel();
+        self.counters.teardowns = self.counters.teardowns.saturating_add(1);
+        if matches!(cause, TeardownCause::FailedClosed { .. }) {
+            self.counters.terminal_failures = self.counters.terminal_failures.saturating_add(1);
+        }
         self.journal.push(GraphTransition::TornDown {
             generation: outgoing.generation,
             at_position: outgoing.position,
@@ -1090,6 +1427,17 @@ impl Slot {
         });
         self.retired.push(outgoing);
         self.torn.stop();
+    }
+
+    /// The counters, with the journal's own drop count folded in.
+    ///
+    /// The journal counts what it dropped because it is the thing that dropped it; reading the
+    /// figure from there rather than keeping a second copy is what stops the two from disagreeing.
+    fn counters(&self) -> GraphCounters {
+        GraphCounters {
+            transitions_dropped: self.journal.dropped,
+            ..self.counters
+        }
     }
 }
 
@@ -1103,10 +1451,28 @@ impl Slot {
 /// hands the replacement generation the *same* slot rather than copying its contents out from under
 /// a handle that is still pointing at it — and the retired generation's own teardown then finds an
 /// empty one, which is what stops a re-INVITE from tearing down the graph it just carried over.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct SlotRef {
     slot: Arc<Mutex<Slot>>,
     direction: AudioDirection,
+}
+
+/// The slot's own rendering, reached without ever waiting for it (`M-68`).
+///
+/// `try_lock` rather than [`hold`]: a diagnostic must never be the thing that blocks the media
+/// worker, and "somebody is running a frame right now" is a fact worth reporting rather than a
+/// reason to park. It also makes this safe from inside a `with`, which a blocking one would
+/// deadlock in.
+impl std::fmt::Debug for SlotRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut record = f.debug_struct("SlotRef");
+        record.field("direction", &self.direction);
+        match self.slot.try_lock() {
+            Ok(slot) => record.field("slot", &*slot),
+            Err(_) => record.field("slot", &"in use"),
+        }
+        .finish()
+    }
 }
 
 impl SlotRef {
@@ -1159,6 +1525,12 @@ impl SlotRef {
                 slot.retired.push(built);
                 return Err(refusal);
             }
+            // Recorded on the slot only once the plan is going in, so a refused install cannot
+            // change what a later replacement will be sized for.
+            slot.sizing = Some(Sizing {
+                format,
+                frame_samples,
+            });
             let generation = slot.generation.saturating_add(1);
             slot.generation = generation;
             built.generation = generation;
@@ -1208,13 +1580,18 @@ impl SlotRef {
                 samples.fill(0);
                 return;
             }
-            let Some(generation) = slot.live.as_mut() else {
+            // Destructured so the frame's counters, its journal and the generation running it are
+            // three borrows of one take rather than three takes.
+            let Slot {
+                live,
+                counters,
+                journal,
+                ..
+            } = slot;
+            let Some(generation) = live.as_mut() else {
                 return;
             };
-            let report = generation.run(self.direction, samples);
-            if let Some(bypassed) = report.bypassed {
-                slot.journal.push(bypassed);
-            }
+            let report = generation.run(self.direction, samples, counters, journal);
             if let Some(processor) = report.failed_closed {
                 slot.retire(TeardownCause::FailedClosed { processor });
                 slot.failed_closed = true;
@@ -1236,8 +1613,9 @@ impl SlotRef {
     /// Discard every stage's sample memory and reopen the epoch at position 0 (§6.2).
     fn realign(&self) {
         self.with(|slot| {
-            if let Some(generation) = slot.live.as_mut() {
-                generation.realign(DiscontinuityKind::Realign);
+            let Slot { live, counters, .. } = slot;
+            if let Some(generation) = live.as_mut() {
+                generation.realign(DiscontinuityKind::Realign, counters);
             }
         });
     }
@@ -1245,6 +1623,58 @@ impl SlotRef {
     /// Drain this direction's typed transitions.
     pub(crate) fn transitions(&self) -> Vec<GraphTransition> {
         self.with(|slot| slot.journal.drain())
+    }
+
+    /// Everything the runtime has observed about this direction's processors (`M-68`).
+    pub(crate) fn counters(&self) -> GraphCounters {
+        self.with(|slot| slot.counters())
+    }
+
+    /// Move this direction's graph onto the session generation that just replaced its own
+    /// (`MediaSession::reconfigure`).
+    ///
+    /// A graph belongs to the call, so an ordinary renegotiation re-anchors it: the epoch reopens
+    /// at position 0 with every stage reset, and the application does not have to re-attach. A
+    /// renegotiation that changed the **audio format or the packetisation** is the one case that
+    /// cannot be re-anchored, because both are things the chain was validated, prepared and sized
+    /// against. It is torn down with [`TeardownCause::FormatChanged`], which the application reads
+    /// off [`Self::transitions`] or waits for on `settled()`.
+    pub(crate) fn re_anchor(&self, format: Option<StreamFormat>, frame_samples: usize) {
+        let sizing = format.map(|format| Sizing {
+            format,
+            frame_samples,
+        });
+        let carried_over = self.with(|slot| {
+            // A slot with no graph has nothing to carry and nothing to tear down; recording the
+            // new sizing is all it needs, so that a later attach through the handle is sized for
+            // the session that is actually running.
+            let unchanged = slot.live.is_none() || (slot.sizing == sizing && sizing.is_some());
+            slot.sizing = sizing;
+            unchanged
+        });
+        if carried_over {
+            self.realign();
+            return;
+        }
+        self.cancel(TeardownCause::FormatChanged);
+    }
+
+    /// Validate and publish a new chain, sized as the **session** is rather than as the handle
+    /// remembers (§5.4).
+    ///
+    /// # Errors
+    ///
+    /// [`GraphError::Detached`] for a slot no graph was ever installed into, and otherwise
+    /// whatever [`Self::install`] refuses.
+    pub(crate) fn reinstall(&self, plan: GraphPlan) -> Result<u64, GraphError> {
+        let Some(Sizing {
+            format,
+            frame_samples,
+        }) = self.with(|slot| slot.sizing)
+        else {
+            return Err(GraphError::Detached);
+        };
+        self.install(plan, format, frame_samples, true)
     }
 
     /// What this direction's graph is holding right now, live and retired generations together.
@@ -1400,11 +1830,21 @@ impl CallDsp {
     /// generation is left with empty ones, so its own shutdown tears down nothing that is still in
     /// use. The move re-anchors both directions — audio queued under a media generation that no
     /// longer exists would land in the new epoch as old audio at a new position.
-    pub(crate) fn adopt(&self, previous: &Self) {
+    ///
+    /// `format` and `frame_samples` are the **replacement** session's, and a graph is carried over
+    /// only if they are the ones it was validated against. One that was not is torn down with
+    /// [`TeardownCause::FormatChanged`] rather than carried onto audio it never agreed to
+    /// (`M-68`); see [`SlotRef::re_anchor`].
+    pub(crate) fn adopt(
+        &self,
+        previous: &Self,
+        format: Option<StreamFormat>,
+        frame_samples: usize,
+    ) {
         let carried = std::mem::take(&mut *hold(&previous.directions));
         *hold(&self.directions) = carried;
         for direction in [AudioDirection::Inbound, AudioDirection::Outbound] {
-            self.slot(direction).realign();
+            self.slot(direction).re_anchor(format, frame_samples);
         }
     }
 
