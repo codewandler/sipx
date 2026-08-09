@@ -1228,5 +1228,126 @@ class ThePreambleReader(unittest.TestCase):
         self.assertIn("Flow", problems[0])
 
 
+class TheAttributeAndProseAboutIt(unittest.TestCase):
+    """`M-97`: an attribute is syntax, and a doc comment naming one is prose about syntax.
+
+    `preamble` hands both rules one string holding a type's attributes *and* its doc comment, and
+    the marked test used to ask whether that string contained `#[non_exhaustive]`. A type whose
+    documentation explained a decision by naming the attribute therefore satisfied the rule without
+    carrying it — the one way past a check whose whole design is that an exception is written where
+    a reader can grep for it. `M-83` wrote three such sentences in one diff, and `sipx-media`'s
+    `ProviderKind` had been passing on prose alone since `M-74`.
+
+    The reason phrases are held the same way, for the narrower half of the same question. They are
+    `///` phrases and so genuinely prose, but a doc comment that *quotes* one while arguing about a
+    different type used to classify this one; requiring the phrase to open a line of the preamble
+    closes the quoting case. What no rule can close is a phrase written at the start of a line about
+    somebody else's type, and that stays a reader's job.
+    """
+
+    #: An enum documented by naming the attribute and not carrying it — which is `ProviderKind`'s
+    #: shape, and a sentence this workspace has good reason to write.
+    NAMED_NOT_MARKED = (
+        "/// Which way a stream flows.\n"
+        "///\n"
+        "/// Closed by design, and deliberately not `#[non_exhaustive]`: a stream has two ends.\n"
+        "pub enum Flow { In, Out }\n"
+    )
+
+    #: The same shape for the struct rule, with the constructor that keeps the answer about the
+    #: attribute rather than about `M-92`'s second obligation.
+    NAMED_NOT_MARKED_STRUCT = (
+        "/// A payload.\n"
+        "///\n"
+        "/// Deliberately not `#[non_exhaustive]`: the wire carries these and no more.\n"
+        "pub struct Encoded {\n"
+        "    /// What it is encoded in.\n"
+        "    pub payload_type: u8,\n"
+        "}\n\n"
+        "impl Encoded {\n"
+        "    /// One of these.\n"
+        "    pub fn new(payload_type: u8) -> Self {\n"
+        "        Self { payload_type }\n"
+        "    }\n"
+        "}\n"
+    )
+
+    def test_a_doc_comment_naming_the_attribute_does_not_guard_an_enum(self):
+        problems = demo_crate({"lib.rs": self.NAMED_NOT_MARKED})
+        self.assertEqual(1, len(problems))
+        self.assertIn("`Flow`", problems[0])
+
+    def test_a_doc_comment_naming_the_attribute_does_not_guard_a_struct(self):
+        problems = demo_crate({"lib.rs": self.NAMED_NOT_MARKED_STRUCT}, guard.struct_problems)
+        self.assertEqual(1, len(problems))
+        self.assertIn("`Encoded`", problems[0])
+        self.assertIn(guard.COMPLETE_REASON, problems[0])
+
+    def test_the_attribute_itself_still_guards_both_rules(self):
+        """The narrowing has to leave the thing it narrowed to."""
+        self.assertEqual(
+            [], demo_crate({"lib.rs": self.NAMED_NOT_MARKED.replace("pub enum", "#[non_exhaustive]\npub enum")})
+        )
+        self.assertEqual(
+            [],
+            demo_crate(
+                {
+                    "lib.rs": self.NAMED_NOT_MARKED_STRUCT.replace(
+                        "pub struct", "#[non_exhaustive]\npub struct"
+                    )
+                },
+                guard.struct_problems,
+            ),
+        )
+
+    def test_an_indented_attribute_is_still_the_attribute(self):
+        """An item written inside an inline `mod` carries its attribute at that indentation."""
+        self.assertTrue(guard.marked("    /// Flow.\n    #[non_exhaustive]\n"))
+
+    def test_the_attribute_named_inside_a_doc_line_is_not_the_attribute(self):
+        self.assertFalse(guard.marked("/// Unlike [`Side`], which is `#[non_exhaustive]`.\n"))
+
+    def test_a_quoted_reason_phrase_does_not_argue_a_type_out(self):
+        """The reason half: a phrase quoted mid-sentence is about the sentence, not this type."""
+        problems = demo_crate(
+            {
+                "lib.rs": "/// Which way a stream flows.\n"
+                "///\n"
+                "/// See [`Side`], whose `/// Exhaustive by design:` note explains the pattern.\n"
+                "pub enum Flow { In, Out }\n"
+            }
+        )
+        self.assertEqual(1, len(problems))
+        self.assertIn("`Flow`", problems[0])
+
+    def test_a_reader_blind_to_the_attribute_reports_every_marked_type(self):
+        """Why narrowing is safe to attempt: over-narrowing here is loud rather than quiet.
+
+        `X-131` and `X-132` pinned the same property on the CLI-reference readers. A marked test
+        that stopped recognising the attribute does not excuse a type — it reports every marked
+        type in the workspace as unguarded, which is a red gate and not a silent pass.
+        """
+        marked = guard.marked
+        guard.marked = lambda above: False
+        try:
+            enums = demo_crate(
+                {"lib.rs": "/// Flow.\n#[non_exhaustive]\npub enum Flow { In, Out }\n"}
+            )
+            structs = demo_crate(
+                {
+                    "lib.rs": self.NAMED_NOT_MARKED_STRUCT.replace(
+                        "pub struct", "#[non_exhaustive]\npub struct"
+                    )
+                },
+                guard.struct_problems,
+            )
+        finally:
+            guard.marked = marked
+        self.assertEqual(1, len(enums))
+        self.assertIn("`Flow`", enums[0])
+        self.assertEqual(1, len(structs))
+        self.assertIn("`Encoded`", structs[0])
+
+
 if __name__ == "__main__":
     sys.exit(0 if unittest.main(exit=False, verbosity=2).result.wasSuccessful() else 1)

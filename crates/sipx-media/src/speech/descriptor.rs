@@ -280,9 +280,8 @@ impl fmt::Display for LanguageRange {
 
 /// Which of the two contracts one descriptor describes (§3 `kind`).
 ///
-/// Closed by design, and deliberately not `#[non_exhaustive]`: this specification defines two
-/// substitutable contracts, and a third would be a different document rather than a new variant of
-/// this one.
+/// Exhaustive by design: this specification defines two substitutable contracts, and a third would
+/// be a different document rather than a new variant of this one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ProviderKind {
     /// Speech recognition (§5).
