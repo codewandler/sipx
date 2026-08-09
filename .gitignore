@@ -52,3 +52,9 @@ __pycache__/
 # its own, so this has to match every peer — a pattern naming one of them silently commits the
 # next one's key.
 /tests/interop/*/tls/
+
+# The DSP heap probe. Excluded from the workspace so it can install a counting global allocator
+# without weakening `unsafe_code = "forbid"` for anything sipx publishes; it resolves its own lock
+# the way `fuzz` and `wasm` do. `scripts/check-dsp-heap.sh` runs it.
+/heap-probe/target
+/heap-probe/Cargo.lock

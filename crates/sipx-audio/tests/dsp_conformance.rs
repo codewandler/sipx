@@ -18,14 +18,16 @@
     clippy::indexing_slicing
 )]
 
+use std::cell::Cell;
+
 use sipx_audio::analysis::{AudioDirection, DiscontinuityKind};
 use sipx_audio::dsp::{
     CHECK_ALLOCATION, CHECK_CANCELLATION, CHECK_CAPABILITY, CHECK_CHUNK_BOUNDARY,
     CHECK_DETERMINISM, CHECK_DISCONTINUITY, CHECK_EXTREMES, CHECK_FRAME_REFUSAL, CHECK_LENGTH,
-    CHECK_RESET, Conformance, DspCapability, DspFrame, DspObservation, DspResetCause,
-    ExecutionPolicy, ExecutionProfile, FrameAdmission, FrameProcessor, FrameSink, LengthPolicy,
-    Parameter, ParameterDomain, ParameterError, ParameterSpec, ParameterValue, ProcessError,
-    ResetBehavior, Scratch, StreamFormat,
+    CHECK_RESET, CheckStatus, Conformance, DspCapability, DspFrame, DspObservation, DspResetCause,
+    ExecutionPolicy, ExecutionProfile, FrameAdmission, FrameProcessor, FrameSink, HeapMeter,
+    HeapUse, LengthPolicy, Parameter, ParameterDomain, ParameterError, ParameterSpec,
+    ParameterValue, ProcessError, ResetBehavior, Scratch, StreamFormat,
 };
 
 // ---------------------------------------------------------------- reference fixtures ----
@@ -895,6 +897,117 @@ fn an_unprovable_check_is_reported_as_unproven_rather_than_passed() {
         report.unproven().count() > 0,
         "the heap component of the allocation bound is not observable here and must say so: \
          {report}"
+    );
+}
+
+// ------------------------------------------------------- §9.1 heap growth (`X-128`) ----
+
+/// A scripted [`HeapMeter`] that measures nothing.
+///
+/// This is a test double for the harness's *arithmetic*, not a measurement: it hands back the
+/// figures it was built with, one window per [`HeapMeter::begin`], so that what `DSP-K9` concludes
+/// from a given pair of figures is covered by `cargo test`. The real figures come from a counting
+/// global allocator, which cannot live in this workspace — `heap-probe/` is where that runs.
+///
+/// Keeping the double this dumb is deliberate. If it tried to measure anything it would be a second
+/// implementation of the thing under test, and the two would drift.
+struct ScriptedMeter {
+    /// One entry per metered window, in the order the harness opens them.
+    script: Vec<HeapUse>,
+    /// How many windows have been opened so far.
+    window: Cell<usize>,
+}
+
+impl ScriptedMeter {
+    /// The whole-life window's figures, then the after-`prepare` window's.
+    fn new(life: HeapUse, after_prepare: HeapUse) -> Self {
+        Self {
+            script: vec![life, after_prepare],
+            window: Cell::new(0),
+        }
+    }
+
+    /// A meter that reports a processor which never touched the heap.
+    fn quiet() -> Self {
+        Self::new(HeapUse::new(0, 0), HeapUse::new(0, 0))
+    }
+}
+
+impl HeapMeter for ScriptedMeter {
+    fn begin(&self) {
+        self.window.set(self.window.get().saturating_add(1));
+    }
+
+    fn measure(&self) -> HeapUse {
+        let index = self.window.get().saturating_sub(1);
+        self.script.get(index).copied().unwrap_or_default()
+    }
+}
+
+/// The `DSP-K9` outcome of one run, which every test below asserts on.
+fn allocation_outcome(
+    report: &sipx_audio::dsp::ConformanceReport,
+) -> &sipx_audio::dsp::CheckOutcome {
+    report
+        .checks()
+        .iter()
+        .find(|check| check.id() == CHECK_ALLOCATION)
+        .unwrap()
+}
+
+/// §9.1 + §11.1: given a meter, `DSP-K9` reports a measured figure rather than `Unproven`.
+///
+/// The identity processor owns no heap, so the figure it is held to is its declaration less its
+/// inline size, and a quiet meter is the truth about it.
+#[test]
+fn a_heap_meter_turns_the_allocation_check_into_a_measurement() {
+    let report = Conformance::new().run_with_heap_meter(Ident::default, &ScriptedMeter::quiet());
+    assert!(report.passed(), "{report}");
+    let allocation = allocation_outcome(&report);
+    assert_eq!(
+        allocation.status(),
+        CheckStatus::Passed,
+        "a measured bound that holds is a pass, not an unproven: {report}"
+    );
+    assert!(
+        allocation.detail().contains('0'),
+        "the outcome states the figure it measured: {allocation}"
+    );
+}
+
+/// §11.3: a processor whose live heap exceeds what it declared is caught by `DSP-K9`.
+///
+/// The declaration is `Ident`'s 4,096 default; the meter reports a processor sitting on a megabyte.
+#[test]
+fn the_harness_catches_a_processor_whose_heap_exceeds_its_declaration() {
+    let meter = ScriptedMeter::new(HeapUse::new(1_048_576, 1_048_576), HeapUse::new(0, 0));
+    let report = Conformance::new().run_with_heap_meter(Ident::default, &meter);
+    assert_caught(&report, CHECK_ALLOCATION);
+}
+
+/// §9.1: "no allocation after `prepare`" is a claim of its own, and a processor that allocates per
+/// frame breaks it however small the allocation is.
+///
+/// The whole-life figure here is comfortably inside the declaration, so this is the after-`prepare`
+/// window failing on its own and not a second spelling of the test above.
+#[test]
+fn the_harness_catches_a_processor_that_allocates_after_prepare() {
+    let meter = ScriptedMeter::new(HeapUse::new(64, 64), HeapUse::new(64, 0));
+    let report = Conformance::new().run_with_heap_meter(Ident::default, &meter);
+    assert_caught(&report, CHECK_ALLOCATION);
+}
+
+/// §11.1: without a meter the check stays `Unproven` — never a pass — and now says where the proof
+/// lives instead of stopping at "cannot".
+#[test]
+fn without_a_meter_the_allocation_check_stays_unproven_and_names_the_prover() {
+    let report = Conformance::new().run(Ident::default);
+    let allocation = allocation_outcome(&report);
+    assert_eq!(allocation.status(), CheckStatus::Unproven, "{report}");
+    assert!(
+        allocation.detail().contains("heap-probe"),
+        "an unproven check that names the mechanism that would prove it is worth more than one \
+         that does not: {allocation}"
     );
 }
 

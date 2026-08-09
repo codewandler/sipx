@@ -653,7 +653,13 @@ impl DspCapability {
         self
     }
 
-    /// An upper bound on the memory the processor itself owns (§9.1).
+    /// An upper bound on the memory the processor itself owns (§9.1): what it holds inline plus
+    /// what it owns on the heap.
+    ///
+    /// Both halves are checked. `DSP-K9` holds the inline half against this figure on every run,
+    /// and the heap half on a run given a
+    /// [`HeapMeter`](crate::dsp::HeapMeter) — see that trait for why one cannot be built inside this
+    /// workspace and where the one that measures these processors lives.
     #[must_use]
     pub const fn with_state_bytes(mut self, bytes: u64) -> Self {
         self.state_bytes = bytes;

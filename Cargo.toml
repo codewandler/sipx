@@ -5,8 +5,11 @@ members = ["crates/*"]
 # browser module needs `#[unsafe(no_mangle)]` for its twelve WebAssembly exports, which
 # `unsafe_code = "forbid"` below refuses — so it lives outside the workspace too, keeping the
 # non-negotiable intact for every crate that answers to it. `scripts/check-wasm-kernel.sh` builds
-# it; `wasm/src/lib.rs` explains it.
-exclude = ["fuzz", "wasm"]
+# it; `wasm/src/lib.rs` explains it. The DSP heap probe needs `unsafe impl GlobalAlloc` to count
+# allocations for `DSP-K9` (`X-128`) and is outside for the same reason and on the same terms:
+# `scripts/check-dsp-heap.sh` runs it, `heap-probe/src/main.rs` explains it, and nothing sipx
+# publishes gains an `unsafe` from either of them.
+exclude = ["fuzz", "wasm", "heap-probe"]
 
 [workspace.package]
 version = "1.0.0-rc.16"

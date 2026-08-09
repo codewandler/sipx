@@ -45,6 +45,14 @@
 //! [`conformance::CheckStatus::Unproven`] rather than as passes — and is itself proved by fixtures
 //! that violate each invariant on purpose.
 //!
+//! One check, `DSP-K9`, needs something this workspace cannot contain. Holding a processor's heap
+//! to its declared `state_bytes` means counting allocations, counting allocations means
+//! `unsafe impl GlobalAlloc`, and `unsafe_code` is `forbid`den here — for tests as much as for
+//! libraries, and a `forbid` is not something an `allow` can reopen. So [`Conformance::run`] reports
+//! that half `Unproven` and says where the proof is, while [`Conformance::run_with_heap_meter`]
+//! takes a [`HeapMeter`] from a caller that has one and reports a measured figure. `heap-probe/`,
+//! outside the workspace, is the caller that has one.
+//!
 //! ```
 //! use sipx_audio::analysis::AudioDirection;
 //! use sipx_audio::dsp::{
@@ -107,7 +115,7 @@ pub use conformance::{
     CHECK_ALLOCATION, CHECK_CANCELLATION, CHECK_CAPABILITY, CHECK_CHUNK_BOUNDARY,
     CHECK_DETERMINISM, CHECK_DISCONTINUITY, CHECK_EXTREMES, CHECK_FORMAT_REFUSAL,
     CHECK_FRAME_REFUSAL, CHECK_LENGTH, CHECK_PARAMETER_REFUSAL, CHECK_RESET, CHECKS, CheckOutcome,
-    CheckStatus, Conformance, ConformanceReport,
+    CheckStatus, Conformance, ConformanceReport, HeapMeter, HeapUse,
 };
 pub use contract::{
     Admitted, CapabilityError, DeadlineAction, DspCapability, DspFrame, DspObservation,

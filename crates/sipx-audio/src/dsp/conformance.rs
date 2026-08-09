@@ -74,6 +74,12 @@ pub const CHECKS: &[&str] = &[
 /// How many observations one frame's queue holds during a conformance run.
 const OBSERVATION_CAPACITY: u32 = 16;
 
+/// How many reset-separated epochs a metered lifecycle drives.
+///
+/// Two rather than one, because a processor that reallocates on `reset` allocates nothing at all in
+/// a run that never reaches a second epoch.
+const METERED_EPOCHS: usize = 2;
+
 /// The largest frame, in positions, the harness will build.
 const REFERENCE_FRAME_POSITIONS: usize = 16;
 
@@ -194,6 +200,104 @@ impl fmt::Display for ConformanceReport {
     }
 }
 
+/// What one metered window observed on the heap, in bytes.
+///
+/// Both figures are *deltas over the window*, not absolute process figures: an implementation
+/// re-baselines at [`HeapMeter::begin`], so a meter that has just begun reports zero and zero.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HeapUse {
+    allocated_bytes: u64,
+    peak_live_bytes: u64,
+}
+
+impl HeapUse {
+    /// State a window's figures: bytes allocated in total, and the high-water mark of bytes live at
+    /// once.
+    ///
+    /// `peak_live_bytes` is expected to be the smaller of the two — every live byte was allocated —
+    /// but nothing here enforces that, because a meter that reports an impossible pair should be
+    /// visible as such rather than silently normalized.
+    #[must_use]
+    pub const fn new(allocated_bytes: u64, peak_live_bytes: u64) -> Self {
+        Self {
+            allocated_bytes,
+            peak_live_bytes,
+        }
+    }
+
+    /// Every byte handed out during the window, whether or not it was given back.
+    ///
+    /// This is the figure §9.1's "no allocation after `prepare`" is about: a processor that
+    /// allocates and immediately frees per frame still allocates per frame.
+    #[must_use]
+    pub const fn allocated_bytes(&self) -> u64 {
+        self.allocated_bytes
+    }
+
+    /// The most bytes live at any one instant during the window.
+    ///
+    /// This is the figure `state_bytes` is about: what the processor *owns*, as opposed to what it
+    /// churned through.
+    #[must_use]
+    pub const fn peak_live_bytes(&self) -> u64 {
+        self.peak_live_bytes
+    }
+}
+
+/// A heap measurement the conformance harness can borrow, so that `DSP-K9` reports a figure instead
+/// of `Unproven`.
+///
+/// # What this promises
+///
+/// Nothing, on its own. This trait is a *seam*, not a measurement: it exists because a counting
+/// global allocator needs `unsafe impl GlobalAlloc`, `unsafe_code` is `forbid`den for every crate in
+/// this workspace, and a `forbid` cannot be overridden by an `allow` (`E0453`) or escaped by putting
+/// the code in a test target. The implementation therefore lives outside the workspace, in
+/// `heap-probe/`, the same way `wasm/` and `fuzz/` do and for the same reason. What lives here is
+/// the part that can: the trait, and the arithmetic the harness applies to what it returns.
+///
+/// # What an implementation must promise
+///
+/// - [`Self::begin`] starts a fresh window: figures reported afterwards are deltas over it.
+/// - Both are attributed to **the calling thread only**. The harness makes no cross-thread promise
+///   and neither should an implementation — `cargo test` runs test functions in parallel threads,
+///   and a process-wide counter would measure whatever else happened to be running.
+/// - [`Self::measure`] may be called while the window is open, and does not close it.
+///
+/// # What the harness promises in return
+///
+/// **The harness allocates nothing on the calling thread between `begin` and `measure`.** Every
+/// buffer a metered processor is lent is taken before the window opens and reused across frames.
+/// That is what makes the figure the processor's rather than the harness's, and it is checked
+/// rather than asserted: a built-in that owns no heap measures exactly zero, which it could not do
+/// if the harness's own allocations were landing in the window.
+///
+/// # What it does not promise
+///
+/// Not a leak detector, not a profiler, and not a bound on anything a processor does on a thread of
+/// its own. A processor that hands work to another thread is measured as allocating nothing, which
+/// is one of several reasons `docs/specs/custom-call-dsp.md` §7.1 does not let the inline profile
+/// spawn one.
+pub trait HeapMeter {
+    /// Open a fresh measurement window on the calling thread, discarding any previous one.
+    fn begin(&self);
+
+    /// Report what has happened on the heap since [`Self::begin`].
+    fn measure(&self) -> HeapUse;
+}
+
+/// Which part of a processor's life a metered window covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MeterWindow {
+    /// Construction onwards. `state_bytes` is a claim about the processor's whole state, and
+    /// `Stutter` allocates its delay line in `new`, so a window opening at `prepare` would measure
+    /// zero for the one built-in that has a heap component at all.
+    WholeLife,
+    /// After `prepare` returned. §9.1: "no allocation after `prepare` — not per frame, not per
+    /// position, not per observation."
+    AfterPrepare,
+}
+
 /// A conformance run's configuration.
 ///
 /// The stream length and frame sizes are derived from the processor's own declaration rather than
@@ -243,7 +347,33 @@ impl Conformance {
     /// processor that panics is a finding, and a harness that dies with it produces no finding at
     /// all. That requires the unwinding panic strategy; under `panic = "abort"` this cannot be
     /// promised and is not claimed.
-    pub fn run<P, F>(&self, mut factory: F) -> ConformanceReport
+    pub fn run<P, F>(&self, factory: F) -> ConformanceReport
+    where
+        P: FrameProcessor,
+        F: FnMut() -> P,
+    {
+        self.run_metered(factory, None)
+    }
+
+    /// Run every check in [`CHECKS`], with `DSP-K9`'s heap component actually measured.
+    ///
+    /// Identical to [`Self::run`] except that `DSP-K9` reports a measured figure instead of
+    /// [`CheckStatus::Unproven`]: the processor's peak live heap is held against its declared
+    /// `state_bytes` less its inline size, and §9.1's "no allocation after `prepare`" is checked on
+    /// a second instance whose construction and `prepare` are outside the window.
+    ///
+    /// A meter cannot be built inside this workspace — see [`HeapMeter`] for why, and
+    /// `heap-probe/` for where one is. Callers without one keep [`Self::run`], which is honest
+    /// about what it did not measure rather than passing a claim it never checked.
+    pub fn run_with_heap_meter<P, F>(&self, factory: F, meter: &dyn HeapMeter) -> ConformanceReport
+    where
+        P: FrameProcessor,
+        F: FnMut() -> P,
+    {
+        self.run_metered(factory, Some(meter))
+    }
+
+    fn run_metered<P, F>(&self, mut factory: F, meter: Option<&dyn HeapMeter>) -> ConformanceReport
     where
         P: FrameProcessor,
         F: FnMut() -> P,
@@ -297,7 +427,7 @@ impl Conformance {
             self.check_cancellation(&mut factory, &wave, positions)
         }));
         checks.push(guarded(CHECK_ALLOCATION, "allocation", || {
-            self.check_allocation(&mut factory, &wave, positions)
+            self.check_allocation(&mut factory, &wave, positions, meter)
         }));
         checks.push(guarded(CHECK_DISCONTINUITY, "discontinuity", || {
             self.check_discontinuity(&mut factory, &wave, positions)
@@ -877,6 +1007,7 @@ impl Conformance {
         factory: &mut F,
         signal: &[i16],
         frame_positions: usize,
+        meter: Option<&dyn HeapMeter>,
     ) -> CheckOutcome {
         let capability = factory().capability();
         let drive = match self.reference(factory, signal, frame_positions) {
@@ -906,20 +1037,147 @@ impl Conformance {
                 ),
             );
         }
-        unproven(
+        let workspace = format!(
+            "the workspace bound held ({} of {} scratch samples requested, no sink overrun) and \
+             the inline state is {inline} of {} declared bytes",
+            drive.scratch_high_water,
+            capability.scratch_samples(),
+            capability.state_bytes()
+        );
+
+        let Some(meter) = meter else {
+            return unmeasured_heap(&workspace);
+        };
+
+        // `state_bytes` is the whole state, inline plus heap, so the heap's budget is what the
+        // declaration has left after the inline half — which was just checked to fit.
+        let budget = capability.state_bytes().saturating_sub(inline);
+        let life = self.metered_life(
+            factory,
+            &capability,
+            signal,
+            frame_positions,
+            meter,
+            MeterWindow::WholeLife,
+        );
+        if life.peak_live_bytes() > budget {
+            return failed(
+                CHECK_ALLOCATION,
+                "allocation",
+                format!(
+                    "the processor held {} heap bytes at once against a budget of {budget} — its \
+                     declared {} `state_bytes` less the {inline} it occupies inline",
+                    life.peak_live_bytes(),
+                    capability.state_bytes()
+                ),
+            );
+        }
+
+        let after = self.metered_life(
+            factory,
+            &capability,
+            signal,
+            frame_positions,
+            meter,
+            MeterWindow::AfterPrepare,
+        );
+        if after.allocated_bytes() > 0 {
+            return failed(
+                CHECK_ALLOCATION,
+                "allocation",
+                format!(
+                    "the processor allocated {} heap bytes after `prepare` returned; §9.1 admits \
+                     no allocation there — not per frame, not per position, not per observation — \
+                     and freeing them again does not make the allocation not have happened",
+                    after.allocated_bytes()
+                ),
+            );
+        }
+
+        passed(
             CHECK_ALLOCATION,
             "allocation",
             format!(
-                "the workspace bound held ({} of {} scratch samples requested, no sink overrun) \
-                 and the inline state is {inline} of {} declared bytes. Heap growth inside the \
-                 processor's own state is not observable here: `unsafe_code` is forbidden \
-                 workspace-wide, so no counting allocator can be installed, and a figure that \
-                 cannot be produced is not reported as one",
-                drive.scratch_high_water,
-                capability.scratch_samples(),
-                capability.state_bytes()
+                "{workspace}. Measured heap: {} bytes live at peak against a {budget}-byte budget, \
+                 {} allocated over the whole life and {} after `prepare`",
+                life.peak_live_bytes(),
+                life.allocated_bytes(),
+                after.allocated_bytes()
             ),
         )
+    }
+
+    /// Drive one processor's life with the meter armed, allocating nothing inside the window.
+    ///
+    /// Every buffer is taken before [`HeapMeter::begin`] and reused across frames, because an
+    /// allocation the harness makes inside the window is indistinguishable from one the processor
+    /// made. Frame results are discarded: what a processor *writes* is `DSP-K5`, `DSP-K6` and
+    /// `DSP-K11`'s business, and collecting output here would mean allocating to hold it.
+    fn metered_life<P: FrameProcessor, F: FnMut() -> P>(
+        &self,
+        factory: &mut F,
+        capability: &DspCapability,
+        signal: &[i16],
+        frame_positions: usize,
+        meter: &dyn HeapMeter,
+        window: MeterWindow,
+    ) -> HeapUse {
+        let channels = usize::from(self.format.channels()).max(1);
+        let step = frame_positions.saturating_mul(channels).max(1);
+        let positions = u32::try_from(frame_positions).unwrap_or(u32::MAX);
+        // One buffer serves both `process` and `flush`, so the flush needs no allocation of its
+        // own. An over-wide sink weakens nothing here: sink overrun is checked on the reference
+        // drive above, and this pass only counts bytes.
+        let room = usize_of(capability.max_output_positions(positions))
+            .max(usize_of(capability.tail_positions()))
+            .saturating_mul(channels)
+            .max(1);
+        let mut output = vec![0i16; room];
+        let mut scratch_buffer = vec![0i16; usize_of(capability.scratch_samples())];
+        let mut observations = Vec::with_capacity(usize_of(OBSERVATION_CAPACITY));
+
+        // `AfterPrepare` builds and prepares its instance outside the window; `WholeLife` does both
+        // inside it.
+        let mut ready = match window {
+            MeterWindow::AfterPrepare => {
+                let mut processor = factory();
+                let _ = processor.prepare(self.direction, self.format);
+                Some(processor)
+            }
+            MeterWindow::WholeLife => None,
+        };
+
+        meter.begin();
+        let mut processor = ready.take().unwrap_or_else(|| {
+            let mut fresh = factory();
+            let _ = fresh.prepare(self.direction, self.format);
+            fresh
+        });
+        for _ in 0..METERED_EPOCHS {
+            let mut position = 0u64;
+            let mut offset = 0;
+            while offset < signal.len() {
+                let end = offset.saturating_add(step).min(signal.len());
+                let Some(chunk) = signal.get(offset..end) else {
+                    break;
+                };
+                observations.clear();
+                let mut scratch = Scratch::new(&mut scratch_buffer);
+                let mut sink = FrameSink::new(&mut output, &mut observations, OBSERVATION_CAPACITY);
+                let frame = DspFrame::new(self.direction, self.format, position, chunk);
+                let _ = processor.process(&frame, &mut scratch, &mut sink);
+                position =
+                    position.saturating_add(u64::try_from(chunk.len() / channels).unwrap_or(0));
+                offset = end;
+            }
+            observations.clear();
+            let mut sink = FrameSink::new(&mut output, &mut observations, OBSERVATION_CAPACITY);
+            let _ = processor.flush(&mut sink);
+            processor.reset(DspResetCause::Requested);
+        }
+        processor.cancel();
+        // Read before the processor drops: `peak_live_bytes` is about what it owned while it lived.
+        meter.measure()
     }
 
     fn check_discontinuity<P: FrameProcessor, F: FnMut() -> P>(
@@ -1289,6 +1547,29 @@ fn out_of_range(domain: ParameterDomain) -> Option<ParameterValue> {
 
 fn usize_of(value: u32) -> usize {
     usize::try_from(value).unwrap_or(usize::MAX)
+}
+
+/// `DSP-K9` on a run with no [`HeapMeter`]: everything measurable, plus where the rest is measured.
+///
+/// The reason is as long as it is on purpose. "Unproven" on its own reads as a shrug, and this one
+/// is a decision with an argument behind it — `X-128` weighed a scoped exception, an in-workspace
+/// measurement crate and an external tool before concluding that the mechanism cannot live here at
+/// all, and the outcome should carry that rather than leave the next reader to redo it.
+fn unmeasured_heap(workspace: &str) -> CheckOutcome {
+    unproven(
+        CHECK_ALLOCATION,
+        "allocation",
+        format!(
+            "{workspace}. Heap growth inside the processor's own state is not measured on this \
+             run: a counting global allocator needs `unsafe impl GlobalAlloc`, and `unsafe_code` \
+             is forbidden for every crate in this workspace — a `forbid` that an `allow` cannot \
+             override and a test target does not escape. The measurement lives outside the \
+             workspace instead, in `heap-probe/`; run `./scripts/check-dsp-heap.sh` for the \
+             figure, or pass a `HeapMeter` to `Conformance::run_with_heap_meter`. Until one is \
+             passed this is reported unproven rather than passed, because a figure that was not \
+             produced is not a figure"
+        ),
+    )
 }
 
 /// A processor that cannot even run the harness's reference stream fails the check that needed it.

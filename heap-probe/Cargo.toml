@@ -1,0 +1,36 @@
+[package]
+name = "sipx-dsp-heap-probe"
+description = "Measures DSP processor heap growth against `state_bytes` with a counting global allocator"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Its own workspace root, stated rather than implied, for the reason `fuzz/Cargo.toml` and
+# `wasm/Cargo.toml` state it: the root manifest's `exclude` says the same thing only for a checkout
+# that sits at the top of the filesystem walk, and in a git worktree nested inside another checkout
+# cargo walks past the excluding manifest, finds the outer one, and refuses to build.
+[workspace]
+
+[dependencies]
+# Every line of logic is over there, in the workspace, under `unsafe_code = "forbid"`. This package
+# exists only because counting allocations needs `unsafe impl GlobalAlloc` — see the module docs.
+# The harness it drives, and the arithmetic that decides what a figure means, are `sipx-audio`'s.
+sipx-audio = { path = "../crates/sipx-audio" }
+
+[lints.rust]
+missing_docs = "warn"
+unreachable_pub = "warn"
+# Deliberately **not** `forbid`, and this is the second package in the repository where that is
+# true — the first is `wasm`, for its WebAssembly exports. The allowance buys exactly one
+# `unsafe impl GlobalAlloc` with two methods in it; see `src/main.rs`.
+unsafe_code = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+indexing_slicing = "warn"
