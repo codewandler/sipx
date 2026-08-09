@@ -36,7 +36,9 @@
 //!   stall RTP. For a supervised stage that is because the media worker never waits for it: it
 //!   offers a frame to a bounded channel and takes a result only if one is present by the declared
 //!   deadline, and a hang, a crash or a malformed result costs the declared action plus a
-//!   termination and a reap.
+//!   termination and a reap. The termination is a kill and the reap is a `wait`, because that stage
+//!   runs in an operating-system process this crate spawns and owns (`M-102`) — which is also what
+//!   puts its memory and CPU inside whatever the operating system is configured to bound.
 //! - any stage [`TrustedCooperativeNative`] — **nothing about containment**. That stage is
 //!   application code on the media worker: sipx cannot preempt it, cancel it or reap it, and a
 //!   callback that does not return stalls RTP for that call. No deadline, failure action or
@@ -67,13 +69,17 @@ use crate::processing::AudioDirection;
 mod builtin;
 mod graph;
 mod supervised;
+mod wire;
+mod worker;
 
 pub use builtin::BuiltIn;
 pub use graph::{
     BypassCause, GraphBarrier, GraphBounds, GraphError, GraphPlan, GraphTransition, MAX_PROCESSORS,
     MAX_WORKER_QUEUE, TeardownCause,
 };
-pub use supervised::{SupervisedWorker, WorkerResult};
+pub use supervised::WorkerProcess;
+pub use wire::WorkerProtocolError;
+pub use worker::{SupervisedWorker, WorkerResult, serve_worker};
 
 /// The processor contract itself, re-exported unchanged from [`sipx_audio::dsp`].
 ///
@@ -160,6 +166,22 @@ impl DspGraph {
     #[must_use]
     pub fn latency_positions(&self) -> u64 {
         self.slot.latency_positions()
+    }
+
+    /// The processes this graph's supervised stages run in, in chain order (§7).
+    ///
+    /// Empty for a graph with no supervised stage, and empty once the graph has been torn down —
+    /// a reaped worker is not a process any more, and reporting its old pid would name whatever the
+    /// operating system reuses that number for next.
+    ///
+    /// This is how the process boundary is checked from outside rather than believed: an operator
+    /// can inspect, limit or watch these processes, and a test can prove that the audio came from
+    /// one of them. Bounding their memory and CPU is deployment configuration
+    /// (`docs/specs/custom-call-dsp.md` §7.2), and these are the identifiers that configuration
+    /// needs.
+    #[must_use]
+    pub fn worker_pids(&self) -> Vec<u32> {
+        self.slot.worker_pids()
     }
 
     /// The lag this graph's supervised stages add, in frame durations (§7.1).

@@ -24,7 +24,7 @@ use sipx_media::dsp::{
     BuiltIn, BypassCause, DspCapability, DspFrame, DspResetCause, ExecutionPolicy,
     ExecutionProfile, FailureAction, FormatError, FrameAdmission, FrameProcessor, FrameSink,
     GraphBounds, GraphError, GraphPlan, GraphTransition, Parameter, ParameterError, ParameterValue,
-    ProcessError, Scratch, StreamFormat, SupervisedWorker, TeardownCause, WorkerResult,
+    ProcessError, Scratch, StreamFormat, TeardownCause, WorkerProcess,
 };
 use sipx_media::{
     AudioDirection, Codec, Config, MediaPort, MediaSession, PcmEncoding, PcmFormat, PcmSamples,
@@ -322,34 +322,35 @@ impl FrameProcessor for Downstream {
     }
 }
 
+/// The reference worker of `docs/specs/call-dsp-graph.md` §7.5, which `M-102` made the only kind
+/// of supervised worker there is: a program, run in a process of its own.
+const WORKER: &str = env!("CARGO_BIN_EXE_sipx-dsp-worker");
+
+/// A supervised worker that answers correctly, so the contained path is proven to carry audio.
+fn supervised_gain2() -> WorkerProcess {
+    WorkerProcess::new(
+        DspCapability::new("supervised-gain2")
+            .with_execution(ExecutionPolicy::new(ExecutionProfile::SupervisedIsolated)),
+        WORKER,
+    )
+    .arg("--mode")
+    .arg("gain")
+    .arg("--gain")
+    .arg("2")
+}
+
 /// A supervised worker that never answers, so the deadline is what is observed rather than the
 /// worker.
-struct NeverAnswers;
-
-impl SupervisedWorker for NeverAnswers {
-    fn capability(&self) -> DspCapability {
+fn never_answers() -> WorkerProcess {
+    WorkerProcess::new(
         DspCapability::new("never-answers").with_execution(
             ExecutionPolicy::new(ExecutionProfile::SupervisedIsolated)
                 .with_max_consecutive_misses(2),
-        )
-    }
-    fn run(&mut self, _samples: &[i16], _out: &mut Vec<i16>) -> WorkerResult {
-        WorkerResult::Withheld
-    }
-}
-
-/// A supervised worker that answers correctly, so the contained path is proven to carry audio.
-struct SupervisedGain2;
-
-impl SupervisedWorker for SupervisedGain2 {
-    fn capability(&self) -> DspCapability {
-        DspCapability::new("supervised-gain2")
-            .with_execution(ExecutionPolicy::new(ExecutionProfile::SupervisedIsolated))
-    }
-    fn run(&mut self, samples: &[i16], out: &mut Vec<i16>) -> WorkerResult {
-        out.extend(samples.iter().map(|sample| sample.saturating_mul(2)));
-        WorkerResult::Produced
-    }
+        ),
+        WORKER,
+    )
+    .arg("--mode")
+    .arg("withhold")
 }
 
 // --------------------------------------------------------------------------- harness ----
@@ -759,7 +760,7 @@ async fn a_supervised_stage_carries_audio_and_is_reaped() {
     let graph = session
         .attach_dsp(
             GraphPlan::new(AudioDirection::Outbound, GraphBounds::new())
-                .with_supervised(Box::new(SupervisedGain2)),
+                .with_supervised(supervised_gain2()),
         )
         .expect("activates");
     assert!(
@@ -820,7 +821,7 @@ async fn a_supervised_worker_that_never_answers_costs_its_declared_action() {
     let graph = session
         .attach_dsp(
             GraphPlan::new(AudioDirection::Outbound, GraphBounds::new())
-                .with_supervised(Box::new(NeverAnswers)),
+                .with_supervised(never_answers()),
         )
         .expect("activates");
 
@@ -873,7 +874,7 @@ async fn teardown_waits_on_a_barrier_proving_nothing_is_held() {
         .attach_dsp(
             GraphPlan::new(AudioDirection::Outbound, GraphBounds::new())
                 .with_processor(Box::new(Bias::new("bias", 1)))
-                .with_supervised(Box::new(SupervisedGain2)),
+                .with_supervised(supervised_gain2()),
         )
         .expect("activates");
 
@@ -899,7 +900,7 @@ async fn a_stopped_session_releases_its_graphs() {
     let graph = session
         .attach_dsp(
             GraphPlan::new(AudioDirection::Inbound, GraphBounds::new())
-                .with_supervised(Box::new(SupervisedGain2)),
+                .with_supervised(supervised_gain2()),
         )
         .expect("activates");
 

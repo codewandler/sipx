@@ -21,6 +21,15 @@ opus = ["sipx-audio/opus"]
 ## way; this feature supplies only the handshake.
 dtls = ["dep:openssl"]
 
+# The reference supervised DSP worker of `docs/specs/call-dsp-graph.md` §7.5. A supervised stage
+# runs its worker in an operating-system process, so the protocol needs a conforming peer that can
+# be spawned — by this crate's own tests, and by an application checking its supervision before it
+# writes a worker of its own. Declared here rather than discovered under `src/bin/` so that the
+# target's path says out loud that a published package ships an executable (`M-102`).
+[[bin]]
+name = "sipx-dsp-worker"
+path = "src/bin/dsp_worker.rs"
+
 [dependencies]
 rand.workspace = true
 sipx-sdp.workspace = true
