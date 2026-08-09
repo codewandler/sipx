@@ -144,6 +144,10 @@ class TheRepositoryItself(unittest.TestCase):
         Before `M-80` this reported six types, `Encoded` and `Packet` among them — the two whose
         field additions in `M-75` and `M-79` broke in-tree literals and are the reason the rule
         exists at all.
+
+        `M-92` removed the type boundary that kept the other twenty-nine out of the population, so
+        this failed against the tree it was widened over and names all of them. It now asserts both
+        halves of the rule: marked-or-argued, and — for a marked type — buildable-or-argued.
         """
         self.assertEqual([], guard.struct_problems(guard.guarded_structs(self.published)))
 
