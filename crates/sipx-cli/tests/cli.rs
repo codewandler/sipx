@@ -5420,10 +5420,38 @@ async fn a_one_call_load_run_reports_the_call_its_peer_answered() {
 #[tokio::test]
 async fn generated_media_load_pair_retains_the_rtp_workload() {
     let _scenario = process_scenario().await;
-    let (mut responder, mut lines, ready) = start_mode_responder("generated-media", "4", "2").await;
+    // The generator's in-flight ceiling, and the number of dialogs the responder must therefore
+    // carry at once for this workload to have been driven at all.
+    let concurrency: u64 = 2;
+    // Twice that, and the factor is the signalling pair's argument rather than its number: it is
+    // headroom for the dialog a retiring call has left behind. The responder frees a slot when its
+    // worker future is joined, which is strictly after it has put the 200 on the wire for that
+    // dialog's BYE; the generator frees its own slot on receiving that same 200 and places the
+    // replacement INVITE immediately. Every retiring call is therefore counted by both ends for as
+    // long as the machine takes to schedule the responder's accept loop, and all `concurrency` of
+    // them may retire together.
+    //
+    // An equal ceiling put admission control on the happy path of both of this run's slot
+    // handovers, and a full `sipx-cli` suite refused one of the four calls that way — a 503 with
+    // `active_high_water` exactly at the ceiling, nothing failed and nothing timed out (`X-130`).
+    // Four calls is only two handovers, which is why deliberate contention almost never catches it
+    // and why the equal ceiling looked safe: 46 runs at two and four CPU burners per core shed
+    // nothing, and every one of them still sat exactly at the ceiling. Lengthening the same pair to
+    // 40 calls — 38 handovers instead of 2, nothing else changed — sheds 3 calls over 6 runs at an
+    // equal ceiling and 0 over 6 at this one, where `active_high_water` reaches 3 in half the runs.
+    // That third slot is the call an equal ceiling refuses. The headroom is not a tolerance and
+    // does not weaken anything below; it removes a limit that was never what this test is about.
+    let max_active = concurrency * 2;
+    let concurrency_arg = concurrency.to_string();
+    let max_active_arg = max_active.to_string();
+    let (mut responder, mut lines, ready) =
+        start_mode_responder("generated-media", "4", &max_active_arg).await;
     let address = ready["address"].as_str().expect("readiness address");
+    // Four one-second calls two at a time is a little over two seconds of work; fifteen is the
+    // bound on a `load` that never returns at all, scaled like every other wait in this file
+    // because a busy machine takes longer to run the same process, not longer to hang.
     let output = tokio::time::timeout(
-        Duration::from_secs(15),
+        bound(Duration::from_secs(15)),
         sipx()
             .args([
                 "load",
@@ -5433,7 +5461,7 @@ async fn generated_media_load_pair_retains_the_rtp_workload() {
                 "--rate",
                 "20",
                 "--concurrency",
-                "2",
+                &concurrency_arg,
                 "--calls",
                 "4",
                 "--call-duration",
@@ -5489,6 +5517,19 @@ async fn generated_media_load_pair_retains_the_rtp_workload() {
             + summary["counts"]["cancelled"].as_u64().unwrap_or(0),
         4,
         "{summary}"
+    );
+    // A range rather than an equality, and both ends carry a claim. At least `concurrency` proves
+    // the responder really did carry the workload the generator asked for; no more than
+    // `max_active` proves admission control still held. The exact figure inside that band is the
+    // count of retiring dialogs the accept loop had not joined yet, which is the scheduling detail
+    // this test does not assert on — and which the headroom above exists to leave room for.
+    let high_water = summary["counts"]["active_high_water"]
+        .as_u64()
+        .expect("active_high_water is a count");
+    assert!(
+        (concurrency..=max_active).contains(&high_water),
+        "responder carried {high_water} dialogs at once, outside {concurrency}..={max_active}: \
+         {summary}"
     );
     assert_eq!(summary["post_drain"]["active_dialogs"], 0);
     assert_eq!(summary["post_drain"]["owned_tasks"], 0);
