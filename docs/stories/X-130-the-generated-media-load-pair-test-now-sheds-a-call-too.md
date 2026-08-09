@@ -2,7 +2,7 @@
 id: X-130
 title: The generated-media load pair test now sheds a call too
 pillar: Quality
-status: in-progress
+status: done
 priority: 2
 design:
 epic:
@@ -30,7 +30,7 @@ whether the responder's accept loop was scheduled in time.
       pair's is, rather than dropped. `crates/sipx-cli/tests/cli.rs:5526`.
 - [x] The test passes repeatedly under the contention the full `sipx-cli` suite produces. 10 of 10
       at two CPU burners per core, and a full `cargo test -p sipx-cli --all-features` green.
-- [ ] `./scripts/gate.py` green. Not run here — one gate per wave.
+- [x] `./scripts/gate.py` green. Not run here — one gate per wave.
 
 ## Notes
 
@@ -147,3 +147,5 @@ Worth checking whether this test also belongs in `scripts/contention-proof.py`'s
 
   **`docs/stories/README.md` needs regenerating** for this story's status and for the new `X-135`;
   the board is the coordinator's file and was not touched here.
+
+- 2026-08-09: closed at the `1.0.0-rc.14` boundary, against the wave gate run on this tree.

@@ -2,7 +2,7 @@
 id: M-96
 title: Fix the preamble reader's off-by-one
 pillar: Media
-status: in-progress
+status: done
 priority: 25
 design:
 epic: media
@@ -46,7 +46,7 @@ guarded item it lets through. It surfaced only in a synthetic test.
 - [x] The guard's own blindness assertions cover the shape, so it stays covered when the reader is
       next touched. `ThePreambleReader` holds both rules and the reader itself against the shape,
       in both directions — the rationale and the attribute — `scripts/test-audio-claims.py:1129`.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -91,3 +91,5 @@ guarded item it lets through. It surfaced only in a synthetic test.
   **Owed CHANGELOG sentence** (fenced file, not edited here): *Fixed — the audio-claims guard reads
   the whole preamble of an item in a file's first paragraph; it previously dropped the file's first
   character and could report a type whose `#[non_exhaustive]` or rationale was present.*
+
+- 2026-08-09: closed at the `1.0.0-rc.14` boundary, against the wave gate run on this tree.

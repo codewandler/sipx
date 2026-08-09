@@ -1,13 +1,39 @@
 ---
 title: What's new
-description: Release highlights and adoption notes for the sipx 1.0.0-rc.13 release candidate.
+description: Release highlights and adoption notes for the sipx 1.0.0-rc.14 release candidate.
 ---
 
 # What's new
 
 <!-- BEGIN generated:release-heading -->
-## 1.0.0-rc.13 — 2026-08-09
+## 1.0.0-rc.14 — 2026-08-09
 <!-- END generated:release-heading -->
+
+RC.14 finishes the extensibility rollout while it is still reversible, and repairs three checkers
+that were accepting what they could not see.
+
+```bash
+cargo install --locked --version =1.0.0-rc.14 sipx-cli
+```
+
+- **Breaking: every reachable public enum in the published crates is `#[non_exhaustive]`** or
+  carries a written argument for being exhaustive. A downstream `match` on one of the 61 marked
+  types needs a `_` arm it did not need before; what it buys is that sipx can add a method, a
+  transport or a driver instruction in a minor release rather than a major one — a choice that
+  disappears at `1.0.0`.
+- **An application can read what a call's voice detection is measuring against**, and is told when
+  calibration moves it. Every field is a sample count or an amplitude; the wire carries no audio,
+  and the record has no field that could hold any.
+- **`--media none`** on both load examples negotiates no session at all, so plain SIP throughput can
+  be measured apart from the cost of having a media stack. The caller half is now public in
+  `sipx-call` and shared with `sipx load --mode signalling`.
+- **Three checkers stopped accepting what they could not see**: one command's help may name another
+  command's flag again, a flag list broken by prose is reported rather than silently accepted, and
+  the audio-claims guard reads the whole preamble of an item at the top of a file.
+- **The generated-media load-pair test has admission headroom**, so its `connected == calls` is a
+  claim about the workload rather than about scheduling luck.
+
+## 1.0.0-rc.13 — 2026-08-09
 
 RC.13 is four defects that only a measurement would have found, and one thing an operator had no way
 to know.
@@ -715,5 +741,5 @@ answer calls, but application callback bindings are not implemented.
 This website is built from `main`, so a page or API link may describe work newer than the tagged
 release. Use the exact crates.io version when reproducibility matters, and consult the
 [complete changelog](https://github.com/codewandler/sipx/blob/main/CHANGELOG.md) before updating a
-Git revision. Unreleased behavior is not part of `1.0.0-rc.13` merely because it appears on this
+Git revision. Unreleased behavior is not part of `1.0.0-rc.14` merely because it appears on this
 site.

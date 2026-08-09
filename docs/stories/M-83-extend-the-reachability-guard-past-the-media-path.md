@@ -2,7 +2,7 @@
 id: M-83
 title: Extend the extensibility guard past the media path
 pillar: Media
-status: in-progress
+status: done
 priority: 9
 design:
 epic: media
@@ -42,12 +42,12 @@ than it sounds, so this may be cheaper than the count suggests.
       adjacent `/// Exhaustive by design:` argument, with the reason recorded **at the type**.
 - [x] `GUARDED_SURFACE` is retired, or reduced to exactly the crates with a stated reason for being
       outside it. The checker's outstanding count reaches zero, or prints what remains and why.
-- [ ] Each enum that becomes `#[non_exhaustive]` is a breaking change for exhaustive `match` arms
+- [x] Each enum that becomes `#[non_exhaustive]` is a breaking change for exhaustive `match` arms
       and gets one `CHANGELOG.md` statement covering the set, saying what a downstream arm must add
       and what it buys.
 - [x] A failing-first proof: with the boundary widened and the enums untouched, the checker reports
       them; after, it is quiet.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -128,3 +128,5 @@ than it sounds, so this may be cheaper than the count suggests.
   `python3 -m unittest scripts/test-audio-claims.py` (104 tests), `check-audio-claims.py --check`,
   `check-provenance.sh`, `cargo check`/`clippy --workspace --all-targets --all-features
   -D warnings`, `cargo fmt --all`, `cargo test` for all eight changed crates, and `cargo doc`.
+
+- 2026-08-09: closed at the `1.0.0-rc.14` boundary, against the wave gate run on this tree.

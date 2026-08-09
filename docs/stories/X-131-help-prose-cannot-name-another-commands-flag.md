@@ -2,7 +2,7 @@
 id: X-131
 title: Help prose cannot name another command's flag
 pillar: Quality
-status: in-progress
+status: done
 priority: 5
 design:
 epic:
@@ -34,7 +34,7 @@ merely mentioned it.
       makes over-narrowing loud rather than quiet.
 - [x] `sipx load-responder`'s `--max-active` guidance names the generator's flag as `--concurrency`
       again, since that is the spelling an operator types. `crates/sipx-cli/src/cli.rs:481`.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Notes
 
@@ -112,3 +112,5 @@ easy to write and easy to make too permissive.
   name another command's flag; the CLI-reference check reads a command's options from its help's
   option entries rather than from every `--token` in the text. `sipx load-responder --help` sizes
   `--max-active` against the generator's `--concurrency` by name again.*
+
+- 2026-08-09: closed at the `1.0.0-rc.14` boundary, against the wave gate run on this tree.

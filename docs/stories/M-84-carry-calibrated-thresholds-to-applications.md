@@ -2,7 +2,7 @@
 id: M-84
 title: Carry calibrated thresholds onto the application wire
 pillar: Media
-status: in-progress
+status: done
 priority: 26
 design: docs/designs/call-audio-analysis.md
 epic: call-audio-analysis
@@ -29,7 +29,7 @@ to a Rust caller.
       derived-tested against that spec the way `call.voice.started` is.
 - [x] The wire surface carries no audio and no field an application could reconstruct audio from,
       and the check that would catch a regression there is named.
-- [ ] Generated bindings and docs are updated and the full gate is green.
+- [x] Generated bindings and docs are updated and the full gate is green.
 
 ## Progress
 
@@ -130,3 +130,5 @@ to a Rust caller.
 
 - 2026-08-08: renumbered from `M-80` on filing. `M-80` had already been allocated in the same wave,
   to the `#[non_exhaustive]` decision for `Encoded` and `Packet`. Only the id moved.
+
+- 2026-08-09: closed at the `1.0.0-rc.14` boundary, against the wave gate run on this tree.

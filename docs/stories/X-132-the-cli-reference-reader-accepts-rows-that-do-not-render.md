@@ -2,7 +2,7 @@
 id: X-132
 title: The CLI reference reader accepts rows that do not render
 pillar: Quality
-status: in-progress
+status: done
 priority: 5
 design:
 epic:
@@ -57,7 +57,7 @@ different change from narrowing a checker and belongs in its own diff.
 - [x] `website/docs/reference/cli.md`'s `sipx load-responder` section carries all twelve of its
       flags in one table, with the sizing paragraph below it rather than through it.
 - [x] The rest of the page is checked for the same shape, since nothing has been asking.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Notes
 
@@ -124,3 +124,4 @@ needs after the ceiling.
   documented flags from the rows of a Markdown table, so a flag list broken by prose is reported
   instead of silently accepted.*
 
+- 2026-08-09: closed at the `1.0.0-rc.14` boundary, against the wave gate run on this tree.
