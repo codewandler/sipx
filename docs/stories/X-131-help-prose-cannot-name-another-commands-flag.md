@@ -101,6 +101,13 @@ easy to write and easy to make too permissive.
   After: `python3 scripts/test-cli-reference.py` 18 tests OK, and `./scripts/check-cli-reference.py`
   exits 0 with "8 command helps and 5 versioned JSON contracts agree".
 
+  Filed while here: `X-132`. Narrowing the executable half of this comparison meant reading the
+  page half beside it, and the page half has the same shape of defect — it counts any `|`-leading
+  line in a command's section as a documented flag without asking whether those lines form a table.
+  `sipx load-responder`'s last six flags sit below a paragraph spliced through the middle of its
+  table, with no delimiter row, so they are documented to the checker and prose to a reader. Left
+  alone here: moving text on the public page is a different change from narrowing a checker.
+
   **Owed CHANGELOG sentence** (fenced file, not edited here): *Fixed — one command's `--help` may
   name another command's flag; the CLI-reference check reads a command's options from its help's
   option entries rather than from every `--token` in the text. `sipx load-responder --help` sizes
