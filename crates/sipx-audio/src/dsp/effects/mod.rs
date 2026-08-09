@@ -65,6 +65,17 @@ pub use glitch::{MAX_STUTTER_POSITIONS, Stutter};
 pub use level::{Gain, Polarity};
 pub use shape::{BitCrush, HardClip, SoftClip};
 
+/// The arithmetic, frame plumbing and one-pole section `M-66`'s noise reduction shares with these.
+///
+/// Not public: these are `crate::dsp`'s internals, visible to [`crate::dsp::noise`] and nowhere
+/// else. A suppressor that admitted frames through its own copy of the refusal taxonomy, or that
+/// re-derived the one-pole coefficient from its own table, would be a second reading of documents
+/// whose whole point is that there is one — so the reuse is the design and not a convenience.
+pub(in crate::dsp) use filter::{OnePole, coefficient};
+pub(in crate::dsp) use frame::{Body, CHANNELS, MAX_CHANNELS, open, state_bytes, transform};
+
+pub(in crate::dsp) use arithmetic::{narrow, scaled};
+
 /// [`Gain`]'s declared identifier.
 pub const GAIN: &str = "sipx.gain";
 /// [`Polarity`]'s declared identifier.

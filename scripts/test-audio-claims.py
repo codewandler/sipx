@@ -356,6 +356,17 @@ class TheModuleReader(unittest.TestCase):
                 "dsp::effects::glitch",
                 "dsp::effects::level",
                 "dsp::effects::shape",
+                # `M-66`'s noise reduction: `dsp::noise` is the interface — a declaration naming
+                # warm-up, activity input and host requirement, plus the trait a reducer
+                # implements — and `dsp::noise::subband` is the one implementation this workspace
+                # ships behind it, a three-band statistical suppressor built from `M-65`'s one-pole
+                # section and integer arithmetic. Both belong here for the same reason the effects
+                # do and one more: this is the module a reader would most expect to load a model,
+                # and it loads none. It cannot — the processor contract gives it no socket, no file
+                # and no device — so it carries no codec claim, no model claim and no accelerator
+                # dependency, which is exactly what `HostRequirement::PortableInteger` declares.
+                "dsp::noise",
+                "dsp::noise::subband",
                 "g711",
                 "g722",
                 "l16",
