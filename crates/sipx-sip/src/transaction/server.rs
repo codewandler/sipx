@@ -7,6 +7,10 @@ use crate::transaction::timing::{Timer, Timers};
 use crate::transaction::{Output, Reason, Reliability, TuEvent};
 
 /// The state of a server transaction.
+///
+/// Exhaustive by design: the union of the states of RFC 3261 §17.2's two server machines with
+/// RFC 6026's `Accepted`. See [`ClientState`](crate::transaction::ClientState) — the same argument
+/// on the other side of the transaction, and the two must gain a state together or not at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServerState {
     /// Non-INVITE: the request is with the transaction user and nothing has been sent.

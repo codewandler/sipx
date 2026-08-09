@@ -335,6 +335,9 @@ async fn discover(options: &PeersOptions, registrar: &str) -> Result<Vec<Peer>, 
             .map(|password| Credentials::new(user.clone(), password));
         let consumer = RegistrationConsumer::new(registrar, CONTACT_LIMIT);
         let target = event_peer(target);
+        // `None` when the candidate's transport has no event-client name — see `event_peer`. The
+        // address is reported unreachable so the pass moves to the next one, which is what a
+        // candidate this command cannot dial is.
         // A fresh dialog identity per candidate. A subscription attempted at another address is a
         // new usage (RFC 6665 §4.1.2.1), and reusing the Call-ID and tag of the attempt that just
         // failed would present it to the registrar as the first one arriving twice.
@@ -345,6 +348,12 @@ async fn discover(options: &PeersOptions, registrar: &str) -> Result<Vec<Peer>, 
                 return crate::destination::Attempted::Answered(Failed::stated(
                     Exit::Usage,
                     "invalid registrar resource for the registration package",
+                ));
+            };
+            let Some(target) = target else {
+                return crate::destination::Attempted::Unreachable(Failed::stated(
+                    Exit::Failed,
+                    "the candidate's transport has no event-client name",
                 ));
             };
             let start = EventStart {
@@ -424,6 +433,14 @@ fn unreached(outcome: crate::destination::Unreached<Failed>) -> Unreachable {
         crate::destination::Unreached::Answered(failed) => {
             Unreachable::stated(failed.exit, failed.message)
         }
+        // `Unreached` is `#[non_exhaustive]` since `M-83`. The arm above says why `Nothing` is
+        // answered by name rather than swept into a catch-all, and the same rule applies here:
+        // this states that the ending is one the command does not know, instead of borrowing a
+        // message from an ending that did not happen.
+        _ => Unreachable::stated(
+            Exit::Failed,
+            "the candidate pass ended for an unstated reason",
+        ),
     }
 }
 
@@ -560,7 +577,13 @@ fn registrar_peers(delivery: EventNotification<RegistrationSnapshot>) -> Vec<Pee
         .collect()
 }
 
-fn event_peer(target: &Target) -> EventPeer {
+/// The event client's name for a resolved target, or `None` when it has none.
+///
+/// Partial since `M-83` made both transport enums `#[non_exhaustive]`: the SIP transport set grows
+/// and neither crate may promise otherwise across a release. A candidate this cannot name is
+/// declined rather than approximated — subscribing to a registrar over a transport it did not
+/// select is the one substitution that could downgrade a protected flow.
+fn event_peer(target: &Target) -> Option<EventPeer> {
     let transport = match target.transport {
         TransportKind::Udp => Transport::Udp,
         TransportKind::Tcp => Transport::Tcp,
@@ -568,14 +591,15 @@ fn event_peer(target: &Target) -> EventPeer {
         TransportKind::Ws => Transport::Ws,
         TransportKind::Wss => Transport::Wss,
         TransportKind::Quic => Transport::Quic,
+        _ => return None,
     };
-    EventPeer {
+    Some(EventPeer {
         address: target.addr,
         transport,
         connection: None,
         identity: target.verify_as.clone(),
         path: target.path.clone(),
-    }
+    })
 }
 
 /// Read the book from wherever it lives.
@@ -890,7 +914,7 @@ mod tests {
         )
         .verifying("registrar.example.test")
         .at_path("/events");
-        let peer = event_peer(&target);
+        let peer = event_peer(&target).expect("a Wss target has an event-client transport");
         assert_eq!(peer.transport, Transport::Wss);
         assert_eq!(peer.identity.as_deref(), Some("registrar.example.test"));
         assert_eq!(peer.path.as_deref(), Some("/events"));

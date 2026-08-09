@@ -146,7 +146,10 @@ fn every_rfc5118_message_is_classified_and_behaves_as_the_rfc_says() {
                     expected
                 );
             }
-            Expect::HeaderErr(_) | Expect::ValidateErr(_) | Expect::Unreferenced => panic!(
+            // `HeaderErr`, `ValidateErr` and `Unreferenced`, and — since `M-83` made `Expect`
+            // `#[non_exhaustive]` — any class added after this was written. The panic says the
+            // same thing to all of them, which is what it said to the three before.
+            _ => panic!(
                 "RFC 5118 {} ({}) is classified {:?}; this corpus uses only ParseOk and ParseErr, \
                  and a new class needs its assertion written here before it is used",
                 case.section, case.name, case.expect

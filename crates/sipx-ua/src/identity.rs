@@ -341,6 +341,11 @@ impl<F: CredentialFetcher> CredentialFetcher for CachedCredentials<F> {
 }
 
 /// Successful verification state.
+///
+/// Exhaustive by design: a verification that did not fail either verified a header or established
+/// that policy required none. Everything else is a failure and belongs to
+/// [`VerificationFailure`] — which is marked non-exhaustive precisely because RFC 8224 §6.2.2's
+/// status list is the side of this split that grows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verification {
     /// One trusted header verified.

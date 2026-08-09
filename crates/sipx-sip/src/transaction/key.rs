@@ -14,6 +14,10 @@ use crate::message::{Headers, Method, Request, Response};
 use crate::name::HeaderName;
 
 /// A key identifying a transaction.
+///
+/// Exhaustive by design: the module header states the whole of it — there are two matching schemes
+/// and the magic cookie decides which one a message is matched under. A message carries nothing
+/// that could select a third, so a third variant would be a key no message could be given.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TransactionKey {
     /// RFC 3261 matching: the branch carries the magic cookie.

@@ -26,6 +26,10 @@ pub const PIDF_TYPE: &str = "application/pidf+xml";
 /// Two values, and only two. §4.1.3 defines `open` and `closed` and nothing else; the rich
 /// vocabulary people expect — busy, away, on the phone — is RFC 4480's, which is a separate
 /// document and a separate story.
+///
+/// Exhaustive by design: that is the argument. §4.1.3's `basic` element is a closed pair, and
+/// RFC 4480's vocabulary arrives as separate elements beside it rather than as further values
+/// here — so this type gaining a variant would mean PIDF's own status element had.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Basic {
     /// Reachable.
@@ -184,6 +188,11 @@ impl Pidf {
 /// The three operations differ only by what is present, which is why they are read as one thing
 /// and dispatched on: an entity tag with no body is a refresh, with a body a modify, and with
 /// `Expires: 0` a removal.
+///
+/// Exhaustive by design: [`Publish::read`] is a total function of three inputs — a tag or none, a
+/// body or none, and whether the granted expiry is zero — and these five variants are its complete
+/// case analysis. A sixth would have to be an operation those three inputs cannot spell, which is
+/// the same as saying §6 could not have received it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Publish {
     /// First publication: a body and no entity tag.
@@ -237,6 +246,7 @@ impl Publish {
 
 /// How a publication attempt was answered.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Published {
     /// Accepted. The tag identifies the state from now on and goes in `SIP-ETag` (§6 step 6).
     ///

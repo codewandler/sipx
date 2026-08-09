@@ -9,6 +9,7 @@ use std::time::Duration;
 
 /// What to do when the app fails (§9.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum OnFailure {
     /// Keep the program that is already running.
     Continue,
@@ -120,6 +121,7 @@ fn protocol_action(action: &OnFailure) -> sipx_app_protocol::OnFailure {
 
 /// How a callback failed — the four §9.2 knobs, as the thing that selects one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Failure {
     /// It did not return in time.
     Timeout,

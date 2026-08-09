@@ -22,6 +22,7 @@ pub const EVENT_QUEUE: usize = sipx_app_protocol::MAX_QUEUED_EVENTS;
 
 /// One thing the scenario makes happen.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Step {
     /// A call event occurs.
     Event {
@@ -68,6 +69,10 @@ impl Step {
 }
 
 /// How a call finished.
+///
+/// Exhaustive by design: when the scenario's clock reaches its bound the call is up or it is over,
+/// and every reason it might be over is [`EndCause`]'s rather than this type's. A third conclusion
+/// would be a call that is neither live nor ended, which the scenario has no way to observe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Conclusion {
     /// Still up when the scenario ended.

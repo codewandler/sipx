@@ -129,6 +129,7 @@ impl SourceAdmission {
 
 /// What a pre-transaction request policy decided.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum RequestPolicyDecision {
     /// Continue without adding fields.
     Allow,
@@ -167,6 +168,10 @@ impl std::fmt::Debug for RequestPolicyRef {
 }
 
 /// Which side of the endpoint boundary a message crossed.
+///
+/// Exhaustive by design: the boundary has two sides and an observed message crossed it once, so it
+/// arrived or it left. Adding a direction would mean adding a boundary, and an observation stream
+/// with three of them would no longer be describing one endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageDirection {
     /// Parsed network input.
@@ -177,6 +182,7 @@ pub enum MessageDirection {
 
 /// How the transaction layer classified an observed message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TransactionClass {
     /// A new server transaction.
     ServerCreated,
@@ -220,6 +226,7 @@ pub struct ConnectionId {
 
 /// A connection lifecycle transition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ConnectionState {
     /// An inbound socket was accepted into the pool.
     Accepted,
@@ -248,6 +255,7 @@ pub struct ConnectionObservation {
 
 /// One item on the bounded endpoint observation stream.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum EndpointObservation {
     /// A parsed or finalized SIP message.
     Message(Box<MessageObservation>),

@@ -862,6 +862,10 @@ fn unreached_dial(
         }
         crate::destination::Unreached::Unreachable { last, .. }
         | crate::destination::Unreached::Answered(last) => last.to_string(),
+        // `Unreached` is `#[non_exhaustive]` since `M-83`, and a frame's refusal message is read
+        // by a person. Saying the ending is unnamed is worth more than repeating one of the
+        // messages above over an ending that did not produce it.
+        _ => "the target candidate pass ended for an unstated reason".to_owned(),
     };
     Refusal { message, attempts }
 }

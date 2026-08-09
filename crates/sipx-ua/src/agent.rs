@@ -598,9 +598,6 @@ impl UserAgent {
 
         match outcome {
             Ok(reached) => Ok(reached),
-            // Nothing is attempted at all only when the list was empty, which is a caller that
-            // resolved nothing; there is no transport failure to report for that.
-            Err(destination::Unreached::Nothing) => Err(Error::NoResponse),
             Err(destination::Unreached::Expired { .. }) => Err(Error::AttemptTimeout {
                 limit: budget.unwrap_or_default(),
             }),
@@ -611,6 +608,12 @@ impl UserAgent {
                 Error::Transport(source) => Error::ConnectionFailed { attempts, source },
                 other => other,
             }),
+            // `Nothing`: nothing was attempted at all, which happens only when the list was
+            // empty — a caller that resolved nothing, with no transport failure to report.
+            // `Unreached` is `#[non_exhaustive]` since `M-83`, so this arm also takes an ending
+            // this crate cannot name, and the same answer is the honest one for it: no candidate
+            // answered, and there is nothing more specific to say about why.
+            Err(_) => Err(Error::NoResponse),
         }
     }
 

@@ -13,6 +13,7 @@ use std::time::Duration;
 
 /// The state of a subscription, as a `Subscription-State` header says it (RFC 6665 §4.1.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum State {
     /// Accepted and authorised. Notifications are flowing.
     Active,
@@ -51,6 +52,7 @@ impl State {
 /// interchangeable about it: `deactivated` says re-subscribe now, `probation` says wait,
 /// `rejected` says do not, and `noresource` says there is nothing left to subscribe to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Reason {
     /// The subscription ended and the subscriber should re-subscribe immediately.
     Deactivated,

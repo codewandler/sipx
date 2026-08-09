@@ -15,6 +15,7 @@ use crate::name::HeaderName;
 
 /// Something wrong with a message that parsed.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Finding {
     /// A header RFC 3261 §8.1.1 requires is absent.
     MissingRequiredHeader(&'static str),

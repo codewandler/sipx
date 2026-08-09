@@ -180,6 +180,11 @@ fn valid_digest(value: &str) -> bool {
 }
 
 /// A canonical origin or destination identity.
+///
+/// Exhaustive by design: RFC 8225 §5.2's identity claim has two forms, a telephone number and a
+/// URI, and RFC 8224 §§8.1, 8.3 and 8.5 derive both from the SIP message. An identity that is
+/// neither cannot be signed or verified under those sections at all, so it is not one this type
+/// could usefully hold.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum CanonicalIdentity {
     /// Telephone-number identity, containing only digits, `*`, and `#`.

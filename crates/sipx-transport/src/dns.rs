@@ -84,6 +84,10 @@ pub enum ResolutionError {
 ///
 /// The distinction between "no records" and "could not ask" is the whole reason this is not
 /// just `Vec<T>`.
+///
+/// Exhaustive by design: either a server answered the question or none did. `Records(vec![])` is
+/// the zone saying the name has nothing; `Unavailable` is nobody saying anything. Every lookup
+/// result is one of those two, and a third variant would be a server that answered and did not.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Answer<T> {
     /// The server answered, with these records — possibly none.
@@ -761,6 +765,11 @@ fn uri_transport(uri: &sipx_sip::Uri) -> Result<crate::TransportKind, Resolution
         sipx_sip::UriTransport::Ws => crate::TransportKind::Ws,
         sipx_sip::UriTransport::Wss => crate::TransportKind::Wss,
         sipx_sip::UriTransport::Quic => crate::TransportKind::Quic,
+        // `UriTransport` is `#[non_exhaustive]` since `M-83`: a `transport=` value `sipx-sip`
+        // learns to parse before this crate can carry it has no [`TransportKind`], and the same
+        // refusal a URI naming an unusable transport already gets is the honest answer. Inventing
+        // a nearby transport is what `selected_transport` refuses to do for `sips:` over UDP.
+        _ => return Err(crate::ResolutionError::InvalidTransport.into()),
     })
 }
 

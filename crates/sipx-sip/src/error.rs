@@ -170,6 +170,7 @@ pub enum FramingError {
 
 /// Which limit was exceeded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LimitKind {
     /// Total message size.
     MessageBytes,

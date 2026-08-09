@@ -27,6 +27,7 @@ use crate::uri::Uri;
 /// §3.1.1.2 sends a method built from exclamation marks, percent signs, backticks and
 /// apostrophes, and it is a perfectly legal method.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Method {
     /// `INVITE`
     Invite,
@@ -113,6 +114,11 @@ impl std::fmt::Display for Method {
 }
 
 /// The protocol version on a start line.
+///
+/// Exhaustive by design: this is not a version registry but a two-way split — the one version sipx
+/// speaks, and everything else kept verbatim so a 505 can quote it back. A version sipx came to
+/// speak would be a second protocol rather than a variant, and one it does not speak is already
+/// representable, so neither direction adds a case.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Version {
     /// `SIP/2.0`, the only version sipx speaks.
@@ -940,6 +946,10 @@ pub struct Response {
 }
 
 /// A request or a response.
+///
+/// Exhaustive by design: RFC 3261 §7 — "SIP messages are either requests or responses" — and every
+/// rule in the document below it is written on that split. A third kind of SIP message would not
+/// be a variant of this type; it would be a different protocol arriving on the same port.
 #[derive(Debug, Clone)]
 pub enum Message {
     /// A request.

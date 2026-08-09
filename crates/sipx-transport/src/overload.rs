@@ -15,6 +15,7 @@ use sipx_sip::{Header, HeaderName, Headers, Request, Response};
 
 /// Which RFC 7339 message category local policy assigns to a request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RequestCategory {
     /// Traffic reduced first.
     Ordinary,
@@ -24,6 +25,7 @@ pub enum RequestCategory {
 
 /// The feedback an endpoint reports when its application queue is full.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum OverloadFeedback {
     /// Ask the upstream peer to discard this percentage of requests.
     Loss(u8),
@@ -242,7 +244,12 @@ impl Controller {
                 self.priority_tolerance_intervals,
                 now,
             ))),
-            OverloadAlgorithm::Loss | OverloadAlgorithm::Other(_) => None,
+            // A `loss` report over 100 is out of range, an extension token is one this side does
+            // not implement, and `OverloadAlgorithm` is `#[non_exhaustive]` since `M-83` so an
+            // algorithm added later reads the same way. None of them may be applied: RFC 7339
+            // §5.2 has a client throttle only for an algorithm it agreed to, and guessing at one
+            // would shed traffic on terms the server never asked for.
+            _ => None,
         };
         self.peers.insert(
             peer,

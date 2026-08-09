@@ -143,6 +143,11 @@ fn parameter(input: &str, name: &str) -> Option<String> {
 }
 
 /// What verification concluded.
+///
+/// Exhaustive by design: the credentials are right or they are wrong, and right ones were computed
+/// over a nonce that is fresh or expired. That partition is exactly what RFC 7616 §3.3's `stale`
+/// parameter exists to carry, so a fourth verdict would be a conclusion the challenge cannot
+/// express. Why verification failed is [`Reason`]'s, which does grow.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
     /// The credentials are correct and fresh.
@@ -159,6 +164,7 @@ pub enum Verdict {
 
 /// Why verification failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Reason {
     /// The digest did not match the password.
     ///

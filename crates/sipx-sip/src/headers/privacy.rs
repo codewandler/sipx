@@ -20,6 +20,7 @@ const LABEL: &str = "Privacy";
 /// `Extension` retains the spelling of a later token so policy can recognize it without waiting
 /// for this enum to gain another variant.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum PrivacyValue {
     /// Request user-level privacy.
     User,

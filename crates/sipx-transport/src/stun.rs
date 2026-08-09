@@ -78,6 +78,10 @@ pub fn is_stun(datagram: &[u8]) -> bool {
 }
 
 /// What a datagram that is STUN turned out to say.
+///
+/// Exhaustive by design: RFC 8489 §5 gives a STUN message four classes and only two of them are
+/// replies — a success response and an error response. A request and an indication answer no
+/// transaction, so nothing else can arrive carrying the [`TransactionId`] this type reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reply {
     /// A Binding Response, with the address the server saw — if it named one.

@@ -689,7 +689,11 @@ impl Responses {
             TuEvent::Response(_) => InviteObservation::Provisional,
             TuEvent::Timeout => InviteObservation::Timeout,
             TuEvent::TransportError => InviteObservation::TransportError,
-            TuEvent::Request(_) | TuEvent::Ack(_) => return,
+            // A request or an ACK says nothing about this invitation's fate, and neither does an
+            // event this crate has not met: `TuEvent` is `#[non_exhaustive]` since `M-83`, so the
+            // wildcard is required and leaving the last observation standing is the only reading
+            // that cannot invent one.
+            _ => return,
         };
     }
 
@@ -3683,6 +3687,11 @@ impl Driver {
                 Output::ClearTimer(timer) => self.timers.clear(&(key.clone(), timer)),
                 Output::ToTu(event) => self.deliver(key, *event, origin).await,
                 Output::Terminated(_) => self.finish_transaction(key),
+                // `Output` is `#[non_exhaustive]` since `M-83`, so the driver has to write this
+                // arm. An instruction it cannot read is one `sipx-sip` added without teaching the
+                // driver to perform it: it is reported rather than performed, because the
+                // alternatives are to panic on a peer's message or to leave no trace at all.
+                _ => tracing::warn!("a transaction asked for an output this driver cannot perform"),
             }
         }
         Performed { sent_message }

@@ -384,10 +384,14 @@ impl Failed {
 fn unreached(outcome: crate::destination::Unreached<Cause>) -> Failed {
     let attempts = outcome.attempts();
     let cause = match outcome {
-        crate::destination::Unreached::Nothing => Cause::Transport,
         crate::destination::Unreached::Expired { .. } => Cause::Timeout,
         crate::destination::Unreached::Unreachable { last, .. }
         | crate::destination::Unreached::Answered(last) => last,
+        // `Nothing`, and — since `M-83` made `Unreached` `#[non_exhaustive]` — an ending this
+        // harness cannot name. Both are counted as a transport failure, which is what an address
+        // list that produced no answer leaves; the alternative is a call counted as neither
+        // succeeded nor failed.
+        _ => Cause::Transport,
     };
     Failed { cause, attempts }
 }

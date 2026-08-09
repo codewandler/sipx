@@ -68,6 +68,11 @@ const INSTANCE_PARAM: &str = "+sip.instance";
 /// only the application knows whether the address it is about to put in a `Contact` has to
 /// outlive this registration. Unlinkability is a property that must be *asked* for — and, having
 /// been asked for, is never quietly downgraded: see [`Gruus::preferred`].
+///
+/// Exhaustive by design: RFC 5627 defines two GRUUs and the sections quoted above are the whole of
+/// the difference between them — one keeps working, one cannot be correlated. A registrar has
+/// nothing else to hand out, because a third kind would need a third document to define what it
+/// guarantees.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Kind {
     /// One stable URI for this instance, usable for as long as the instance exists.

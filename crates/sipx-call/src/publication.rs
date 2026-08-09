@@ -563,7 +563,11 @@ impl Publications {
             Published::Invalid => {
                 answer(&endpoint, incoming, 400, "Bad Request", None, None, None).await;
             }
-            Published::Unavailable => {
+            // `Unavailable`: the compositor could not answer. `Published` is `#[non_exhaustive]`
+            // since `M-83`, so this arm also takes an answer this dispatcher cannot read, and 500
+            // is right for both — the publication reached a conclusion the host has no response
+            // for, which is the host's problem and not the publisher's.
+            _ => {
                 answer(
                     &endpoint,
                     incoming,
@@ -713,6 +717,11 @@ impl Driver {
                     // discard: no receiver means the application released its observation handle.
                     let _ = self.states.send(Some(change));
                 }
+                // `Output` is `#[non_exhaustive]` since `M-83`, so this driver has to write the
+                // arm. An instruction it cannot perform is one `sipx-ua` added without teaching
+                // the dispatcher to carry it out; reporting it is all that is left, because
+                // guessing at an action for a publication holding an entity tag is worse.
+                _ => tracing::warn!("a publication asked for an output this driver cannot perform"),
             }
         }
     }
@@ -724,7 +733,11 @@ impl Driver {
         let Some((events, _)) = self.events.as_ref() else {
             return;
         };
-        match self.endpoint.send(request, transport_target(peer)).await {
+        let Some(target) = transport_target(peer) else {
+            tracing::warn!("no PUBLISH target: the peer's transport has no transport-layer name");
+            return;
+        };
+        match self.endpoint.send(request, target).await {
             Ok(mut responses) => {
                 let events = events.clone();
                 let counters = Arc::clone(&self.shared.counters);
@@ -969,26 +982,33 @@ async fn answer(
     }
 }
 
-fn transport(value: sipx_ua::event_client::Transport) -> TransportKind {
-    match value {
+/// The transport layer's name for the event client's, or `None` when it has none.
+///
+/// `M-83` made both enums `#[non_exhaustive]`, because the SIP transport set grows — QUIC is the
+/// proof — so this mapping is partial and has to be. Every total answer available downgrades: an
+/// unknown transport sent over UDP is a protected flow answered in the clear, which is the one
+/// mistake a publication holding an entity tag must not make.
+fn transport(value: sipx_ua::event_client::Transport) -> Option<TransportKind> {
+    Some(match value {
         sipx_ua::event_client::Transport::Udp => TransportKind::Udp,
         sipx_ua::event_client::Transport::Tcp => TransportKind::Tcp,
         sipx_ua::event_client::Transport::Tls => TransportKind::Tls,
         sipx_ua::event_client::Transport::Ws => TransportKind::Ws,
         sipx_ua::event_client::Transport::Wss => TransportKind::Wss,
         sipx_ua::event_client::Transport::Quic => TransportKind::Quic,
-    }
+        _ => return None,
+    })
 }
 
-fn transport_target(peer: sipx_ua::event_client::Peer) -> Target {
-    let mut target = Target::new(peer.address, transport(peer.transport));
+fn transport_target(peer: sipx_ua::event_client::Peer) -> Option<Target> {
+    let mut target = Target::new(peer.address, transport(peer.transport)?);
     if let Some(identity) = peer.identity {
         target = target.verifying(identity);
     }
     if let Some(path) = peer.path {
         target = target.at_path(path);
     }
-    target
+    Some(target)
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -1091,7 +1111,7 @@ mod tests {
         let peer = Peer::new("192.0.2.20:7443".parse().expect("peer"), Transport::Wss)
             .verifying("compositor.example.test")
             .at_path("/publish");
-        let target = transport_target(peer);
+        let target = transport_target(peer).expect("a Wss peer has a transport-layer name");
         assert_eq!(target.transport, TransportKind::Wss);
         assert_eq!(target.verify_as.as_deref(), Some("compositor.example.test"));
         assert_eq!(target.path.as_deref(), Some("/publish"));

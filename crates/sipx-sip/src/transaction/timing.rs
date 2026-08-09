@@ -9,6 +9,16 @@ use crate::transaction::Reliability;
 /// Named by letter because that is what the RFC calls them and what every packet capture and
 /// every mailing-list thread will call them. Renaming them to something friendlier would only
 /// make the code harder to check against the specification.
+///
+/// Exhaustive by design: the type already publishes the claim. [`Timer::ALL`] is a `[Self; 13]`
+/// this crate hands out as the complete set, so marking this type non-exhaustive would promise
+/// the variants can grow while `ALL` promises they have not.
+/// The set is §17's Table 4 — a normative table, not a registry — restricted to the timers a
+/// user agent transaction arms, with RFC 6026's `L` and `M` and the 200 ms §17.2.1 states as a
+/// plain duration. Everything that reads it is a total function of it: the durations below,
+/// `sipx-testkit`'s `timer_row`, and the retransmission classification in `sipx-transport`'s
+/// counters. A timer added without extending those is a timer nothing schedules, and the compile
+/// errors are what say so.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Timer {
     /// INVITE request retransmission. Unreliable transports only.

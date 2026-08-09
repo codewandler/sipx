@@ -371,6 +371,7 @@ impl BridgeMeters {
 
 /// Which half of setup was outstanding when its bound elapsed (§3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SetupStep {
     /// The server's `session.created`, owed within the bound of the completed upgrade.
     SessionCreated,

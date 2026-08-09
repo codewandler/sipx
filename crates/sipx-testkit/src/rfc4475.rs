@@ -24,6 +24,7 @@
 
 /// Which layer must object to a message, and how.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Expect {
     /// Parses, and re-serializes byte-identically. Anything else about the message —
     /// unknown schemes, unknown methods, a `Max-Forwards` of zero — is a concern for a layer
@@ -43,6 +44,7 @@ pub enum Expect {
 
 /// The structural fault a [`Expect::ParseErr`] case must produce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Fault {
     /// The request or status line is malformed.
     StartLine,

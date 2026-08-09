@@ -113,12 +113,17 @@ There is no suppression list, under any name. A claim this check reports is eith
 missing from the other doors, or false and has to go; a third option is what let the first three
 corrections be hand corrections.
 
-`GUARDED_SURFACE` is the one boundary in this file and it is deliberately not that. It names
-crates and never an item, so no enum can be excused individually; correcting the extensibility
-rule's selector turned up more than a hundred reachable enums at once, which is a breaking change
-across eleven crates rather than a review anybody can do, and the run prints how many are still
-outstanding beyond it. A suppression list makes a finding disappear. This one makes it a number
-printed on every run.
+`GUARDED_SURFACE` was the one boundary in this file and it is gone (`M-83`). It named crates and
+never an item, so no enum was ever excused individually; correcting the extensibility rule's
+selector turned up more than a hundred reachable enums at once, which is a breaking change across
+eleven crates rather than a review anybody can do, so `M-74` paid down the media path behind the
+boundary and `M-83` paid down the rest. What decided the timing is that the choice is only
+reversible in one direction: `#[non_exhaustive]` can be *removed* in a minor release and added only
+in a major one, so a type left unmarked when `1.0.0` freezes the API is decided for the life of the
+major version. The enum rule now runs over every published crate, and the one crate outside it is
+outside for a stated reason rather than for a rollout's convenience — see `CLOSED_VOCABULARY`. What
+that exclusion holds is still counted and printed on every run, because an exclusion that reported
+nothing would be a suppression list with a better name.
 """
 
 import re
@@ -309,38 +314,28 @@ COMPLETE_REASON = "/// Complete by design:"
 #: for the attribute it does not carry.
 UNBUILT_REASON = "/// Built by this crate only:"
 
-#: The crates whose reachable public enums are held to the guard today.
-#:
-#: This is a **rollout boundary and not a suppression list**, and the difference is mechanical
-#: rather than a promise. It names crates and never enums, so nothing inside a crate that is in
-#: scope can be excused one item at a time — which is the shape a suppression list takes and the
-#: shape this check has always refused. Widening it is a reviewable diff, and until it is widened
-#: the run prints how many reachable enums outside it are still unguarded, so the debt is reported
-#: at every gate run rather than kept somewhere nobody reads.
-#:
-#: Why a boundary exists at all: `M-78` replaced a rule that keyed on a name ending in `Error`,
-#: and correcting the selector turns up well over a hundred reachable enums across the workspace.
-#: Marking those is a breaking change for every downstream `match` arm in eleven crates at once,
-#: which is not one reviewable change; `M-74` paid down the media path, which is the surface the
-#: argument was made for. The remainder is recorded in `M-78`'s progress note.
-GUARDED_SURFACE = ("sipx-audio", "sipx-call", "sipx-media", "sipx-rtp", "sipx-sdp")
-
 #: The crates whose reachable public-field structs are held to the guard today (`M-80`).
 #:
-#: A second boundary rather than a second entry in the one above, because the struct rule is a
-#: release behind the enum rule and saying so in a diff is cheaper than a comment claiming both are
-#: at the same place. The struct rule reaches the two crates the relay path runs through, which is
-#: where both breakages happened and where the argument for the rule was made.
+#: This is the last **rollout boundary** in this file, and the difference between one of those and
+#: a suppression list is mechanical rather than a promise. It names crates and never a struct, so
+#: no type inside a crate in scope can be excused one at a time — which is the shape a suppression
+#: list takes and the shape this check has always refused. Widening it is a reviewable diff, and
+#: until it is widened the run prints how many reachable public-field structs the rule does not
+#: hold, so the debt is reported at every gate run rather than kept somewhere nobody reads.
 #:
-#: The same mechanical property as `GUARDED_SURFACE`: it names crates and never a struct, so no
-#: type inside a crate in scope can be excused one at a time, and the run prints how many reachable
-#: public-field structs the rule does not hold. That number is large — see `struct_problems` for
-#: why the rule is additionally narrowed by a property of the type rather than by widening this.
+#: The struct rule reaches the two crates the relay path runs through, which is where both
+#: breakages happened and where the argument for the rule was made. `M-83` retired the enum rule's
+#: equivalent boundary by paying it down rather than by widening it in one step, which is the
+#: sequence this one is expected to follow.
 MEDIA_SURFACE = ("sipx-media", "sipx-rtp")
 
 #: `sipx-app-protocol` owns a closed, versioned application vocabulary and documents its own
 #: exceptions, so `A-9` explicitly leaves it out — a decision that outlives any particular
-#: rollout boundary and so is written down separately from one.
+#: rollout boundary, which is why it survived `M-83` retiring the one the enum rule had.
+#:
+#: It is a stated exclusion and not a boundary of convenience, and the two are told apart the same
+#: mechanical way: this names one crate and never an item, and what it holds out of the enum rule
+#: is counted and printed on every run rather than disappearing.
 CLOSED_VOCABULARY = "sipx-app-protocol"
 
 
@@ -986,17 +981,24 @@ def enum_problems(crates: list[str]) -> list[str]:
 
 
 def guarded(crates: list[str]) -> list[str]:
-    """The crates whose reachable enums this run holds to the guard. See `GUARDED_SURFACE`."""
-    return [crate for crate in crates if crate in GUARDED_SURFACE and crate != CLOSED_VOCABULARY]
+    """The crates whose reachable enums this run holds to the guard: every one that publishes.
+
+    `M-83` retired the rollout boundary this used to read, so the answer is now derived from the
+    workspace the way `published` is — a crate added later joins the enum rule by existing rather
+    than by somebody remembering to name it. The one subtraction is `CLOSED_VOCABULARY`, which is a
+    stated decision about a crate rather than a rollout's convenience.
+    """
+    return [crate for crate in crates if crate != CLOSED_VOCABULARY]
 
 
-def outside_the_boundary(crates: list[str]) -> list[str]:
-    """The crates the rollout has not reached, whose debt the summary line reports."""
-    return [
-        crate
-        for crate in crates
-        if crate not in GUARDED_SURFACE and crate != CLOSED_VOCABULARY
-    ]
+def outside_the_rule(crates: list[str]) -> list[str]:
+    """The crates the enum rule does not hold, whose count the summary line reports.
+
+    Exactly `CLOSED_VOCABULARY` since `M-83`, and it is still counted rather than assumed empty:
+    an exclusion whose size nobody prints is indistinguishable from a suppression list, and the
+    number is what makes re-reading `A-9` a decision somebody takes rather than one that decays.
+    """
+    return [crate for crate in crates if crate == CLOSED_VOCABULARY]
 
 
 def guarded_structs(crates: list[str]) -> list[str]:
@@ -1349,12 +1351,15 @@ def main() -> int:
         f"{len(read_crates)} published crates, {doors} front doors, {len(codecs)} codecs claimed "
         f"({', '.join(codecs) or 'none'}), every claim backed and every door agreeing"
     )
-    # The rollout boundary's debt, counted on every run. See `GUARDED_SURFACE`: a boundary that
-    # reported nothing would be a suppression list with a better name.
-    debt = enum_problems(outside_the_boundary(crates))
+    # What the one stated exclusion holds out of the enum rule, counted on every run. See
+    # `CLOSED_VOCABULARY`: an exclusion that reported nothing would be a suppression list with a
+    # better name, and that is as true of a decision as it was of the rollout boundary `M-83`
+    # retired.
+    excused = enum_problems(outside_the_rule(crates))
     print(
-        f"{len(GUARDED_SURFACE)} crates hold every reachable public enum non-exhaustive or argued; "
-        f"{len(debt)} reachable enums outside that boundary are still exhaustive"
+        f"{len(guarded(crates))} crates hold every reachable public enum non-exhaustive or argued; "
+        f"{len(excused)} reachable enums in {CLOSED_VOCABULARY} stay exhaustive, which A-9 decided "
+        f"because that crate's vocabulary is closed and versioned"
     )
     # The struct rule's debt, on the same terms and for the same reason (`M-80`).
     structs = outstanding_structs(crates)
