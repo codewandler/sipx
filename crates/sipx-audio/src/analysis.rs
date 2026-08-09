@@ -615,7 +615,12 @@ pub enum FrameError {
 /// Samples are borrowed for the duration of the call and are never retained after
 /// [`AudioAnalyzer::process`] returns: raw-audio non-retention is a design invariant, not an
 /// optimisation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Its [`Debug`] rendering is hand-written and carries the frame's identity and its sample
+/// **count**, never its samples (`M-61`). A derived one printed all 65,536 of them, which is the
+/// same defect twice: raw call audio in the one place an operator copies into a ticket, in a record
+/// whose length is the frame's rather than the format's.
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct AnalysisFrame<'a> {
     direction: AudioDirection,
     sequence: u64,
@@ -667,6 +672,23 @@ impl<'a> AnalysisFrame<'a> {
     #[must_use]
     pub const fn samples(&self) -> &'a [i16] {
         self.samples
+    }
+}
+
+/// What a frame is, never what it contains (`M-61`).
+///
+/// Direction, sequence and declared break identify the frame; `samples` is the borrowed slice's
+/// length. Reaching the audio itself takes [`AnalysisFrame::samples`] and a deliberate decision, so
+/// no ordinary record — a `tracing` field, an `unwrap` message, a test failure — can carry call
+/// audio by accident.
+impl std::fmt::Debug for AnalysisFrame<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AnalysisFrame")
+            .field("direction", &self.direction)
+            .field("sequence", &self.sequence)
+            .field("discontinuity", &self.discontinuity)
+            .field("samples", &self.samples.len())
+            .finish()
     }
 }
 
@@ -1179,6 +1201,66 @@ impl EffectiveThresholds {
     #[must_use]
     pub const fn frozen_samples(&self) -> u64 {
         self.frozen_samples
+    }
+}
+
+/// The one-line diagnostic identity of a running analyser (`M-61`).
+///
+/// What an operator reading a record needs to know is *which measurement produced it*: the
+/// direction and rate it is bound to, the window it measures over, the threshold in force, and how
+/// far calibration has moved. That is exactly this line —
+///
+/// ```text
+/// inbound 8000 Hz window 160 activation 1920 (configured 2048) hangover 1600 silence 16000
+/// calibration 1600/800 freeze 240000 updates 1 floor 0 outcome applied frozen 0
+/// ```
+///
+/// (one line; wrapped here only to fit the page)
+///
+/// — and it is the whole of what [`Self`] can say, because every field of [`Self`] is a count or an
+/// amplitude. **There is no audio here and none to render**: §3.3 forbids retaining samples past
+/// `process` and §8.1 enumerates the whole of an analyser's state without an audio buffer in it.
+/// An explicit capture facility would be a different contract with a different door; this one is
+/// closed by construction rather than by omission.
+///
+/// Counts are sample counts, never milliseconds and never a clock reading, so a record from one
+/// machine names the same positions as a record from another.
+impl std::fmt::Display for EffectiveThresholds {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} {} Hz window {} activation {} (configured {}) hangover {}",
+            self.profile.direction,
+            self.profile.rate,
+            self.window_samples,
+            self.activation_amplitude,
+            self.profile.activation_amplitude,
+            self.hangover_samples,
+        )?;
+        match self.silence_timeout_samples {
+            None => f.write_str(" silence off")?,
+            Some(timeout) => write!(f, " silence {timeout}")?,
+        }
+        match (self.calibration_samples, self.update_samples) {
+            (Some(warmup), Some(update)) => write!(f, " calibration {warmup}/{update}")?,
+            // Both are present exactly when a calibration profile is, so this arm is the fixed
+            // threshold rather than a half-configured one.
+            _ => f.write_str(" calibration off")?,
+        }
+        match self.freeze_limit_samples {
+            None => f.write_str(" freeze unbounded")?,
+            Some(limit) => write!(f, " freeze {limit}")?,
+        }
+        write!(f, " updates {}", self.updates)?;
+        match self.observed_floor {
+            None => f.write_str(" floor none")?,
+            Some(floor) => write!(f, " floor {floor}")?,
+        }
+        match self.outcome {
+            None => f.write_str(" outcome none")?,
+            Some(outcome) => write!(f, " outcome {outcome}")?,
+        }
+        write!(f, " frozen {}", self.frozen_samples)
     }
 }
 

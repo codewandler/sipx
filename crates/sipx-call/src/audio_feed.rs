@@ -109,6 +109,7 @@ impl AudioFeed {
         if unflagged_gap {
             tracing::debug!(
                 seam_sequence,
+                analysis = %self.analyzer.thresholds(),
                 "the call PCM seam skipped a frame without flagging it"
             );
             discontinuity = Some(DiscontinuityKind::Loss);
@@ -126,7 +127,16 @@ impl AudioFeed {
             // not a counter. What is *not* discarded is the break they left: the next frame carries
             // it, so the epoch restarts rather than a report summing across the hole or voice
             // staying latched over it.
-            tracing::debug!(%refusal, "the call audio analyser refused a seam frame");
+            // `frame` renders its identity and its sample count, never its samples (`M-61`), and
+            // the analyser's snapshot renders the profile the refusal was measured against. Both
+            // are counters and amplitudes: an ordinary record says which measurement refused what,
+            // and carries no call audio.
+            tracing::debug!(
+                %refusal,
+                ?frame,
+                analysis = %self.analyzer.thresholds(),
+                "the call audio analyser refused a seam frame"
+            );
             self.owe_break();
             return false;
         }
