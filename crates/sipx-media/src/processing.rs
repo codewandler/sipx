@@ -93,7 +93,13 @@ impl std::fmt::Display for Discontinuity {
 }
 
 /// One PCM frame delivered to a processor (`docs/specs/call-audio-seam.md` §4).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Its [`Debug`] is hand-written and carries the frame's identity, its position and its sample
+/// **count**, never its samples (`docs/specs/call-audio-seam.md` §4, `M-107`). `M-61` fixed the
+/// same derive one layer down on [`sipx_audio::analysis::AnalysisFrame`], where it was reachable
+/// from a refusal record `sipx-call` already wrote; this one was latent, and the distance between
+/// latent and live is one `tracing::warn!` somebody adds later.
+#[derive(Clone, PartialEq, Eq)]
 pub struct PcmFrame {
     direction: AudioDirection,
     pcm: Pcm,
@@ -150,6 +156,29 @@ impl PcmFrame {
     #[must_use]
     pub const fn discontinuity(&self) -> Option<Discontinuity> {
         self.discontinuity
+    }
+}
+
+/// What a frame is, never what it contains (`M-107`).
+///
+/// Direction, format, position and declared break identify the frame; `samples` is how many there
+/// were. Every field is a scalar or a small fixed vocabulary, so the record's length is bounded by
+/// this implementation rather than by the frame — an unbounded diagnostic is the second half of the
+/// same defect, and a redaction that still grew with the audio would have fixed neither.
+///
+/// Reaching the audio itself takes [`PcmFrame::pcm`] and a deliberate decision, so no ordinary
+/// record — a `tracing` field, an `expect` message, a test failure — can carry call audio by
+/// accident.
+impl std::fmt::Debug for PcmFrame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PcmFrame")
+            .field("direction", &self.direction)
+            .field("format", &self.pcm.format())
+            .field("sample_time", &self.sample_time)
+            .field("sequence", &self.sequence)
+            .field("discontinuity", &self.discontinuity)
+            .field("samples", &self.pcm.samples().len())
+            .finish()
     }
 }
 

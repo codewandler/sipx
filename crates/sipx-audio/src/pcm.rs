@@ -51,7 +51,7 @@ impl PcmFormat {
 }
 
 /// Owned samples whose variant states their depth.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PcmSamples {
     /// Unsigned eight-bit linear samples.
@@ -77,7 +77,37 @@ impl PcmSamples {
     }
 }
 
+/// What the buffer is, never what it contains (`M-107`).
+///
+/// This is the one place in the workspace where call audio is actually held, so it is the one
+/// place the redaction has to be: every carrier above it — [`Pcm`], the processing seam's
+/// `PcmFrame`, the speech contract's frame and chunk — renders *this*, and a container that
+/// derives `Debug` over a `Pcm` is safe because of what is written here rather than because
+/// somebody remembered.
+///
+/// The depth is the variant's own name and the size is a count, so the record's length is a
+/// two-word constant plus at most twenty digits — bounded independently of the buffer's, which is
+/// the second half of the defect `M-61` fixed on
+/// [`AnalysisFrame`](crate::analysis::AnalysisFrame). Reaching the audio takes a `match` on the
+/// variant and a deliberate decision, so no ordinary record — a `tracing` field, an `expect`
+/// message, a test failure — can carry it by accident.
+impl std::fmt::Debug for PcmSamples {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let depth = match self {
+            Self::Unsigned8(_) => "Unsigned8",
+            Self::Signed16(_) => "Signed16",
+        };
+        write!(f, "{depth}({} samples)", self.len())
+    }
+}
+
 /// One owned mono PCM buffer.
+///
+/// Its `Debug` is derived and that is safe by composition rather than by accident: the only field
+/// that can hold audio is a [`PcmSamples`], whose own `Debug` renders a depth and a count
+/// (`M-107`). A `Pcm` inside a log record therefore reports its format and how much audio there
+/// was. Holding the samples directly here — a `Vec<i16>` in place of the enum — would put the
+/// derive back over raw audio, which is why the redaction lives at the buffer and not here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pcm {
     format: PcmFormat,

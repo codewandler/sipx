@@ -310,6 +310,41 @@ _IMPLEMENTS_DEFAULT = r"(?m)^impl(?:<[^>]*>)?\s+Default\s+for\s+{name}\b"
 #: root writes a long one. What it re-exports is read out of the body by `reexports` below.
 _REEXPORT = re.compile(r"(?m)^[ \t]*pub use\s+(?P<body>[^;]+);")
 
+#: A raw buffer of linear PCM samples, in every shape a field can be written in: `Vec<i16>`, a
+#: borrowed or boxed `[i16]`, and a fixed `[i16; N]`. `f32` joins `i16` because a float sample
+#: buffer is the same audio at a different depth, and matching it now costs nothing.
+#:
+#: **The element type is the whole of what makes this checkable** (`M-107`). A `Vec<i16>` is call
+#: audio and nothing else in this workspace; a `Vec<u8>` or a `Bytes` is a G.711 payload *or* a
+#: `Call-ID` *or* a SIP body *or* a STUN attribute, and around sixty reachable public types hold
+#: one — so a rule over byte buffers would report the whole SIP surface, where rendering the bytes
+#: is what a protocol log is *for*. Widening this to `u8` would not make the check stricter, it
+#: would make it unrunnable and then switched off. What that leaves outside is stated in
+#: `sample_buffer_problems` rather than left to be discovered.
+_SAMPLE_BUFFER = re.compile(r"\bVec<\s*(?:i16|f32)\s*>|\[\s*(?:i16|f32)\s*[];]")
+
+#: A hand-written `Debug`, at whatever indentation and in whatever spelling of the path the file
+#: imported — `std::fmt::Debug`, `core::fmt::Debug` or a bare `fmt::Debug`.
+_IMPLEMENTS_DEBUG = r"(?m)^[ \t]*impl(?:\s*<[^>]*>)?\s+(?:\w+::)*fmt::Debug\s+for\s+{name}\b"
+
+#: The phrase that classifies a sample-typed buffer which is not call audio — a coefficient table,
+#: a window, a fixture. A fourth phrase rather than a reuse of the extensibility rules', because it
+#: answers a different question again: "these samples are not somebody's conversation".
+NOT_AUDIO_REASON = "/// Not call audio:"
+
+#: Below this the sample-buffer reader has stopped recognising a buffer rather than found a
+#: workspace that holds none.
+#:
+#: This is `_PLAUSIBLE_ITEMS`'s argument for the other rule that reads Rust rather than prose, and
+#: it is the answer to the one direction in which narrowing a *selector* is quiet. Over-narrowing
+#: the exception side of `sample_buffer_problems` is loud by construction — a reader that stopped
+#: recognising a hand-written `Debug` reports every carrier in the workspace. Over-narrowing
+#: `_SAMPLE_BUFFER` is the opposite: it finds nothing, holds nothing, and passes. So the population
+#: is counted and a run that recognises almost none of it fails instead. Nine public types across
+#: two crates carry one today; four is low enough that removing a crate's worth of them is not a
+#: red gate and high enough that a reader which has gone blind is.
+_PLAUSIBLE_CARRIERS = 4
+
 #: The one phrase that classifies an intentionally exhaustive enum. Like the fixed-sleep guard's
 #: classifications, the reason lives at the site it excuses rather than in a list here.
 EXHAUSTIVE_REASON = "/// Exhaustive by design:"
@@ -999,6 +1034,143 @@ def struct_problems(crates: list[str]) -> list[str]:
     return problems
 
 
+def type_body(source: str, offset: int) -> str:
+    """The braced or parenthesised body of the item declared at `offset`, code only.
+
+    `declaration` is the struct rule's reader and is deliberately not reused here. It counts brace
+    depth over the raw text, which its own comment justifies — "a struct body holds field types,
+    and no field type contains an unbalanced brace" — and that is true of a struct and false of an
+    enum. `sipx-testkit`'s `Malformed` documents its first variant as ``/// `not json{` ``, and a
+    depth count that reads a doc comment as code never closes that body at all.
+
+    Comments and string literals are dropped rather than skipped over, because this reader's
+    caller matches a *type* against the result: a doc line naming `Vec<i16>` while explaining a
+    field, or an `#[error("…")]` message quoting one, is prose about a buffer and not a buffer.
+
+    Returns the empty string for a unit struct, which has no body to read.
+    """
+    index, angle, end = offset, 0, len(source)
+    while index < end:
+        character = source[index]
+        if character == "<":
+            angle += 1
+        elif character == ">":
+            angle -= 1
+        elif angle == 0 and character in "{(;":
+            break
+        index += 1
+    if index >= end or source[index] == ";":
+        return ""
+    opener = source[index]
+    closer = "}" if opener == "{" else ")"
+    depth, scan, kept = 0, index, []
+    while scan < end:
+        character = source[scan]
+        if character == "/" and source[scan + 1 : scan + 2] == "/":
+            newline = source.find("\n", scan)
+            scan = end if newline < 0 else newline
+            continue
+        if character == '"':
+            scan += 1
+            while scan < end and source[scan] != '"':
+                scan += 2 if source[scan] == "\\" else 1
+            scan += 1
+            continue
+        if character == opener:
+            depth += 1
+            if depth == 1:
+                scan += 1
+                continue
+        elif character == closer:
+            depth -= 1
+            if depth == 0:
+                return "".join(kept)
+        kept.append(character)
+        scan += 1
+    raise ValueError(f"an item at offset {offset} has no closing `{closer}`")
+
+
+def sample_buffer_carriers(crates: list[str]) -> list[tuple[Path, str, int]]:
+    """Every reachable public type of these crates that holds a raw buffer of PCM samples.
+
+    Structs and enums together, because the two leak identically: `PcmSamples` is the enum that
+    holds every owned buffer in this workspace, and a rule that read only structs would have missed
+    the one type all the others are made of.
+    """
+    found = []
+    for crate in crates:
+        for pattern in (_PUBLIC_STRUCT, _PUBLIC_ENUM):
+            for path, _module, name, offset in reachable(crate, pattern):
+                source = code(path.read_text(encoding="utf-8"))
+                if _SAMPLE_BUFFER.search(type_body(source, offset)):
+                    found.append((path, name, offset))
+    return found
+
+
+def sample_buffer_problems(crates: list[str]) -> list[str]:
+    """Reachable public types whose `Debug` would render the call's own audio.
+
+    `M-61` found `sipx_audio::AnalysisFrame`'s derived `Debug` rendering all 65,536 samples it
+    borrowed, reachable from a refusal record `sipx-call` already wrote; `M-107` found the same
+    derive on `sipx_media::PcmFrame`, latent only because nothing logged it yet. Both are one
+    defect written twice: raw call audio in the place an operator copies into a ticket, in a record
+    whose length is the audio's rather than the format's. A type that holds samples therefore
+    **implements** `Debug` — identity, position and a count — or says beside itself why its buffer
+    is not somebody's conversation.
+
+    The rule asks for the implementation rather than forbidding the derive, and that is the whole
+    reason it is safe to narrow. Reading "does not derive `Debug`" would be quiet when it went
+    wrong: a reader that stopped recognising `#[derive(Debug)]` would excuse every carrier in the
+    workspace at exit 0. Reading "implements `Debug`" fails the other way — a reader that stopped
+    recognising the implementation reports every carrier, which is a red gate. `M-97` made the same
+    correction to `marked`, and `X-131` and `X-132` to the CLI-reference readers.
+
+    **What it cannot check, stated rather than discovered.** It reads a field's element type, so it
+    holds `i16` and `f32` buffers and nothing else. Encoded audio is `Bytes` or `Vec<u8>`, which in
+    this workspace is equally a `Call-ID`, a SIP body and a STUN attribute — sixty-odd reachable
+    public types, nearly all of them protocol bytes whose `Debug` should be their bytes. So
+    `sipx_media::Encoded` and `sipx_rtp::Packet` carry the call in a shape no checker here can tell
+    from a header, and they stay a reviewer's question: `M-107` redacted the first by hand and
+    `M-110` is the second. It also cannot read what an implementation *prints*; it enforces that
+    somebody wrote one, and the tests beside each type enforce what it says.
+    """
+    problems = []
+    for path, name, offset in sample_buffer_carriers(crates):
+        source = code(path.read_text(encoding="utf-8"))
+        above = preamble(source, offset)
+        if re.search(_IMPLEMENTS_DEBUG.format(name=re.escape(name)), source):
+            continue
+        if argued(above, NOT_AUDIO_REASON):
+            continue
+        line = source.count("\n", 0, offset) + 1
+        try:
+            where = path.relative_to(ROOT)
+        except ValueError:
+            where = path
+        problems.append(
+            f"{where}:{line} `{name}` is reachable from the crate root and holds a buffer of PCM "
+            f"samples, so a derived `Debug` renders the call's own audio; implement `Debug` with a "
+            f"sample count, or add an adjacent `{NOT_AUDIO_REASON}` rationale"
+        )
+    return problems
+
+
+def unreadable_surface(carriers: list[tuple[Path, str, int]]) -> list[str]:
+    """The one problem a sample-buffer reader that has gone blind reports about itself.
+
+    See `_PLAUSIBLE_CARRIERS`. Every other narrowing in this file fails loudly by reporting types;
+    a selector fails by reporting none, so the population it selected is held to a floor and a run
+    that finds almost nothing says so instead of passing.
+    """
+    if len(carriers) >= _PLAUSIBLE_CARRIERS:
+        return []
+    return [
+        f"the sample-buffer reader recognised {len(carriers)} public types holding PCM samples, "
+        f"below the {_PLAUSIBLE_CARRIERS} this workspace's audio path is built from; the reader "
+        f"has narrowed rather than the workspace changed"
+    ]
+
+
 def enum_problems(crates: list[str]) -> list[str]:
     """Reachable public enums that promise their current variant set can never grow.
 
@@ -1367,7 +1539,9 @@ def main() -> int:
         return 1
 
     read_crates = [read(name, tables) for name in crates]
+    carriers = sample_buffer_carriers(crates)
     problems += enum_problems(guarded(crates)) + struct_problems(guarded_structs(crates))
+    problems += sample_buffer_problems(crates) + unreadable_surface(carriers)
     for crate in read_crates:
         problems += (
             claim_problems(crate) + agreement_problems(crate) + stability_problems(crate)
@@ -1412,6 +1586,14 @@ def main() -> int:
         f"{len(MEDIA_SURFACE)} crates hold every reachable public-field struct non-exhaustive or "
         f"argued, and every marked one buildable; {len(structs)} reachable public-field structs "
         f"outside that boundary can still be broken by a new field"
+    )
+    # The sample-buffer rule's population, printed for the reason `_PLAUSIBLE_CARRIERS` gives: a
+    # selector that quietly stopped selecting is the one narrowing in this file that a red gate
+    # would not report by itself (`M-107`).
+    print(
+        f"{len(carriers)} reachable public types hold a buffer of PCM samples and every one of "
+        f"them implements `Debug` or argues it is not call audio; encoded audio in `Bytes` is "
+        f"outside what an element type can decide and stays a reviewer's question"
     )
     return 0
 

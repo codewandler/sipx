@@ -434,3 +434,108 @@ async fn a_relaying_session_produces_no_received_frames() {
 
     session.shutdown().await;
 }
+
+// ---- diagnostics carry identity and counters, never audio (`M-107`) ----
+
+/// SEAM-16 (`M-107`): an ordinary diagnostic record of a frame says what the frame *is*, never
+/// what it contains.
+///
+/// The shape `M-61` fixed one layer down on [`sipx_audio::analysis::AnalysisFrame`], held here
+/// against the type this seam hands an application. A derived `Debug` renders every sample it
+/// borrows, so a `tracing` field, an `expect` message or a test failure carrying a frame puts raw
+/// call audio into a record whose length is the frame's — which is the retention failure and an
+/// unbounded diagnostic in one derive. What a record needs is the frame's identity and its
+/// counters.
+///
+/// The frame comes off the live seam rather than out of a literal, because [`PcmFrame`] has no
+/// public constructor: the only frame there is to render is the one an application is handed, and
+/// that is the one whose rendering this is about.
+#[tokio::test]
+async fn a_frame_diagnostic_carries_counters_and_no_raw_audio() {
+    let (session, _peer, _session_addr) = session_and_peer().await;
+    let mut transmitted = session
+        .attach_processor(Processing::new(AudioDirection::Outbound, narrowband()))
+        .expect("attaches to transmitted audio");
+
+    // A sample value that is not a count: 30,011 is prime, and is not a sequence, a sample time, a
+    // rate, a queue capacity or a frame length anywhere in this seam. Finding its decimal spelling
+    // in a record can therefore only mean the samples themselves were rendered.
+    let sentinel = vec![30_011i16; SAMPLES_PER_PACKET];
+    assert!(
+        session.send(sentinel.clone()).await,
+        "queues outbound audio"
+    );
+    let frame = tokio::time::timeout(ARRIVAL_BOUND, transmitted.recv())
+        .await
+        .expect("transmitted audio reaches the seam")
+        .expect("a frame");
+    assert_eq!(
+        signed(frame.pcm().samples()),
+        sentinel.as_slice(),
+        "the consumer receives the audio, which is where it belongs"
+    );
+
+    let record = format!("{frame:?}");
+    assert!(
+        !record.contains("30011"),
+        "a frame's diagnostic rendering carries no sample value: {record}"
+    );
+    assert!(
+        record.contains("160"),
+        "how much audio there was is a counter and belongs in the record: {record}"
+    );
+    assert!(
+        record.contains("Outbound"),
+        "and which side of the call it was: {record}"
+    );
+    assert!(
+        record.len() < 200,
+        "a record whose length is the frame's is unbounded diagnostics: {record}"
+    );
+
+    session.shutdown().await;
+}
+
+/// SEAM-16, second half: the same, for the call audio that has not been decoded yet.
+///
+/// An [`Encoded`] payload is the conversation in whatever the far end chose to carry it in, and
+/// for G.711 that is one octet per sample. It is the sibling `check-audio-claims.py` cannot reach:
+/// a checker recognises a sample buffer by its element type, and `Bytes` is equally a `Call-ID`, a
+/// SIP body and a STUN attribute — so this rendering is held here by hand. The payload *type*
+/// stays in the record, because that is what a relay log is for.
+#[tokio::test]
+async fn an_encoded_payload_renders_its_type_and_its_length_and_not_the_call() {
+    let (session, peer, session_addr) = session_and_peer().await;
+    session.set_relay(true);
+
+    feed(&peer, session_addr, 4, 0xAB).await;
+    let encoded = tokio::time::timeout(ARRIVAL_BOUND, session.recv_encoded())
+        .await
+        .expect("the relay path carries the packet")
+        .expect("an encoded frame");
+    assert_eq!(encoded.payload.len(), SAMPLES_PER_PACKET);
+    assert_eq!(
+        encoded.payload[0], 0xAB,
+        "the relay receives the audio, which is where it belongs"
+    );
+
+    let record = format!("{encoded:?}");
+    assert!(
+        !record.contains("171") && !record.contains("ab"),
+        "a payload octet survived, in decimal or in hex: {record}"
+    );
+    assert!(
+        record.contains(&Codec::Pcmu.payload_type().to_string()),
+        "what it is encoded in is what a relay log is for: {record}"
+    );
+    assert!(
+        record.contains("160"),
+        "and how much of it there was: {record}"
+    );
+    assert!(
+        record.len() < 200,
+        "a record whose length is the payload's is unbounded diagnostics: {record}"
+    );
+
+    session.shutdown().await;
+}

@@ -47,7 +47,11 @@ const STUTTER_PARAMETERS: &[ParameterSpec] = &[ParameterSpec::new("repeat", Para
 /// running, because latency and tail are declarations a graph has already sized buffers from; and
 /// does not feed back — the line is written once from the input and never from its own output, so
 /// there is no repeat count, no decay and no unbounded growth.
-#[derive(Debug, Clone)]
+///
+/// Its `Debug` carries the line's *length* and never the line (`M-107`). The delay line is a copy
+/// of the call's own audio held for as long as the effect is configured, so a derived rendering
+/// puts up to a second of the conversation in whatever record reported a refused parameter.
+#[derive(Clone)]
 pub struct Stutter {
     body: Body,
     line: Vec<i16>,
@@ -108,6 +112,21 @@ impl Stutter {
         line.fill(0);
         *cursor = 0;
         *filled = 0;
+    }
+}
+
+/// How the line is configured and how full it is, never what is in it (`M-107`).
+impl std::fmt::Debug for Stutter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Stutter")
+            .field("body", &self.body)
+            .field("line", &self.line.len())
+            .field("positions", &self.positions)
+            .field("channels", &self.channels)
+            .field("cursor", &self.cursor)
+            .field("filled", &self.filled)
+            .field("repeat", &self.repeat)
+            .finish()
     }
 }
 

@@ -99,7 +99,13 @@ impl StreamFormat {
 /// Samples are borrowed for the duration of the call and MUST NOT be retained after
 /// [`FrameProcessor::process`] returns. A processor needing sample memory across frames owns that
 /// memory as declared state and copies into it; what it may not do is keep the caller's buffer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Its [`Debug`] is hand-written and carries the frame's identity and its sample **count**, never
+/// its samples (`M-107`), for the reason
+/// [`AnalysisFrame`](crate::analysis::AnalysisFrame)'s is: a graph that refuses a frame writes a
+/// record at exactly the moment the frame is in hand, and a derived rendering would make that
+/// record raw call audio of the frame's own length.
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct DspFrame<'a> {
     direction: AudioDirection,
     format: StreamFormat,
@@ -176,6 +182,19 @@ impl<'a> DspFrame<'a> {
     #[must_use]
     pub const fn positions(&self) -> u64 {
         self.samples.len() as u64 / self.format.channels as u64
+    }
+}
+
+/// What a frame is, never what it contains (`M-107`).
+impl std::fmt::Debug for DspFrame<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DspFrame")
+            .field("direction", &self.direction)
+            .field("format", &self.format)
+            .field("position", &self.position)
+            .field("discontinuity", &self.discontinuity)
+            .field("samples", &self.samples.len())
+            .finish()
     }
 }
 
@@ -1140,7 +1159,11 @@ pub enum ProcessError {
 /// §4.7 requires a processor to write a region before reading it, and the conformance harness fills
 /// this with a run-specific pattern so that a processor which reads unwritten scratch fails
 /// determinism rather than passing on a machine where the leftovers happened to match.
-#[derive(Debug)]
+///
+/// Its `Debug` reports the two numbers a scratch bound is argued from and not the region itself
+/// (`M-107`). Contents are unspecified on entry and are a processor's working copy of the frame
+/// once it starts, so a derived rendering would put call audio in whatever record reported a
+/// [`ProcessError::ScratchExhausted`].
 pub struct Scratch<'a> {
     buffer: &'a mut [i16],
     requested: u32,
@@ -1193,13 +1216,27 @@ impl<'a> Scratch<'a> {
     }
 }
 
+/// What the region is for, never what is in it (`M-107`).
+impl std::fmt::Debug for Scratch<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Scratch")
+            .field("capacity", &self.buffer.len())
+            .field("requested", &self.requested)
+            .finish()
+    }
+}
+
 /// Where a processor writes its output and its observations (§6).
 ///
 /// Both are caller-owned and neither grows. The sink refuses a write past its capacity with the
 /// already-written prefix untouched; the observation queue coalesces at capacity into
 /// [`DspObservation::Lost`] exactly as the analysis contract's queue does, so an undersized queue
 /// is a visible counted fact rather than a silent absence.
-#[derive(Debug)]
+///
+/// Its `Debug` reports capacities and fill levels and never either buffer (`M-107`). The output
+/// region is processed call audio, and the observation queue is rendered as a count for the second
+/// half of the same rule: its length is a caller's configured bound rather than a constant, so
+/// listing it would make the record's length a configuration value.
 pub struct FrameSink<'a> {
     output: &'a mut [i16],
     written: usize,
@@ -1292,6 +1329,18 @@ impl<'a> FrameSink<'a> {
             return;
         }
         self.observations.push(observation);
+    }
+}
+
+/// What the sink holds, never the audio it holds (`M-107`).
+impl std::fmt::Debug for FrameSink<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FrameSink")
+            .field("capacity", &self.output.len())
+            .field("written", &self.written)
+            .field("observations", &self.observations.len())
+            .field("observation_capacity", &self.observation_capacity)
+            .finish()
     }
 }
 
