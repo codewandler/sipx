@@ -89,6 +89,18 @@ type in that position states which it is — it publishes a constructor, or it s
 that it is a value this crate hands out and nothing outside builds. Both are answers; being
 outside the rule was not one.
 
+**Diagnostics.** Two more rules, over what a public type's `Debug` *renders* rather than over what
+its crate promises or what its shape breaks. `M-61` found a derived `Debug` printing 65,536 samples
+of a call into a refusal record and `M-107` found the same derive on two more types, so a type
+holding an `i16` or `f32` buffer now implements `Debug` or argues its samples are not somebody's
+conversation — see `sample_buffer_problems`. `M-107` also concluded that the *encoded* half could
+not be checked, because a payload is `Bytes` and so is a `Call-ID`. `M-110` found the narrowing
+that makes it checkable: not a different element type but a different **scope**. On the two crates
+the call's own bytes pass through, every byte buffer is decidable and every one is decided — see
+`byte_buffer_problems` and `RELAY_PATH`. The two rules have separate escape phrases on purpose,
+because "not call audio" is true of an RFC 3550 §6.5 `CNAME` and excusing personal data truthfully
+is the one thing the byte rule cannot afford.
+
 Both extensibility rules read the attribute as an attribute and each rationale as the opening of a
 doc line (`M-97`). `preamble` hands them a type's attributes and its documentation as one string,
 and a substring test over that string let a sentence *about* `#[non_exhaustive]` stand in for
@@ -314,13 +326,17 @@ _REEXPORT = re.compile(r"(?m)^[ \t]*pub use\s+(?P<body>[^;]+);")
 #: borrowed or boxed `[i16]`, and a fixed `[i16; N]`. `f32` joins `i16` because a float sample
 #: buffer is the same audio at a different depth, and matching it now costs nothing.
 #:
-#: **The element type is the whole of what makes this checkable** (`M-107`). A `Vec<i16>` is call
-#: audio and nothing else in this workspace; a `Vec<u8>` or a `Bytes` is a G.711 payload *or* a
-#: `Call-ID` *or* a SIP body *or* a STUN attribute, and around sixty reachable public types hold
-#: one — so a rule over byte buffers would report the whole SIP surface, where rendering the bytes
-#: is what a protocol log is *for*. Widening this to `u8` would not make the check stricter, it
-#: would make it unrunnable and then switched off. What that leaves outside is stated in
-#: `sample_buffer_problems` rather than left to be discovered.
+#: **The element type is the whole of what makes this checkable across every crate at once**
+#: (`M-107`). A `Vec<i16>` is call audio and nothing else in this workspace; a `Vec<u8>` or a
+#: `Bytes` is a G.711 payload *or* a `Call-ID` *or* a SIP body *or* a STUN attribute, and 58
+#: reachable public types hold one — so widening this to `u8` would report the whole SIP surface,
+#: where rendering the bytes is what a protocol log is *for*, and the check would be switched off
+#: by whoever hit it second.
+#:
+#: What `M-107` concluded from that is that encoded audio is a reviewer's question. `M-110` found
+#: the narrowing that was missing: not a different element type but a different **scope**. See
+#: `RELAY_PATH` and `_BYTE_BUFFER` — the sixty are spread across eleven crates, and on the two the
+#: call's own bytes pass through, every one of them can be decided.
 _SAMPLE_BUFFER = re.compile(r"\bVec<\s*(?:i16|f32)\s*>|\[\s*(?:i16|f32)\s*[];]")
 
 #: A hand-written `Debug`, at whatever indentation and in whatever spelling of the path the file
@@ -344,6 +360,29 @@ NOT_AUDIO_REASON = "/// Not call audio:"
 #: two crates carry one today; four is low enough that removing a crate's worth of them is not a
 #: red gate and high enough that a reader which has gone blind is.
 _PLAUSIBLE_CARRIERS = 4
+
+#: A buffer of raw octets, in every shape a field can be written in. The byte-buffer rule's
+#: selector, and unlike `_SAMPLE_BUFFER` it says nothing at all about what the octets are — which
+#: is why it runs only over `RELAY_PATH` and why it needs its own escape phrase.
+_BYTE_BUFFER = re.compile(r"\bBytes(?:Mut)?\b|\bVec<\s*u8\s*>|\[\s*u8\s*[];]")
+
+#: The phrase that classifies a byte buffer on the relay path as neither the call nor a
+#: participant — a STUN attribute, an ICE datagram, a key.
+#:
+#: A fifth phrase rather than a reuse of `NOT_AUDIO_REASON`, and the difference is the whole of
+#: `M-110`'s finding. "Not call audio" is *true* of an RFC 3550 §6.5 `SdesItem`: its bytes are a
+#: `CNAME`, a `NAME` or an `EMAIL`, which is a person rather than a conversation. A rule whose
+#: escape was the audio phrase would therefore have been answered truthfully by the one type in
+#: this crate carrying personal data, and a redaction check that can be switched off by a true
+#: sentence checks nothing. This phrase asks the question the rule actually has: **neither.**
+NOT_THE_CALL_REASON = "/// Not the call:"
+
+#: Below this the byte-buffer reader has stopped recognising a buffer rather than found a relay
+#: path that carries none. `_PLAUSIBLE_CARRIERS`' argument, for the other selector that fails by
+#: selecting nothing: eight reachable public types across the two crates hold one today, and four
+#: is low enough that removing a crate's worth is not a red gate and high enough that a reader
+#: which has gone blind is.
+_PLAUSIBLE_RELAY_CARRIERS = 4
 
 #: The one phrase that classifies an intentionally exhaustive enum. Like the fixed-sleep guard's
 #: classifications, the reason lives at the site it excuses rather than in a list here.
@@ -377,6 +416,32 @@ UNBUILT_REASON = "/// Built by this crate only:"
 #: equivalent boundary by paying it down rather than by widening it in one step, which is the
 #: sequence this one is expected to follow.
 MEDIA_SURFACE = ("sipx-media", "sipx-rtp")
+
+#: The crates the call's own bytes pass through **as bytes**, and the scope of the byte-buffer rule
+#: (`M-110`). See `byte_buffer_problems`.
+#:
+#: It holds the same two crates as `MEDIA_SURFACE` and is deliberately a separate constant, because
+#: the two mean opposite things about their own future. `MEDIA_SURFACE` is a **rollout boundary**:
+#: it is expected to be widened, and `M-83` is the sequence it is meant to follow. This is a
+#: **stated scope**, and widening it is a category error rather than progress — a `Bytes` in
+#: `sipx-sip` is a `Call-ID`, a URI or a body, and holding those to a redaction would report forty
+#: types where printing the bytes is the entire purpose of the log. Whoever widens the rollout
+#: boundary must not widen this one with it, which one constant used twice could not have said.
+#:
+#: Why these two and not three. `sipx-audio` handles the same conversation, but there it is `i16`
+#: samples and `_SAMPLE_BUFFER` already holds every type that touches them; adding it here would
+#: hold `DspCapability`'s compile-time channel list to a rule aimed at a call. The bytes only
+#: become bytes at `sipx_media::Encoded` and stay bytes down to `sipx_rtp::Packet`, and those two
+#: types are the ones `M-80` marked `#[non_exhaustive]` together as "the two ends of one relay
+#: path".
+#:
+#: What it holds out is not assumed empty: `outstanding_byte_buffers` counts every reachable public
+#: type outside it that holds a byte buffer, and the run prints the number. Reading the fifty found
+#: four that are not protocol headers — `sipx_app_protocol::Source::Inline`, `sipx_testkit::Record`
+#: and `sipx_testkit::ClientEvent` each document their own bytes as audio, and
+#: `sipx_ua::Authenticator` derives a `Debug` over the key its nonces are MACed with. They are
+#: `M-117`, which also owns the question of whether a second scope should name their crates.
+RELAY_PATH = ("sipx-media", "sipx-rtp")
 
 #: `sipx-app-protocol` owns a closed, versioned application vocabulary and documents its own
 #: exceptions, so `A-9` explicitly leaves it out — a decision that outlives any particular
@@ -1171,6 +1236,122 @@ def unreadable_surface(carriers: list[tuple[Path, str, int]]) -> list[str]:
     ]
 
 
+def byte_buffer_carriers(crates: list[str]) -> list[tuple[Path, str, int]]:
+    """Every reachable public type of these crates that holds a buffer of raw octets.
+
+    Structs and enums together, for `sample_buffer_carriers`' reason and one more: `Rtcp` is an
+    enum whose `Other` variant holds the body of a packet the crate does not model, and a rule that
+    read only structs would have held both ends of the relay path and missed the one in the middle.
+    """
+    found = []
+    for crate in crates:
+        for pattern in (_PUBLIC_STRUCT, _PUBLIC_ENUM):
+            for path, _module, name, offset in reachable(crate, pattern):
+                source = code(path.read_text(encoding="utf-8"))
+                if _BYTE_BUFFER.search(type_body(source, offset)):
+                    found.append((path, name, offset))
+    return found
+
+
+def byte_buffer_problems(crates: list[str]) -> list[str]:
+    """Reachable public types on the relay path whose `Debug` would render the call, or a person.
+
+    **This is the rule `M-107` concluded could not exist, narrowed until it could** (`M-110`). That
+    conclusion was about `Bytes` in general and it is correct in general: 58 reachable public types
+    in this workspace hold a byte buffer, and for nearly all of them — a `Call-ID`, a URI, a SIP
+    body, a STUN attribute — rendering the octets is the entire point of the log. What the
+    conclusion missed is that the sixty are spread across eleven crates. On the two the call's own
+    bytes pass through, every one of them can be decided by a person once and held by a checker
+    afterwards, which is the difference between a review and a rule. See `RELAY_PATH`.
+
+    So a reachable public type in those crates that holds a byte buffer **implements** `Debug` — a
+    payload type, a count, a length — or says beside itself that its bytes are neither the call nor
+    a participant. The population is eight and every one of them has an answer today: `Encoded`,
+    `Packet`, `Rtcp` and `SdesItem` redact, `SrtpKeys` already did, and the ICE and STUN carriers
+    argue.
+
+    **Two sensitivities, and the escape phrase is where the difference is enforced.** A payload is
+    the conversation still encoded, and for G.711 an octet is a sample. An RFC 3550 §6.5 `SdesItem`
+    is not audio at all — it is a login name, a real name, an email address — and the reason it is
+    redacted is not the payload's reason. `NOT_THE_CALL_REASON` exists because the audio phrase
+    would have excused it *truthfully*; see that constant.
+
+    **Where it is narrowed, and which way each narrowing fails.** Asking for the implementation
+    rather than forbidding the derive is `sample_buffer_problems`' argument unchanged, and it fails
+    loudly: a reader blind to a hand-written `Debug` reports all eight carriers. `_BYTE_BUFFER` is
+    the selector, which fails by selecting nothing, so its population is held to a floor by
+    `unread_relay_path`. The escape is a line-anchored phrase, so a reader that stopped recognising
+    it reports the types it excuses.
+
+    **What it still cannot do.** It cannot read what an implementation *prints* — the tests beside
+    each type do that, and `crates/sipx-rtp/tests/payload_diagnostics.rs` is where `M-110`'s are.
+    And it cannot reach a carrier outside the two crates, which is a real gap and not a rhetorical
+    one: `sipx_app_protocol::Source::Inline` documents itself as PCM and derives its `Debug`. That
+    is counted by `outstanding_byte_buffers` and filed as `M-117` rather than left here.
+    """
+    problems = []
+    for path, name, offset in byte_buffer_carriers(crates):
+        source = code(path.read_text(encoding="utf-8"))
+        above = preamble(source, offset)
+        if re.search(_IMPLEMENTS_DEBUG.format(name=re.escape(name)), source):
+            continue
+        if argued(above, NOT_THE_CALL_REASON):
+            continue
+        line = source.count("\n", 0, offset) + 1
+        try:
+            where = path.relative_to(ROOT)
+        except ValueError:
+            where = path
+        problems.append(
+            f"{where}:{line} `{name}` is reachable from the crate root of a relay-path crate and "
+            f"holds a buffer of octets, so a derived `Debug` renders whatever the call put in it; "
+            f"implement `Debug` with a length, or add an adjacent `{NOT_THE_CALL_REASON}` rationale"
+        )
+    return problems
+
+
+def unread_relay_path(carriers: list[tuple[Path, str, int]]) -> list[str]:
+    """The one problem a byte-buffer reader that has gone blind reports about itself.
+
+    `unreadable_surface`, for the other selector. See `_PLAUSIBLE_RELAY_CARRIERS`: narrowing
+    `_BYTE_BUFFER` is quiet by construction, so the population it selected is held to a floor.
+    """
+    if len(carriers) >= _PLAUSIBLE_RELAY_CARRIERS:
+        return []
+    return [
+        f"the byte-buffer reader recognised {len(carriers)} public types holding octets across "
+        f"{' and '.join(RELAY_PATH)}, below the {_PLAUSIBLE_RELAY_CARRIERS} the relay path is "
+        f"built from; the reader has narrowed rather than the workspace changed"
+    ]
+
+
+def on_the_relay_path(crates: list[str]) -> list[str]:
+    """The crates whose reachable byte-buffer carriers this run holds. See `RELAY_PATH`."""
+    return [crate for crate in crates if crate in RELAY_PATH]
+
+
+def outstanding_byte_buffers(crates: list[str]) -> list[str]:
+    """Every reachable public type outside the relay path that holds a byte buffer.
+
+    A stated scope whose size nobody prints is a suppression list with a better name — the argument
+    `outside_the_rule` and `outstanding_structs` each make, applied to the scope `M-110` chose. The
+    number is what makes re-reading `RELAY_PATH` a decision somebody takes rather than one that
+    decays, and it is the number that says how much of the workspace is still a reviewer's
+    question.
+
+    It counts *carriers* rather than *problems*, unlike `outstanding_structs`. Nearly every one of
+    them is a header a log exists to print, so reporting them as unfixed work would be a debt line
+    that misrepresents its own contents; what the count measures is how far the rule does not
+    reach.
+    """
+    return [
+        f"{path}:{name}"
+        for path, name, _offset in byte_buffer_carriers(
+            [crate for crate in crates if crate not in RELAY_PATH]
+        )
+    ]
+
+
 def enum_problems(crates: list[str]) -> list[str]:
     """Reachable public enums that promise their current variant set can never grow.
 
@@ -1540,8 +1721,10 @@ def main() -> int:
 
     read_crates = [read(name, tables) for name in crates]
     carriers = sample_buffer_carriers(crates)
+    relay = byte_buffer_carriers(on_the_relay_path(crates))
     problems += enum_problems(guarded(crates)) + struct_problems(guarded_structs(crates))
     problems += sample_buffer_problems(crates) + unreadable_surface(carriers)
+    problems += byte_buffer_problems(on_the_relay_path(crates)) + unread_relay_path(relay)
     for crate in read_crates:
         problems += (
             claim_problems(crate) + agreement_problems(crate) + stability_problems(crate)
@@ -1593,7 +1776,18 @@ def main() -> int:
     print(
         f"{len(carriers)} reachable public types hold a buffer of PCM samples and every one of "
         f"them implements `Debug` or argues it is not call audio; encoded audio in `Bytes` is "
-        f"outside what an element type can decide and stays a reviewer's question"
+        f"outside what an element type can decide and is held by scope instead"
+    )
+    # The byte-buffer rule's population and the scope's remainder, on the terms every other
+    # boundary in this file is held to (`M-110`). Both numbers, because they answer different
+    # questions: the first is whether the reader still reads, the second is how much of the
+    # workspace this rule deliberately does not reach.
+    outside = outstanding_byte_buffers(crates)
+    print(
+        f"{len(relay)} reachable public types across {' and '.join(RELAY_PATH)} hold a buffer of "
+        f"octets and every one of them implements `Debug` or argues its bytes are not the call; "
+        f"{len(outside)} byte-buffer carriers outside that scope are protocol headers a log exists "
+        f"to print, bar the four M-117 names"
     )
     return 0
 
