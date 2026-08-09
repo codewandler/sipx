@@ -23,6 +23,7 @@ over-claim and been switched off by whoever hit it second.
 
 import importlib.util
 import pathlib
+import re
 import subprocess
 import tempfile
 import sys
@@ -1360,6 +1361,194 @@ class TheAttributeAndProseAboutIt(unittest.TestCase):
         self.assertIn("`Flow`", enums[0])
         self.assertEqual(1, len(structs))
         self.assertIn("`Encoded`", structs[0])
+
+
+#: A type holding call audio with nothing but the derive over it, which is the thing `M-61` found
+#: on `AnalysisFrame` and `M-107` on `PcmFrame`.
+LEAKING = "/// One frame of call audio.\n#[derive(Debug)]\npub struct Frame { samples: Vec<i16> }\n"
+
+#: The redaction that answers the rule, written the way both fixes write it.
+REDACTION = (
+    "impl std::fmt::Debug for Frame {\n"
+    "    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n"
+    '        f.debug_struct("Frame").field("samples", &self.samples.len()).finish()\n'
+    "    }\n"
+    "}\n"
+)
+
+
+class TheSampleBufferRule(unittest.TestCase):
+    """`M-107`: a public type holding call audio implements `Debug` or says why its buffer is not.
+
+    Two defects in two crates, one shape. `sipx_audio::AnalysisFrame`'s derived `Debug` rendered
+    every one of the up-to-65,536 samples it borrowed and was reachable from a refusal record
+    `sipx-call` wrote (`M-61`); `sipx_media::PcmFrame` had the same derive over an owned buffer and
+    was latent only because nothing logged it yet. What a review caught twice is what this asks a
+    checker for.
+
+    The tests below are in three groups, because three separate things have to hold: the rule
+    selects the shape a buffer is written in, it does not select the byte buffers that are not
+    audio, and it fails loudly in both directions its readers can narrow.
+    """
+
+    def problems(self, source):
+        return demo_crate({"lib.rs": source}, guard.sample_buffer_problems)
+
+    # -- what it selects ------------------------------------------------------------------
+
+    def test_a_type_holding_samples_with_only_the_derive_is_reported(self):
+        problems = self.problems(LEAKING)
+        self.assertEqual(1, len(problems))
+        self.assertIn("`Frame`", problems[0])
+        self.assertIn("PCM samples", problems[0])
+
+    def test_every_shape_a_sample_buffer_is_written_in_is_one(self):
+        """Owned, borrowed, boxed and fixed. A rule that read only `Vec<i16>` would have held
+        `PcmSamples` and missed `AnalysisFrame`, `DspFrame` and G.722's twenty-four-sample delay
+        line — three of the four types the workspace actually leaked from."""
+        for field in (
+            "samples: Vec<i16>",
+            "samples: &'a [i16]",
+            "samples: Box<[i16]>",
+            "qmf_delay: [i16; 24]",
+            "samples: Vec<f32>",
+        ):
+            with self.subTest(field=field):
+                problems = self.problems(
+                    f"/// One frame.\n#[derive(Debug)]\npub struct Frame<'a> {{ {field} }}\n"
+                )
+                self.assertEqual(1, len(problems), field)
+
+    def test_an_enum_holding_samples_is_selected_as_a_struct_is(self):
+        """`PcmSamples` is the enum every owned buffer in the workspace is made of, so a rule that
+        read only structs would have missed the type all the others delegate to."""
+        problems = self.problems(
+            "/// Owned samples.\n#[derive(Debug)]\npub enum Samples { Signed16(Vec<i16>) }\n"
+        )
+        self.assertEqual(1, len(problems))
+        self.assertIn("`Samples`", problems[0])
+
+    # -- what answers it, and what it deliberately does not select ------------------------
+
+    def test_a_hand_written_debug_answers_the_rule(self):
+        self.assertEqual([], self.problems(LEAKING.replace("#[derive(Debug)]\n", "") + REDACTION))
+
+    def test_the_implementation_is_recognised_in_every_spelling_of_the_path(self):
+        for opening in (
+            "impl std::fmt::Debug for Frame {",
+            "impl core::fmt::Debug for Frame {",
+            "impl fmt::Debug for Frame {",
+            "impl<'a> fmt::Debug for Frame<'a> {",
+        ):
+            with self.subTest(opening=opening):
+                source = LEAKING.replace("#[derive(Debug)]\n", "") + opening + "\n}\n"
+                self.assertEqual([], self.problems(source))
+
+    def test_a_rationale_beside_the_type_answers_it_too(self):
+        """The escape a coefficient table needs. It opens a doc line, like every other rationale
+        this file accepts, so a phrase quoted mid-sentence does not classify a type."""
+        argued = LEAKING.replace(
+            "/// One frame of call audio.",
+            "/// A window.\n///\n/// Not call audio: these are the Hann coefficients.",
+        )
+        self.assertEqual([], self.problems(argued))
+        quoted = LEAKING.replace(
+            "/// One frame of call audio.",
+            "/// One frame. See [`Window`], whose `/// Not call audio:` note explains the escape.",
+        )
+        self.assertEqual(1, len(self.problems(quoted)))
+
+    def test_a_byte_buffer_is_not_a_sample_buffer(self):
+        """The stated limit, and the reason the rule can run over every published crate at once.
+
+        `Vec<u8>` and `Bytes` are a G.711 payload here and a `Call-ID`, a SIP body and a STUN
+        attribute three crates over. Selecting them would report the whole SIP surface, where the
+        bytes *are* what a protocol log is for — so encoded audio stays a reviewer's question, and
+        `sipx_media::Encoded` was redacted by hand rather than by this.
+        """
+        for field in ("payload: Vec<u8>", "payload: Bytes", "channels: &'static [u8]"):
+            with self.subTest(field=field):
+                self.assertEqual(
+                    [],
+                    self.problems(
+                        f"/// A packet.\n#[derive(Debug)]\npub struct Frame {{ {field} }}\n"
+                    ),
+                )
+
+    def test_a_buffer_named_in_prose_is_not_a_buffer(self):
+        """`type_body` drops comments and string literals: a doc line explaining that a field used
+        to be a `Vec<i16>`, or an `#[error]` message quoting one, is prose about a buffer."""
+        self.assertEqual(
+            [],
+            self.problems(
+                "/// A count.\n"
+                "#[derive(Debug)]\n"
+                "pub struct Frame {\n"
+                "    /// How many samples there were, replacing the `Vec<i16>` this used to hold.\n"
+                "    samples: usize,\n"
+                "}\n"
+            ),
+        )
+
+    def test_an_unbalanced_brace_in_a_variant_doc_does_not_stop_the_reader(self):
+        """`sipx-testkit`'s `Malformed` documents a variant as ``/// `not json{` ``, and the struct
+        rule's own body reader — which counts brace depth over the raw text — never closes it. The
+        reader here drops comments first, so the type after that one is still read."""
+        source = (
+            "/// Frames that are not frames.\n"
+            "#[derive(Debug)]\n"
+            "pub enum Malformed {\n"
+            "    /// `not json{` — a text frame that is not JSON at all.\n"
+            "    NotJson,\n"
+            "}\n"
+            "\n" + LEAKING
+        )
+        problems = self.problems(source)
+        self.assertEqual(1, len(problems))
+        self.assertIn("`Frame`", problems[0])
+
+    # -- how each reader fails when it narrows --------------------------------------------
+
+    def test_a_reader_blind_to_the_implementation_reports_every_carrier(self):
+        """Why the rule asks for an implementation instead of forbidding the derive.
+
+        `M-97` made this correction to `marked` and `X-131`/`X-132` to the CLI-reference readers:
+        the side of a rule that is *narrowed* has to be the side whose failure reports types. A
+        reader that stopped recognising a hand-written `Debug` reports every redacted type in the
+        workspace, which is a red gate; one that stopped recognising `#[derive(Debug)]` would have
+        excused every leaking one at exit 0.
+        """
+        pattern = guard._IMPLEMENTS_DEBUG
+        guard._IMPLEMENTS_DEBUG = r"(?!)"
+        try:
+            problems = self.problems(LEAKING.replace("#[derive(Debug)]\n", "") + REDACTION)
+        finally:
+            guard._IMPLEMENTS_DEBUG = pattern
+        self.assertEqual(1, len(problems))
+        self.assertIn("`Frame`", problems[0])
+
+    def test_a_reader_blind_to_a_sample_buffer_fails_the_run_rather_than_passing_it(self):
+        """The other direction, which no report of types can cover.
+
+        A selector fails by selecting nothing, so narrowing `_SAMPLE_BUFFER` is the one change in
+        this file that would be quiet. The population is therefore held to a floor: a reader that
+        recognises almost none of a workspace built out of `i16` buffers says so.
+        """
+        buffer = guard._SAMPLE_BUFFER
+        guard._SAMPLE_BUFFER = re.compile(r"(?!)")
+        try:
+            carriers = demo_crate({"lib.rs": LEAKING}, guard.sample_buffer_carriers)
+        finally:
+            guard._SAMPLE_BUFFER = buffer
+        self.assertEqual([], carriers)
+        self.assertEqual(1, len(guard.unreadable_surface(carriers)))
+        self.assertIn("has narrowed", guard.unreadable_surface(carriers)[0])
+
+    def test_a_workspace_that_still_reads_is_not_reported(self):
+        """The floor has to leave the thing it was set above."""
+        self.assertEqual(
+            [], guard.unreadable_surface([("path", "Frame", 0)] * guard._PLAUSIBLE_CARRIERS)
+        )
 
 
 if __name__ == "__main__":

@@ -109,6 +109,21 @@ compresses over loss. Wall-clock time appears nowhere.
 
 **`discontinuity`**, when present, describes the break immediately *before* this frame.
 
+**A frame's diagnostic rendering carries its identity and its counters, never its samples.** The
+`Debug` of `PcmFrame` — and of every type on this surface that holds a buffer of samples — reports
+direction, format, position, declared break and a sample **count**. It MUST NOT report a sample
+value, and the length of what it writes MUST be bounded by the implementation rather than by the
+frame: a redaction that still grew with the audio would close half of one defect. Reaching the
+audio takes `PcmFrame::pcm` and a deliberate decision, so no ordinary record — a `tracing` field, an
+`expect` message, a test failure — carries call audio by accident.
+
+The rule is normative here because a derived `Debug` satisfies it by luck and stops satisfying it
+the moment a field is added. `M-61` found the same derive rendering all 65,536 samples of
+`call-audio-processing.md`'s `AnalysisFrame`, reachable from a refusal record `sipx-call` already
+wrote; `M-107` found it here, latent only because nothing logged a frame yet. What is checkable
+mechanically — that a public type holding a buffer of `i16` samples implements its own `Debug` — is
+enforced by `scripts/check-audio-claims.py`. What a rendering *says* is SEAM-16.
+
 ## 5. Attachment and format selection
 
 An attachment is requested with a direction, a `PcmFormat` and a queue capacity:
@@ -249,3 +264,4 @@ default capacity of 32.
 | SEAM-13 | attach 8 times, then a ninth | the ninth is refused `TooManyProcessors`; the eight remain live |
 | SEAM-14 | attach to a stopped session | refused `SessionStopped` |
 | SEAM-15 | `S8` relaying; a packet arrives | no `Inbound` frame; the encoded path is unchanged |
+| SEAM-16 | `S8` with an `Outbound` attachment; send 160 samples of one distinctive value; render the frame and, relaying, the `Encoded` payload | neither record contains a sample or payload value; each names its direction or payload type and its length; each is under 200 octets |

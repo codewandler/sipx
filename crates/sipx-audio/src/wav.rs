@@ -26,12 +26,25 @@ pub enum WavError {
 }
 
 /// 16-bit mono PCM at a given sample rate.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Its `Debug` carries the rate and the sample count and never the samples (`M-107`). A clip is a
+/// whole file rather than a frame, so a derived one is the same defect with a worse bound: a
+/// record whose length is the recording's.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Wav {
     /// Samples per second.
     pub sample_rate: u32,
     /// The samples.
     pub samples: Vec<i16>,
+}
+
+impl std::fmt::Debug for Wav {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Wav")
+            .field("sample_rate", &self.sample_rate)
+            .field("samples", &self.samples.len())
+            .finish()
+    }
 }
 
 impl Wav {

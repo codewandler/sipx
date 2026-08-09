@@ -781,7 +781,7 @@ impl std::fmt::Debug for SrtpKeys {
 /// both answers reachable; shipping `1.0.0` unmarked would have spent the choice on the answer
 /// that two stories had already shown to be wrong. See `docs/roadmap.md`'s v1 predicate 4, which
 /// is where a contract stops being editable to fit a change.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct Encoded {
     /// What it is encoded in.
@@ -842,6 +842,27 @@ impl Encoded {
             payload,
             extension: None,
         }
+    }
+}
+
+/// What the payload is, never the payload (`M-107`).
+///
+/// These bytes are the call, still encoded. For G.711 that is one octet per sample and a decode
+/// away from the conversation, and for every other payload type it is still the audio somebody
+/// spoke — so a derived `Debug`, which renders the whole buffer, puts the call in whatever record
+/// carries an `Encoded`. The payload type stays: it is what a relay log is actually for.
+///
+/// This is `M-107`'s **hand** half rather than its checked half. A sample buffer is recognisable
+/// by its element type and a checker holds the whole workspace to it; a payload is `Bytes`, which
+/// is also what a `Call-ID` and a SIP body are, and no checker can tell those apart from this. The
+/// same bytes one layer down — [`sipx_rtp::Packet::payload`] — are `M-110`.
+impl std::fmt::Debug for Encoded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Encoded")
+            .field("payload_type", &self.payload_type)
+            .field("payload", &self.payload.len())
+            .field("extension", &self.extension.as_ref().map(Bytes::len))
+            .finish()
     }
 }
 

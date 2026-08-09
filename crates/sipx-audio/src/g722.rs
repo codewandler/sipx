@@ -546,11 +546,22 @@ fn qmf_synthesis(delay: &mut [i16; 24], low: i16, high: i16) -> (i16, i16) {
 // ---------------------------------------------------------------------------------------------
 
 /// A G.722 encoder: 16 kHz signed 16-bit mono in, 64 kbit/s payload octets out.
-#[derive(Debug)]
+///
+/// Its `Debug` reports the type and nothing else (`M-107`). Every field it has is the call's own
+/// audio or a function of it — the QMF delay line is twenty-four samples verbatim, and each band's
+/// `d`, `p` and `r` are sub-band signal history — so there is no field here a log record may carry,
+/// and no identity, position or count to report in their place. A codec's state is inspected in a
+/// debugger, not in a record somebody copies into a ticket.
 pub struct Encoder {
     lower: Band,
     higher: Band,
     qmf_delay: [i16; 24],
+}
+
+impl std::fmt::Debug for Encoder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Encoder { .. }")
+    }
 }
 
 impl Encoder {
@@ -597,11 +608,19 @@ impl Default for Encoder {
 ///
 /// Decodes at 64 kbit/s (mode 1), which is what RTP payload type 9 carries. Any byte sequence
 /// is decodable — a stream joined mid-call converges, and nothing panics.
-#[derive(Debug)]
+///
+/// Its `Debug` reports the type and nothing else, on [`Encoder`]'s terms and for its reasons
+/// (`M-107`).
 pub struct Decoder {
     lower: Band,
     higher: Band,
     qmf_delay: [i16; 24],
+}
+
+impl std::fmt::Debug for Decoder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Decoder { .. }")
+    }
 }
 
 impl Decoder {
