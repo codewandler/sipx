@@ -2,7 +2,7 @@
 id: X-142
 title: Register the DSP heap probe in the gate
 pillar: Build
-status: in-progress
+status: done
 priority:
 design: docs/designs/custom-call-dsp.md
 epic: custom-call-dsp
@@ -68,3 +68,4 @@ today it runs only when somebody remembers. A measurement nobody runs decays int
 
   `./scripts/gate.py --check` reports **51 steps over 24 CI jobs, none unaccounted for**.
 
+- 2026-08-09: closed at the `1.0.0-rc.17` boundary, against the wave gate run on this tree.

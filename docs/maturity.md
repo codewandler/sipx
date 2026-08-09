@@ -60,19 +60,19 @@ No aggregate percentage is given. `media` and `core` differ in size and in how m
 
 | Pillar | Open stories |
 |---|---|
-| Media | 18 |
 | Application | 16 |
-| Build | 11 |
+| Media | 15 |
+| Build | 9 |
 | Signalling | 3 |
 | Transport | 3 |
 | Phone | 2 |
-| **total** | **53** |
+| **total** | **48** |
 
-348 stories done. `blocked` counts as open: a story parked on a dependency is distance, not progress.
+353 stories done. `blocked` counts as open: a story parked on a dependency is distance, not progress.
 
 ## Discovery versus closure
 
-<!-- maturity-event-days: {"basis":"sha256:37e9b5269770d90e4cce8b1c1476ad955075f52e3486a49ff0acd218b7a70eee","closed":{"2026-07-28":58,"2026-07-29":48,"2026-07-30":40,"2026-07-31":5,"2026-08-01":1,"2026-08-03":12,"2026-08-04":39,"2026-08-05":35,"2026-08-08":89,"2026-08-09":21},"filed":{"2026-07-28":95,"2026-07-29":42,"2026-07-30":44,"2026-07-31":3,"2026-08-03":1,"2026-08-04":51,"2026-08-05":73,"2026-08-06":17,"2026-08-08":56,"2026-08-09":20}} -->
+<!-- maturity-event-days: {"basis":"sha256:c40127b6a96799fe3c62e458e344d2727faae8f969c63ade257e9482a2e938a9","closed":{"2026-07-28":58,"2026-07-29":48,"2026-07-30":40,"2026-07-31":5,"2026-08-01":1,"2026-08-03":12,"2026-08-04":39,"2026-08-05":35,"2026-08-08":89,"2026-08-09":26},"filed":{"2026-07-28":95,"2026-07-29":42,"2026-07-30":44,"2026-07-31":3,"2026-08-03":1,"2026-08-04":51,"2026-08-05":73,"2026-08-06":17,"2026-08-08":56,"2026-08-09":20}} -->
 
 Burn-down is not a maturity signal while discovery outpaces closure. The marker to watch is not a single day where closure wins but the date that crossover becomes **durable** — that is when the codebase stops surprising its authors.
 
@@ -87,7 +87,7 @@ Burn-down is not a maturity signal while discovery outpaces closure. The marker 
 | 2026-08-05 | 73 | 35 | -38 |
 | 2026-08-06 | 17 | 0 | -17 |
 | 2026-08-08 | 56 | 89 | +33 |
-| 2026-08-09 | 20 | 21 | +1 |
+| 2026-08-09 | 20 | 26 | +6 |
 
 Filed is a story file being added; closed is a `status: done` line appearing, so a story reopened and closed again counts twice — which is the honest reading of *closed that day*.
 

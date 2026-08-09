@@ -2,7 +2,7 @@
 id: X-128
 title: Measure DSP processor heap growth
 pillar: Build
-status: in-progress
+status: done
 priority:
 design: docs/designs/custom-call-dsp.md
 epic: custom-call-dsp
@@ -109,3 +109,5 @@ processor's own state — into a measured figure, so `docs/specs/custom-call-dsp
   in a wave where other implementors are running, and `gate.py --check` passes untouched at 50 steps
   over 23 CI jobs. Until then the probe is run by hand and its figures are quoted in the spec.
   **The board needs regenerating for `X-142` — that file is fenced, so it is the coordinator's.**
+
+- 2026-08-09: closed at the `1.0.0-rc.17` boundary, against the wave gate run on this tree.

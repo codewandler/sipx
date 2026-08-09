@@ -2,7 +2,7 @@
 id: M-102
 title: Run a supervised DSP worker in its own process
 pillar: Media
-status: in-progress
+status: done
 priority: 39
 design: docs/designs/custom-call-dsp.md
 epic: custom-call-dsp
@@ -114,3 +114,5 @@ process", and the profile's documentation must not be read as promising otherwis
   is the next frame of a live call — so a worker that dies while a call is idle is not reaped until
   the next frame or the teardown, whichever comes first. That is bounded and reported, not a leak,
   and it is why the tests wait for the process to be gone rather than for a duration.
+
+- 2026-08-09: closed at the `1.0.0-rc.17` boundary, against the wave gate run on this tree.

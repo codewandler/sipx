@@ -1,13 +1,33 @@
 ---
 title: What's new
-description: Release highlights and adoption notes for the sipx 1.0.0-rc.16 release candidate.
+description: Release highlights and adoption notes for the sipx 1.0.0-rc.17 release candidate.
 ---
 
 # What's new
 
 <!-- BEGIN generated:release-heading -->
-## 1.0.0-rc.16 — 2026-08-09
+## 1.0.0-rc.17 — 2026-08-09
 <!-- END generated:release-heading -->
+
+RC.17 finishes three things that had been true on paper and not in fact.
+
+```bash
+cargo install --locked --version =1.0.0-rc.17 sipx-cli
+```
+
+- **Nine types stopped printing call audio into a log.** `PcmFrame`, `PcmSamples`, `Wav`, the DSP
+  frame, scratch and sink, the stutter delay line and the G.722 codecs all rendered their samples in
+  `Debug`. Each now reports identity and a count, and a checker holds every published crate to it.
+- **A supervised DSP worker is a real operating-system process**, spawned, killed and reaped — so
+  the profile's containment claim is the one the spec writes rather than a thread's approximation.
+- **A processor's heap is measured against what it declares.** `sipx.stutter`'s delay line is the
+  first declared heap figure ever checked, and it is exact to the byte.
+- **`call.dial.finished` has a producer**, and a row named as driver-composed must now point at the
+  thing that composes it — the asymmetry that let three separate events be specified and
+  unreachable.
+- **Interchangeable noise reduction**, which states what it damages and when it makes speech worse.
+
+## 1.0.0-rc.16 — 2026-08-09
 
 RC.16 gives the DSP graph something to run, gives two contract events a producer, and stops a frame
 printing its audio into a log.
@@ -788,5 +808,5 @@ answer calls, but application callback bindings are not implemented.
 This website is built from `main`, so a page or API link may describe work newer than the tagged
 release. Use the exact crates.io version when reproducibility matters, and consult the
 [complete changelog](https://github.com/codewandler/sipx/blob/main/CHANGELOG.md) before updating a
-Git revision. Unreleased behavior is not part of `1.0.0-rc.16` merely because it appears on this
+Git revision. Unreleased behavior is not part of `1.0.0-rc.17` merely because it appears on this
 site.

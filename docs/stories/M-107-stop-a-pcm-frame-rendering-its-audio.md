@@ -2,7 +2,7 @@
 id: M-107
 title: Stop a PCM frame rendering its audio
 pillar: Media
-status: in-progress
+status: done
 priority: 5
 design:
 epic: media
@@ -50,7 +50,7 @@ moment something goes wrong — which is precisely when a record gets written.
 - [x] Whether this can be *enforced* rather than reviewed is answered: `check-audio-claims.py`
       already reads this surface, and a derive that prints a sample buffer is a shape a checker can
       look for. If it cannot be checked, say why.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -117,3 +117,5 @@ moment something goes wrong — which is precisely when a record gets written.
   `--all-targets --all-features --no-deps -- -D warnings`, `cargo fmt --all`, `cargo doc` on those
   `--no-deps --all-features`, `python3 -m unittest scripts/test-audio-claims.py` (129 tests, 12 of
   them new), `./scripts/check-audio-claims.py --check`, `./scripts/gate.py --check`.
+
+- 2026-08-09: closed at the `1.0.0-rc.17` boundary, against the wave gate run on this tree.

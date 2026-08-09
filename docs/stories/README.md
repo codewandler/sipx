@@ -78,13 +78,8 @@ appeared twice before anyone named it.
 - [M-66 — Ship interchangeable local noise reduction](M-66-ship-interchangeable-noise-reduction.md) · Media · after M-63 · optional M-58 VAD input · provider-neutral contract and local baseline
 - [M-70 — Accept multiplexed browser offers with unused component candidates](M-70-accept-multiplexed-browser-offers-with-unused-component-candidates.md) · Media · external review finding 9 · a second browser engine reaches SDP then fails the multiplexed profile
 - [M-72 — Prove the AEAD SRTP key derivation against an independent peer](M-72-prove-the-aead-srtp-key-derivation-against-a-peer.md) · Media · RFC 7714 publishes no KDF vector · a wrong salt placement makes two sipx endpoints interoperate with each other and nobody else, and every round-trip test still passes
-- [M-102 — Run a supervised DSP worker in its own process](M-102-run-a-supervised-dsp-worker-in-its-own-process.md) · Media · after M-64 · the operating-system half of the supervised-isolated profile
-- [M-103 — Give `call.dial.finished` a producer](M-103-give-call-dial-finished-a-producer.md) · Media · filed by M-99 · the last §5.3 row with no producer anywhere, and the driver refuses the effect that would create the leg
-- [M-107 — Stop a PCM frame rendering its audio](M-107-stop-a-pcm-frame-rendering-its-audio.md) · Media · PcmFrame derives Debug over its samples · the same shape M-61 fixed one layer down, where it was reachable from a real refusal record
 - [T-33 — Bind browser WebSocket signalling](T-33-bind-browser-websocket-signalling.md) · Transport · after A-16 and S-41 · browser owns I/O, WASM core consumes bytes
 - [X-93 — Make protected release evidence faster without weakening it](X-93-make-protected-release-evidence-faster.md) · Build · measure cache and preflight changes against the 12m37 cold beta gate · follow-up
-- [X-128 — Measure DSP processor heap growth](X-128-measure-processor-heap-growth.md) · Build · after M-63 · DSP-K9 reports heap growth `Unproven` because no counting allocator can be installed
-- [X-142 — Register the DSP heap probe in the gate](X-142-register-the-dsp-heap-probe-in-the-gate.md) · Build · after X-128 · `check-dsp-heap.sh` measures what `DSP-K9` could not, and nothing runs it automatically
 
 ## Next (ready — take the top one unless the user named a story)
 
@@ -284,6 +279,9 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [M-97 — Make the extensibility guard tell the attribute from prose about it](M-97-tell-the-attribute-from-prose-about-it.md) · Media · `preamble` is searched as one string, so a doc comment containing `#[non_exhaustive]` satisfies the rule; `sipx-media`'s `ProviderKind` passes on prose alone today
 - [M-98 — Close and test the call-to-contract event bridge](M-98-close-the-call-to-contract-event-bridge.md) · Media · filed by M-84 · `call.signal.metrics` is specified and typed but unreachable, and `event_from_call` has no tests at all
 - [M-99 — Give `call.bridged` and `call.unbridged` a producer](M-99-give-the-bridge-events-a-producer.md) · Media · filed by M-98 · two more §5.3 rows are specified, typed and round-tripped with nothing that emits them
+- [M-102 — Run a supervised DSP worker in its own process](M-102-run-a-supervised-dsp-worker-in-its-own-process.md) · Media · after M-64 · the operating-system half of the supervised-isolated profile
+- [M-103 — Give `call.dial.finished` a producer](M-103-give-call-dial-finished-a-producer.md) · Media · filed by M-99 · the last §5.3 row with no producer anywhere, and the driver refuses the effect that would create the leg
+- [M-107 — Stop a PCM frame rendering its audio](M-107-stop-a-pcm-frame-rendering-its-audio.md) · Media · PcmFrame derives Debug over its samples · the same shape M-61 fixed one layer down, where it was reachable from a real refusal record
 - [P-1 — Build the CLI scaffold and machine-readable output](P-1-cli-scaffold-and-output.md) · Phone
 - [P-2 — Implement `sipx register`](P-2-cli-register.md) · Phone
 - [P-3 — Implement `sipx dial`](P-3-cli-dial.md) · Phone
@@ -514,6 +512,7 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [X-125 — See what only the non-Linux jobs compile](X-125-see-what-only-the-non-linux-jobs-compile.md) · Build · two CI jobs were red for a day over a cfg that disagreed with its only caller · the Linux gate compiles the caller, so it cannot see it
 - [X-126 — The default load pair test rejects a call under suite contention](X-126-the-default-load-pair-test-rejects-a-call-under-suite-contention.md) · Quality · default_load_pair_completes_the_requested_signalling_workload fails intermittently in the full cli suite — the responder 503s one call at max_active, connecting 19 of 20
 - [X-127 — Bound registry pacing across the whole publication, not one invocation](X-127-bound-registry-pacing-across-the-whole-publication.md) · Build · found while verifying X-119 against X-93's rate-limit row · the per-run budget resets
+- [X-128 — Measure DSP processor heap growth](X-128-measure-processor-heap-growth.md) · Build · after M-63 · DSP-K9 reports heap growth `Unproven` because no counting allocator can be installed
 - [X-129 — Say what --max-active costs a caller who sizes it to their concurrency](X-129-say-what-max-active-costs-a-caller-who-sizes-it-to-their-concurrency.md) · Quality · load-responder sheds calls by design when --max-active equals the generator's concurrency, and nothing tells the operator sizing a run
 - [X-130 — The generated-media load pair test now sheds a call too](X-130-the-generated-media-load-pair-test-now-sheds-a-call-too.md) · Quality · generated_media_load_pair_retains_the_rtp_workload runs --concurrency 2 against --max-active 2 and was observed rejecting one of four calls in a full cli suite run
 - [X-131 — Help prose cannot name another command's flag](X-131-help-prose-cannot-name-another-commands-flag.md) · Quality · check-cli-reference reads --flag tokens out of a command's whole help text, so a cross-reference in prose reads as an undocumented option
@@ -521,6 +520,7 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [X-133 — The JSON contract reader accepts rows that do not render](X-133-the-json-contract-reader-accepts-rows-that-do-not-render.md) · Quality · X-132 narrowed the flag half of check-cli-reference to real tables; `_document_json_contracts` in the same file still counts any three-celled `|` line between the region markers
 - [X-135 — A contention subject that can tell the load-pair headroom from its absence](X-135-a-contention-subject-that-can-tell-the-load-pair-headroom-from-its-absence.md) · Quality · the generated-media load pair rolls its handover race twice per run, so contention-proof.py cannot make it red and adding it to SUBJECTS would cost minutes to prove nothing
 - [X-136 — The load candidate count goes null under suite load](X-136-the-load-candidate-count-goes-null-under-suite-load.md) · Quality · a_load_run_that_reaches_no_address_reports_what_it_attempted reported candidates_attempted null in a full workspace run and 3 alone
+- [X-142 — Register the DSP heap probe in the gate](X-142-register-the-dsp-heap-probe-in-the-gate.md) · Build · after X-128 · `check-dsp-heap.sh` measures what `DSP-K9` could not, and nothing runs it automatically
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

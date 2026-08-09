@@ -7,6 +7,53 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0-rc.17] — 2026-08-09
+
+Five stories: nine types stop printing call audio, a supervised worker becomes a real process, a
+heap figure gets measured for the first time, and the last unreachable contract event gets a
+producer.
+
+### Added
+
+- **A supervised DSP stage runs its worker in an operating-system process** that this crate spawns,
+  kills and reaps, so `SupervisedIsolated`'s containment claim is the one the spec writes rather
+  than a thread's approximation of it. `with_supervised` takes a `WorkerProcess`, and a
+  `sipx-dsp-worker` executable now ships with the package — its command line is a compatibility
+  surface, stated rather than discovered.
+
+- **Interchangeable call-DSP noise reduction**: a `NoiseReducer` trait and `NoiseReduction`
+  declaration, a deterministic three-band suppressor behind it, and `BuiltIn::SubbandSuppressor` to
+  attach it to a call. What it removes, what it damages, and the five conditions under which it
+  makes speech **worse than leaving it alone** are stated normatively, not implied.
+
+- **A host can perform the contract's `dial` verb.** An outbound leg is placed on the call's own
+  endpoint and `call.dial.finished` reports how it resolved — which no host could emit before,
+  because the call layer never put a dial's outcome on an event at all.
+
+### Fixed
+
+- **The media surface no longer renders call audio in a `Debug` record.** Nine types were doing it:
+  `PcmFrame`, `PcmSamples`, `Wav`, the DSP frame, scratch and sink, the stutter delay line, the
+  G.722 codecs and `Encoded`. Each now reports identity and a sample count in a record whose length
+  is bounded independently of the audio, and `check-audio-claims.py` holds every published crate to
+  it. Encoded audio in `Bytes` is outside what an element type can decide and stays a reviewer's
+  question, which the checker says rather than implies.
+
+- **`DSP-K9` measures a processor's heap growth** against its declared `state_bytes` instead of
+  reporting it unproven. `sipx.stutter`'s delay line is the first declared heap figure ever checked,
+  and it is exact. The measurement lives outside the workspace because `unsafe_code = "forbid"`
+  covers every target of every member — a counting allocator does not merely violate a convention
+  here, it does not compile — and it is a gate step, because a measurement nobody runs decays into
+  a claim.
+
+### Changed
+
+- **A row named as driver-composed must now point at the thing that composes it.** The contract's
+  reachability table asserted only that a row was *absent* from the bridge, which a row nothing
+  produced anywhere satisfied perfectly. That asymmetry is why three separate stories each found one
+  unreachable event; the table now checks composition, and the two rows that happened to have real
+  producers were verified for the first time.
+
 ## [1.0.0-rc.16] — 2026-08-09
 
 Five stories: the DSP graph gets processors to run, two contract events get producers, and a frame
@@ -4320,7 +4367,8 @@ Stated so nobody has to discover it from a stack trace:
 - **Interop is verified against Kamailio only.** A second implementation with different
   opinions — Asterisk, as a B2BUA rather than a proxy — has not been tried.
 
-[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.16...HEAD
+[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.17...HEAD
+[1.0.0-rc.17]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.16...v1.0.0-rc.17
 [1.0.0-rc.16]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.15...v1.0.0-rc.16
 [1.0.0-rc.15]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.14...v1.0.0-rc.15
 [1.0.0-rc.14]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.13...v1.0.0-rc.14

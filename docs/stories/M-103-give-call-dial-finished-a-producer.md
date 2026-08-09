@@ -2,7 +2,7 @@
 id: M-103
 title: Give `call.dial.finished` a producer
 pillar: Media
-status: in-progress
+status: done
 priority: 29
 design: docs/designs/app-sdk.md
 epic: app-sdk
@@ -35,7 +35,7 @@ specified, typed, wire-round-tripped, consumed — and emitted by nothing.
       (`interpreter.rs:550`) in that list with real producers behind them and `call.dial.finished`
       in it with none — the list asserts a row is *absent* from `src/call.rs` and has never asserted
       that anything composes it, which is the hole all three of these stories fell into.
-- [ ] The full gate is green.
+- [x] The full gate is green.
 
 ## Progress
 
@@ -88,3 +88,5 @@ it went away.
   When it can perform `Effect::Bridge` it must pass the `leg` the interpreter put on that effect,
   and hold the name until the `CallEvent::Unbridged` it produces has been mapped — §6.2 ends a
   bridge on `unbridge` **or either leg ending**, so the name outlives the instruction.
+
+- 2026-08-09: closed at the `1.0.0-rc.17` boundary, against the wave gate run on this tree.
