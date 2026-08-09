@@ -2,7 +2,7 @@
 id: M-99
 title: Give `call.bridged` and `call.unbridged` a producer
 pillar: Media
-status: in-progress
+status: done
 priority: 28
 design: docs/designs/app-sdk.md
 epic: app-sdk
@@ -35,7 +35,7 @@ are not — the same question `M-98` answered for `call.signal.metrics`, one lay
       or the rows leave §5.3.
       → the rows got a producer; `COMPOSED_BY_THE_DRIVER` is down to three entries and the test's
       other branch now requires the arm.
-- [ ] The full gate is green.
+- [x] The full gate is green.
 
 ## Progress
 
@@ -111,3 +111,5 @@ Gate row left unticked — the wave gate is the coordinator's to run.
 - `check-audio-claims.py` already records that `sipx-call` has nothing named bridge (`X-35`,
   `C-6`'s gap). This is the app-contract half of the same absence, and the two are worth settling
   together rather than separately.
+
+- 2026-08-09: closed at the `1.0.0-rc.16` boundary, against the wave gate run on this tree.

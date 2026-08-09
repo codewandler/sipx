@@ -7,6 +7,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0-rc.16] — 2026-08-09
+
+Five stories: the DSP graph gets processors to run, two contract events get producers, and a frame
+stops printing its audio.
+
 ### Added
 
 - **Nine deterministic built-in call-DSP processors** — gain, polarity, hard and soft clipping, bit
@@ -4315,7 +4320,8 @@ Stated so nobody has to discover it from a stack trace:
 - **Interop is verified against Kamailio only.** A second implementation with different
   opinions — Asterisk, as a B2BUA rather than a proxy — has not been tried.
 
-[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.15...HEAD
+[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.16...HEAD
+[1.0.0-rc.16]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.15...v1.0.0-rc.16
 [1.0.0-rc.15]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.14...v1.0.0-rc.15
 [1.0.0-rc.14]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.13...v1.0.0-rc.14
 [1.0.0-rc.13]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.12...v1.0.0-rc.13

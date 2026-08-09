@@ -2,7 +2,7 @@
 id: X-127
 title: Bound registry pacing across the whole publication, not one invocation
 pillar: Build
-status: in-progress
+status: done
 priority: 42
 design: docs/specs/release-rehearsal.md
 epic: conformance
@@ -40,7 +40,7 @@ first multi-crate publication has a finite total cost a reviewer can read off th
 - [x] `NEW_CRATE_RATE_LIMIT` and `NEW_VERSION_RATE_LIMIT` say where their values come from and what
       would make them stale. They are crates.io's published policy transcribed as constants, with no
       check that the policy still says that.
-- [ ] `./scripts/gate.py` is green.
+- [x] `./scripts/gate.py` is green.
 
 ## Progress
 - 2026-08-08: filed from the `X-93` implementation. `X-119` satisfies `X-93`'s rate-limit row for
@@ -107,3 +107,5 @@ first multi-crate publication has a finite total cost a reviewer can read off th
   The ledger bounds the resulting waiting, so the cost is bounded refusals rather than lost uploads.
   The board (`docs/stories/README.md`) is fenced for this implementor and needs regenerating for
   both `X-127` and the new `X-140`.
+
+- 2026-08-09: closed at the `1.0.0-rc.16` boundary, against the wave gate run on this tree.

@@ -2,7 +2,7 @@
 id: M-61
 title: Harden call-audio analysis against adversarial input
 pillar: Media
-status: in-progress
+status: done
 priority: 26
 design: docs/designs/call-audio-analysis.md
 epic: call-audio-analysis
@@ -31,7 +31,7 @@ resources, starve the media path or leak observations between calls.
       cross call boundaries.
 - [x] Ordinary diagnostics contain algorithm/profile identity and counters but no raw audio, and any
       explicit capture facility remains outside this epic.
-- [ ] The adversarial corpus joins the bounded fuzz campaign and the full gate is green.
+- [x] The adversarial corpus joins the bounded fuzz campaign and the full gate is green.
 
 ## Progress
 
@@ -131,3 +131,5 @@ resources, starve the media path or leak observations between calls.
   corpus over every supported PCM format, resource bounds under long silence, permanent activity
   and event backpressure, cancellation and cross-call isolation tests, and diagnostics that carry
   algorithm identity and counters without raw audio (`M-61`).*
+
+- 2026-08-09: closed at the `1.0.0-rc.16` boundary, against the wave gate run on this tree.

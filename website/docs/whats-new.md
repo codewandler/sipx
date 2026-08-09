@@ -1,13 +1,35 @@
 ---
 title: What's new
-description: Release highlights and adoption notes for the sipx 1.0.0-rc.15 release candidate.
+description: Release highlights and adoption notes for the sipx 1.0.0-rc.16 release candidate.
 ---
 
 # What's new
 
 <!-- BEGIN generated:release-heading -->
-## 1.0.0-rc.15 — 2026-08-09
+## 1.0.0-rc.16 — 2026-08-09
 <!-- END generated:release-heading -->
+
+RC.16 gives the DSP graph something to run, gives two contract events a producer, and stops a frame
+printing its audio into a log.
+
+```bash
+cargo install --locked --version =1.0.0-rc.16 sipx-cli
+```
+
+- **A call-audio frame no longer renders its samples when it is logged.** The derived `Debug`
+  printed every borrowed sample, so any tracing field or panic message carrying a frame put raw call
+  audio into a record — up to 65,536 values, from a refusal record the call layer already writes.
+- **Nine deterministic built-in DSP processors** — gain, polarity, hard and soft clipping, bit
+  crushing, a bounded stutter line, and one-pole low-pass, high-pass and peaking filters — run in a
+  call-local graph. Each says what it does *not* do; provenance stays a property of the stage, so a
+  built-in beside your processor lends yours nothing.
+- **`call.bridged` and `call.unbridged` can be emitted.** Both were in the contract and wrote a
+  snapshot member, and nothing produced either.
+- **Registry publication spends one budget across a whole release**, not one per frontier rerun.
+- **The contention proof has a subject that can actually go red** — 6 of 6 without the admission
+  headroom, 0 of 6 with it.
+
+## 1.0.0-rc.15 — 2026-08-09
 
 RC.15 is mostly things that existed on paper and could not be reached in practice, plus the first
 measurement of what media actually costs.
@@ -766,5 +788,5 @@ answer calls, but application callback bindings are not implemented.
 This website is built from `main`, so a page or API link may describe work newer than the tagged
 release. Use the exact crates.io version when reproducibility matters, and consult the
 [complete changelog](https://github.com/codewandler/sipx/blob/main/CHANGELOG.md) before updating a
-Git revision. Unreleased behavior is not part of `1.0.0-rc.15` merely because it appears on this
+Git revision. Unreleased behavior is not part of `1.0.0-rc.16` merely because it appears on this
 site.

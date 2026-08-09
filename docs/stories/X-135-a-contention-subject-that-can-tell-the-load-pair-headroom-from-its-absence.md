@@ -2,7 +2,7 @@
 id: X-135
 title: A contention subject that can tell the load-pair headroom from its absence
 pillar: Quality
-status: in-progress
+status: done
 priority: 3
 design:
 epic:
@@ -32,7 +32,7 @@ ceiling is equal to the generator's concurrency and green when it clears it — 
       0 failed; 2 ignored` for `tests/cli.rs` where it reported one ignored before.
 - [x] The minutes it adds to a full proof run are stated, since `contention-proof.py` is already
       not a gate step for that reason. About 27 seconds, beside the `SUBJECTS` entry that names it.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Notes
 
@@ -163,3 +163,5 @@ subject; this story is about the fixtures whose race is too rare to catch as wri
 
   **`docs/stories/README.md` needs regenerating** for this story's status; the board is the
   coordinator's file and was not touched here.
+
+- 2026-08-09: closed at the `1.0.0-rc.16` boundary, against the wave gate run on this tree.

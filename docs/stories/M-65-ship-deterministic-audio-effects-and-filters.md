@@ -2,7 +2,7 @@
 id: M-65
 title: Ship deterministic audio effects and filters
 pillar: Media
-status: in-progress
+status: done
 priority: 39
 design: docs/designs/custom-call-dsp.md
 epic: custom-call-dsp
@@ -31,7 +31,7 @@ runtime.
       never produce NaN, wraparound, panic or allocation beyond the declared bound.
 - [x] Intentional glitch/stutter output is distinguishable in events/metrics from accidental
       discontinuity or deadline miss; docs never present an overload defect as an effect.
-- [ ] Each built-in passes the external-processor conformance harness and the full gate is green.
+- [x] Each built-in passes the external-processor conformance harness and the full gate is green.
 
 ## Progress
 
@@ -89,3 +89,5 @@ runtime.
   filter's `band_gain` is documented as the scale applied to the extracted band rather than the
   magnitude at the centre frequency, and only a measurement may say otherwise. No SDK-side
   parameter control (`M-67`) and no noise reduction (`M-66`) are attempted here.
+
+- 2026-08-09: closed at the `1.0.0-rc.16` boundary, against the wave gate run on this tree.
