@@ -80,7 +80,7 @@ pub use message::{
 };
 pub use name::HeaderName;
 pub use params::{Param, Params};
-pub use parser::{Limits, StreamParser, parse_datagram};
+pub use parser::{Limits, StreamParser, parse_datagram, parse_frame};
 pub use transaction::{
     ClientTransaction, Output, Reliability, ServerTransaction, Timer, Timers, TransactionKey,
     TransactionLayer, TuEvent,

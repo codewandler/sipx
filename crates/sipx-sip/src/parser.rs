@@ -1,9 +1,15 @@
 //! Turning bytes into messages.
 //!
-//! One implementation serves both transports. [`parse_datagram`] frames a message from a
+//! One implementation serves every transport. [`parse_datagram`] frames a message from a
 //! single packet; [`StreamParser`] frames messages out of a byte stream arriving in arbitrary
-//! chunks. They share every rule, so a message parses identically however it arrived — a
-//! property the tests assert directly by splitting each corpus message at every byte offset.
+//! chunks; [`parse_frame`] frames the one message a self-delimiting frame is allowed to carry.
+//! They share every rule, so a message parses identically however it arrived — a property the
+//! tests assert directly by splitting each corpus message at every byte offset.
+//!
+//! What differs between the three is only what a *leftover* means. A datagram ignores octets
+//! after the message (RFC 3261 §18.3), a stream holds them for the next one, and a frame refuses
+//! them. That is the whole of the difference, and keeping it here is what stops each transport
+//! growing a framing rule of its own.
 //!
 //! See `docs/specs/sip-parser.md` for the normative rules and the reasoning behind the
 //! choices the RFC leaves open.
@@ -102,6 +108,59 @@ pub fn parse_datagram(buf: Bytes, limits: &Limits) -> Result<Message, ParseError
     };
 
     Ok(assemble(start, headers, body))
+}
+
+/// Parse the one message a self-delimiting frame carries, refusing anything else.
+///
+/// **What it promises: one whole message and nothing else.** Where the transport draws the
+/// message boundary itself — a WebSocket message (RFC 7118 §5), a QUIC stream — a frame holding
+/// half a message, two messages, or one message followed by any octets at all has not delivered
+/// something to be salvaged. It has revealed that the peer disagrees about where messages end,
+/// and every one of those answers [`FramingError::NotExactlyOneMessage`] with what was actually
+/// there. `docs/specs/sip-tls.md` §4 is the rule and §6.1 the vectors.
+///
+/// **What it is not.** It is *not* the datagram tolerance of RFC 3261 §18.3: [`parse_datagram`]
+/// returns the first message and discards the rest as noise, which is correct for a packet and
+/// wrong for a frame, and it is the one difference a caller is most likely to get by reaching for
+/// the nearer function. It is also *not* the stream framer: [`StreamParser`] holds an incomplete
+/// message until the rest arrives, where this refuses it.
+///
+/// **It does not require `Content-Length`.** RFC 3261 §20.14 makes the header mandatory on a
+/// stream because nothing else says where a message ends; here the frame says, so a message
+/// without one is well framed and its body runs to the end of the frame. That is also why a body
+/// that happens to look like a second message is one message: with no declared length those
+/// octets were already spent on the first.
+///
+/// Limits are the caller's policy rather than part of the rule — a browser kernel and a native
+/// transport reasonably bound a frame differently — so they are an argument like everywhere else.
+// Takes the buffer by value for the same reason `parse_datagram` does: the parsed message keeps
+// views into this exact allocation.
+#[allow(clippy::needless_pass_by_value)]
+pub fn parse_frame(buf: Bytes, limits: &Limits) -> Result<Message, ParseError> {
+    // The stream framer is reused rather than reimplemented: it already knows every rule about
+    // where a message ends, and a second copy of those rules is a second place for them to drift.
+    // Only what is done with the answer differs.
+    let mut parser = StreamParser::new(*limits);
+    match parser.push(&buf) {
+        Ok(mut messages) => {
+            let trailing = parser.pending();
+            if trailing == 0
+                && messages.len() == 1
+                && let Some(message) = messages.pop()
+            {
+                return Ok(message);
+            }
+            Err(ParseError::Framing(FramingError::NotExactlyOneMessage {
+                complete: messages.len(),
+                trailing,
+            }))
+        }
+        // The one framing rule that does not carry over, per the doc comment above.
+        Err(ParseError::Framing(FramingError::ContentLengthRequired)) => {
+            parse_datagram(buf, limits)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Frames messages out of a byte stream.
@@ -816,6 +875,110 @@ mod tests {
             p.push(text.as_bytes()),
             Err(ParseError::Framing(FramingError::ContentLengthRequired))
         ));
+    }
+
+    // --------------------------------------------------------------- the framed reading
+
+    fn frame(text: &str) -> Result<Message, ParseError> {
+        parse_frame(Bytes::from(text.to_owned()), &Limits::stream())
+    }
+
+    #[test]
+    fn a_frame_holding_one_whole_message_parses() {
+        let message = frame(MINIMAL).expect("one message in one frame");
+        assert_eq!(message.to_bytes(), Bytes::from(MINIMAL));
+    }
+
+    /// The three readings on the same octets, which is the only way to state what actually
+    /// separates them: a datagram ignores what follows a message (RFC 3261 §18.3), a stream keeps
+    /// it for the message after, and a frame refuses it because there is no message after.
+    #[test]
+    fn a_leftover_is_what_separates_the_three_readings() {
+        for (what, bytes, complete, trailing) in [
+            ("two whole messages", format!("{MINIMAL}{MINIMAL}"), 2, 0),
+            ("one and then octets", format!("{MINIMAL}garbage"), 1, 7),
+            (
+                "not even one",
+                MINIMAL[..MINIMAL.len() / 2].to_owned(),
+                0,
+                MINIMAL.len() / 2,
+            ),
+        ] {
+            let refusal = frame(&bytes).expect_err("a frame carries one message and nothing else");
+            assert_eq!(
+                refusal,
+                ParseError::Framing(FramingError::NotExactlyOneMessage { complete, trailing }),
+                "{what}: the refusal says what was actually in the frame"
+            );
+
+            // The same octets, read the other two ways, on purpose: this is not a frame's answer
+            // being right in isolation, it is the three answers being three.
+            let mut stream = StreamParser::new(Limits::stream());
+            let held = stream.push(bytes.as_bytes()).expect("a stream waits");
+            assert_eq!(held.len(), complete, "{what}: a stream frames what it has");
+            assert_eq!(stream.pending(), trailing, "{what}: and holds the rest");
+        }
+
+        // A datagram takes the first and calls the rest noise, which is exactly the tolerance a
+        // frame must not inherit.
+        let datagram = parse_datagram(
+            Bytes::from(format!("{MINIMAL}{MINIMAL}")),
+            &Limits::datagram(),
+        )
+        .expect("RFC 3261 §18.3 ignores what follows");
+        assert_eq!(datagram.to_bytes(), Bytes::from(MINIMAL));
+    }
+
+    /// `Content-Length` is mandatory on a stream and optional in a frame, because the frame says
+    /// where the message ends. This is the rule that makes the framed reading more than a
+    /// stricter stream.
+    #[test]
+    fn a_frame_does_not_require_content_length() {
+        let text = "OPTIONS sip:a@b.com SIP/2.0\r\nTo: <sip:a@b.com>\r\n\r\nv=0\r\n";
+        let message = frame(text).expect("the frame says where it ends");
+        assert_eq!(message.body().as_ref(), b"v=0\r\n");
+
+        let mut stream = StreamParser::new(Limits::stream());
+        assert!(matches!(
+            stream.push(text.as_bytes()),
+            Err(ParseError::Framing(FramingError::ContentLengthRequired))
+        ));
+    }
+
+    /// The sharp edge of the rule above: with no declared length RFC 3261 §20.14 has already
+    /// spent every remaining octet on the body, so a body that reads like a second message is
+    /// one message rather than the two-message refusal.
+    #[test]
+    fn a_body_that_looks_like_a_second_message_is_one_message() {
+        let text = format!("OPTIONS sip:a@b.com SIP/2.0\r\nTo: <sip:a@b.com>\r\n\r\n{MINIMAL}");
+        let message = frame(&text).expect("one message whose body happens to look like SIP");
+        assert_eq!(message.body().as_ref(), MINIMAL.as_bytes());
+    }
+
+    /// RFC 3261 §7.5's leading CRLF is ignored rather than counted as a message boundary — it is
+    /// RFC 5626 §4.4.1's keep-alive, and peers send exactly this before a message.
+    #[test]
+    fn a_leading_keepalive_does_not_make_a_frame_two_messages() {
+        let message = frame(&format!("\r\n{MINIMAL}")).expect("a keep-alive is not a message");
+        assert_eq!(message.to_bytes(), Bytes::from(MINIMAL));
+    }
+
+    /// A limit refusal is the limit's, not the shape's: the bound has to run before anything
+    /// counts messages, or a caller learns "wrongly framed" about input that was simply too big.
+    #[test]
+    fn a_frame_refuses_an_oversize_body_by_its_limit() {
+        let limits = Limits {
+            max_body_bytes: 4,
+            ..Limits::stream()
+        };
+        let text = "MESSAGE sip:a@b SIP/2.0\r\nContent-Length: 5\r\n\r\nabcde";
+        assert_eq!(
+            parse_frame(Bytes::from(text), &limits).expect_err("the body limit must refuse"),
+            ParseError::Limit {
+                limit: LimitKind::BodyBytes,
+                value: 5,
+            }
+        );
     }
 
     #[test]

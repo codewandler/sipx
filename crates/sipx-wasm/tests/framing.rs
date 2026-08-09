@@ -166,3 +166,112 @@ fn a_message_without_content_length_runs_to_the_end_of_the_frame() {
     assert_eq!(parse_errors(&mut host), 0, "the frame says where it ends");
     assert_eq!(host.wires().len(), 1, "answered: {:?}", host.wires());
 }
+
+// ------------------------------------------------------ the shared vectors, this side of them
+
+/// The four shapes that make §4's rule a rule of its own rather than one of its neighbours: two
+/// separate it from RFC 3261 §18.3's datagram tolerance, and two from the stream framer.
+///
+/// Named rather than counted, because a table that quietly lost one of them would still be a
+/// table and this test would still pass over whatever was left.
+const SEPARATING_SHAPES: [&str; 4] = [
+    "two-complete-messages",
+    "one-message-then-octets",
+    "no-content-length",
+    "leading-keepalive",
+];
+
+/// `docs/specs/sip-tls.md` §6.1's framing vectors, read out of the spec rather than transcribed.
+///
+/// A verdict (`one` or `refused`) and a name begin a case; the frame's lines follow, indented four
+/// spaces, each contributing its own text and a CRLF, with `<CRLF>` alone meaning an empty line.
+/// The frame is those octets and nothing else.
+///
+/// `sipx-transport`'s `ws.rs` carries the same reader over the same table. That is deliberate: the
+/// duplication that matters is of the *rule*, which now has one implementation, and this is what
+/// stops a caller quietly acquiring a second one — a corpus neither caller owns and both answer.
+fn spec_framing_vectors() -> Vec<(String, bool, Vec<u8>)> {
+    const SPEC: &str = include_str!("../../../docs/specs/sip-tls.md");
+    const BEGIN: &str = "# BEGIN ws-framing-vectors";
+    const END: &str = "# END ws-framing-vectors";
+
+    let table = SPEC
+        .split_once(BEGIN)
+        .and_then(|(_, rest)| rest.split_once(END))
+        .map(|(table, _)| table)
+        .unwrap_or_default();
+
+    let mut vectors: Vec<(String, bool, Vec<u8>)> = Vec::new();
+    for line in table.lines() {
+        if let Some(text) = line.strip_prefix("    ") {
+            let (name, _, frame) = vectors.last_mut().expect("a frame line inside a case");
+            assert!(!text.is_empty(), "{name}: an empty line is written <CRLF>");
+            if text != "<CRLF>" {
+                frame.extend_from_slice(text.as_bytes());
+            }
+            frame.extend_from_slice(b"\r\n");
+        } else if !line.trim().is_empty() {
+            let mut fields = line.split_whitespace();
+            let verdict = fields.next().expect("a verdict");
+            let name = fields.next().expect("a case name").to_owned();
+            assert!(
+                matches!(verdict, "one" | "refused"),
+                "{name}: unknown verdict {verdict}"
+            );
+            vectors.push((name, verdict == "one", Vec::new()));
+        }
+    }
+    vectors
+}
+
+/// Every §6.1 vector, through `sipx_input_bytes`.
+///
+/// `sipx-transport` runs the same table through the WebSocket transport. Two callers, one rule,
+/// one corpus: after `S-54` the rule has a single implementation in `sipx_sip::parse_frame`, and
+/// this is the check that says so out loud — a caller that reimplements it fails the row it
+/// disagrees with rather than agreeing today and drifting later.
+#[test]
+fn every_spec_framing_vector_holds_for_the_kernel() {
+    let vectors = spec_framing_vectors();
+    for shape in SEPARATING_SHAPES {
+        assert!(
+            vectors.iter().any(|(name, ..)| name == shape),
+            "docs/specs/sip-tls.md §6.1 has no `{shape}` vector; found {:?}",
+            vectors.iter().map(|(name, ..)| name).collect::<Vec<_>>()
+        );
+    }
+
+    for (name, one, frame) in &vectors {
+        let mut host = healthy();
+        let before = parse_errors(&mut host);
+        assert_eq!(
+            host.receive_bytes(frame),
+            0,
+            "{name}: hostile framing is a value, not a host-contract violation (§4.10)"
+        );
+        if *one {
+            assert_eq!(
+                parse_errors(&mut host),
+                before,
+                "{name}: §6.1 calls this one whole message"
+            );
+            assert_eq!(
+                host.wires().len(),
+                1,
+                "{name}: and one message is answered once: {:?}",
+                host.wires()
+            );
+        } else {
+            assert_eq!(
+                parse_errors(&mut host),
+                before + 1,
+                "{name}: §6.1 refuses this frame, and §4.11's count is how the host learns"
+            );
+            assert!(
+                host.log.is_empty(),
+                "{name}: nothing may be answered, sent or scheduled from a refused frame: {:?}",
+                host.log
+            );
+        }
+    }
+}
