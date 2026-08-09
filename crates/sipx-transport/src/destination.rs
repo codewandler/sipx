@@ -458,20 +458,39 @@ pub enum Unreached<E> {
         last: E,
     },
     /// The far end answered, and its answer ends the pass.
-    Answered(E),
+    Answered {
+        /// How far the pass got before the answer ended it.
+        ///
+        /// Carried for the reason [`Unreached::attempts`] gives: the answer came *from* a
+        /// candidate, so this ending is a statement about the peer **and** about a pass that ran.
+        attempts: Attempts,
+        /// The answer the far end gave for the name.
+        last: E,
+    },
 }
 
 impl<E> Unreached<E> {
     /// How far the pass got, for a failure that came from one.
     ///
-    /// `None` — never `Some(zero)` — for an outcome no candidate was attempted for, because a
+    /// `None` — never `Some(zero)` — for the one outcome no candidate was attempted for, because a
     /// report saying zero candidates were attempted describes a pass that ran and got nowhere, and
-    /// these are the outcomes where no pass ran at all.
+    /// [`Unreached::Nothing`] is where no pass ran at all.
+    ///
+    /// `Answered` reports its depth like every other ending (`X-136`). It reads as a fact about the
+    /// peer rather than about the addresses, and that is why it stops the pass — but it is only
+    /// ever reached from inside the loop, after the candidate that produced it has been counted, so
+    /// "no candidate was attempted" was never true of it. Withholding the count there left a pass
+    /// stopped at the head of a three-address list reporting exactly what a pass that never ran
+    /// reports, and the two are the readings these counts exist to separate: `sipx load` printed
+    /// `candidates_attempted: null` for a call whose first address ran out of the pass's budget,
+    /// which is the ending a busy host produces and the one an operator most needs the number for.
     #[must_use]
     pub fn attempts(&self) -> Option<Attempts> {
         match self {
-            Self::Expired { attempts } | Self::Unreachable { attempts, .. } => Some(*attempts),
-            Self::Nothing | Self::Answered(_) => None,
+            Self::Expired { attempts }
+            | Self::Unreachable { attempts, .. }
+            | Self::Answered { attempts, .. } => Some(*attempts),
+            Self::Nothing => None,
         }
     }
 }
@@ -523,7 +542,12 @@ where
         match attempt(target, remaining).await {
             Attempted::Reached(reached) => return Ok(reached),
             Attempted::Unreachable(error) => last = Some(error),
-            Attempted::Answered(error) => return Err(Unreached::Answered(error)),
+            Attempted::Answered(error) => {
+                return Err(Unreached::Answered {
+                    attempts,
+                    last: error,
+                });
+            }
         }
     }
 
@@ -542,6 +566,71 @@ where
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    /// `X-136`: an answer ends the pass, and the pass still says how far it got.
+    ///
+    /// [`Unreached::attempts`] returns `None` for the endings **no candidate was attempted for**,
+    /// and an answer is not one of them: it is only ever reached from inside the loop, after the
+    /// candidate that produced it has been counted. Reporting nothing for it made a pass stopped
+    /// at the head of a three-address list indistinguishable from a pass that never ran — the
+    /// exact reading a caller uses these counts to rule out.
+    #[tokio::test]
+    async fn a_pass_an_answer_ended_says_how_far_it_got() {
+        let candidates: Vec<Target> = (1..=3)
+            .map(|last| Target::udp(SocketAddr::from(([127, 0, 0, last], 5060))))
+            .collect();
+        let mut reached = 0_usize;
+
+        let outcome: Result<(), Unreached<&str>> =
+            walk(&candidates, None, |_target, _remaining| {
+                reached += 1;
+                async move {
+                    // The first address is unreachable and the second answers, so the pass ends
+                    // with one address behind it and one it never tried.
+                    if reached == 1 {
+                        Attempted::Unreachable("refused")
+                    } else {
+                        Attempted::Answered("486 Busy Here")
+                    }
+                }
+            })
+            .await;
+
+        let error = outcome.expect_err("an answered pass reaches nothing");
+        let attempts = error
+            .attempts()
+            .expect("an answer came from a candidate, so a pass ran and got that far");
+        assert_eq!(attempts.attempted(), 2, "two addresses were tried");
+        assert_eq!(attempts.resolved(), 3, "and three were resolved");
+        assert!(
+            !attempts.exhausted(),
+            "the third was never tried, which is what says the name was not ruled out"
+        );
+    }
+
+    /// The other half of the same distinction: absent still means *no pass ran*.
+    ///
+    /// Reporting a depth for an answered pass is only worth something while the absence keeps a
+    /// meaning of its own. An empty list is the one ending that has no candidate behind it, so it
+    /// is the one ending that reports nothing — and a caller reading `None` now learns that and
+    /// nothing else.
+    #[tokio::test]
+    async fn a_pass_with_nothing_to_attempt_reports_no_depth_at_all() {
+        let outcome: Result<(), Unreached<&str>> = walk(&[], None, |_target, _remaining| async {
+            unreachable!("there is no candidate to attempt")
+        })
+        .await;
+
+        let error = outcome.expect_err("an empty list reaches nothing");
+        assert!(
+            matches!(error, Unreached::Nothing),
+            "an empty list is the ending with no candidate behind it"
+        );
+        assert!(
+            error.attempts().is_none(),
+            "zero would describe a pass that ran and got nowhere, and none ran"
+        );
+    }
 
     #[test]
     fn a_next_hop_does_not_replace_the_request_scheme_or_transport() {

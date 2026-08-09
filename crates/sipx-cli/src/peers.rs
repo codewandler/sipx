@@ -425,14 +425,16 @@ fn unreached(outcome: crate::destination::Unreached<Failed>) -> Unreachable {
             ),
             attempts,
         },
-        crate::destination::Unreached::Unreachable { last, .. } => Unreachable {
+        // The last address's failure, and the far end's answer, are one record here: both name
+        // what ended the pass, and `X-136` made both say how far it got. An answer is the
+        // registrar's rather than the address list's, which is why it stops the pass — but it came
+        // from a candidate, so the depth behind it is a fact like any other ending's.
+        crate::destination::Unreached::Unreachable { last, .. }
+        | crate::destination::Unreached::Answered { last, .. } => Unreachable {
             exit: last.exit,
             message: last.message,
             attempts,
         },
-        crate::destination::Unreached::Answered(failed) => {
-            Unreachable::stated(failed.exit, failed.message)
-        }
         // `Unreached` is `#[non_exhaustive]` since `M-83`. The arm above says why `Nothing` is
         // answered by name rather than swept into a catch-all, and the same rule applies here:
         // this states that the ending is one the command does not know, instead of borrowing a

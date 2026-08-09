@@ -2,7 +2,7 @@
 id: X-136
 title: The load candidate count goes null under suite load
 pillar: Quality
-status: ready
+status: in-progress
 priority: 3
 design:
 epic: test-surfaces
@@ -46,12 +46,12 @@ looks like "no pass was walked".
 
 ## Acceptance
 
-- [ ] The failure is reproduced deliberately rather than waited for — `scripts/contention-proof.py`'s
+- [x] The failure is reproduced deliberately rather than waited for — `scripts/contention-proof.py`'s
       technique is the instrument, and `X-126`/`X-130` are the precedent for magnifying a fixture
       until the mechanism fires rather than widening a threshold on faith.
-- [ ] Which of the two readings holds is settled with evidence, and written down. If the counts are
+- [x] Which of the two readings holds is settled with evidence, and written down. If the counts are
       genuinely lost, that is a defect in `load` and this story fixes it there, not in the test.
-- [ ] Whatever is decided, the assertion afterwards is non-vacuous: a run that truly walked no pass
+- [x] Whatever is decided, the assertion afterwards is non-vacuous: a run that truly walked no pass
       must still be distinguishable from one whose count was dropped.
 - [ ] `./scripts/gate.py` green.
 
@@ -61,3 +61,50 @@ looks like "no pass was walked".
   run — it now closes admission and waits for admitted calls instead of cancelling them — and
   `record_pass`'s deliberate silence on a poisoned lock, which is correct for a summary field and
   indistinguishable from "nothing recorded one".
+
+- 2026-08-09: **the second reading holds — the counts were dropped, not legitimately absent** — and
+  the defect is one layer below `record_pass`. Fixed in `sipx_transport::destination`.
+
+  *Reproduced,* by magnifying the fixture rather than waiting for a loaded box (`X-130`'s
+  precedent). A `load` run whose first candidate accepts the connection and answers nothing prints,
+  today, the summary the gate reported character for character:
+
+  ```
+  {"candidates_attempted":null,"candidates_resolved":null,...,
+   "outcomes":{"attempted":1,"connected":0,"failed":0,"peak_concurrency":1,"rejected":0,
+               "timed_out":1},...}
+  ```
+
+  `outcomes.attempted: 1` and `peak_concurrency: 1` are what settle it: **a call was admitted and it
+  walked a pass.** `T-44`'s bounded run is exonerated — the first reading requires a bound that
+  closed admission before any call walked a candidate, and this run admitted one, attempted a
+  candidate and reported `null` anyway.
+
+  *The mechanism.* `load` classifies a response deadline as the far end answering for the name
+  (deliberate, `T-42`), so a candidate that runs out of the pass's budget instead of refusing
+  promptly ends the pass as `Unreached::Answered` — and that variant carried no `Attempts`, so the
+  depth it had reached was destroyed before `record_pass` ever saw it. A refusal is prompt on an
+  idle box and the pass ends `Unreachable` with its count intact, which is why the test passes alone
+  in 0.05 s; a busy host is exactly where a candidate stops refusing promptly.
+
+  *The fix.* `Unreached::Answered` now carries `attempts` like every other ending, and
+  `Unreached::attempts()` returns `None` only for `Nothing`. The variant's own doc claimed it was an
+  ending "no candidate was attempted for", which `walk`'s control flow contradicts: `Answered` is
+  reached only from inside the loop, after `attempts.attempt()` has counted the candidate that
+  produced the answer. `dial`, `peers`, `scenario` and `load` all read the pair through
+  `outcome.attempts()`, so all four now report how far a pass got when an answer ended it.
+
+  *Non-vacuity.* The two endings now report different numbers — `1 of 3` for a pass an answer cut
+  short at the head of the list, `3 of 3` for a name whose every address refused — and
+  `a_pass_with_nothing_to_attempt_reports_no_depth_at_all` pins the other half: absent still means
+  no pass ran. Where a `load` summary can still print `null`, `outcomes.attempted` beside it
+  separates "no call was admitted" from "a call was and reached nothing this counts".
+
+  *What was not reproduced.* The original test's own fixture never went red under load here: 8 runs
+  under 40 CPU burners, then 100 runs at 20-way process and port churn under 20 burners, all green.
+  So the trigger that starved that particular candidate on the gate box is not itself demonstrated —
+  only that the ending it produces destroys the count, which is the defect the story is about.
+
+  *Owed CHANGELOG sentence* (not written here — the ledger is the coordinator's):
+  `Fixed: a candidate pass ended by an answer now reports how far it got, so sipx load no longer
+  prints candidates_attempted: null for a run that walked the list (X-136).`

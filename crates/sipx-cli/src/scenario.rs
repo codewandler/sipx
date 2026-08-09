@@ -852,8 +852,9 @@ impl Snapshot {
 ///
 /// `timeout` is the frame's own deadline, restated as the caller gave it: an expired pass is a fact
 /// about that budget and not about the addresses it never reached, so it is named as one rather
-/// than reported as the last address's refusal. The counts are absent, never zero, for the two
-/// endings no pass produced — an empty list, and an answer from the far end.
+/// than reported as the last address's refusal. The counts are absent, never zero, for the one
+/// ending no pass produced — an empty list. An answer from the far end carries them too since
+/// `X-136`: it came from a candidate the pass had already attempted.
 fn unreached_dial(
     outcome: crate::destination::Unreached<sipx_call::Error>,
     timeout: Duration,
@@ -866,7 +867,7 @@ fn unreached_dial(
             format!("the {timeout:?} deadline was spent before any address of the target answered")
         }
         crate::destination::Unreached::Unreachable { last, .. }
-        | crate::destination::Unreached::Answered(last) => last.to_string(),
+        | crate::destination::Unreached::Answered { last, .. } => last.to_string(),
         // `Unreached` is `#[non_exhaustive]` since `M-83`, and a frame's refusal message is read
         // by a person. Saying the ending is unnamed is worth more than repeating one of the
         // messages above over an ending that did not produce it.

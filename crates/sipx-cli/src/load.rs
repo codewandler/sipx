@@ -386,7 +386,7 @@ fn unreached(outcome: crate::destination::Unreached<Cause>) -> Failed {
     let cause = match outcome {
         crate::destination::Unreached::Expired { .. } => Cause::Timeout,
         crate::destination::Unreached::Unreachable { last, .. }
-        | crate::destination::Unreached::Answered(last) => last,
+        | crate::destination::Unreached::Answered { last, .. } => last,
         // `Nothing`, and — since `M-83` made `Unreached` `#[non_exhaustive]` — an ending this
         // harness cannot name. Both are counted as a transport failure, which is what an address
         // list that produced no answer leaves; the alternative is a call counted as neither
@@ -689,6 +689,14 @@ fn credentials(options: &LoadOptions, from: &str) -> Result<Option<Credentials>,
 /// summary that refused to print because a count could not be recorded would withhold the numbers
 /// the run exists to produce. The counts are absent when nothing recorded one, which is exactly
 /// what the reader is told.
+///
+/// `X-136`: what reaches here is now every failed pass rather than most of them. A pass ended by an
+/// answer — which is where a candidate that ran out of the pass's budget lands, and therefore where
+/// a busy host puts one — used to arrive with no depth at all, so the summary printed
+/// `candidates_attempted: null` for a run that had walked the list. The remaining `null` says the
+/// one thing it is supposed to say: no admitted call reported a pass. `outcomes.attempted` beside
+/// it separates the two ways that happens — no call was admitted, or a call was and reached
+/// nothing this counts.
 fn record_pass(
     passes: &Mutex<Option<crate::destination::Attempts>>,
     attempts: Option<crate::destination::Attempts>,

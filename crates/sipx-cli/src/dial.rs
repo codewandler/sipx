@@ -201,9 +201,10 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
         .await
         {
             Ok(dialing) => dialing,
-            Err(crate::destination::Unreached::Answered(sipx_call::Error::Cancelled(
-                cancellation,
-            ))) if !cancellation.timed_out => {
+            Err(crate::destination::Unreached::Answered {
+                last: sipx_call::Error::Cancelled(cancellation),
+                ..
+            }) if !cancellation.timed_out => {
                 return report_pending_interrupt(
                     format,
                     export,
@@ -330,9 +331,10 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
         .await
         {
             Ok(call) => call,
-            Err(crate::destination::Unreached::Answered(sipx_call::Error::Cancelled(
-                cancellation,
-            ))) if !cancellation.timed_out => {
+            Err(crate::destination::Unreached::Answered {
+                last: sipx_call::Error::Cancelled(cancellation),
+                ..
+            }) if !cancellation.timed_out => {
                 return report_pending_interrupt(
                     format,
                     export,
@@ -543,13 +545,14 @@ fn attempted<T>(
 ///
 /// `Expired` is a deadline and not a statement about the addresses it never reached, so it exits
 /// the way `register`'s and `peers`' expired passes do — as "nothing answered in time" — while
-/// still carrying how far it got. The counts are absent, never zero, for the two endings no pass
-/// produced: an empty list, and an answer from the far end.
+/// still carrying how far it got. The counts are absent, never zero, for the one ending no pass
+/// produced: an empty list. An answer from the far end carries them too since `X-136`, because it
+/// came from a candidate the pass had already attempted.
 fn unreached(outcome: Unreachable) -> (sipx_call::Error, Option<crate::destination::Attempts>) {
     let attempts = outcome.attempts();
     let error = match outcome {
         crate::destination::Unreached::Unreachable { last, .. }
-        | crate::destination::Unreached::Answered(last) => last,
+        | crate::destination::Unreached::Answered { last, .. } => last,
         // `Nothing` and `Expired`, and — since `M-83` made `Unreached` `#[non_exhaustive]` — an
         // ending this command cannot name. All three are "nothing answered": there is no address's
         // refusal to report for any of them, and inventing one would put a failure the far end
