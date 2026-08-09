@@ -432,9 +432,24 @@ set named in the row applied before the stream.
 ### 9.1 What `DSP-K9` being unproven means here
 
 [custom-call-dsp.md](custom-call-dsp.md) §9.1 reports the heap component of a processor's own state
-as `Unproven` for **every** processor, because `unsafe_code` is forbidden workspace-wide and no
-counting allocator can be installed. That is the only unproven check these processors produce, and
-it is unproven by construction rather than by anything they do: the scratch declaration is held
-exactly, the sink is never overrun, and each one's inline size is inside its declared
-`state_bytes`. EFFECT-V19 asserts the unproven set is *exactly* `DSP-K9`, so a check quietly
-slipping from passed to unproven is a test failure rather than a footnote.
+as `Unproven` for **every** processor *on a run with no meter*, because counting allocations needs
+`unsafe impl GlobalAlloc` and `unsafe_code` is forbidden for every crate in this workspace. That is
+the only unproven check these processors produce, and it is unproven by construction rather than by
+anything they do: the scratch declaration is held exactly, the sink is never overrun, and each one's
+inline size is inside its declared `state_bytes`. EFFECT-V19 asserts the unproven set is *exactly*
+`DSP-K9`, so a check quietly slipping from passed to unproven is a test failure rather than a
+footnote.
+
+`X-128` added the run where it is *not* unproven. `heap-probe/`, outside the workspace, installs the
+counting allocator and hands the harness a `HeapMeter`; `./scripts/check-dsp-heap.sh` runs it, and
+under it every processor below reports a measured figure and `DSP-K9` passes. What that run
+established, which EFFECT-V19 cannot:
+
+| Processor | Declared heap | Measured peak live | Allocated after `prepare` |
+|---|---|---|---|
+| every built-in but `sipx.stutter` | 0 | 0 | 0 |
+| `sipx.stutter`, delay 1 / 4 / 4,096 | 4 / 16 / 16,384 | 4 / 16 / 16,384 | 0 |
+
+The stutter row is the point. Its delay line is the one heap allocation any built-in makes, its
+`state_bytes` stated the line's size on the author's word, and nothing checked it until there was a
+mechanism that could. It is exact, not merely within budget.

@@ -147,11 +147,18 @@ where
 
 /// Acceptance: each built-in passes the external-processor conformance harness.
 ///
-/// `DSP-K9` is the one check that comes back `Unproven` for every processor, built-in or not, and
-/// it is unproven by construction rather than by anything these processors do: §9.1 reports the
-/// heap component of a processor's own state as unproven because `unsafe_code` is forbidden
-/// workspace-wide and no counting allocator can be installed. Asserting the unproven set *exactly*
-/// is what keeps that a stated fact instead of a check quietly slipping from passed to unproven.
+/// `DSP-K9` is the one check that comes back `Unproven` for every processor **on this run**, built-in
+/// or not, and it is unproven by construction rather than by anything these processors do: §9.1
+/// reports the heap component of a processor's own state as unproven wherever a counting allocator
+/// cannot be installed, and `unsafe_code = "forbid"` means that is everywhere in this workspace,
+/// test targets included. Asserting the unproven set *exactly* is what keeps that a stated fact
+/// instead of a check quietly slipping from passed to unproven.
+///
+/// The measured figure exists, it just cannot be produced from here: `./scripts/check-dsp-heap.sh`
+/// runs these same nine through the same harness with a real `HeapMeter` and `DSP-K9` passes, with
+/// `sipx.stutter`'s delay line coming out equal to its declaration to the byte (`X-128`). If this
+/// assertion ever needs relaxing to `[]`, that means a meter reached the workspace and the
+/// forbid did not survive it — which is a much bigger change than a test edit.
 #[test]
 fn every_built_in_passes_the_conformance_harness() {
     assert_eq!(conform(Gain::new), [CHECK_ALLOCATION]);

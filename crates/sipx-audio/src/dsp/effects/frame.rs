@@ -195,10 +195,12 @@ where
 
 /// A truthful `state_bytes` for a processor: what it holds inline, plus what it owns on the heap.
 ///
-/// §9.1 is exact about what this figure is and is not. The conformance harness measures the inline
-/// half against this declaration and reports the heap half `Unproven` by name, because
-/// `unsafe_code` is forbidden workspace-wide and a counting allocator cannot be installed — so a
-/// processor that owns a delay line states its size here rather than leaving it uncounted.
+/// §9.1 is exact about what this figure is and is not. The conformance harness always measures the
+/// inline half against this declaration; the heap half it reports `Unproven` by name under
+/// `cargo test`, where `unsafe_code = "forbid"` rules out a counting allocator, and *measures* under
+/// `heap-probe/`, which sits outside the workspace and can install one (`X-128`). So the `heap`
+/// argument is a claim that gets checked: `./scripts/check-dsp-heap.sh` holds the delay line's
+/// stated size against the bytes it actually takes, and they agree exactly.
 pub(super) fn state_bytes<T>(heap: u64) -> u64 {
     u64::try_from(size_of::<T>())
         .unwrap_or(u64::MAX)

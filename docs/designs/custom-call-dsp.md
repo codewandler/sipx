@@ -78,6 +78,67 @@ and processed output through only packaged APIs.
   lifetime and stack-owned-buffer isolation select the supervised process profile. Sandboxed/WASM
   DSP execution remains future work and is not silently promised here.
 
+## How processor heap growth is measured (`X-128`)
+
+`DSP-K9` reported the heap half of `state_bytes` `Unproven` from `M-63` onward. §9.1 was right that
+the workspace half is structural — scratch and sink are caller-owned and sized from the declaration
+— and right that the heap half was unobservable. It was wrong to leave the reason as "no counting
+allocator can be installed" without saying where one *could* be. This records the four options and
+what each was measured against, because the decision is the deliverable and not the code.
+
+**Option A — a counting allocator inside `sipx-audio`, behind `#[cfg(test)]` or a dev-only feature.
+Impossible, proved rather than assumed.** `[workspace.lints.rust] unsafe_code = "forbid"` reaches
+rustc as `-F unsafe_code` on the command line, and Cargo's `[lints]` table applies to *every* target
+of a member package. An integration test under `crates/sipx-audio/tests/` is therefore as forbidden
+as the library: `unsafe impl GlobalAlloc` there fails with "implementation of an `unsafe` trait", and
+a narrowly scoped `#[allow(unsafe_code)]` fails with `E0453`, "overruled by previous forbid". A
+`forbid` is not overridable by construction; that is the whole difference between it and `deny`. The
+only door is deleting `[lints] workspace = true` from a published crate, which would drop every other
+workspace lint from it as collateral and void non-negotiable 3 for `sipx-audio` itself.
+
+**Option B — measurement outside the forbidding crate. Chosen, and already precedented.** The root
+manifest excludes `fuzz/` and `wasm/` from the workspace *for exactly this reason*, and says so: the
+browser module needs `#[unsafe(no_mangle)]`, "so it lives outside the workspace too, keeping the
+non-negotiable intact for every crate that answers to it". A counting global allocator is the same
+shape of need and gets the same answer. `heap-probe/` is a fourth-wall package outside the workspace
+that installs the allocator, implements a **safe** trait `sipx-audio` declares, and drives the same
+`Conformance` harness every other caller drives. Nothing in the workspace gains `unsafe`;
+`scripts/comparison-report.py::rule_unsafe_policy` reads `unsafe_code = "forbid"` out of the
+workspace manifest and publishes it, and that generated claim stays true.
+
+**Option C — proving the bound structurally.** The structural half is already done and cannot be
+extended to the rest. `size_of::<P>()` sees a pointer, not what it points at, and Rust offers no safe
+traversal of a foreign type's heap: a `P: FrameProcessor` from an application crate may hold any
+`Vec` it likes. Making the heap half structural would mean forbidding owned heap in the trait, which
+`Stutter`'s delay line — a legitimate `vec![0; samples]` sized from a bounded parameter — shows is
+the wrong contract.
+
+**Option D — a permanent `Unproven` with a better reason. Adopted for the workspace, and only
+there.** Under `cargo test`, no meter exists and none can, so `DSP-K9` keeps reporting `Unproven`.
+What changes is that the reason now names the mechanism that *does* measure it and the command that
+runs it, instead of stopping at "cannot". An unproven check that tells you where the proof lives is a
+different artifact from one that tells you to give up.
+
+The seam between B and D is one safe trait, `HeapMeter`, and one additive entry point,
+`Conformance::run_with_heap_meter`. The harness's arithmetic — what is compared against
+`state_bytes`, when a figure fails — lives in `sipx-audio` and is tested in the workspace against a
+scripted test-double meter, so the logic is covered by `cargo test`. Only the *bytes* come from
+outside. That split is deliberate: if the whole check lived in `heap-probe/`, a refactor in the
+workspace could silently stop calling it and nothing in the gate would notice.
+
+Two figures are measured, because §9.1 makes two separate claims. **Peak live bytes** over a
+processor's whole life, held against `state_bytes` less its inline size — this is the claim
+`state_bytes` *is*. And **bytes allocated after `prepare`**, which must be zero — this is §9.1's "no
+allocation after `prepare`, not per frame, not per position, not per observation", and until now
+nothing checked it at all. Construction is inside the metered window: `Stutter` allocates its line in
+`new()`, so a window starting at `prepare` would measure zero and leave the one built-in with a real
+heap component exactly as unverified as before.
+
+The window is kept clean by the harness allocating nothing inside it — buffers are taken before the
+meter starts and reused across frames — and that property is self-checking rather than asserted: the
+eight built-ins with no heap measure exactly 0 bytes, which they could not do if the harness's own
+allocations were landing in the window.
+
 ## Exit
 
 An application composes built-in and external processors on either call direction, changes their

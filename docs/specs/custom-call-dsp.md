@@ -466,12 +466,34 @@ is refused rather than served.
 **What that bound is, precisely, and what it is not.** Making the workspace caller-owned is what
 turns "does not allocate" from something to be observed into something the caller controls: a
 processor cannot obtain more scratch or more output room than its declaration, whatever it does.
-Heap growth *inside* a processor's own state is a different question, and this workspace cannot
-observe it — `unsafe_code` is forbidden workspace-wide, so no counting global allocator can be
-installed, and a counted figure that cannot be produced must not be reported as one. §11's harness
-therefore measures what it can (the inline size of the processor against `state_bytes`), holds the
-scratch declaration exactly, and reports the heap component as **unproven, by name**, rather than
-passing it. A check that quietly omitted it would be the more comfortable and the less true design.
+Heap growth *inside* a processor's own state is a different question, and it is measured in one
+place and unproven in the other.
+
+**Unproven under `cargo test`, and permanently so.** Counting allocations needs a global allocator,
+a global allocator needs `unsafe impl GlobalAlloc`, and `unsafe_code = "forbid"` covers every target
+of every crate in this workspace — an integration test as much as a library, with no `allow` able to
+override a `forbid` (`E0453`). §11's harness therefore measures what it can (the inline size of the
+processor against `state_bytes`), holds the scratch declaration exactly, and reports the heap
+component as **unproven, by name**, rather than passing it. A check that quietly omitted it would be
+the more comfortable and the less true design. What the unproven outcome must also do is say where
+the proof lives; an unprovable check that names its prover is a different artifact from one that
+says only "cannot".
+
+**Measured by `heap-probe/`.** That package sits outside the workspace, as `wasm/` and `fuzz/` do
+and for the same reason, installs the counting allocator, and hands §11's harness a `HeapMeter`
+through `Conformance::run_with_heap_meter`. `./scripts/check-dsp-heap.sh` runs it. Two figures, one
+per claim this section makes:
+
+- **peak live bytes** across construction, `prepare`, `process`, `flush`, `reset` and `cancel`, held
+  against `state_bytes` less the processor's inline size. Construction is inside the window
+  deliberately: a processor that allocates its state in its constructor would otherwise measure
+  zero.
+- **bytes allocated after `prepare` returned**, which MUST be zero. This is the "no allocation after
+  `prepare`" sentence above, and it is a separate claim from the size one — a processor that
+  allocates and frees a buffer per frame owns nothing extra and is still in violation.
+
+The comparison lives in the workspace and only the bytes come from outside, so what a figure *means*
+is covered by `cargo test` even though what it *is* cannot be.
 
 ### 9.2 CPU per frame
 
@@ -521,7 +543,7 @@ on what it managed to run is a report that cannot be compared to yesterday's.
 | `DSP-K6` | chunk boundary | one stream delivered as one frame and as many small frames produces the same samples |
 | `DSP-K7` | reset | `retained() = 0` after a reset, and a stream processed after a reset equals the same stream on a fresh instance; a `Stateless` declaration is held to a reset being unobservable |
 | `DSP-K8` | cancellation | after `cancel`: `retained() = 0`, `process` and `flush` return `Cancelled` and write nothing, and a second `cancel` is a no-op |
-| `DSP-K9` | allocation | the scratch actually requested never exceeds the declaration, the sink is never overrun, and the processor's inline size is within `state_bytes` — with the heap component reported `Unproven` per §9.1 |
+| `DSP-K9` | allocation | the scratch actually requested never exceeds the declaration, the sink is never overrun, and the processor's inline size is within `state_bytes` — plus, on a run given a `HeapMeter`, its peak live heap within the rest of `state_bytes` and nothing at all allocated after `prepare`; without a meter the heap component is reported `Unproven` per §9.1 |
 | `DSP-K10` | discontinuity | a flagged frame is accepted, its reset runs before its own samples, and a `Realign` frame produces exactly what a fresh instance would |
 | `DSP-K11` | length | a `Preserving` processor writes exactly the positions it consumed; a `Bounded` one never exceeds its declared maximum |
 | `DSP-K12` | extremes | full scale, `i16::MIN`, alternating full scale, DC and long silence produce a typed result and never a panic |
@@ -551,13 +573,18 @@ harness names it:
 | `ZombieCancel` | keeps working after `cancel` and reports retained audio | `DSP-K8` |
 | `ChunkDependent` | output depends on where the caller cut the stream | `DSP-K6` |
 | `ScratchHog` | requests more scratch than it declared, and hides the refusal | `DSP-K9` |
+| `HeapHog` | allocates once per frame and keeps it | `DSP-K9` (after-`prepare`, under a meter) |
+| `HeapLiar` | owns a 64 KiB buffer behind a 4,096-byte declaration | `DSP-K9` (`state_bytes`, under a meter) |
 | `LengthLiar` | produces one position for every two it consumed under `Preserving` | `DSP-K11` |
 | `SloppyRefusal` | advances its state before refusing a frame | `DSP-K3` |
 | `Panicky` | panics on `i16::MIN` | `DSP-K12` |
 | `ScratchReader` | reads scratch it never wrote | `DSP-K5` |
 
 Those fixtures are written against the crate's public API from outside the crate, which is the same
-sentence as "the contract is implementable by an application" and is checked by being true.
+sentence as "the contract is implementable by an application" and is checked by being true. The
+first eight live in `crates/sipx-audio/tests/dsp_conformance.rs`; `HeapHog` and `HeapLiar` live in
+`heap-probe/` because they are the two whose invariant only has a check where a meter exists, and a
+fixture kept somewhere its check cannot run is a fixture nobody notices going stale.
 
 ## 12. Vectors
 
