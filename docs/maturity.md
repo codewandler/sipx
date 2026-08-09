@@ -60,20 +60,20 @@ No aggregate percentage is given. `media` and `core` differ in size and in how m
 
 | Pillar | Open stories |
 |---|---|
+| Media | 18 |
 | Application | 16 |
-| Media | 16 |
 | Build | 10 |
 | Quality | 3 |
 | Signalling | 3 |
 | Transport | 3 |
 | Phone | 2 |
-| **total** | **53** |
+| **total** | **55** |
 
 339 stories done. `blocked` counts as open: a story parked on a dependency is distance, not progress.
 
 ## Discovery versus closure
 
-<!-- maturity-event-days: {"basis":"sha256:62285ebbe578981220ac83fac4c39b4cba6481bda2884efc57128f97eb0227bd","closed":{"2026-07-28":58,"2026-07-29":48,"2026-07-30":40,"2026-07-31":5,"2026-08-01":1,"2026-08-03":12,"2026-08-04":39,"2026-08-05":35,"2026-08-08":89,"2026-08-09":12},"filed":{"2026-07-28":95,"2026-07-29":42,"2026-07-30":44,"2026-07-31":3,"2026-08-03":1,"2026-08-04":51,"2026-08-05":73,"2026-08-06":17,"2026-08-08":56,"2026-08-09":11}} -->
+<!-- maturity-event-days: {"basis":"sha256:8dd1e9791f585b3393ff670c1df743d95701f9171473a32d613d0b903017d33c","closed":{"2026-07-28":58,"2026-07-29":48,"2026-07-30":40,"2026-07-31":5,"2026-08-01":1,"2026-08-03":12,"2026-08-04":39,"2026-08-05":35,"2026-08-08":89,"2026-08-09":12},"filed":{"2026-07-28":95,"2026-07-29":42,"2026-07-30":44,"2026-07-31":3,"2026-08-03":1,"2026-08-04":51,"2026-08-05":73,"2026-08-06":17,"2026-08-08":56,"2026-08-09":13}} -->
 
 Burn-down is not a maturity signal while discovery outpaces closure. The marker to watch is not a single day where closure wins but the date that crossover becomes **durable** — that is when the codebase stops surprising its authors.
 
@@ -88,7 +88,7 @@ Burn-down is not a maturity signal while discovery outpaces closure. The marker 
 | 2026-08-05 | 73 | 35 | -38 |
 | 2026-08-06 | 17 | 0 | -17 |
 | 2026-08-08 | 56 | 89 | +33 |
-| 2026-08-09 | 11 | 12 | +1 |
+| 2026-08-09 | 13 | 12 | -1 |
 
 Filed is a story file being added; closed is a `status: done` line appearing, so a story reopened and closed again counts twice — which is the honest reading of *closed that day*.
 

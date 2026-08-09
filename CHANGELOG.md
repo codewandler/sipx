@@ -7,6 +7,40 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **A bounded DSP graph can be attached to a live call**, per direction, validated whole before it
+  activates and replaced atomically at a sample boundary. Queue, frame, scratch, tail and processor
+  limits are explicit and non-zero; a failed stage bypasses open or tears the graph down as its
+  policy states, without awaiting or stalling RTP; and teardown waits on a barrier proving no task,
+  frame or state is held. A graph claims that over-budget work cannot stall RTP only when **every**
+  stage is proven-inline or supervised-isolated — one trusted-cooperative-native stage and the whole
+  chain claims nothing, because that stage is application code the media worker cannot preempt.
+  **The supervised worker runs in a thread rather than its own process** (`M-102`).
+
+### Fixed
+
+- **A candidate pass ended by an answer reports how far it got.** `sipx load` printed
+  `candidates_attempted: null` for a run that had walked the whole list, because the ending a
+  response deadline produces carried no depth at all — the count was destroyed a layer below where
+  it was read. `dial`, `peers` and `scenario` gain the same pair on that ending.
+
+- **`call.signal.metrics` and `call.signal.silence` are reachable from a call at last.** Both were
+  specified, typed and wire-round-tripped, and no host could emit either: the bridge had no arm and
+  no tests. Every `CallEvent` variant now either has a producing arm or is named with the reason it
+  has none, and a specified event with no arm is a red build.
+
+- **A call the far end cancelled is reported to an application as `remote`, not `error`.** An
+  invitation the peer withdrew is not the host failing to go on, and `sipx-call`'s own
+  documentation already said so.
+
+- **The extensibility guard reads `#[non_exhaustive]` as an attribute** rather than as a substring
+  of the text above a type, so a doc comment naming the attribute no longer stands in for carrying
+  it. One type in the tree was passing on prose alone.
+
+- **The versioned-contract table is read through the same row reader as the flag table**, so a
+  contract row spliced under prose is reported as undocumented instead of counted.
+
 ## [1.0.0-rc.14] — 2026-08-09
 
 Six stories: the extensibility rollout finished across every published crate, calibrated voice
