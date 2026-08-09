@@ -2663,6 +2663,40 @@ on_4xx = {{ reject = 488 }}
         invitation
     }
 
+    /// §6.5 — a `dial` sets the fields the document granted it, and nothing else (`M-103`).
+    ///
+    /// The limit that section states is the reason `dial.headers` is not a free header map: an app
+    /// that could name any field could name `Via`, `From` or `Route`. So the allowlist is checked
+    /// against a grant that names one field and a request that asks for three, and the two that
+    /// were never granted have to be absent rather than merely different.
+    #[test]
+    fn a_dial_sets_only_the_header_fields_the_document_granted() {
+        let asked = BTreeMap::from([
+            ("X-Campaign".to_owned(), "spring".to_owned()),
+            ("x-secret".to_owned(), "nope".to_owned()),
+            ("Route".to_owned(), "<sip:attacker.example;lr>".to_owned()),
+        ]);
+        let grants = Grants {
+            play_roots: Vec::new(),
+            dial_headers: vec!["x-campaign".to_owned()],
+            originate: false,
+        };
+
+        let allowed = allowed_dial_headers(&asked, &grants);
+        let names: Vec<String> = allowed
+            .iter()
+            .map(|header| String::from_utf8_lossy(header.name().canonical()).into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["X-Campaign".to_owned()],
+            "the grant is a list of field names, matched without case (RFC 3261 §7.3.1)"
+        );
+
+        // And a grant of nothing — what an absent `grants` table means — sets nothing.
+        assert!(allowed_dial_headers(&asked, &Grants::denied()).is_empty());
+    }
+
     #[test]
     fn a_host_reads_its_listener_out_of_the_document() {
         let host = Host::start(DOCUMENT, "127.0.0.1".parse().unwrap()).unwrap();
