@@ -408,24 +408,29 @@ async fn run_attempt(
 ) -> Result<Measurement, Failed> {
     match limits.mode {
         WorkloadMode::Signalling => {
-            let identity = SignallingIdentity::new(handle, to, from, limits.seed, index)
-                .map_err(Failed::stated)?;
+            let call =
+                CallIdentity::new(handle, to, from, limits.seed, index).map_err(Failed::stated)?;
             // `P-31`'s serial pass, and `P-29`'s accounting with it: `--timeout` bounds *a call's
             // setup*, so it funds every address of the target together rather than restarting at
             // each one. A three-address name previously spent three times the number the operator
             // typed before one call gave up.
+            //
+            // `T-45`: the position in that pass is the third input to the call's identity, and it
+            // is counted here because `walk` calls this once per attempted candidate, in order.
+            let mut position = 0_usize;
             crate::destination::walk(
                 candidates,
                 (!limits.setup_timeout.is_zero()).then_some(limits.setup_timeout),
                 |target, remaining| {
                     let target = target.clone();
-                    let identity = &identity;
+                    let identity = call.at(position);
+                    position = position.saturating_add(1);
                     async move {
                         match run_signalling_attempt(
                             handle,
                             target,
                             to,
-                            identity,
+                            &identity,
                             credentials,
                             remaining,
                             limits,
@@ -508,15 +513,30 @@ async fn run_generated_media_attempt(
     })
 }
 
+/// One admitted call's signalling identity, before the pass decides which address hears it.
+///
+/// The split is `T-45`, and the line it draws is RFC 3261 §8.2.2.2's. The `To` header, the `From`
+/// URI and the `Contact` are the call and are the same wherever it is placed; the `Call-ID` and the
+/// `From` tag are *per candidate*, because two addresses of one name commonly lead to the same
+/// server, and a second INVITE carrying the `Call-ID`, `From` tag and `CSeq` of one that server
+/// already accepted is a merged request there — answered `482 Loop Detected`, which this command
+/// reads as the far end's answer for the whole name. The pass then stops at the address a fresh
+/// call would have been accepted at.
+///
+/// `peers` states the same rule for the same reason one usage over (RFC 6665 §4.1.2.1), and
+/// `--mode generated-media` has always had it: `sipx_call::dial_until` builds its own identity, and
+/// the pass calls it once per candidate.
 #[derive(Debug)]
-struct SignallingIdentity {
+struct CallIdentity {
     to: Bytes,
-    from: Bytes,
-    call_id: Bytes,
+    from_uri: String,
     contact: Bytes,
+    run_id: String,
+    seed: u64,
+    index: u64,
 }
 
-impl SignallingIdentity {
+impl CallIdentity {
     fn new(
         handle: &sipx_transport::Handle,
         to: &Uri,
@@ -527,18 +547,46 @@ impl SignallingIdentity {
         let from = Address::parse(from.as_bytes(), "From")
             .map_err(|error| Cause::Other(format!("invalid load From address: {error}")))?;
         let run_tail = seed.rotate_left(29) ^ 0x6c6f_6164_2d72_756e;
-        let run_id = format!("{seed:016x}{run_tail:016x}");
-        let index = u64::try_from(index).unwrap_or(u64::MAX);
         Ok(Self {
             to: Bytes::from(format!("<{}>", String::from_utf8_lossy(&to.to_bytes()))),
-            from: Bytes::from(format!(
-                "<{}>;tag=f-{seed:016x}-{index:x}",
-                String::from_utf8_lossy(&from.uri.to_bytes())
-            )),
-            call_id: Bytes::from(format!("cl-{run_id}-{index}@driver.invalid")),
+            from_uri: String::from_utf8_lossy(&from.uri.to_bytes()).into_owned(),
             contact: Bytes::from(format!("<sip:load@{}>", handle.advertised())),
+            run_id: format!("{seed:016x}{run_tail:016x}"),
+            seed,
+            index: u64::try_from(index).unwrap_or(u64::MAX),
         })
     }
+
+    /// The identity for the candidate at `position` in this call's pass.
+    ///
+    /// Derived, never random: `--seed` and the call index still decide every byte, with the
+    /// candidate position as the only new input, so a run replayed under the same seed puts the
+    /// same requests on the wire in the same order.
+    fn at(&self, position: usize) -> SignallingIdentity {
+        let (seed, index) = (self.seed, self.index);
+        let position = u64::try_from(position).unwrap_or(u64::MAX);
+        SignallingIdentity {
+            to: self.to.clone(),
+            from: Bytes::from(format!(
+                "<{}>;tag=f-{seed:016x}-{index:x}-{position:x}",
+                self.from_uri
+            )),
+            call_id: Bytes::from(format!(
+                "cl-{}-{index}-{position}@driver.invalid",
+                self.run_id
+            )),
+            contact: self.contact.clone(),
+        }
+    }
+}
+
+/// What one candidate of one admitted call is presented to the far end as.
+#[derive(Debug)]
+struct SignallingIdentity {
+    to: Bytes,
+    from: Bytes,
+    call_id: Bytes,
+    contact: Bytes,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1094,6 +1142,7 @@ fn emit_summary(
 mod tests {
     use super::*;
     use clap::Parser as _;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     use crate::cli::{Cli, Command};
 
@@ -1307,5 +1356,303 @@ mod tests {
         assert_eq!(deterministic_frame(41, 2), deterministic_frame(41, 2));
         assert_ne!(deterministic_frame(41, 2), deterministic_frame(42, 2));
         assert_ne!(deterministic_frame(41, 2), deterministic_frame(41, 3));
+    }
+
+    /// `T-45`: the candidate position is the only new input, and nothing about the identity became
+    /// random.
+    ///
+    /// A run replayed under the same `--seed` still puts the same bytes on the wire, which is what
+    /// `load` promises a seed for. What the position separates is the `Call-ID` and the `From` tag;
+    /// the `To` header and the `Contact` are the call's and are the same at every address.
+    #[tokio::test]
+    async fn seed_call_index_and_candidate_position_reproduce_the_signalling_identity() {
+        let (handle, _incoming) = bind(TransportConfig::new(
+            "127.0.0.1:0".parse().expect("local address"),
+        ))
+        .await
+        .expect("endpoint binds");
+        let to = Uri::parse(Bytes::from_static(b"sip:load@127.0.0.1")).expect("request URI");
+        let call = |seed, index| {
+            CallIdentity::new(&handle, &to, "<sip:sipx@127.0.0.1>", seed, index).expect("identity")
+        };
+
+        let replayed = (call(41, 2).at(1), call(41, 2).at(1));
+        assert_eq!(replayed.0.call_id, replayed.1.call_id);
+        assert_eq!(replayed.0.from, replayed.1.from);
+
+        let call_41_2 = call(41, 2);
+        for (left, right) in [
+            (call_41_2.at(0), call_41_2.at(1)),
+            (call(41, 2).at(0), call(41, 3).at(0)),
+            (call(41, 2).at(0), call(42, 2).at(0)),
+        ] {
+            assert_ne!(left.call_id, right.call_id);
+            assert_ne!(left.from, right.from);
+            assert_eq!(
+                left.to, right.to,
+                "the callee is the call's, not the address's"
+            );
+            assert_eq!(left.contact, right.contact, "one endpoint places them all");
+        }
+
+        handle.shutdown().await;
+    }
+
+    /// `T-45`: the pass presents each address of a name with a call of its own.
+    ///
+    /// Two addresses of one name commonly lead to one server — an A record pair, or an SRV pair
+    /// over one host — and RFC 3261 §8.2.2.2 makes a second INVITE carrying the `Call-ID`, `From`
+    /// tag and `CSeq` of one already accepted a *merged request*, which a compliant UAS answers
+    /// `482 Loop Detected`. Before this story the pass sent exactly that: one identity built per
+    /// admitted call, outside the walk, with only the `Via` branch differing between candidates.
+    /// `load` then read the 482 as the far end's answer for the whole name and stopped, so the
+    /// fallback the pass exists for could not happen against the one topology it matters most on.
+    #[tokio::test]
+    async fn a_second_candidate_at_the_same_server_gets_a_call_of_its_own() {
+        let server = SameServer::start().await;
+        let (handle, _incoming) = bind(TransportConfig::new(
+            "127.0.0.1:0".parse().expect("local address"),
+        ))
+        .await
+        .expect("endpoint binds");
+        let uri = format!("sip:load@{}", server.answering);
+        let arguments = raw(&[
+            "load",
+            &uri,
+            "--rate",
+            "1",
+            "--concurrency",
+            "1",
+            "--calls",
+            "1",
+            // A ceiling over the whole pass, not a wait: both candidates answer on loopback as
+            // soon as they are asked, and this only stops a wedged run from hanging the suite.
+            "--timeout",
+            "10",
+        ]);
+        let limits = Limits::parse(&command(&arguments)).expect("finite plan");
+        let to = Uri::parse(Bytes::from(uri)).expect("request URI");
+        let from = "<sip:sipx@127.0.0.1>".to_owned();
+        let options = DialOptions::new(from.clone(), IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+        let candidates = [
+            sipx_transport::Target::new(server.broken, sipx_transport::TransportKind::Tcp),
+            sipx_transport::Target::new(server.answering, sipx_transport::TransportKind::Tcp),
+        ];
+
+        let measured = run_attempt(
+            0,
+            limits,
+            &handle,
+            &candidates,
+            &to,
+            &from,
+            &options,
+            None,
+            &Stop::new(),
+        )
+        .await;
+
+        handle.shutdown().await;
+        let measurement = measured.unwrap_or_else(|failed| {
+            panic!(
+                "the second address of a name whose first one took the INVITE and dropped must be \
+                 a call of its own, not the first one arriving twice: {:?}",
+                failed.cause
+            )
+        });
+        assert_eq!(
+            measurement.status, 200,
+            "the second candidate was answered by the server the first one already had a request \
+             from"
+        );
+        let seen = server.accepted();
+        assert_eq!(
+            seen.len(),
+            2,
+            "both addresses were presented with a request the server could accept: {seen:?}"
+        );
+        assert_ne!(
+            seen.first(),
+            seen.last(),
+            "each candidate needs its own Call-ID and From tag, not a copy of the last one's: \
+             {seen:?}"
+        );
+    }
+
+    /// One server, reachable at two addresses, refusing merged requests as RFC 3261 §8.2.2.2
+    /// requires a UAS to.
+    ///
+    /// Two listeners over one shared record of what has been accepted is what "the same server
+    /// behind two addresses" *is*; nothing else about the fixture matters. The first address reads
+    /// the request and drops the connection, which is the one classification the pass walks past
+    /// (`sipx-transport` fails a transaction the moment its connection goes, rather than leaving
+    /// it to Timer B) and which still leaves the server holding the request. The second address
+    /// then sees whatever the pass sends next: the same request by another path, or a new call.
+    struct SameServer {
+        /// Takes the request and drops the connection without answering.
+        broken: std::net::SocketAddr,
+        /// Answers `482` to a request this server already has, `200` to anything else.
+        answering: std::net::SocketAddr,
+        accepted: Arc<Mutex<Vec<String>>>,
+        listening: Vec<tokio::task::JoinHandle<()>>,
+    }
+
+    impl SameServer {
+        async fn start() -> Self {
+            let dropping = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("binds");
+            let answering = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("binds");
+            let server = Self {
+                broken: dropping.local_addr().expect("has an address"),
+                answering: answering.local_addr().expect("has an address"),
+                accepted: Arc::new(Mutex::new(Vec::new())),
+                listening: Vec::new(),
+            };
+            let contact = server.answering;
+            let taken = Arc::clone(&server.accepted);
+            let held = Arc::clone(&server.accepted);
+            let mut server = server;
+            server.listening.push(tokio::spawn(async move {
+                // Aborting this task drops the set, which is what stops the connections it owns.
+                let mut connections = tokio::task::JoinSet::new();
+                while let Ok((stream, _)) = dropping.accept().await {
+                    let taken = Arc::clone(&taken);
+                    connections.spawn(async move {
+                        let mut stream = stream;
+                        let mut buffered = Vec::new();
+                        if let Some(request) = read_message(&mut stream, &mut buffered).await
+                            && let Ok(mut taken) = taken.lock()
+                        {
+                            taken.push(merge_identity(&request));
+                        }
+                    });
+                }
+            }));
+            server.listening.push(tokio::spawn(async move {
+                let mut connections = tokio::task::JoinSet::new();
+                while let Ok((stream, _)) = answering.accept().await {
+                    let held = Arc::clone(&held);
+                    connections.spawn(async move {
+                        let mut stream = stream;
+                        let mut buffered = Vec::new();
+                        while let Some(request) = read_message(&mut stream, &mut buffered).await {
+                            let Some(reply) = answer(&request, &held, contact) else {
+                                continue;
+                            };
+                            if stream.write_all(reply.as_bytes()).await.is_err() {
+                                return;
+                            }
+                        }
+                    });
+                }
+            }));
+            server
+        }
+
+        /// Every request this server took, by the three terms §8.2.2.2 merges on.
+        fn accepted(&self) -> Vec<String> {
+            self.accepted
+                .lock()
+                .map(|seen| seen.clone())
+                .unwrap_or_default()
+        }
+    }
+
+    impl Drop for SameServer {
+        fn drop(&mut self) {
+            for listening in &self.listening {
+                listening.abort();
+            }
+        }
+    }
+
+    /// Read one bodyless SIP message, keeping whatever arrived behind it.
+    async fn read_message(
+        stream: &mut tokio::net::TcpStream,
+        buffered: &mut Vec<u8>,
+    ) -> Option<String> {
+        loop {
+            if let Some(end) = buffered.windows(4).position(|window| window == b"\r\n\r\n") {
+                let message: Vec<u8> = buffered.drain(..end.saturating_add(4)).collect();
+                return Some(String::from_utf8_lossy(&message).into_owned());
+            }
+            let mut chunk = [0u8; 2048];
+            match stream.read(&mut chunk).await {
+                Ok(0) | Err(_) => return None,
+                Ok(read) => buffered.extend_from_slice(chunk.get(..read).unwrap_or_default()),
+            }
+        }
+    }
+
+    /// What this server says to one request, and `None` where a UAS says nothing.
+    fn answer(
+        request: &str,
+        accepted: &Mutex<Vec<String>>,
+        contact: std::net::SocketAddr,
+    ) -> Option<String> {
+        match request.split_whitespace().next()? {
+            "ACK" => None,
+            "INVITE" => {
+                let identity = merge_identity(request);
+                let mut accepted = accepted.lock().ok()?;
+                if accepted.contains(&identity) {
+                    return Some(response(request, "482 Loop Detected", None));
+                }
+                accepted.push(identity);
+                Some(response(
+                    request,
+                    "200 OK",
+                    Some(&format!("<sip:same-server@{contact}>")),
+                ))
+            }
+            _ => Some(response(request, "200 OK", None)),
+        }
+    }
+
+    /// RFC 3261 §8.2.2.2's three terms, which are what make a second copy a merged request rather
+    /// than a new call: the same `Call-ID`, the same `From` tag and the same `CSeq`.
+    fn merge_identity(request: &str) -> String {
+        let from_tag = header(request, "From")
+            .and_then(|value| value.split(";tag=").nth(1))
+            .and_then(|tail| tail.split(';').next())
+            .unwrap_or_default();
+        format!(
+            "{}|{from_tag}|{}",
+            header(request, "Call-ID").unwrap_or_default(),
+            header(request, "CSeq").unwrap_or_default()
+        )
+    }
+
+    fn response(request: &str, status: &str, contact: Option<&str>) -> String {
+        let mut reply = vec![format!("SIP/2.0 {status}")];
+        reply.extend(
+            ["Via", "From", "Call-ID", "CSeq"]
+                .into_iter()
+                .filter_map(|name| header(request, name).map(|value| format!("{name}: {value}"))),
+        );
+        // The caller's dialog needs a remote tag, and this server is the only party that can
+        // supply one; a request that already carries one is answered with it unchanged.
+        let to = header(request, "To").unwrap_or("<sip:load@127.0.0.1>");
+        reply.push(if to.contains(";tag=") {
+            format!("To: {to}")
+        } else {
+            format!("To: {to};tag=same-server")
+        });
+        reply.extend(contact.map(|contact| format!("Contact: {contact}")));
+        reply.push("Content-Length: 0".to_owned());
+        format!("{}\r\n\r\n", reply.join("\r\n"))
+    }
+
+    fn header<'a>(message: &'a str, name: &str) -> Option<&'a str> {
+        message.lines().find_map(|line| {
+            let (field, value) = line.split_once(':')?;
+            field
+                .trim()
+                .eq_ignore_ascii_case(name)
+                .then_some(value.trim())
+        })
     }
 }
