@@ -38,7 +38,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use sipx_app_protocol::{
-    CallSnapshot, Direction, Effect, EventKind, Failure, Input, Interpreter,
+    CallSnapshot, DialOutcome, Direction, Effect, EventKind, Failure, Input, Interpreter,
     OnFailure as ContractOnFailure, Output, Policy, Response, Source, Timer, Timestamp,
 };
 use sipx_call::{
@@ -201,6 +201,9 @@ enum SessionInput {
 
 struct DocumentCall {
     handle: Handle,
+    /// Where an outbound leg's in-dialog requests are registered, so a `dial` this actor placed
+    /// can be told that the far end hung up (`M-103`).
+    calls: Calls,
     invitation: Option<Invitation>,
     invitation_events: Option<CallEvents>,
     call: Option<Call>,
@@ -213,6 +216,7 @@ struct DocumentCall {
     binding: DocumentBinding,
     timers: [Option<Instant>; 3],
     playbacks: BTreeMap<PlaybackId, (String, Playback)>,
+    legs: DialTasks,
     shutdown: watch::Receiver<bool>,
     stopping: bool,
     terminal: bool,
@@ -226,9 +230,90 @@ struct OutboundCall {
     call_id: String,
 }
 
+/// The endpoint one call is carried on: where its messages go out, and where in-dialog requests
+/// arriving for a dialog it owns are routed to.
+///
+/// One value rather than two parameters because the two are only ever correct together — the
+/// routing table belongs to the dispatcher reading that handle's socket, and a call handed a
+/// mismatched pair would place legs nobody could deliver a BYE to (`M-103`).
+#[derive(Clone)]
+struct CallEndpoint {
+    handle: Handle,
+    calls: Calls,
+}
+
+/// One resolved `dial`, on its way back to the interpreter as §5.3's `call.dial.finished`.
+struct DialedLeg {
+    instruction_id: String,
+    leg: String,
+    outcome: DialOutcome,
+}
+
+/// How many resolutions may wait behind a busy actor before a leg task blocks on reporting.
+///
+/// A `dial` blocks the program until it resolves (§6.2), so more than a handful in flight would
+/// mean a driver that had lost track of its own queue. Bounded rather than unbounded because
+/// nothing here may grow with what a far end does.
+const DIAL_RESOLUTIONS: usize = 8;
+
+/// The outbound legs one document call has placed, and the signal that ends them.
+///
+/// # Why a leg is a task rather than a field
+///
+/// An answered leg is a confirmed dialog that has to keep answering its own BYE and its own
+/// session refreshes for as long as it exists. The actor's own `select!` already owns the inbound
+/// call, and a second, third and fourth stream multiplexed into it would be a scheduler written
+/// by hand. So each leg is served by [`sipx_call::serve`] on its own task, and the actor learns
+/// only the two things the contract has words for: how the `dial` resolved, and — through
+/// [`Self::finish`] — that every leg is down before the actor reports its own end.
+///
+/// The stop signal is the cancellation half `AGENTS.md` requires of background work: it is sent
+/// once, every leg hangs up the call it holds, and [`Self::finish`] awaits that cleanup rather
+/// than aborting a task mid-BYE.
+struct DialTasks {
+    tasks: JoinSet<()>,
+    stop: watch::Sender<bool>,
+    resolutions: mpsc::Sender<DialedLeg>,
+    resolved: mpsc::Receiver<DialedLeg>,
+}
+
+impl DialTasks {
+    fn new() -> Self {
+        let (stop, _) = watch::channel(false);
+        let (resolutions, resolved) = mpsc::channel(DIAL_RESOLUTIONS);
+        Self {
+            tasks: JoinSet::new(),
+            stop,
+            resolutions,
+            resolved,
+        }
+    }
+
+    /// Stop every leg and wait for each to finish hanging up.
+    ///
+    /// Both halves matter. Without the signal the tasks would serve calls the actor has left;
+    /// without the await, dropping the [`JoinSet`] would abort one at whatever await its BYE had
+    /// reached, which is the leak `AGENTS.md`'s bounded-background-work rule names.
+    async fn finish(&mut self) {
+        let _ = self.stop.send(true);
+        while self.tasks.join_next().await.is_some() {}
+    }
+}
+
+impl Drop for DialTasks {
+    fn drop(&mut self) {
+        let _ = self.stop.send(true);
+        // The same reasoning [`OriginateTasks`] records: a cancelled actor future drops this
+        // without being able to await anything, and aborting a leg mid-BYE is the leak the stop
+        // signal exists to avoid. Detaching lets each task see the signal and finish its own
+        // bounded hang-up.
+        self.tasks.detach_all();
+    }
+}
+
 impl DocumentCall {
     fn new(
-        handle: Handle,
+        endpoint: CallEndpoint,
         mut invitation: Invitation,
         call_id: String,
         media_address: IpAddr,
@@ -242,7 +327,8 @@ impl DocumentCall {
             protocol_policy(&policy),
         );
         Self {
-            handle,
+            handle: endpoint.handle,
+            calls: endpoint.calls,
             invitation: Some(invitation),
             invitation_events,
             call: None,
@@ -255,6 +341,7 @@ impl DocumentCall {
             binding,
             timers: [None; 3],
             playbacks: BTreeMap::new(),
+            legs: DialTasks::new(),
             shutdown,
             stopping: false,
             terminal: false,
@@ -263,7 +350,7 @@ impl DocumentCall {
     }
 
     fn new_outbound(
-        handle: Handle,
+        endpoint: CallEndpoint,
         outbound: OutboundCall,
         media_address: IpAddr,
         policy: AppPolicy,
@@ -278,7 +365,8 @@ impl DocumentCall {
         } = outbound;
         let interpreter_policy = protocol_policy(&policy);
         Self {
-            handle,
+            handle: endpoint.handle,
+            calls: endpoint.calls,
             invitation: None,
             invitation_events: None,
             call: Some(call),
@@ -294,6 +382,7 @@ impl DocumentCall {
             binding: DocumentBinding::Session(session),
             timers: [None; 3],
             playbacks: BTreeMap::new(),
+            legs: DialTasks::new(),
             shutdown,
             stopping: false,
             terminal: false,
@@ -317,6 +406,11 @@ impl DocumentCall {
         if self.stopping {
             self.teardown().await;
         }
+        // Unconditional, and after both teardown paths: an outbound leg outlives every way the
+        // inbound call can finish, so this is the only place that sees all of them. N11's rule
+        // that an admission is released only when the call is really over would be false if a
+        // `dial` this actor placed were still up when it reported its end.
+        self.legs.finish().await;
         self.call_id
     }
 
@@ -361,6 +455,7 @@ impl DocumentCall {
         };
         let shutdown = &mut self.shutdown;
         let binding = &mut self.binding;
+        let resolved = &mut self.legs.resolved;
         tokio::select! {
             _ = shutdown.changed() => ActorAction::Shutdown,
             event = events.recv() => event.map_or(ActorAction::Closed, ActorAction::CallEvent),
@@ -376,6 +471,9 @@ impl DocumentCall {
             }
             () = sleep_until(session_deadline) => ActorAction::SessionDeadline,
             input = binding.next_session_input() => ActorAction::Session(input),
+            // This actor holds a sender of its own, so the channel never closes while it lives and
+            // a `None` here is unreachable rather than an ending to interpret.
+            Some(leg) = resolved.recv() => ActorAction::Dialed(Box::new(leg)),
         }
     }
 
@@ -385,10 +483,15 @@ impl DocumentCall {
         };
         let shutdown = &mut self.shutdown;
         let binding = &mut self.binding;
+        let resolved = &mut self.legs.resolved;
         tokio::select! {
             _ = shutdown.changed() => ActorAction::Shutdown,
             event = events.recv() => event.map_or(ActorAction::Closed, ActorAction::CallEvent),
             input = binding.next_session_input() => ActorAction::Session(input),
+            // A `dial` before the invitation is answered is a document's to write, so its
+            // resolution has to be read here too — §6.1 orders instructions and does not require an
+            // `answer` before them.
+            Some(leg) = resolved.recv() => ActorAction::Dialed(Box::new(leg)),
         }
     }
 
@@ -400,6 +503,24 @@ impl DocumentCall {
                 Input::Event(EventKind::Dtmf { digit, duration_ms }),
             ),
             ActorAction::Digit(None) | ActorAction::Closed => Vec::new(),
+            // §5.3's `call.dial.finished`, composed here because nothing else can: the app's
+            // `instruction_id` and `leg` are this driver's, and how the invitation resolved is the
+            // `Err` of the dial rather than anything on the leg's event stream (`M-103`).
+            ActorAction::Dialed(leg) => {
+                let DialedLeg {
+                    instruction_id,
+                    leg,
+                    outcome,
+                } = *leg;
+                self.interpreter.handle(
+                    timestamp(),
+                    Input::Event(EventKind::DialFinished {
+                        instruction_id,
+                        leg,
+                        outcome,
+                    }),
+                )
+            }
             ActorAction::Shutdown => {
                 self.stopping = true;
                 Vec::new()
@@ -712,11 +833,100 @@ impl DocumentCall {
                     call.unmute();
                 }
             }
-            // These operations need host facilities outside phase 1 (outbound legs, recording
-            // storage, coupling and transfers). The interpreter has still made the sole decision
-            // about what the document means; the driver refuses an operation it cannot perform.
+            Effect::Dial {
+                instruction_id,
+                leg,
+                target,
+                from,
+                timeout_ms,
+                headers,
+            } => self.dial(DialRequest {
+                instruction_id,
+                leg,
+                target,
+                from,
+                timeout_ms,
+                headers,
+            }),
+            // These operations need host facilities outside phase 1 (recording storage, coupling
+            // and transfers). The interpreter has still made the sole decision about what the
+            // document means; the driver refuses an operation it cannot perform.
             _ => self.fail_effect().await,
         }
+    }
+
+    /// Place §6.2's `dial` as a second leg of this call, and report how it went (`M-103`).
+    ///
+    /// Spawned rather than awaited, and that is the whole shape of it. The far end may ring for as
+    /// long as the app allowed; awaiting it here would stop this actor answering the *inbound*
+    /// call's BYE, its DTMF and its own callback timer for that entire time — the stall
+    /// [`Self::deliver_while_serving`] exists to prevent, reintroduced through the back door. So
+    /// the attempt runs on its own task and comes back as one [`ActorAction::Dialed`].
+    ///
+    /// The interpreter has already put the leg in §5.2's `legs` as `ringing` and is blocking the
+    /// program on this instruction, so nothing else runs meanwhile and nothing here has to hold a
+    /// queue of its own.
+    fn dial(&mut self, request: DialRequest) {
+        let DialRequest {
+            instruction_id,
+            leg,
+            target,
+            from,
+            timeout_ms,
+            headers,
+        } = request;
+        // §6.2 makes `from` optional. The identity the inbound call reached is what this host is
+        // to the caller, so a leg placed on its behalf goes out as the same thing rather than as a
+        // name invented here — and an outbound-originated call, whose snapshot has no `to` yet,
+        // falls back to the address media is advertised on, which is the only identity it has.
+        let from = from.unwrap_or_else(|| {
+            let to = &self.interpreter.snapshot().to;
+            if to.is_empty() {
+                format!("<sip:{}>", self.media_address)
+            } else {
+                to.clone()
+            }
+        });
+        let attempt = DialAttempt {
+            handle: self.handle.clone(),
+            calls: self.calls.clone(),
+            media_address: self.media_address,
+            target,
+            from,
+            timeout: timeout_ms.map(|ms| Duration::from_millis(u64::from(ms))),
+            // §6.5: `dial` may set the fields the document granted it and no others. A field
+            // outside the allowlist is dropped rather than refused — the grant is the operator's
+            // statement about what may go on the wire, and ending a call over a header the app was
+            // never entitled to set would make that statement a hazard to use.
+            headers: allowed_dial_headers(&headers, &self.grants),
+        };
+        let resolutions = self.legs.resolutions.clone();
+        let mut stop = self.legs.stop.subscribe();
+        self.legs.tasks.spawn(async move {
+            let placed = attempt.place(&mut stop).await;
+            let outcome = match &placed {
+                Ok(_) => sipx_app_protocol::dial_outcome(None),
+                // §5.3's four words all describe how a far end answered, and none of them says
+                // "this side could not ask". `timeout` is the one whose documented meaning — *it
+                // never resolved* — is true of an unaddressable target and says nothing false
+                // about an end that was never reached.
+                Err(DialRefusal::Unaddressable) => DialOutcome::Timeout,
+                Err(DialRefusal::Refused(error)) => sipx_app_protocol::dial_outcome(Some(error)),
+            };
+            // Reporting before serving: the app is told how its `dial` resolved as soon as that is
+            // known, and the leg's own lifetime follows behind it. A closed channel means the
+            // actor is already gone, which is not a reason to leave a confirmed dialog up.
+            let _ = resolutions
+                .send(DialedLeg {
+                    instruction_id,
+                    leg,
+                    outcome,
+                })
+                .await;
+            if let Ok(established) = placed {
+                established.serve(&mut stop).await;
+            }
+        });
     }
 
     async fn answer(&mut self) {
@@ -809,6 +1019,9 @@ enum ActorAction {
     CallEvent(CallEvent),
     Incoming(Box<Incoming>),
     Digit(Option<(char, u32)>),
+    /// A `dial` this actor placed resolved (`M-103`). Boxed for the same reason `Incoming` is: the
+    /// enum is held across an await in a future whose size is already lint-budgeted.
+    Dialed(Box<DialedLeg>),
     Timer(Timer),
     SessionDeadline,
     Session(SessionInput),
@@ -1259,6 +1472,146 @@ impl sipx_transport::resolve::Rng for FirstCandidate {
     }
 }
 
+/// §6.2's `dial`, as the interpreter handed it over.
+struct DialRequest {
+    instruction_id: String,
+    leg: String,
+    target: String,
+    from: Option<String>,
+    timeout_ms: Option<u32>,
+    headers: BTreeMap<String, String>,
+}
+
+/// Everything one outbound leg needs, resolved off the actor before its task starts.
+///
+/// A value rather than seven arguments because it crosses a `spawn` boundary: what the task may
+/// touch is exactly what is in here, so nothing about the actor can be reached from it by accident.
+struct DialAttempt {
+    handle: Handle,
+    calls: Calls,
+    media_address: IpAddr,
+    target: String,
+    from: String,
+    timeout: Option<Duration>,
+    headers: Vec<sipx_sip::Header>,
+}
+
+/// Why a `dial` produced no leg.
+enum DialRefusal {
+    /// No INVITE was ever sent: the app's `target` is not a SIP URI, or nothing resolved it to an
+    /// address. Distinct from a refusal because nobody refused anything.
+    Unaddressable,
+    /// An invitation went out and did not become a call.
+    Refused(sipx_call::Error),
+}
+
+impl DialAttempt {
+    /// Send one INVITE and wait for what the far end makes of it.
+    ///
+    /// The shape mirrors [`prepare_originated`] — early dialog, register the route, then wait for
+    /// confirmation — for the reason that function gives: registering before the 2xx is what keeps
+    /// a BYE that overtakes it from being answered `481` by a dispatcher that has never heard of
+    /// the dialog.
+    async fn place(self, stop: &mut watch::Receiver<bool>) -> Result<EstablishedLeg, DialRefusal> {
+        let Ok(uri) = Uri::parse(Bytes::copy_from_slice(self.target.as_bytes())) else {
+            return Err(DialRefusal::Unaddressable);
+        };
+        if !uri.scheme().is_sip() || self.from.is_empty() {
+            return Err(DialRefusal::Unaddressable);
+        }
+        let Some(target) = resolve_originate_target(&uri).await else {
+            return Err(DialRefusal::Unaddressable);
+        };
+        // §6.2's `timeout_ms` is how long the app is willing to let it ring, which is exactly the
+        // invitation deadline `sipx-call` withdraws the INVITE at. Absent, there is no local
+        // deadline and the attempt is bounded by the call it belongs to: ending that call stops
+        // this task, which is what [`DialTasks::finish`] is.
+        let mut options = DialOptions::new(self.from, self.media_address);
+        if let Some(timeout) = self.timeout {
+            options = options.with_timeout(timeout);
+        }
+        for header in self.headers {
+            options = options.with_header(header);
+        }
+        let dialing = dial_early_until(&self.handle, target, &uri, &options, shutdown_signal(stop))
+            .await
+            .map_err(DialRefusal::Refused)?;
+        let Some(dialog) = dialing.dialog().cloned() else {
+            // A dialog is what `dial_early` returns *for*; without one there is nothing to route
+            // in-dialog requests to, and confirming anyway would build a call nobody can reach.
+            dialing.cancel().await;
+            return Err(DialRefusal::Unaddressable);
+        };
+        let inbox = self.calls.register(&dialog);
+        match dialing.answered_until(shutdown_signal(stop)).await {
+            Ok(call) => Ok(EstablishedLeg { call, inbox }),
+            Err(error) => {
+                self.calls.forget(&dialog);
+                Err(DialRefusal::Refused(error))
+            }
+        }
+    }
+}
+
+/// One answered outbound leg, owned until it ends.
+struct EstablishedLeg {
+    call: Call,
+    inbox: mpsc::Receiver<Incoming>,
+}
+
+impl EstablishedLeg {
+    /// Hold the leg until the far end ends it or this actor stops.
+    ///
+    /// [`sipx_call::serve_until`] rather than [`sipx_call::serve`] in a `select!`: the stop signal
+    /// has to be observed *between* requests, not in the middle of one, and this is where that
+    /// ordering is written down — inbound dialog traffic has priority over the stop, so a BYE
+    /// already queued wins and no BYE of our own is originated on top of it.
+    ///
+    /// The media half is a future that resolves with the token and nothing else. This leg has no
+    /// media work of its own: coupling it to the inbound call is §6.2's `bridge`, which this
+    /// driver still refuses, so until then the leg exists to answer its own signalling and to be
+    /// hung up cleanly.
+    async fn serve(mut self, stop: &mut watch::Receiver<bool>) {
+        let _: sipx_call::Result<sipx_call::Served<()>> = sipx_call::serve_until(
+            &mut self.call,
+            &mut self.inbox,
+            |_media, cancelled| async move { cancelled.cancelled().await },
+            shutdown_signal(stop),
+        )
+        .await;
+    }
+}
+
+/// The header fields a `dial` is granted, as SIP headers (§6.5, and `host-config.md` §5's
+/// `dial_headers`).
+///
+/// The grant is a list of field *names*, compared without case because SIP field names are
+/// case-insensitive (RFC 3261 §7.3.1). A field outside it never becomes a header at all, which is
+/// what "may set these header fields, and no others" means; one whose value the kernel's builder
+/// refuses is dropped the same way, because a header that cannot be built is not a header this
+/// host may send.
+fn allowed_dial_headers(
+    headers: &BTreeMap<String, String>,
+    grants: &Grants,
+) -> Vec<sipx_sip::Header> {
+    headers
+        .iter()
+        .filter(|(name, _)| {
+            grants
+                .dial_headers
+                .iter()
+                .any(|allowed| allowed.eq_ignore_ascii_case(name))
+        })
+        .filter_map(|(name, value)| {
+            sipx_sip::Header::build(
+                HeaderName::parse(&Bytes::copy_from_slice(name.as_bytes())),
+                Bytes::copy_from_slice(value.as_bytes()),
+            )
+            .ok()
+        })
+        .collect()
+}
+
 /// Own one answered call and one realtime session until either ends, then release both.
 async fn run_realtime_call(
     call: &mut Call,
@@ -1544,6 +1897,10 @@ impl Host {
         let agent = UserAgent::new(handle.clone(), Self::agent_config(&listener));
         let mut dispatcher = Dispatcher::new(handle.clone(), incoming);
         let outbound_calls = dispatcher.calls();
+        let call_endpoint = CallEndpoint {
+            handle: handle.clone(),
+            calls: outbound_calls.clone(),
+        };
         let session_listener = self.bind_session_endpoint().await?;
         let (originates, mut originate_rx) = mpsc::channel::<OriginateRequest>(64);
         let (socket_shutdown, _) = watch::channel(false);
@@ -1606,7 +1963,8 @@ impl Host {
                         }
                         outcome = originating.join_next(), if !originating.is_empty() => {
                             if let Some(outcome) = outcome {
-                                self.handle_originated(outcome, &handle, &mut actors).await;
+                                self.handle_originated(outcome, &call_endpoint, &mut actors)
+                                    .await;
                             }
                         }
                         Some(_) = sockets.join_next(), if !sockets.is_empty() => {}
@@ -1618,7 +1976,7 @@ impl Host {
             };
             match event {
                 Dispatched::Invitation(invitation) => {
-                    self.admit(&handle, &listener, invitation, &mut actors)
+                    self.admit(&call_endpoint, &listener, invitation, &mut actors)
                         .await;
                 }
                 Dispatched::OutOfDialog(request) => {
@@ -1631,7 +1989,8 @@ impl Host {
         while sockets.join_next().await.is_some() {}
         originating.stop();
         while let Some(outcome) = originating.join_next().await {
-            self.handle_originated(outcome, &handle, &mut actors).await;
+            self.handle_originated(outcome, &call_endpoint, &mut actors)
+                .await;
         }
         actors.finish(&mut self.running).await;
         Ok(())
@@ -1669,12 +2028,13 @@ impl Host {
     #[allow(clippy::too_many_lines)]
     fn admit<'a>(
         &'a mut self,
-        handle: &'a Handle,
+        endpoint: &'a CallEndpoint,
         listener: &'a Listener,
         invitation: Invitation,
         actors: &'a mut ActorSupervisor,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
+            let handle = &endpoint.handle;
             let call_id = call_id(invitation.request());
             match self.running.admit(&call_id, &listener.name) {
                 Admission::App(policy) => {
@@ -1695,7 +2055,7 @@ impl Host {
                         };
                         let budget = policy.failure.timeout;
                         let actor = DocumentCall::new(
-                            handle.clone(),
+                            endpoint.clone(),
                             invitation,
                             call_id,
                             self.media_address,
@@ -1735,7 +2095,7 @@ impl Host {
                             return;
                         };
                         let actor = DocumentCall::new(
-                            handle.clone(),
+                            endpoint.clone(),
                             invitation,
                             call_id,
                             self.media_address,
@@ -1841,7 +2201,7 @@ impl Host {
     async fn handle_originated(
         &mut self,
         outcome: OriginateOutcome,
-        handle: &Handle,
+        endpoint: &CallEndpoint,
         actors: &mut ActorSupervisor,
     ) {
         let prepared = match outcome {
@@ -1869,7 +2229,7 @@ impl Host {
             return;
         };
         let actor = DocumentCall::new_outbound(
-            handle.clone(),
+            endpoint.clone(),
             OutboundCall {
                 call,
                 events,
@@ -2215,6 +2575,14 @@ on_4xx = {{ reject = 488 }}
             .expect("binds")
     }
 
+    /// The pair [`Host::admit`] takes, built from a test's own endpoint and its dispatcher's table.
+    fn endpoint_of(handle: &Handle, calls: &Calls) -> CallEndpoint {
+        CallEndpoint {
+            handle: handle.clone(),
+            calls: calls.clone(),
+        }
+    }
+
     fn callee_uri() -> Uri {
         Uri::sip(UriHost::Name(HostName::new("host.example").expect("host")))
     }
@@ -2293,6 +2661,40 @@ on_4xx = {{ reject = 488 }}
             panic!("an INVITE is dispatched as an invitation");
         };
         invitation
+    }
+
+    /// §6.5 — a `dial` sets the fields the document granted it, and nothing else (`M-103`).
+    ///
+    /// The limit that section states is the reason `dial.headers` is not a free header map: an app
+    /// that could name any field could name `Via`, `From` or `Route`. So the allowlist is checked
+    /// against a grant that names one field and a request that asks for three, and the two that
+    /// were never granted have to be absent rather than merely different.
+    #[test]
+    fn a_dial_sets_only_the_header_fields_the_document_granted() {
+        let asked = BTreeMap::from([
+            ("X-Campaign".to_owned(), "spring".to_owned()),
+            ("x-secret".to_owned(), "nope".to_owned()),
+            ("Route".to_owned(), "<sip:attacker.example;lr>".to_owned()),
+        ]);
+        let grants = Grants {
+            play_roots: Vec::new(),
+            dial_headers: vec!["x-campaign".to_owned()],
+            originate: false,
+        };
+
+        let allowed = allowed_dial_headers(&asked, &grants);
+        let names: Vec<String> = allowed
+            .iter()
+            .map(|header| String::from_utf8_lossy(header.name().canonical()).into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["X-Campaign".to_owned()],
+            "the grant is a list of field names, matched without case (RFC 3261 §7.3.1)"
+        );
+
+        // And a grant of nothing — what an absent `grants` table means — sets nothing.
+        assert!(allowed_dial_headers(&asked, &Grants::denied()).is_empty());
     }
 
     #[test]
@@ -2552,6 +2954,7 @@ on_unreachable = { reject = 503 }
         let (callee, incoming) = endpoint().await;
         let address = callee.local_addr();
         let mut dispatcher = Dispatcher::new(callee.clone(), incoming);
+        let calls = dispatcher.calls();
         let (peer, _incoming) = endpoint().await;
         let invite = invitation(&peer, "actor-ended@test.example", "z9hG4bK-actor-ended");
         let mut responses = peer
@@ -2561,8 +2964,13 @@ on_unreachable = { reject = 503 }
         let invitation = dispatched_invitation(&mut dispatcher).await;
         let mut actors = ActorSupervisor::new();
 
-        host.admit(&callee, &listener, invitation, &mut actors)
-            .await;
+        host.admit(
+            &endpoint_of(&callee, &calls),
+            &listener,
+            invitation,
+            &mut actors,
+        )
+        .await;
         assert_eq!(host.running.live_calls(), 1, "the actor owns one admission");
         let refusal = tokio::time::timeout(Duration::from_secs(5), responses.final_response())
             .await
@@ -2596,6 +3004,7 @@ on_unreachable = { reject = 503 }
         let (callee, incoming) = endpoint().await;
         let address = callee.local_addr();
         let mut dispatcher = Dispatcher::new(callee.clone(), incoming);
+        let calls = dispatcher.calls();
         let (peer, _incoming) = endpoint().await;
         let invite = invitation(&peer, "saturated@test.example", "z9hG4bK-saturated");
         let mut responses = peer
@@ -2605,8 +3014,13 @@ on_unreachable = { reject = 503 }
         let invitation = dispatched_invitation(&mut dispatcher).await;
         let mut actors = ActorSupervisor::with_limit(0);
 
-        host.admit(&callee, &listener, invitation, &mut actors)
-            .await;
+        host.admit(
+            &endpoint_of(&callee, &calls),
+            &listener,
+            invitation,
+            &mut actors,
+        )
+        .await;
         let refusal = tokio::time::timeout(Duration::from_secs(5), responses.final_response())
             .await
             .expect("the saturated host answers")
@@ -2629,6 +3043,7 @@ on_unreachable = { reject = 503 }
         let (callee, incoming) = endpoint().await;
         let address = callee.local_addr();
         let mut dispatcher = Dispatcher::new(callee.clone(), incoming);
+        let calls = dispatcher.calls();
         let (peer, _incoming) = endpoint().await;
         let invite = invitation(
             &peer,
@@ -2642,8 +3057,13 @@ on_unreachable = { reject = 503 }
         let invitation = dispatched_invitation(&mut dispatcher).await;
         let mut actors = ActorSupervisor::new();
 
-        host.admit(&callee, &listener, invitation, &mut actors)
-            .await;
+        host.admit(
+            &endpoint_of(&callee, &calls),
+            &listener,
+            invitation,
+            &mut actors,
+        )
+        .await;
         tokio::time::timeout(Duration::from_secs(5), held)
             .await
             .expect("the initial callback starts")
@@ -2686,6 +3106,7 @@ on_unreachable = { reject = 503 }
         let (callee, incoming) = endpoint().await;
         let address = callee.local_addr();
         let mut dispatcher = Dispatcher::new(callee.clone(), incoming);
+        let calls = dispatcher.calls();
         let (peer, _incoming) = endpoint().await;
         let invite = invitation(&peer, "late-cancel@test.example", "z9hG4bK-late-cancel");
         let mut responses = peer
@@ -2698,8 +3119,13 @@ on_unreachable = { reject = 503 }
             .expect("an invitation has one event stream");
         let mut actors = ActorSupervisor::new();
 
-        host.admit(&callee, &listener, invitation, &mut actors)
-            .await;
+        host.admit(
+            &endpoint_of(&callee, &calls),
+            &listener,
+            invitation,
+            &mut actors,
+        )
+        .await;
         let refusal = tokio::time::timeout(Duration::from_secs(5), responses.final_response())
             .await
             .expect("the actor answers")

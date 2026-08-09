@@ -262,6 +262,19 @@ second spelling here is one that can disagree with it. A host that couples media
 application having asked — an in-process bridge of its own — has no §6.2 name for the far leg, and
 emits neither event.
 
+**[sipx]** `call.dial.finished` reports the **attempt**, and the four words in its `outcome` are
+read as follows. `busy` is `486` and only `486`: it is the one refusal this section gives a word of
+its own, so every other status arrives as `rejected{status}` rather than being sorted into a
+category this table does not have — including the `422` of RFC 4028 §6, which a host may retry for
+itself but may not report as anything other than the refusal it was. `timeout` means exactly what
+this table says, *it never resolved*, so it is also what a host sends when it could not place the
+invitation at all: a `target` nothing could address produced no far end, and calling that
+`rejected` would attribute a decision to an end that was never reached. **An app cannot tell those
+two apart from this event**, and that is deliberate — a fifth outcome for "the host declined to
+try" would put a host diagnosis into a vocabulary that otherwise says only what a far end did, and
+the operator's log is where that belongs. Either way §5.2's `legs` stops listing the leg, which is
+the fact an app acts on.
+
 ## 6. Instructions (app → host)
 
 ### 6.1 Document

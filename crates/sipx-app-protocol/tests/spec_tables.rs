@@ -176,32 +176,58 @@ fn section_5_3_lists_exactly_the_event_types_the_crate_has() {
 /// fixture's `Debug` spelling rather than typed here, for the reason this file's header gives: a
 /// list of variant names next to a list of variant names tests that a list equals itself.
 ///
-/// [`COMPOSED_BY_THE_DRIVER`] is the other half of the answer, and it is asserted *absent* rather
-/// than skipped — a type that grows a bridge arm has to leave the list in the same change.
+/// `COMPOSED_BY_THE_DRIVER` is the other half of the answer, and each of its rows has to satisfy
+/// **both** halves: absent from the bridge, *and* present in the source that composes it instead.
+///
+/// # Why the second half had to be added (`M-103`)
+///
+/// Until `M-103` this list held names and nothing else, and the only thing asserted about a name
+/// on it was that `src/call.rs` does *not* produce it. That is a claim about where a row is not,
+/// and it is satisfied by a row nothing produces anywhere — which is exactly the defect `M-98`,
+/// `M-99` and `M-103` each closed once. `call.incoming` and `call.gather.finished` happened to have
+/// real producers behind them; `call.dial.finished` sat in the same list with none, and this test
+/// could not tell those two situations apart. So a row named here now has to point at the file that
+/// composes it, and that file has to contain the construction.
 #[test]
 fn section_5_3_s_rows_are_reachable_through_the_bridge() {
     /// The bridge, as text. Read rather than called so that this runs with the `call` feature off:
     /// the question is which arms exist, and that is answered by the source either way.
     const BRIDGE: &str = include_str!("../src/call.rs");
 
-    /// §5.3 rows no `sipx-call` event carries, so the driver composes them from what it knows.
+    /// The shipped driver (`X-38`), read for the same reason and in the same way as the bridge.
+    ///
+    /// A test in this crate reading the application crate's source is deliberate. The claim being
+    /// checked is *a driver composes this row*, and the only thing that can answer a claim about a
+    /// driver is a driver — the alternative is the list of bare names this test used to hold. It is
+    /// text, not a dependency: `sipx-app` already depends on this crate, and nothing here links it.
+    const DRIVER: &str = include_str!("../../sipx-app/src/host.rs");
+
+    /// The interpreter, which composes the one §5.3 row that is neither a call's fact nor a host's.
+    const INTERPRETER: &str = include_str!("../src/interpreter.rs");
+
+    /// §5.3 rows no `sipx-call` event carries, each named beside **the source that composes it**.
     ///
     /// - `call.incoming` — a call's event stream begins after the INVITE matched an app; the
     ///   arrival is the host's fact, not one of the call's.
     /// - `call.gather.finished` — §6.2's `gather` is composed from `call.dtmf` by the interpreter
     ///   against the instruction's own bounds. No `CallEvent` says a gather resolved.
     /// - `call.dial.finished` — about the second leg the driver created, which is a different call
-    ///   from the one whose stream this bridges.
+    ///   from the one whose stream this bridges, and whose outcome is not on a `CallEvent` at all:
+    ///   `sipx-call` reports a refusal as the `Err` of the dial, never as an event (`M-103`).
     ///
     /// `call.bridged` and `call.unbridged` were here until `M-99` and are not any more. The reason
     /// given for them — §5.3 names the other `leg` and `C-6`'s events do not carry it — was a
     /// missing name rather than a missing event, and this list is for rows no call event reports at
     /// all. Nothing composed them either, so the entry was a claim about a producer that did not
     /// exist; they now have an arm, and this test's other branch is what keeps it.
-    const COMPOSED_BY_THE_DRIVER: [&str; 3] = [
-        "call.incoming",
-        "call.gather.finished",
-        "call.dial.finished",
+    const COMPOSED_BY_THE_DRIVER: [(&str, &str, &str); 3] = [
+        ("call.incoming", "crates/sipx-app/src/host.rs", DRIVER),
+        (
+            "call.gather.finished",
+            "crates/sipx-app-protocol/src/interpreter.rs",
+            INTERPRETER,
+        ),
+        ("call.dial.finished", "crates/sipx-app/src/host.rs", DRIVER),
     ];
 
     let rows: BTreeSet<String> = table_after("5.3 Event types")
@@ -222,18 +248,28 @@ fn section_5_3_s_rows_are_reachable_through_the_bridge() {
             .collect();
         let arm = format!("EventKind::{variant}");
 
-        if COMPOSED_BY_THE_DRIVER.contains(&type_name.as_str()) {
+        let composed = COMPOSED_BY_THE_DRIVER
+            .iter()
+            .find(|(row, _, _)| *row == type_name);
+        if let Some((_, path, source)) = composed {
             assert!(
                 !BRIDGE.contains(&arm),
                 "{type_name} is listed as the driver's to compose and `src/call.rs` produces \
                  `{arm}` — say which it is in one place"
+            );
+            assert!(
+                source.contains(&arm),
+                "{type_name} is listed as composed by `{path}` and that file never writes \
+                 `{arm}`, so nothing produces the row at all — this list says *where* a row comes \
+                 from, and a name on it with no producer behind it is the defect `M-98`, `M-99` \
+                 and `M-103` each closed once"
             );
         } else {
             assert!(
                 BRIDGE.contains(&arm),
                 "§5.3 lists {type_name} and the bridge has no arm producing `{arm}`, so no call \
                  can reach it — add the arm, or name the row in `COMPOSED_BY_THE_DRIVER` with the \
-                 reason the driver composes it"
+                 source that composes it instead"
             );
         }
     }
