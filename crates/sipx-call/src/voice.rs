@@ -130,6 +130,82 @@ impl VoiceActivity {
     }
 }
 
+/// What one call's voice-activity detection is measuring against, on the call's event stream
+/// (`M-84`).
+///
+/// `M-60` made the same answer readable from Rust, through
+/// [`Call::voice_thresholds`](crate::Call::voice_thresholds). This is the *pushed* half of it, for
+/// a consumer that is not holding the `Call` — an app-protocol host, an SDK client — and it exists
+/// so that being told voice started and knowing what that decision was made against are not two
+/// different reachability classes.
+///
+/// **It carries no audio, and there is none to carry.** The processing contract's §3.3 forbids
+/// retaining samples past the frame that carried them and its §8.1 enumerates the whole of an
+/// analyser's state without an audio buffer in it, so every field reachable from here is a count or
+/// an amplitude — see [`EffectiveThresholds`], which is the same value
+/// [`Call::voice_thresholds`](crate::Call::voice_thresholds) hands back, not a second spelling of
+/// it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoiceThresholds {
+    call_id: Arc<str>,
+    at_sample: u64,
+    effective: EffectiveThresholds,
+}
+
+impl VoiceThresholds {
+    /// The `Call-ID` of the call these thresholds belong to (RFC 3261 §8.1.1.4).
+    #[must_use]
+    pub fn call_id(&self) -> &str {
+        &self.call_id
+    }
+
+    /// Which side of the call's audio they are measuring.
+    ///
+    /// Each direction has its own analyser and its own thresholds; nothing is shared between them.
+    #[must_use]
+    pub const fn direction(&self) -> AudioDirection {
+        self.effective.profile().direction()
+    }
+
+    /// Everything in force, as [`Call::voice_thresholds`](crate::Call::voice_thresholds) reports it
+    /// (`docs/specs/call-audio-processing.md` §12.9).
+    #[must_use]
+    pub const fn effective(&self) -> EffectiveThresholds {
+        self.effective
+    }
+
+    /// The first sample of the current epoch at which
+    /// [`EffectiveThresholds::activation_amplitude`] took effect.
+    ///
+    /// `0` when it has been in force since the epoch opened — which is every analyser that has not
+    /// calibrated, and every one whose epoch a reset has re-anchored, because §12.8 preserves the
+    /// effective threshold across a reset while restarting the sample positions.
+    #[must_use]
+    pub const fn at_sample(&self) -> u64 {
+        self.at_sample
+    }
+
+    /// The rate [`Self::at_sample`] is counted at.
+    #[must_use]
+    pub const fn sample_rate(&self) -> u32 {
+        self.effective.profile().rate()
+    }
+
+    /// [`Self::at_sample`] expressed as an offset into the epoch.
+    ///
+    /// A derived offset, not a clock read: exactly `at_sample / sample_rate`, so two runs of the
+    /// same audio produce the same value.
+    #[must_use]
+    pub fn at(&self) -> Duration {
+        Duration::from_nanos(
+            self.at_sample
+                .saturating_mul(1_000_000_000)
+                .checked_div(u64::from(self.sample_rate()))
+                .unwrap_or(0),
+        )
+    }
+}
+
 /// The state a transition would put the application in, once it can be told about it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Transition {
@@ -161,6 +237,16 @@ pub(crate) struct VoiceReporter {
     thresholds: watch::Sender<EffectiveThresholds>,
     /// The last snapshot published, so an unchanged one is not published again.
     published: EffectiveThresholds,
+    /// Whether the application has ever been *told* what this call measures against (`M-84`).
+    ///
+    /// Set only when the announcement was actually delivered, so a full event queue postpones it
+    /// rather than losing it: a consumer that had fallen behind at the first frame is still told,
+    /// and what it is told is the state at the frame it was told at.
+    announced: bool,
+    /// Whether calibration has moved the effective threshold since the last announcement.
+    moved: bool,
+    /// The epoch position the activation amplitude in force took effect at.
+    in_force_since: u64,
 }
 
 impl VoiceReporter {
@@ -181,6 +267,9 @@ impl VoiceReporter {
             latest: None,
             thresholds,
             published,
+            announced: false,
+            moved: false,
+            in_force_since: 0,
         }
     }
 
@@ -191,8 +280,39 @@ impl VoiceReporter {
     pub(crate) fn observe(&mut self, frame: &PcmFrame) {
         if self.feed.offer(frame) {
             self.collect();
+            self.announce();
             self.deliver();
             self.publish();
+        }
+    }
+
+    /// Tell the application what this call is measuring against, when that is news (`M-84`).
+    ///
+    /// News is exactly twice: once when detection has audio for the first time — because "what is
+    /// this call measuring against?" has an answer from the first frame, whether or not anything
+    /// ever moves — and again whenever calibration moved the effective threshold. A settled
+    /// threshold says nothing, which is §12.7's own rule carried onto the call's stream, so an
+    /// analyser with no calibration profile costs exactly one event for the life of the call.
+    ///
+    /// It is announced **before** the frame's voice transition. The contract an app-protocol host
+    /// builds on this reads a snapshot as *now* rather than as when the event happened
+    /// (`docs/specs/app-contract.md` §6.3), so putting the frame of reference ahead of the decision
+    /// is what lets the first `VoiceStarted` an application ever sees already say what opened it.
+    ///
+    /// Nothing here is retried as history: a failed announcement is re-attempted on the next frame
+    /// carrying the snapshot *then*, exactly as a dropped transition is.
+    fn announce(&mut self) {
+        if self.announced && !self.moved {
+            return;
+        }
+        let event = CallEvent::VoiceThresholds(VoiceThresholds {
+            call_id: Arc::clone(&self.call_id),
+            at_sample: self.in_force_since,
+            effective: self.feed.thresholds(),
+        });
+        if self.emitter.try_emit(event) {
+            self.announced = true;
+            self.moved = false;
         }
     }
 
@@ -229,9 +349,22 @@ impl VoiceReporter {
                         cause: Some(cause),
                     });
                 }
-                // Window facts, silence timeouts, resets and the queue's loss marker are not
-                // voice-activity transitions. `M-59` shapes the signal metrics out of them; this
-                // story deliberately reports nothing else.
+                // A threshold that moved is not a transition — the call is where it was — but it
+                // changes what the next one will be decided against, so it is news of its own
+                // (`M-84`). Only the position is kept: the values are read off the analyser's own
+                // snapshot when the announcement is built, which is what keeps a frame that spans
+                // several update periods from reporting a threshold nothing is measuring against.
+                Observation::ThresholdUpdated { at_sample, .. } => {
+                    self.in_force_since = at_sample;
+                    self.moved = true;
+                }
+                // §12.8 preserves the effective threshold across a reset and re-anchors the epoch,
+                // so the value in force has been in force since the new epoch's first sample. That
+                // is a position change and not a threshold change, and it announces nothing.
+                Observation::Reset { .. } => self.in_force_since = 0,
+                // Window facts, silence timeouts and the queue's loss marker are not voice-activity
+                // transitions. `M-59` shapes the signal metrics out of them; this module
+                // deliberately reports nothing else.
                 _ => {}
             }
         }
@@ -408,6 +541,7 @@ mod tests {
             .offer_samples(direction, seam_sequence, discontinuity, samples)
         {
             reporter.collect();
+            reporter.announce();
             reporter.deliver();
             reporter.publish();
         }
@@ -425,6 +559,29 @@ mod tests {
         seen
     }
 
+    /// Everything except `M-84`'s threshold announcements.
+    ///
+    /// The transition tests below are about *where the call is*, and every one of them predates the
+    /// announcement. Filtering it out here rather than adjusting each count keeps them saying what
+    /// they were written to say; the announcement has its own tests, which assert it positively.
+    fn transitions(events: &mut CallEvents) -> Vec<CallEvent> {
+        drained(events)
+            .into_iter()
+            .filter(|event| !matches!(event, CallEvent::VoiceThresholds(_)))
+            .collect()
+    }
+
+    /// Only `M-84`'s threshold announcements, in order.
+    fn announcements(events: &mut CallEvents) -> Vec<VoiceThresholds> {
+        drained(events)
+            .into_iter()
+            .filter_map(|event| match event {
+                CallEvent::VoiceThresholds(thresholds) => Some(thresholds),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The transition an application is told about is the one the analyser found, with this call's
     /// identity, direction, ordering and sample position on it.
     #[test]
@@ -432,7 +589,7 @@ mod tests {
         let (mut reporter, _sink, mut events) = reporter("call-a");
         feed(&mut reporter, 0, &modulated());
 
-        let seen = drained(&mut events);
+        let seen = transitions(&mut events);
         assert_eq!(seen.len(), 1, "{seen:?}");
         let CallEvent::VoiceStarted(activity) = &seen[0] else {
             panic!("expected a voice start, got {seen:?}");
@@ -455,7 +612,7 @@ mod tests {
             feed(&mut reporter, sequence, &silence());
         }
 
-        let seen = drained(&mut events);
+        let seen = transitions(&mut events);
         assert_eq!(seen.len(), 2, "{seen:?}");
         let CallEvent::VoiceEnded { activity, cause } = &seen[1] else {
             panic!("expected a voice end, got {seen:?}");
@@ -480,7 +637,7 @@ mod tests {
         }
         reporter.finish();
 
-        let seen = drained(&mut events);
+        let seen = transitions(&mut events);
         let last = seen.last().unwrap();
         let CallEvent::VoiceEnded { activity, cause } = last else {
             panic!("expected the terminal cut last, got {seen:?}");
@@ -496,7 +653,7 @@ mod tests {
         feed(&mut reporter, 0, &silence());
         reporter.finish();
 
-        assert!(drained(&mut events).is_empty());
+        assert!(transitions(&mut events).is_empty());
     }
 
     /// A dropped transition is retried against the *latest* state, never replayed as history: an
@@ -515,7 +672,7 @@ mod tests {
 
         // Drain everything the backlog held; the call is now inactive again, and the start that
         // never landed must not be delivered late.
-        let backlog = drained(&mut events);
+        let backlog = transitions(&mut events);
         assert!(
             backlog
                 .iter()
@@ -525,7 +682,7 @@ mod tests {
 
         feed(&mut reporter, 11, &silence());
         assert!(
-            drained(&mut events).is_empty(),
+            transitions(&mut events).is_empty(),
             "the application's picture is already correct: voice is closed"
         );
     }
@@ -544,7 +701,7 @@ mod tests {
             feed(&mut two, sequence, &silence());
         }
 
-        let seen_one = drained(&mut events_one);
+        let seen_one = transitions(&mut events_one);
         assert_eq!(seen_one.len(), 2, "{seen_one:?}");
         for event in &seen_one {
             let activity = match event {
@@ -556,14 +713,14 @@ mod tests {
             assert_eq!(activity.call_id(), "call-one");
         }
         assert!(
-            drained(&mut events_two).is_empty(),
+            transitions(&mut events_two).is_empty(),
             "the silent call observed nothing, and neither call's analyser saw the other's audio"
         );
 
         // Each call numbers its own observations from zero: an ordering is only meaningful within
         // one call's stream.
         feed(&mut two, 11, &modulated());
-        let seen_two = drained(&mut events_two);
+        let seen_two = transitions(&mut events_two);
         let CallEvent::VoiceStarted(activity) = &seen_two[0] else {
             panic!("expected the second call's own start, got {seen_two:?}");
         };
@@ -581,7 +738,7 @@ mod tests {
     fn a_flagged_discontinuity_cuts_voice_and_reopens_the_epoch() {
         let (mut reporter, _sink, mut events) = reporter("call-a");
         feed(&mut reporter, 0, &modulated());
-        assert_eq!(drained(&mut events).len(), 1);
+        assert_eq!(transitions(&mut events).len(), 1);
 
         observe_samples(
             &mut reporter,
@@ -591,7 +748,7 @@ mod tests {
             &silence(),
         );
 
-        let seen = drained(&mut events);
+        let seen = transitions(&mut events);
         let CallEvent::VoiceEnded { activity, cause } = &seen[0] else {
             panic!("expected the reset to cut voice, got {seen:?}");
         };
@@ -613,20 +770,20 @@ mod tests {
     fn a_frame_the_analyser_refused_breaks_the_epoch_instead_of_vanishing() {
         let (mut reporter, _sink, mut events) = reporter("call-a");
         feed(&mut reporter, 0, &modulated());
-        assert_eq!(drained(&mut events).len(), 1, "voice opened");
+        assert_eq!(transitions(&mut events).len(), 1, "voice opened");
 
         // Larger than the contract's per-frame ceiling, which the analyser refuses (§7.3). What it
         // carried is beside the point: nothing measured it.
         feed(&mut reporter, 1, &vec![8_192i16; 65_537]);
         assert!(
-            drained(&mut events).is_empty(),
+            transitions(&mut events).is_empty(),
             "a refused frame observes nothing by itself"
         );
 
         feed(&mut reporter, 2, &silence());
         feed(&mut reporter, 3, &modulated());
 
-        let seen = drained(&mut events);
+        let seen = transitions(&mut events);
         assert_eq!(
             seen.len(),
             2,
@@ -659,7 +816,7 @@ mod tests {
         feed(&mut reporter, 0, &silence());
         feed(&mut reporter, 7, &modulated());
 
-        let seen = drained(&mut events);
+        let seen = transitions(&mut events);
         assert!(
             matches!(seen.first(), Some(CallEvent::VoiceStarted(_))),
             "the frame after the unflagged gap is still measured: {seen:?}"
@@ -718,8 +875,8 @@ mod tests {
             }
         }
 
-        let watched_seen = drained(&mut watched_events);
-        let unwatched_seen = drained(&mut unwatched_events);
+        let watched_seen = transitions(&mut watched_events);
+        let unwatched_seen = transitions(&mut unwatched_events);
         assert_eq!(watched_seen.len(), unwatched_seen.len(), "{watched_seen:?}");
         assert!(
             !watched_seen.is_empty(),
@@ -750,6 +907,245 @@ mod tests {
             after.activation_amplitude(),
             1_536,
             "the threshold the call learned is what it last measured against"
+        );
+    }
+
+    /// A call with detection running says what it is measuring against, whether or not it ever
+    /// moves (`M-84`).
+    ///
+    /// The reason this is not conditional on calibration: "what was that decision made against?" has
+    /// an answer from the first frame, and an application that had to infer the answer from the
+    /// absence of a calibration event would be inferring it from silence.
+    #[test]
+    fn detection_announces_what_it_is_measuring_against_on_its_first_frame() {
+        let (mut reporter, _sink, mut events) = reporter("call-a");
+        feed(&mut reporter, 0, &silence());
+
+        let seen = announcements(&mut events);
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        let announced = &seen[0];
+        assert_eq!(announced.call_id(), "call-a");
+        assert_eq!(announced.direction(), AudioDirection::Inbound);
+        assert_eq!(announced.sample_rate(), 8_000);
+        assert_eq!(
+            announced.at_sample(),
+            0,
+            "it has been in force since the epoch opened"
+        );
+        assert_eq!(announced.at(), Duration::ZERO);
+        let effective = announced.effective();
+        assert_eq!(effective.activation_amplitude(), 2_048, "§5.1's configured");
+        assert_eq!(effective.window_samples(), 160);
+        assert_eq!(effective.hangover_samples(), 1_600);
+        assert_eq!(
+            effective.calibration_samples(),
+            None,
+            "a fixed threshold says so, so nothing waits for a move that cannot come"
+        );
+    }
+
+    /// A threshold that cannot move is announced once and never again (`M-84`).
+    #[test]
+    fn a_fixed_threshold_costs_exactly_one_announcement() {
+        let (mut reporter, _sink, mut events) = reporter("call-a");
+        for sequence in 0..40u64 {
+            feed(&mut reporter, sequence, &modulated());
+        }
+        reporter.finish();
+
+        assert_eq!(
+            announcements(&mut events).len(),
+            1,
+            "an analyser with no calibration profile has nothing further to report"
+        );
+    }
+
+    /// Every move is announced, at the sample it took effect, and a settled threshold goes quiet
+    /// (`M-84`, carrying §12.7's rule onto the call's stream).
+    ///
+    /// The numbers are the processing contract's CAL-1: 70 all-zero frames under `K8` make twelve
+    /// updates, at epoch samples 1,600 + 800·k, stepping 2,048 → 1,920 → … → 512, and then the
+    /// target — `0 + margin`, clamped into the floor..=ceiling interval — is reached and the
+    /// analyser goes quiet.
+    #[test]
+    fn every_calibration_move_is_announced_at_the_sample_it_took_effect() {
+        let calibrated = profile().with_calibration(Some(CalibrationProfile::new()));
+        let (mut reporter, _sink, mut events, _) = reporter_with("call-a", calibrated);
+        for sequence in 0..70u64 {
+            feed(&mut reporter, sequence, &silence());
+        }
+
+        let seen = announcements(&mut events);
+        let moves: Vec<(u64, i32)> = seen
+            .iter()
+            .map(|announced| {
+                (
+                    announced.at_sample(),
+                    announced.effective().activation_amplitude(),
+                )
+            })
+            .collect();
+        let mut expected = vec![(0u64, 2_048i32)];
+        for step in 0..12i32 {
+            let ordinal = u64::try_from(step).unwrap_or(0);
+            expected.push((1_600 + 800 * ordinal, 1_920 - 128 * step));
+        }
+        assert_eq!(
+            moves, expected,
+            "the opening announcement, then CAL-1's twelve updates"
+        );
+        assert_eq!(
+            seen[12].effective().calibration_samples(),
+            Some(1_600),
+            "and it says the threshold is one that moves"
+        );
+
+        // 512 is `0 + margin`, so the target is reached and nothing more is said.
+        for sequence in 70..90u64 {
+            feed(&mut reporter, sequence, &silence());
+        }
+        assert!(
+            announcements(&mut events).is_empty(),
+            "a settled threshold is silent"
+        );
+    }
+
+    /// The frame of reference arrives before the decision it frames (`M-84`).
+    ///
+    /// An application that is told voice started and has to wait for a later event to learn what
+    /// opened it is the gap this story exists to close, so the order is asserted rather than left
+    /// to whichever call `observe` happens to make first.
+    #[test]
+    fn the_announcement_precedes_the_transition_it_frames() {
+        let (mut reporter, _sink, mut events) = reporter("call-a");
+        feed(&mut reporter, 0, &modulated());
+
+        let seen = drained(&mut events);
+        assert!(
+            matches!(
+                seen.as_slice(),
+                [CallEvent::VoiceThresholds(_), CallEvent::VoiceStarted(_)]
+            ),
+            "{seen:?}"
+        );
+    }
+
+    /// An announcement nobody had room for is retried against the state *then*, never replayed as
+    /// history (`M-84`) — the same rule the transitions follow.
+    #[test]
+    fn an_undeliverable_announcement_is_retried_against_the_state_then() {
+        let calibrated = profile().with_calibration(Some(CalibrationProfile::new()));
+        let (sink, events) = EventSink::new();
+        let analyzer = AudioAnalyzer::new(calibrated).unwrap();
+        let (publisher, _thresholds) = watch::channel(analyzer.thresholds());
+        let mut reporter = VoiceReporter::new(
+            analyzer,
+            Arc::from("call-a"),
+            Arc::new(AtomicU64::new(0)),
+            sink.reserved_emitter(),
+            publisher,
+        );
+        let mut events = events;
+
+        // Leave no ordinary capacity, so nothing this call reports can be delivered at all.
+        for _ in 0..64 {
+            sink.emit(CallEvent::Answered);
+        }
+        for sequence in 0..25u64 {
+            feed(&mut reporter, sequence, &silence());
+        }
+        let backlog = drained(&mut events);
+        assert!(
+            backlog
+                .iter()
+                .all(|event| matches!(event, CallEvent::Answered)),
+            "{backlog:?}"
+        );
+
+        feed(&mut reporter, 25, &silence());
+        let seen = announcements(&mut events);
+        assert_eq!(seen.len(), 1, "one answer, not five: {seen:?}");
+        assert_eq!(
+            seen[0].effective().activation_amplitude(),
+            1_536,
+            "where the call is, not where it was when the first frame arrived"
+        );
+        assert_eq!(seen[0].at_sample(), 4_000, "and when that took effect");
+    }
+
+    /// A reset re-anchors the epoch without moving the threshold, so it says nothing and the
+    /// position it reports is the new epoch's (`M-84`, §12.8).
+    #[test]
+    fn a_reset_re_anchors_the_position_without_announcing() {
+        let calibrated = profile().with_calibration(Some(CalibrationProfile::new()));
+        let (mut reporter, _sink, mut events, _) = reporter_with("call-a", calibrated);
+        for sequence in 0..25u64 {
+            feed(&mut reporter, sequence, &silence());
+        }
+        assert_eq!(announcements(&mut events).len(), 5);
+
+        observe_samples(
+            &mut reporter,
+            AudioDirection::Inbound,
+            25,
+            Some(DiscontinuityKind::Loss),
+            &silence(),
+        );
+        assert!(
+            announcements(&mut events).is_empty(),
+            "the timeline broke; the threshold did not"
+        );
+
+        // The next move is measured from the new epoch's own origin, and is announced there — and
+        // it continues from the threshold the previous epoch learned, because §12.8 preserves it.
+        for sequence in 26..46u64 {
+            feed(&mut reporter, sequence, &silence());
+        }
+        let seen = announcements(&mut events);
+        assert_eq!(
+            seen.first().map(VoiceThresholds::at_sample),
+            Some(1_600),
+            "the new epoch's first update, not the old epoch's position plus one"
+        );
+        assert_eq!(
+            seen.first()
+                .map(|announced| announced.effective().activation_amplitude()),
+            Some(1_408),
+            "one step on from the 1,536 the broken timeline left in force"
+        );
+    }
+
+    /// Two calls announce their own thresholds and nothing crosses (`M-84`).
+    #[test]
+    fn two_simultaneous_calls_announce_their_own_thresholds() {
+        let calibrated = profile().with_calibration(Some(CalibrationProfile::new()));
+        let (mut quiet, _sink_one, mut events_one, _) = reporter_with("call-one", calibrated);
+        let (mut noisy, _sink_two, mut events_two, _) = reporter_with("call-two", calibrated);
+
+        let background: Vec<i16> = (0..160)
+            .map(|index| if index % 2 == 0 { 1_000 } else { -1_000 })
+            .collect();
+        for sequence in 0..30u64 {
+            feed(&mut quiet, sequence, &silence());
+            feed(&mut noisy, sequence, &background);
+        }
+
+        let quiet_seen = announcements(&mut events_one);
+        let noisy_seen = announcements(&mut events_two);
+        assert!(quiet_seen.iter().all(|t| t.call_id() == "call-one"));
+        assert!(noisy_seen.iter().all(|t| t.call_id() == "call-two"));
+        assert_eq!(
+            quiet_seen
+                .last()
+                .map(|t| t.effective().activation_amplitude()),
+            Some(1_408)
+        );
+        assert_eq!(
+            noisy_seen
+                .last()
+                .map(|t| t.effective().activation_amplitude()),
+            Some(1_512),
+            "each call announces the floor it measured from its own audio"
         );
     }
 

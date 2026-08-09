@@ -156,4 +156,4 @@ pub use subscriber::{
     EventSubscriptions, EventSubscriptionsHandle,
 };
 pub use transfer::{Referral, Replaces, Transfer, TransferState};
-pub use voice::VoiceActivity;
+pub use voice::{VoiceActivity, VoiceThresholds};

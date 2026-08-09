@@ -49,6 +49,15 @@ without a speech runtime still reports it. Each carries the side of the audio it
 the position in samples at the rate those samples are counted at, and an observation number that
 orders one call's voice events. Which call it is about is the envelope's own `call.id`.
 
+What those decisions are measured *against* is readable too. Every event's call snapshot carries a
+`voice` member when detection is running on the call — the amplitude the activation predicate is
+comparing against, the window and hangover it is compared over, and the calibration bounds when the
+threshold is one that adapts — and `call.voice.thresholds` announces it once when detection starts
+and again whenever calibration moved it, so nothing polls and a settled threshold is silent. Every
+member is a sample count or an amplitude, counted at the rate the event names rather than in
+wall-clock time; the surface carries no audio and no field audio could be rebuilt from, and a call
+nobody asked for detection on has no `voice` member at all.
+
 Signal metrics are `call.signal.metrics` and `call.signal.silence`, from the same deterministic
 analysis: level, clipping and silence over an exact stretch of the call's audio, each report naming
 the measurement run, the samples and windows it covers, and the position it starts at. They describe

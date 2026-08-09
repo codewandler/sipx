@@ -159,6 +159,19 @@ pub enum CallEvent {
         /// the call's audio finishing.
         cause: sipx_audio::analysis::VoiceEndCause,
     },
+    /// What this call's voice-activity detection is measuring against (`M-84`).
+    ///
+    /// Emitted once when detection first has audio, and again whenever calibration moved the
+    /// effective activation amplitude — so a threshold that settles is silent and an analyser with
+    /// no calibration profile costs exactly one of these for the life of the call. It is the pushed
+    /// half of [`Call::voice_thresholds`](crate::Call::voice_thresholds), for a consumer that is not
+    /// holding the `Call`, and it carries the *same* value that method returns rather than a second
+    /// spelling of it.
+    ///
+    /// **It carries no audio.** Every field reachable from it is a sample count or an amplitude;
+    /// see [`crate::VoiceThresholds`] and the processing contract's §12.9 for why there is none to
+    /// carry.
+    VoiceThresholds(crate::VoiceThresholds),
     /// A deterministic signal-metric observation for one side of this call's audio (`M-59`).
     ///
     /// Level, energy, clipping and silence, shaped out of the same analyser's per-window facts

@@ -66,6 +66,41 @@ fn table_after(heading: &str) -> Vec<Vec<String>> {
     rows
 }
 
+/// The first fenced ```` ```json ```` block that follows a heading whose text contains `heading`.
+///
+/// The spec's examples are normative by being examples: §5.2 shows the snapshot's members, and a
+/// member the code writes that the section does not show is a wire field nobody agreed to.
+fn json_after(heading: &str) -> sipx_app_protocol::json::Json {
+    let mut lines = SPEC
+        .lines()
+        .skip_while(|line| !(line.starts_with('#') && line.contains(heading)));
+    assert!(lines.next().is_some(), "no heading containing {heading:?}");
+
+    let mut body = String::new();
+    let mut inside = false;
+    for line in lines {
+        if line.trim_start().starts_with("```") {
+            if inside {
+                break;
+            }
+            assert!(
+                line.contains("json"),
+                "the first block after {heading:?} is not JSON"
+            );
+            inside = true;
+            continue;
+        }
+        if inside {
+            body.push_str(line);
+            body.push('\n');
+        }
+    }
+    assert!(inside, "no fenced block after {heading:?}");
+    // The snapshot example writes its id as `"b7c1…"`, which is a perfectly good JSON string.
+    sipx_app_protocol::json::Json::parse(&body)
+        .unwrap_or_else(|e| panic!("the example after {heading:?} is not JSON: {e}"))
+}
+
 /// Every `` `backticked` `` token in a cell, in order.
 fn backticked(cell: &str) -> Vec<String> {
     let mut found = Vec::new();
@@ -232,6 +267,104 @@ fn tag_of(value: &sipx_app_protocol::json::Json) -> String {
                 .map(str::to_owned)
         })
         .expect("a tagged value is a name or an object with one")
+}
+
+/// **§5.2.1** — the `voice` member is exactly the record the crate writes (`M-84`).
+///
+/// Read from two places in the section that a change would have to move together: the snapshot
+/// example, which is what a reader copies, and §5.2.1's table, which is what a reader looks a member
+/// up in. A field added to [`VoiceThresholds`] and to neither fails here, which is what makes
+/// widening the threshold surface a reviewable diff against this specification rather than a quiet
+/// one.
+#[test]
+fn section_5_2_1_documents_exactly_the_voice_members_the_crate_writes() {
+    let written: BTreeSet<String> = sipx_app_protocol::testing::reference_thresholds()
+        .to_json()
+        .as_object()
+        .expect("the record is an object")
+        .keys()
+        .cloned()
+        .collect();
+
+    let example = json_after("5.2 The call snapshot");
+    let shown: BTreeSet<String> = example
+        .get("voice")
+        .and_then(sipx_app_protocol::json::Json::as_object)
+        .expect("§5.2's example shows the `voice` member")
+        .keys()
+        .cloned()
+        .collect();
+    assert_eq!(shown, written, "§5.2's example and the record differ");
+
+    let mut documented = BTreeSet::new();
+    for row in table_after("5.2.1") {
+        for member in backticked(&row[0]) {
+            documented.insert(member);
+        }
+        assert!(!row[1].is_empty(), "§5.2.1 row {:?} says nothing", row[0]);
+    }
+    assert_eq!(documented, written, "§5.2.1's table and the record differ");
+}
+
+/// **§5.2.1** — the threshold surface carries no audio and no field audio could be rebuilt from.
+///
+/// This is the check that section names, and it is deliberately a property of the *serialization*
+/// rather than of the Rust type: what an application receives is the JSON, so the rule is stated
+/// over the JSON. Every member is a number, a `null`, or one of the two words
+/// [`AudioDirection`] spells. Samples could only arrive as an array of numbers or as text — the
+/// first is refused because no member may be an array, the second because no string outside that
+/// closed pair is admitted — so a member carrying audio cannot be added without failing here.
+///
+/// [call-audio-processing.md](../../../docs/specs/call-audio-processing.md) §3.3 and §8.1 mean
+/// there is no retained audio upstream to send in the first place. This is the guard for the case
+/// where that stops being true.
+#[test]
+fn the_voice_member_carries_only_counts_and_amplitudes() {
+    let directions: BTreeSet<&str> = [AudioDirection::Inbound, AudioDirection::Outbound]
+        .iter()
+        .map(|direction| direction.as_str())
+        .collect();
+
+    // Both shapes the record appears in, because the wire surface is both of them: §5.2's read and
+    // §5.3's announcement carry the same object and it has to be the same object in both.
+    let mut objects = vec![sipx_app_protocol::testing::reference_thresholds().to_json()];
+    let announcement = EventKind::VoiceThresholds {
+        sample_time: 1_600,
+        thresholds: sipx_app_protocol::testing::reference_thresholds(),
+    }
+    .to_json();
+    assert!(
+        matches!(
+            announcement.get("sample_time"),
+            Some(sipx_app_protocol::json::Json::Int(_))
+        ),
+        "the position the value took effect at is a sample count"
+    );
+    objects.push(
+        announcement
+            .get("thresholds")
+            .expect("the announcement carries the record")
+            .clone(),
+    );
+
+    for object in objects {
+        let members = object.as_object().expect("the record is an object");
+        assert!(!members.is_empty(), "an empty record proves nothing");
+        for (name, value) in members {
+            match value {
+                sipx_app_protocol::json::Json::Int(_) | sipx_app_protocol::json::Json::Null => {}
+                sipx_app_protocol::json::Json::Str(text) => assert!(
+                    directions.contains(text.as_str()),
+                    "`{name}` is a string that is not a direction: {text:?} — the threshold \
+                     surface carries counts and amplitudes, and nothing audio could be rebuilt from"
+                ),
+                other => panic!(
+                    "`{name}` is neither a count, a null, nor a direction: {}",
+                    other.to_text()
+                ),
+            }
+        }
+    }
 }
 
 /// **§6.2** — the verb table is exactly what [`Verb`] spells, and every row says what completes it.

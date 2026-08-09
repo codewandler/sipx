@@ -1698,7 +1698,11 @@ impl Host {
                         actors
                             .spawn(Box::pin(async move {
                                 let _permit = permit;
-                                let _call_id = actor.run().await;
+                                // `M-84` grew the contract's call snapshot past this future's 16 KiB lint
+                                // budget. It is spawned inside a `Box::pin` already, so the storage is on
+                                // the heap either way; pinning the inner future is what makes that legible
+                                // to the reader and to the lint rather than accidental.
+                                let _call_id = Box::pin(actor.run()).await;
                                 let completion = lease.completion();
                                 drop(lease);
                                 completion
@@ -1734,7 +1738,11 @@ impl Host {
                         actors
                             .spawn(Box::pin(async move {
                                 let _permit = permit;
-                                let _call_id = actor.run().await;
+                                // `M-84` grew the contract's call snapshot past this future's 16 KiB lint
+                                // budget. It is spawned inside a `Box::pin` already, so the storage is on
+                                // the heap either way; pinning the inner future is what makes that legible
+                                // to the reader and to the lint rather than accidental.
+                                let _call_id = Box::pin(actor.run()).await;
                                 let completion = lease.completion();
                                 drop(lease);
                                 completion
@@ -1868,7 +1876,11 @@ impl Host {
         actors
             .spawn(Box::pin(async move {
                 let _permit = permit;
-                let _call_id = actor.run().await;
+                // `M-84` grew the contract's call snapshot past this future's 16 KiB lint
+                // budget. It is spawned inside a `Box::pin` already, so the storage is on
+                // the heap either way; pinning the inner future is what makes that legible
+                // to the reader and to the lint rather than accidental.
+                let _call_id = Box::pin(actor.run()).await;
                 let completion = lease.completion();
                 drop(lease);
                 completion

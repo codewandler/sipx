@@ -614,6 +614,17 @@ the snapshot is a count or an amplitude — the same class of scalar the contrac
 in `Observation::Window`. There is no accessor anywhere in this contract that returns samples, and
 adding one would contradict §3.3.
 
+**Carriage onto an application wire (`M-84`).** The application contract publishes a *subset* of this
+snapshot as [`app-contract.md`](app-contract.md) §5.2.1's `voice` member and announces every move as
+its `call.voice.thresholds` event. The subset is the effective activation amplitude and the derived
+counts — everything invariant across a reset by §12.8 — so a delivered record cannot go stale except
+by moving, and moving announces itself. The count of updates applied, the last observed floor and
+the last period's outcome stay here, readable by a Rust caller and not published, because each is
+cleared by a reset and none is a fact an application acts on; adding one later is a *field* addition
+under that contract's §4 rather than a new wire line. Nothing in either direction widens what this
+section permits: the wire carries strictly less than the snapshot, and the snapshot carries no
+audio.
+
 ### 12.10 Bounds
 
 Calibration adds to §8.1's state exactly: the effective threshold (`i32`), the period counter

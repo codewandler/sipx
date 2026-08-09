@@ -8,6 +8,12 @@
 //! - **`headers` is a selected set.** §5.2 says the snapshot never carries fields the host routes
 //!   on. [`Headers`] enforces that by refusing anything outside the allowlist, so a host cannot
 //!   leak `Via` or `Route` into a snapshot by accident — it would have to change this type.
+//! - **`voice` is counts and amplitudes, and cannot be anything else.** §5.2.1 says the threshold
+//!   surface carries no audio and no field audio could be rebuilt from.
+//!   [`VoiceThresholds`] has no field that could hold a sample sequence, and
+//!   `spec_tables::the_voice_member_carries_only_counts_and_amplitudes` refuses any member of its
+//!   JSON that is not a number, a `null`, or one of the two direction words — so adding one is a
+//!   red build rather than a review someone has to notice.
 
 use std::collections::BTreeMap;
 
@@ -251,6 +257,18 @@ pub struct CallSnapshot {
     pub headers: Headers,
     /// What the media is doing.
     pub media: MediaState,
+    /// What this call's voice-activity detection is measuring against, or `None` when no detection
+    /// is running (`M-84`).
+    ///
+    /// This is the contract's **read** of a calibrated threshold. There is no query verb for it and
+    /// deliberately none: §2 makes every event carry a full snapshot, so "what is it measuring
+    /// against now?" is answered by the last envelope an app received rather than by asking, and
+    /// document mode (§6.3) has no shape for an unsolicited question anyway.
+    ///
+    /// `None` is a real answer — §5.3 says a host that emits no voice analysis is conformant — and
+    /// it is written by leaving the member out rather than as `null`, so a call nobody asked for
+    /// detection on looks exactly as it did before this member existed.
+    pub voice: Option<VoiceThresholds>,
     /// Other legs of the same call.
     pub legs: Vec<Leg>,
     /// Whether this leg is bridged to another.
@@ -275,6 +293,7 @@ impl CallSnapshot {
             to: String::new(),
             headers: Headers::new(),
             media: MediaState::default(),
+            voice: None,
             legs: Vec::new(),
             bridged: false,
             tags: BTreeMap::new(),
@@ -304,6 +323,8 @@ impl CallSnapshot {
             ("to", Some(Json::Str(self.to.clone()))),
             ("headers", Some(self.headers.to_json())),
             ("media", Some(self.media.to_json())),
+            // Omitted rather than `null` when there is no detection: see the field's own docs.
+            ("voice", self.voice.map(VoiceThresholds::to_json)),
             (
                 "legs",
                 Some(Json::Array(self.legs.iter().map(Leg::to_json).collect())),
@@ -351,6 +372,11 @@ impl CallSnapshot {
                 .get("media")
                 .map(MediaState::from_json)
                 .unwrap_or_default(),
+            voice: value
+                .get("voice")
+                .filter(|member| **member != Json::Null)
+                .map(VoiceThresholds::from_json)
+                .transpose()?,
             legs: match value.get("legs").and_then(Json::as_array) {
                 Some(items) => items.iter().map(Leg::from_json).collect::<Result<_>>()?,
                 None => Vec::new(),
@@ -557,6 +583,182 @@ impl VoiceEndCause {
     }
 }
 
+/// What a call's voice-activity detection is measuring against (§5.2's `voice` member, `M-84`).
+///
+/// The answer to *"what was that decision made against?"*, for an application that is told voice
+/// started and does not link the analyser. It appears in two places and is one type in both: as the
+/// snapshot's `voice` member, which is the **read** — §2 makes every event carry a full snapshot,
+/// so the current thresholds ride every envelope and an app never polls for them — and as the
+/// `thresholds` member of `call.voice.thresholds`, which is the **announcement** that they moved.
+/// One spelling, because a second one is a second thing that can disagree.
+///
+/// # What it carries, and what it does not
+///
+/// Every field is a **sample count or an amplitude**, and there is no field it could carry audio
+/// in. That is structural rather than promised: the normative analysis
+/// ([`call-audio-processing.md`](../../../../docs/specs/call-audio-processing.md)) forbids retaining
+/// samples past the frame that carried them (§3.3) and enumerates the whole of an analyser's state
+/// without an audio buffer in it (§8.1), so there is nothing upstream for this to serialize. The
+/// check that would catch a regression is
+/// `spec_tables::the_voice_member_carries_only_counts_and_amplitudes`, which reads this type's own
+/// JSON and refuses any member that is not a number, a `null`, or one of the two direction words.
+///
+/// Deliberately **absent**, each recoverable later as a §4 field addition rather than a new wire
+/// line: the count of updates applied, the last period's observed floor, and what the last update
+/// period did. §12.9 lets a Rust caller read all three; none of them is a fact an application acts
+/// on, and each is invalidated by a reset while every field below survives one unchanged (§12.8) —
+/// so what is here cannot go stale except by moving, and moving announces itself.
+///
+/// Every count is in samples at [`Self::sample_rate`], never in wall-clock milliseconds. That is
+/// what makes a recorded call reproduce the same numbers on every host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct VoiceThresholds {
+    /// Which side of the call's audio these measure. Each side has its own.
+    pub direction: AudioDirection,
+    /// The rate every count here is expressed in.
+    pub sample_rate: u32,
+    /// The amplitude the activation predicate is comparing against right now.
+    ///
+    /// The configured one until calibration moves it, and always inside the configured
+    /// floor..=ceiling interval.
+    pub activation_amplitude: i32,
+    /// How many samples one measurement window covers.
+    pub window_samples: u32,
+    /// How many inactive samples end voice.
+    pub hangover_samples: u64,
+    /// How many silent samples report elapsed silence, or `null` when that timer is off.
+    pub silence_timeout_samples: Option<u64>,
+    /// How many samples of an epoch pass before a calibrated threshold may first move, or `null`
+    /// when this threshold is fixed.
+    ///
+    /// `null` here is the load-bearing one: it tells an application this call will never send a
+    /// `call.voice.thresholds` again, so nothing is waiting for an announcement that cannot come.
+    pub calibration_samples: Option<u64>,
+    /// How many samples one calibration update period covers, or `null` when the threshold is
+    /// fixed.
+    pub update_samples: Option<u64>,
+    /// How many samples open voice may hold an update back, or `null` when that is unbounded or
+    /// the threshold is fixed.
+    pub freeze_limit_samples: Option<u64>,
+}
+
+impl VoiceThresholds {
+    /// A fixed threshold: what an analyser with no calibration configured is measuring against.
+    ///
+    /// A constructor rather than a struct literal because this type is `#[non_exhaustive]`. §4
+    /// already requires both sides of the wire to tolerate a field they do not know, and this is
+    /// that promise kept for a Rust caller too: the three members §12.9 has and this record does
+    /// not can be added without breaking anyone who built one.
+    #[must_use]
+    pub const fn new(
+        direction: AudioDirection,
+        sample_rate: u32,
+        activation_amplitude: i32,
+        window_samples: u32,
+        hangover_samples: u64,
+    ) -> Self {
+        Self {
+            direction,
+            sample_rate,
+            activation_amplitude,
+            window_samples,
+            hangover_samples,
+            silence_timeout_samples: None,
+            calibration_samples: None,
+            update_samples: None,
+            freeze_limit_samples: None,
+        }
+    }
+
+    /// The same, with the silence timeout in force.
+    #[must_use]
+    pub const fn with_silence_timeout(mut self, samples: Option<u64>) -> Self {
+        self.silence_timeout_samples = samples;
+        self
+    }
+
+    /// The same, with the calibration counts of a threshold that moves.
+    #[must_use]
+    pub const fn with_calibration(
+        mut self,
+        calibration_samples: u64,
+        update_samples: u64,
+        freeze_limit_samples: Option<u64>,
+    ) -> Self {
+        self.calibration_samples = Some(calibration_samples);
+        self.update_samples = Some(update_samples);
+        self.freeze_limit_samples = freeze_limit_samples;
+        self
+    }
+
+    /// Whether the threshold can move — that is, whether calibration is configured.
+    #[must_use]
+    pub const fn is_calibrated(&self) -> bool {
+        self.calibration_samples.is_some()
+    }
+
+    /// This record as §5.2's `voice` member.
+    ///
+    /// Every member is always written, `null` included. An omitted count and a `null` one would be
+    /// the same value to a reader that has this version of the vocabulary and different values to
+    /// one that does not — and "this threshold does not move" is exactly the thing an application
+    /// must not have to infer from silence.
+    #[must_use]
+    pub fn to_json(self) -> Json {
+        Json::object([
+            (
+                "direction",
+                Some(Json::Str(self.direction.as_str().to_owned())),
+            ),
+            ("sample_rate", Some(Json::from(self.sample_rate))),
+            (
+                "activation_amplitude",
+                Some(Json::Int(i64::from(self.activation_amplitude))),
+            ),
+            ("window_samples", Some(Json::from(self.window_samples))),
+            ("hangover_samples", Some(Json::from(self.hangover_samples))),
+            (
+                "silence_timeout_samples",
+                Some(count(self.silence_timeout_samples)),
+            ),
+            ("calibration_samples", Some(count(self.calibration_samples))),
+            ("update_samples", Some(count(self.update_samples))),
+            (
+                "freeze_limit_samples",
+                Some(count(self.freeze_limit_samples)),
+            ),
+        ])
+    }
+
+    /// Read one back.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::MissingField`] or [`Error::BadField`] for a member this vocabulary requires and
+    /// this document has no reading for. An absent optional count reads as `null`: the two say the
+    /// same thing, and refusing one of them would make a host that omits its nulls unreadable for
+    /// no gain.
+    pub fn from_json(value: &Json) -> Result<Self> {
+        Ok(Self {
+            direction: audio_direction_field(value)?,
+            sample_rate: u32_field(value, "sample_rate")?,
+            activation_amplitude: i32_field(value, "activation_amplitude")?,
+            window_samples: u32_field(value, "window_samples")?,
+            hangover_samples: u64_field(value, "hangover_samples")?,
+            silence_timeout_samples: optional_count(value, "silence_timeout_samples")?,
+            calibration_samples: optional_count(value, "calibration_samples")?,
+            update_samples: optional_count(value, "update_samples")?,
+            freeze_limit_samples: optional_count(value, "freeze_limit_samples")?,
+        })
+    }
+}
+
+/// A sample count, or `null` for one that is not in force.
+fn count(samples: Option<u64>) -> Json {
+    samples.map_or(Json::Null, Json::from)
+}
+
 /// How far a transfer this side asked for has got (§5.3, `call.transfer.progress`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransferState {
@@ -650,6 +852,26 @@ pub enum EventKind {
         sample_rate: u32,
         /// Whether the hangover elapsed or a reset cut it.
         cause: VoiceEndCause,
+    },
+    /// What this call's voice-activity detection is measuring against changed (`M-84`).
+    ///
+    /// Sent once when detection first has audio — so a call with detection running always says what
+    /// it is measuring against, whether or not the value ever moves — and thereafter only when
+    /// calibration moved it. A settled threshold is silent, which makes this cost nothing in steady
+    /// state and nothing at all on a call whose threshold is fixed.
+    ///
+    /// It carries no delta. §2's rule is that the contract never sends one, so the value it
+    /// *replaced* is not here: an app that missed a delivery is corrected by the snapshot on this
+    /// very envelope rather than left to reassemble a history.
+    VoiceThresholds {
+        /// The first sample of the current epoch from which
+        /// [`VoiceThresholds::activation_amplitude`] has been in force.
+        ///
+        /// `0` when it has been in force since the epoch opened. Counted in samples at the record's
+        /// own `sample_rate`, never read from a clock.
+        sample_time: u64,
+        /// What is now in force — the same record §5.2's `voice` member carries.
+        thresholds: VoiceThresholds,
     },
     /// A reporting period of the call's audio completed (`M-59`).
     ///
@@ -781,6 +1003,7 @@ impl EventKind {
             Self::Dtmf { .. } => "call.dtmf",
             Self::VoiceStarted { .. } => "call.voice.started",
             Self::VoiceEnded { .. } => "call.voice.ended",
+            Self::VoiceThresholds { .. } => "call.voice.thresholds",
             Self::SignalMetrics { .. } => "call.signal.metrics",
             Self::SignalSilence { .. } => "call.signal.silence",
             Self::PlaybackFinished { .. } => "call.playback.finished",
@@ -803,7 +1026,7 @@ impl EventKind {
     /// Enumerable so that "the crate covers the table" is a test rather than a promise; the
     /// derived test in `tests/spec_tables.rs` reads the section and compares.
     #[must_use]
-    pub fn type_names() -> [&'static str; 20] {
+    pub fn type_names() -> [&'static str; 21] {
         [
             "call.incoming",
             "call.ringing",
@@ -812,6 +1035,7 @@ impl EventKind {
             "call.dtmf",
             "call.voice.started",
             "call.voice.ended",
+            "call.voice.thresholds",
             "call.signal.metrics",
             "call.signal.silence",
             "call.playback.finished",
@@ -880,6 +1104,16 @@ impl EventKind {
                 members.push(("sample_time", Some(Json::from(*sample_time))));
                 members.push(("sample_rate", Some(Json::from(*sample_rate))));
                 members.push(("cause", Some(cause.to_json())));
+            }
+            Self::VoiceThresholds {
+                sample_time,
+                thresholds,
+            } => {
+                members.push(("sample_time", Some(Json::from(*sample_time))));
+                // The side of the audio and the rate live inside the record, once: this event and
+                // §5.2's `voice` member are the same object, and a `direction` repeated at the
+                // event level would be a second one that can disagree with it.
+                members.push(("thresholds", Some(thresholds.to_json())));
             }
             Self::SignalMetrics { .. } | Self::SignalSilence { .. } => {
                 members.extend(self.signal_members());
@@ -972,6 +1206,14 @@ impl EventKind {
                     .get("cause")
                     .and_then(VoiceEndCause::from_json)
                     .ok_or(Error::BadField { field: "cause" })?,
+            },
+            "call.voice.thresholds" => Self::VoiceThresholds {
+                sample_time: u64_field(value, "sample_time")?,
+                thresholds: VoiceThresholds::from_json(value.get("thresholds").ok_or(
+                    Error::MissingField {
+                        field: "thresholds",
+                    },
+                )?)?,
             },
             "call.signal.metrics" | "call.signal.silence" => signal_event(type_name, value)?,
             "call.playback.finished" => Self::PlaybackFinished {
@@ -1140,6 +1382,27 @@ pub(crate) fn u64_field(value: &Json, field: &'static str) -> Result<u64> {
         .and_then(Json::as_i64)
         .ok_or(Error::MissingField { field })?;
     u64::try_from(raw).map_err(|_| Error::BadField { field })
+}
+
+pub(crate) fn i32_field(value: &Json, field: &'static str) -> Result<i32> {
+    let raw = value
+        .get(field)
+        .and_then(Json::as_i64)
+        .ok_or(Error::MissingField { field })?;
+    i32::try_from(raw).map_err(|_| Error::BadField { field })
+}
+
+/// A sample count that may be `null`, or absent — which say the same thing (`M-84`).
+fn optional_count(value: &Json, field: &'static str) -> Result<Option<u64>> {
+    match value.get(field) {
+        None | Some(Json::Null) => Ok(None),
+        Some(present) => {
+            let raw = present.as_i64().ok_or(Error::BadField { field })?;
+            u64::try_from(raw)
+                .map(Some)
+                .map_err(|_| Error::BadField { field })
+        }
+    }
 }
 
 /// The `M-59` signal events' extra fields (§5.3).

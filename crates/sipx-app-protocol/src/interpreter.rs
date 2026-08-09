@@ -1003,6 +1003,14 @@ impl Interpreter {
             EventKind::Bridged { .. } => self.snapshot.bridged = true,
             EventKind::Unbridged { .. } => self.snapshot.bridged = false,
             EventKind::Ended { .. } => self.snapshot.state = CallState::Ended,
+            // §5.2's `voice` member is *this*, and only this, writes it (`M-84`). Rebuilding the
+            // read from the announcement is what §2 means by events being authoritative: an app
+            // that missed one is corrected by the next envelope's snapshot rather than left
+            // reassembling a history, and a call nobody asked for detection on never gets a member
+            // at all because nothing ever announces one.
+            EventKind::VoiceThresholds { thresholds, .. } => {
+                self.snapshot.voice = Some(*thresholds);
+            }
             EventKind::DialFinished { leg, outcome, .. } => {
                 // A leg that did not answer is not a leg of this call any more (vector AC-7). It
                 // is removed rather than left in some `failed` state, because §5.2's `legs` is

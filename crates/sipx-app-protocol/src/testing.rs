@@ -8,7 +8,7 @@
 use crate::document::{DtmfMode, Gather, Instruction, Source, TransferTarget, Verb};
 use crate::event::{
     AudioDirection, CallSnapshot, CallState, DialOutcome, Direction, EndCause, EventKind,
-    GatherReason, Leg, TransferState, VoiceEndCause,
+    GatherReason, Leg, TransferState, VoiceEndCause, VoiceThresholds,
 };
 use crate::interpreter::Callback;
 
@@ -39,6 +39,10 @@ pub fn one_of_every_event() -> Vec<EventKind> {
             sample_time: 160,
             sample_rate: 8_000,
             cause: VoiceEndCause::Hangover,
+        },
+        EventKind::VoiceThresholds {
+            sample_time: 1_600,
+            thresholds: reference_thresholds(),
         },
         EventKind::SignalMetrics {
             direction: AudioDirection::Inbound,
@@ -198,6 +202,23 @@ pub fn one_of_every_verb() -> Vec<Instruction> {
     ]
 }
 
+/// The processing contract's reference profile `P8` with its reference calibration `K8` on it, as
+/// §5.2's `voice` member (`M-84`).
+///
+/// The numbers are that spec's, not invented here: `W = 160` and a 1,600-sample hangover at 8 kHz
+/// (§11.1), and `C = 1,600`, `U = 800`, `F = 240,000` from §12.12. `1,536` is where vector CAL-6's
+/// 25-frame prefix leaves the threshold, which `sipx-call`'s own tests arrive at from the analyser
+/// rather than from this constant — so an analyser change that moved it shows up as a disagreement
+/// between two crates instead of being agreed with here.
+#[must_use]
+pub fn reference_thresholds() -> VoiceThresholds {
+    VoiceThresholds::new(AudioDirection::Inbound, 8_000, 1_536, 160, 1_600).with_calibration(
+        1_600,
+        800,
+        Some(240_000),
+    )
+}
+
 /// A snapshot with every member of §5.2 populated, including the ones that are easy to forget.
 #[must_use]
 pub fn populated_snapshot() -> CallSnapshot {
@@ -212,6 +233,7 @@ pub fn populated_snapshot() -> CallSnapshot {
         state: CallState::Ringing,
         to: "sip:bob@example.net".to_owned(),
     });
+    call.voice = Some(reference_thresholds());
     call.tags
         .insert("campaign".to_owned(), "renewal".to_owned());
     call
