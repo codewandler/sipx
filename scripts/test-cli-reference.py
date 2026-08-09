@@ -143,5 +143,102 @@ class TheReferenceBuild(unittest.TestCase):
         )
 
 
+class TheOptionReader(unittest.TestCase):
+    """`X-131`: a command's options are the entries of its help, not every `--token` in the text.
+
+    The reader used to match `--[a-z][a-z0-9-]*` over the whole of a command's `--help`, so a
+    sentence that named another command's flag became a flag of the command that named it. Writing
+    "give it headroom over the generator's `--concurrency`" on `load-responder`'s `--max-active`
+    reported ``load-responder: executable option `--concurrency` is not documented``, and the
+    sentence had to be reworded around the checker.
+
+    Narrowing a reader is how one goes quiet, so both directions are asserted below and in both of
+    clap's layouts: the long help's one-entry-per-line block, which is what the binary renders and
+    where the encounter happened, and the compact two-column block. The third row is the property
+    that makes over-narrowing safe to attempt at all — `help_drift` compares both ways, so a reader
+    that stopped seeing options would be reported by the page half of the same comparison rather
+    than passing silently.
+    """
+
+    #: A root help naming the one command these fixtures describe.
+    ROOT = "Commands:\n  load-responder  Answer a load\n  help  Show this message\n"
+
+    #: The long-help layout: the entry opens the line, everything about it is indented under it.
+    HELP = """\
+Options:
+      --json
+          Report command results as JSON on stdout
+
+      --max-active <MAX_ACTIVE>
+          Ceiling on simultaneously owned dialogs. Give it headroom over the generator's
+          `--concurrency` rather than matching it
+
+  -v...
+          Show load progress
+
+  -h, --help
+          Print help
+"""
+
+    #: The compact layout, where the description shares the entry's line.
+    COMPACT = """\
+OPTIONS:
+    --max-active <N>  Ceiling on dialogs; give it headroom over the generator's `--concurrency`
+    --json            JSON
+    -h, --help        Help
+"""
+
+    DOCUMENT = """\
+# CLI reference
+
+## `sipx load-responder`
+
+| Flag | Meaning |
+|---|---|
+| `--max-active <N>` | Ceiling on dialogs |
+"""
+
+    def test_a_flag_named_in_prose_is_not_an_option_of_the_command_that_named_it(self):
+        self.assertEqual([], self.drift(self.HELP))
+
+    def test_the_same_holds_where_the_description_shares_the_entry_s_line(self):
+        self.assertEqual([], self.drift(self.COMPACT))
+
+    def test_an_undocumented_option_is_still_a_failure(self):
+        """The case the wide reader existed for: a real entry the public page does not carry."""
+        problems = self.drift(self.HELP + "\n      --cleanup <S>\n          Drain deadline\n")
+        self.assertEqual(1, len(problems))
+        self.assertIn("--cleanup", problems[0])
+
+    def test_an_undocumented_option_is_still_a_failure_in_the_compact_layout(self):
+        problems = self.drift(self.COMPACT + "    --cleanup <S>     Drain deadline\n")
+        self.assertEqual(1, len(problems))
+        self.assertIn("--cleanup", problems[0])
+
+    def test_a_reader_that_saw_no_entries_would_be_reported_not_silent(self):
+        """Why narrowing is safe to attempt: the page half of the comparison catches a blind one."""
+        problems = self.drift("Options:\n")
+        self.assertEqual(1, len(problems))
+        self.assertIn("--max-active", problems[0])
+        self.assertIn("absent from executable help", problems[0])
+
+    def test_the_reader_takes_the_option_out_of_its_entry_and_not_its_description(self):
+        self.assertEqual({"--max-active"}, checker.help_options(self.HELP))
+
+    def test_a_value_list_under_an_entry_is_not_an_option(self):
+        """clap prints possible values as `- name:` lines, which a dash-led reader could take."""
+        self.assertEqual(
+            {"--mode"},
+            checker.help_options(
+                "Options:\n      --mode <MODE>\n          Workload\n\n"
+                "          Possible values:\n          - signalling:      Bodyless\n"
+                "          - generated-media: Deterministic\n"
+            ),
+        )
+
+    def drift(self, help_text: str) -> list[str]:
+        return checker.help_drift(self.DOCUMENT, self.ROOT, {"load-responder": help_text})
+
+
 if __name__ == "__main__":
     unittest.main()

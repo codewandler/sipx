@@ -34,6 +34,33 @@ GLOBAL_OPTIONS = {"--help", "--json"}
 BUILD_TIMEOUT_SECONDS = 600
 HELP_TIMEOUT_SECONDS = 10
 
+#: The options block of one command's help, read the way `help_commands` reads the root's command
+#: block: from its heading to the next unindented line, which is the next section or the end.
+_OPTIONS_BLOCK = re.compile(
+    r"^options:\s*$\n(?P<body>.*?)(?=^\S|\Z)",
+    re.MULTILINE | re.DOTALL | re.IGNORECASE,
+)
+
+#: One entry of that block, anchored at the start of its line: the option's spellings and their
+#: value placeholders. `--json`, `-v...`, `-h, --help` and `--max-active <MAX_ACTIVE>` are entries.
+#: A sentence naming a flag is not, and neither is the `- name: meaning` of a possible-value list,
+#: whose dash is followed by a space rather than by a spelling.
+_OPTION_ENTRY = re.compile(
+    r"""\A(?:
+        --?[A-Za-z][A-Za-z0-9-]*            # a spelling of the option
+        (?:[ =](?:<[^>]*>|\[[^\]]*\]))?     # its value placeholder, where it takes a value
+        (?:\.\.\.)?                         # repeatable: `-v...`, `--header <HEADER>...`
+        (?:,[ ]*)?                          # a further spelling of the same option
+    )+""",
+    re.VERBOSE,
+)
+
+#: The deepest indent at which an entry opens. Entries sit at column two, or at six where an absent
+#: short flag is padded past; everything belonging to one — description, default, possible values —
+#: is indented further, at ten. The bound is what keeps a wrapped description line that happens to
+#: begin with a flag from reading as a declaration of it.
+ENTRY_INDENT = 8
+
 
 @dataclasses.dataclass(frozen=True)
 class JsonContract:
@@ -59,9 +86,39 @@ def help_commands(text: str) -> set[str]:
 
 
 def help_options(text: str) -> set[str]:
-    """Normalize every long option named by a command's executable help."""
+    """Normalize the long options a command's executable help *declares*.
 
-    return set(re.findall(r"(?<![a-z0-9-])--[a-z][a-z0-9-]*", text)) - GLOBAL_OPTIONS
+    Read from the entries of the help's options block rather than from every `--token` in the
+    output, because a description is prose and prose names things. `X-131`: `load-responder`'s
+    `--max-active` help sizes the ceiling against the generator's `--concurrency`, and the wide
+    reader turned that cross-reference into an option of `load-responder` — an undocumented one.
+    The clearest sentence available is the one spelling the flag an operator types, so the reader
+    gives way rather than the help.
+
+    An entry opens its own line, and everything written about it is either indented beneath it or
+    set across the column gap after it. That is the whole of the narrowing. It is safe to attempt
+    because `help_drift` compares both ways: a reader that stopped seeing entries does not go
+    quiet, it reports every documented option as absent from the executable help.
+    """
+
+    block = _OPTIONS_BLOCK.search(text)
+    if block is None:
+        return set()
+    options: set[str] = set()
+    for line in block.group("body").splitlines():
+        entry = line.lstrip(" ")
+        if not entry or len(line) - len(entry) > ENTRY_INDENT:
+            continue
+        spelled = _OPTION_ENTRY.match(entry)
+        if spelled is None:
+            continue
+        # What follows the spellings is the description, which clap sets across a column gap. A
+        # line running straight on from a flag is a sentence that happens to begin with one.
+        description = entry[spelled.end() :]
+        if description.strip() and not description.startswith("  "):
+            continue
+        options.update(re.findall(r"--[a-z][a-z0-9-]*", spelled.group()))
+    return options - GLOBAL_OPTIONS
 
 
 def document_command_flags(document: str) -> dict[str, set[str]]:
