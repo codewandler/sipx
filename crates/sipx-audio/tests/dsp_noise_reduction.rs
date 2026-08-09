@@ -16,6 +16,10 @@
 //! drive full-scale alternation at 8,000 Hz — the folding frequency, where both one-pole sections
 //! are exactly zero, so the whole signal lands in the high band and the settled output is the input
 //! times one declared gain and nothing else.
+//!
+//! NR-V18 through NR-V22 are `M-114`'s: §10's producer for the hint §5.5 consumes. They live here
+//! rather than in a file of their own because the measurement they exist for is §8's corpus
+//! measured twice, and two definitions of that corpus could drift apart while both stayed green.
 
 #![allow(
     clippy::unwrap_used,
@@ -24,10 +28,14 @@
     clippy::indexing_slicing
 )]
 
-use sipx_audio::analysis::{AudioDirection, DiscontinuityKind};
+use sipx_audio::analysis::{
+    AnalysisFrame, AnalysisProfile, AudioAnalyzer, AudioDirection, DiscontinuityKind, Observation,
+    ResetCause, VoiceEndCause,
+};
 use sipx_audio::dsp::noise::{
-    ActivityInput, HostRequirement, MAX_WARM_UP_POSITIONS, NOISE_REDUCTION_IDS, NoiseReducer,
-    NoiseReduction, NoiseReductionError, SUBBAND_SUPPRESSOR, SubbandSuppressor,
+    ActivityHint, ActivityInput, HintCause, HintPolicy, HostRequirement, MAX_WARM_UP_POSITIONS,
+    NOISE_REDUCTION_IDS, NoiseReducer, NoiseReduction, NoiseReductionError, SUBBAND_SUPPRESSOR,
+    SubbandSuppressor,
 };
 use sipx_audio::dsp::{
     CHECK_ALLOCATION, CapabilityError, Conformance, DspCapability, DspFrame, DspObservation,
@@ -850,6 +858,41 @@ fn corpus(condition: &str) -> Vec<i16> {
     }
 }
 
+/// FNV-1a over each §8 condition, and the one thing holding two generators to one corpus.
+///
+/// `crates/sipx-audio/examples/dsp_cost.rs` measures what the reducer *costs* on these four
+/// signals; the vectors below measure what it *does* to them. A test helper is not reachable from
+/// an example, so the example carries its own copy of §8's recurrences — and a cost figure taken
+/// on a signal that had quietly drifted from the one the quality figures describe would be two
+/// measurements of two different things, presented as one. These numbers are printed by every
+/// `dsp_cost` run under `corpus`, and `X-109` found a real divergence with them: the example
+/// spliced `transient` with `i16::MIN` where §8 and this file use `-i16::MAX`.
+const CORPUS_CHECKSUMS: &[(&str, u64)] = &[
+    ("silence", 0xb93a_0c83_ce3b_6325),
+    ("stationary", 0x8934_3e5d_b98e_8306),
+    ("transient", 0xe980_f030_62d9_50a3),
+    ("overlapping", 0x05b2_2294_c65e_ee88),
+];
+
+fn checksum(samples: &[i16]) -> u64 {
+    samples.iter().fold(0xcbf2_9ce4_8422_2325, |hash, sample| {
+        (hash ^ u64::from(u16::from_ne_bytes(sample.to_ne_bytes())))
+            .wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+/// NR-V23 (`X-109`) — the corpus is these exact samples, and the cost harness measures the same
+/// ones.
+#[test]
+fn the_corpus_is_the_same_corpus_the_cost_harness_measures() {
+    for (name, expected) in CORPUS_CHECKSUMS {
+        let signal = corpus(name);
+        assert_eq!(checksum(&signal), *expected, "{name}");
+    }
+    assert_eq!(corpus("silence").len(), 4_096);
+    assert_eq!(corpus("stationary").len(), 12_288);
+}
+
 /// Summed magnitude of the output over the input's, in thousandths, after the warm-up (§8).
 fn attenuation(input: &[i16], output: &[i16], from: usize) -> i64 {
     let sum = |samples: &[i16]| -> i64 {
@@ -994,6 +1037,453 @@ fn the_corpus_is_independent_of_framing() {
         let mut reducer = SubbandSuppressor::new();
         let run = replay(&mut reducer, &input, chunk);
         assert_eq!(run.samples, reference.samples, "cut at {chunk}");
+    }
+}
+
+// ------------------------------------------ NR-V18..NR-V22: the activity-hint producer (§10) ----
+
+/// What one hinted replay accounted for, beside the samples it produced.
+#[derive(Debug, Default)]
+struct HintTally {
+    changes: Vec<(u64, bool, HintCause)>,
+    hinted_positions: u64,
+    unprotected: u64,
+    overheld: u64,
+}
+
+/// §10.2's placement, driven: one seam frame reaches the analyser and the reducer, and the hint a
+/// frame's observations produce takes effect at the boundary **after** that frame.
+///
+/// The reducer is fed first and the analyser second on purpose. Feeding the analyser first would
+/// let a hint derived from a frame's own samples reach the reducer before those samples do, which
+/// is a lookahead the reducer's declared zero latency says it does not have.
+fn replay_hinted(
+    reducer: &mut dyn NoiseReducer,
+    input: &[i16],
+    chunk: usize,
+    policy: HintPolicy,
+) -> (Run, HintTally) {
+    let format = d8(reducer);
+    let mut analyzer =
+        AudioAnalyzer::new(AnalysisProfile::new(AudioDirection::Inbound, 8_000)).unwrap();
+    let mut hint = ActivityHint::new(AudioDirection::Inbound, reducer.noise_reduction(), policy);
+    let mut run = Run::default();
+    let mut tally = HintTally::default();
+    let mut applied = false;
+
+    for (sequence, window) in input.chunks(chunk).enumerate() {
+        if hint.voice_active() != applied {
+            let parameter = hint
+                .parameter()
+                .expect("the baseline declares an activity parameter");
+            reducer
+                .configure(&[parameter])
+                .expect("the declared flag is in the declared schema");
+            applied = hint.voice_active();
+        }
+        if applied {
+            tally.hinted_positions += u64::try_from(window.len()).unwrap();
+        }
+        run.feed(reducer, format, window).expect("a valid frame");
+
+        let frame = AnalysisFrame::new(
+            AudioDirection::Inbound,
+            u64::try_from(sequence).unwrap(),
+            window,
+        );
+        analyzer.process(&frame).expect("a valid analysis frame");
+        let at = run.position;
+        for observation in analyzer.drain() {
+            if let Some(change) = hint.observe(at, &observation) {
+                tally
+                    .changes
+                    .push((change.at_position(), change.voice_active(), change.cause()));
+            }
+        }
+        if let Some(change) = hint.advance_to(at) {
+            tally
+                .changes
+                .push((change.at_position(), change.voice_active(), change.cause()));
+        }
+    }
+
+    tally.unprotected = hint.unprotected_positions();
+    tally.overheld = hint.overheld_positions();
+    (run, tally)
+}
+
+/// NR-V18: the producer reads the reducer's declaration and sets what it names, or nothing.
+#[test]
+fn the_producer_sets_the_parameter_the_declaration_names() {
+    let reducer = SubbandSuppressor::new();
+    let declared = reducer.noise_reduction();
+    assert_eq!(
+        declared.activity_input(),
+        ActivityInput::Optional {
+            parameter: "voice_active"
+        }
+    );
+
+    let hint = ActivityHint::new(AudioDirection::Inbound, declared, HintPolicy::new());
+    assert_eq!(hint.direction(), AudioDirection::Inbound);
+    assert_eq!(hint.parameter_id(), Some("voice_active"));
+    assert_eq!(hint.parameter(), Some(flag("voice_active", false)));
+    assert!(
+        !hint.voice_active(),
+        "a producer that has seen nothing hints nothing"
+    );
+    assert_eq!(
+        hint.warm_up_positions(),
+        u64::from(declared.warm_up_positions()),
+        "the deferral is the reducer's own declared count, never a number the policy invented"
+    );
+
+    // §3.3: a caller wiring a detector to `Ignored` is wiring it to nothing, and the producer says
+    // so rather than inventing a parameter name nobody declared.
+    let deaf = ActivityHint::new(
+        AudioDirection::Inbound,
+        NoiseReduction::new(DspCapability::new("deaf")),
+        HintPolicy::new(),
+    );
+    assert_eq!(deaf.parameter_id(), None);
+    assert_eq!(deaf.parameter(), None);
+}
+
+/// A reducer declaration that consumes the hint and warms up instantly.
+///
+/// §10.2's deferral is measured separately, by `the_corpus_is_measured_with_the_hint_wired_and_unwired`
+/// against the baseline's real 1,024 positions; the vector below is the policy's own arithmetic
+/// with that one term removed, so each edge is hand-derivable from the positions beside it.
+const HINT_SCHEMA: &[ParameterSpec] = &[ParameterSpec::new("voice_active", ParameterDomain::Flag)];
+
+fn undeferred() -> NoiseReduction {
+    NoiseReduction::new(DspCapability::new("undeferred").with_parameters(HINT_SCHEMA))
+        .with_activity_input(ActivityInput::Optional {
+            parameter: "voice_active",
+        })
+}
+
+/// NR-V19: the policy, sample-exact, on a stated observation sequence.
+///
+/// Positions are the caller's, in samples, and every edge below is hand-derivable from them: the
+/// analyser's own `W` and hangover are what make the two lags what they are, and the hold cap is
+/// what recovers a hint whose closing transition never arrived.
+#[test]
+fn the_policy_is_a_stated_function_of_positions() {
+    let policy = HintPolicy::new()
+        .with_release_positions(0)
+        .with_hold_positions(4_000);
+    let declared = undeferred();
+    let mut hint = ActivityHint::new(AudioDirection::Inbound, declared, policy);
+
+    // A window that completed at position 160 says voice began at 0: the hint is late by exactly
+    // the detector's window, and the producer accounts for those 160 positions rather than hiding
+    // them.
+    let started = hint
+        .observe(160, &Observation::VoiceStarted { at_sample: 0 })
+        .expect("the leading edge is a change");
+    assert_eq!(started.at_position(), 160);
+    assert!(started.voice_active());
+    assert_eq!(started.lag_positions(), 160);
+    assert_eq!(started.cause(), HintCause::VoiceStarted);
+    assert_eq!(hint.unprotected_positions(), 160);
+    assert_eq!(hint.parameter(), Some(flag("voice_active", true)));
+
+    // An active window refreshes the hold and is not a second edge.
+    assert_eq!(hint.observe(320, &active_window(1)), None);
+    assert_eq!(hint.advance_to(320), None);
+
+    // Nothing refreshes it again: the cap fires 4,000 positions after the last refresh at 320.
+    assert_eq!(hint.advance_to(4_319), None);
+    let elapsed = hint
+        .advance_to(4_320)
+        .expect("an unrefreshed hold is bounded");
+    assert!(!elapsed.voice_active());
+    assert_eq!(elapsed.cause(), HintCause::HoldElapsed);
+    assert_eq!(elapsed.at_position(), 4_320);
+    assert_eq!(hint.parameter(), Some(flag("voice_active", false)));
+
+    // A lost observation may have been the closing transition, and NR-V21 measures that direction
+    // at 420 thousandths against the other's 4 — so the hole resolves toward not hinting.
+    let mut hint = ActivityHint::new(AudioDirection::Inbound, declared, policy);
+    hint.observe(160, &Observation::VoiceStarted { at_sample: 0 });
+    let lost = hint
+        .observe(480, &Observation::Lost { count: 3 })
+        .expect("a hole in the stream is a change");
+    assert!(!lost.voice_active());
+    assert_eq!(lost.cause(), HintCause::ObservationsLost);
+    assert_eq!(hint.advance_to(640), None, "and it does not re-arm itself");
+
+    // The closing transition arrives 1,600 positions — the reference hangover — after the speech it
+    // describes ended, and the producer counts that over-hold too.
+    let mut hint = ActivityHint::new(AudioDirection::Inbound, declared, policy);
+    hint.observe(160, &Observation::VoiceStarted { at_sample: 0 });
+    let ended = hint
+        .observe(
+            3_200,
+            &Observation::VoiceEnded {
+                at_sample: 1_600,
+                cause: VoiceEndCause::Hangover,
+            },
+        )
+        .expect("the trailing edge is a change");
+    assert!(!ended.voice_active());
+    assert_eq!(ended.cause(), HintCause::VoiceEnded);
+    assert_eq!(ended.lag_positions(), 1_600);
+    assert_eq!(hint.overheld_positions(), 1_600);
+
+    // A release guard delays the clear by the positions it declares, and by no others.
+    let guarded = HintPolicy::new().with_release_positions(240);
+    let mut hint = ActivityHint::new(AudioDirection::Inbound, declared, guarded);
+    hint.observe(160, &Observation::VoiceStarted { at_sample: 0 });
+    assert_eq!(
+        hint.observe(
+            3_200,
+            &Observation::VoiceEnded {
+                at_sample: 1_600,
+                cause: VoiceEndCause::Hangover,
+            },
+        ),
+        None,
+        "the guard holds the hint past the transition"
+    );
+    assert!(hint.voice_active());
+    assert_eq!(hint.advance_to(3_439), None);
+    let released = hint.advance_to(3_440).expect("the guard elapses");
+    assert_eq!(released.cause(), HintCause::VoiceEnded);
+    assert_eq!(released.lag_positions(), 1_840);
+
+    // An epoch that restarted has no activity to describe, and the reducer's warm-up re-opens with
+    // it (§5.4): the hint clears at the reset and re-arms only at the next transition.
+    let mut hint = ActivityHint::new(AudioDirection::Inbound, declared, policy);
+    hint.observe(160, &Observation::VoiceStarted { at_sample: 0 });
+    let cut = hint
+        .observe(
+            320,
+            &Observation::Reset {
+                cause: ResetCause::Requested,
+            },
+        )
+        .expect("a reset clears the hint");
+    assert!(!cut.voice_active());
+    assert_eq!(cut.cause(), HintCause::EpochReset);
+    assert_eq!(hint.advance_to(0), None, "positions restart with the epoch");
+}
+
+/// One completed active window, as the analyser spells it (§5.3).
+fn active_window(index: u64) -> Observation {
+    Observation::Window {
+        index,
+        peak: 8_192,
+        sum: 0,
+        energy: 160 * 8_192 * 8_192,
+        clipped: 0,
+        clipping: false,
+        impulsive: false,
+        active: true,
+        dc_offset: false,
+        silent: false,
+    }
+}
+
+/// §10.5's fifth condition: `overlapping`'s near talker with its gate held on.
+///
+/// §8's four rows are `M-66`'s and stay four. This one is `M-114`'s, generated by the same
+/// recurrences, and it exists because §5.6's fifth row reasons about *continuous* speech and §8
+/// has none: `overlapping` gates its talkers off for 800 positions at a time, which is exactly the
+/// pause the estimator needs to find a minimum in.
+fn sustained() -> Vec<i16> {
+    let background = noise(12_288, 800);
+    (0..12_288usize)
+        .map(|n| {
+            let phase = i32::try_from(n % 100).unwrap();
+            let near = (phase * 2 - 100) * 8_000 / 100;
+            i16::try_from((near + i32::from(background[n])).clamp(-32_768, 32_767)).unwrap()
+        })
+        .collect()
+}
+
+/// NR-V20: §8's corpus and §10.5's fifth condition, measured with the producer wired and without it.
+///
+/// The comparison is the whole point of the story: a hint is only worth wiring if the numbers move
+/// the right way on the condition it was reasoned about, and §5.6's third row is that condition.
+/// Two of the five rows below move the wrong way, and they are asserted just as exactly as the one
+/// that moves the right way — a measurement that only records its wins is not a measurement.
+#[test]
+fn the_corpus_is_measured_with_the_hint_wired_and_unwired() {
+    let warm_up = 1_024;
+
+    for condition in [
+        "silence",
+        "stationary",
+        "transient",
+        "overlapping",
+        "sustained",
+    ] {
+        let input = if condition == "sustained" {
+            sustained()
+        } else {
+            corpus(condition)
+        };
+
+        let mut unwired = SubbandSuppressor::new();
+        let plain = replay(&mut unwired, &input, 160);
+
+        let mut wired = SubbandSuppressor::new();
+        let (hinted, tally) = replay_hinted(&mut wired, &input, 160, HintPolicy::new());
+        assert_eq!(hinted.samples.len(), input.len());
+
+        let measured = (
+            attenuation(&input, &plain.samples, warm_up),
+            distortion(&input, &plain.samples, warm_up),
+            attenuation(&input, &hinted.samples, warm_up),
+            distortion(&input, &hinted.samples, warm_up),
+            tally.hinted_positions,
+            tally.unprotected,
+            tally.overheld,
+        );
+
+        // Unwired attenuation and distortion, then wired, then the positions the hint covered and
+        // the two edges it could not. Each is exact so that a change moves a number rather than a
+        // judgement, and each row carries the reason it reads as it does.
+        let expected = match condition {
+            // Nothing rises above the activation threshold, so the hint is never set.
+            "silence" => (1_000, 0, 1_000, 0, 0, 0, 0),
+            // The same: 8,000 Hz noise at amplitude 2,000 has a window deviation near 1,155, well
+            // under the reference profile's activation amplitude of 2,048.
+            "stationary" => (298, 707, 298, 707, 0, 0, 0),
+            // A **false active**, produced by the shipped detector on stated input rather than
+            // asserted: a 32-position full-scale burst carries a whole window past the activation
+            // threshold, and the hint then freezes the floor for the hangover that follows. The
+            // reducer removes *less* of the noise it exists to remove — 377 to 397 — which is the
+            // cost of a wrong hint, measured.
+            "transient" => (377, 643, 397, 631, 1_600, 160, 1_600),
+            // The condition the wiring exists for (§5.6, third row), and the only one where both
+            // measures move the right way: 4 thousandths more noise removed and 4 thousandths less
+            // speech damaged. It is a small margin and it is the whole of the case for wiring this.
+            "overlapping" => (859, 177, 855, 173, 11_168, 1_120, 0),
+            // A **correct** hint that still costs 15 thousandths of speech. A sawtooth's envelope
+            // dips every period, so the unwired floor keeps finding minima; freezing it at 1,120
+            // locks in one that is already higher. Nothing in the policy can see this — the arrow
+            // runs one way (§10) and the reducer's floor is not readable from here.
+            "sustained" => (611, 392, 594, 407, 11_168, 1_120, 0),
+            other => panic!("no condition named {other}"),
+        };
+        assert_eq!(
+            measured, expected,
+            "{condition}: unwired (attenuation, distortion), wired (attenuation, distortion), \
+             hinted positions, unprotected positions, overheld positions"
+        );
+
+        if tally.hinted_positions == 0 {
+            assert_eq!(
+                hinted.samples, plain.samples,
+                "{condition}: a stream the detector never calls voice is the unwired stream, \
+                 sample for sample and not measure for measure"
+            );
+        }
+    }
+}
+
+/// NR-V21: what a wrong hint costs, in each of the two directions §5.6's fifth row names.
+///
+/// The two numbers this produces — 416 against 4 — are what every uncertainty in §10.3's policy is
+/// resolved by. A hint held past the speech it describes is expensive; a hint dropped during speech
+/// is nearly free. So the producer clears on doubt, defers through the warm-up and adds nothing to
+/// the hangover.
+#[test]
+fn a_wrong_hint_costs_what_the_spec_says_it_costs() {
+    let warm_up = 1_024;
+    let input = corpus("overlapping");
+
+    // Wrongly **true**, from the first frame: the floor freezes on the seed §5.2 takes from the
+    // first position of the epoch, that seed was taken from speech, and the speech is then
+    // attenuated by a floor that describes it. This is the failure §5.4's warm-up exists to
+    // prevent, reached by setting the hint inside the warm-up.
+    let mut pinned = SubbandSuppressor::new();
+    pinned.configure(&[flag("voice_active", true)]).unwrap();
+    let pinned_run = replay(&mut pinned, &input, 160);
+
+    // Wrongly **false**, throughout: the unwired run *is* that hint, so the cost is its distance
+    // from the run the analyser's own observations produced.
+    let mut unwired = SubbandSuppressor::new();
+    let unwired_run = replay(&mut unwired, &input, 160);
+    let mut wired = SubbandSuppressor::new();
+    let (wired_run, _) = replay_hinted(&mut wired, &input, 160, HintPolicy::new());
+
+    let damage = |samples: &[i16]| distortion(&input, samples, warm_up);
+    assert_eq!(
+        (
+            damage(&wired_run.samples),
+            damage(&unwired_run.samples),
+            damage(&pinned_run.samples)
+        ),
+        (173, 177, 593),
+        "speech distortion in thousandths: hinted, hint wrongly absent, hint wrongly pinned"
+    );
+    assert_eq!(
+        (
+            damage(&unwired_run.samples) - damage(&wired_run.samples),
+            damage(&pinned_run.samples) - damage(&wired_run.samples),
+        ),
+        (4, 420),
+        "the two directions are not symmetric, and the policy is built around which is which"
+    );
+}
+
+/// NR-V22: a wrong or absent hint degrades to the unhinted behaviour, never to a refusal — and no
+/// observation the reducer produces presents it as a detector.
+#[test]
+fn a_wrong_or_absent_hint_degrades_rather_than_refuses() {
+    let input = corpus("overlapping");
+
+    // Absent: the producer never consulted, the run is `M-66`'s exactly.
+    let mut absent = SubbandSuppressor::new();
+    let reference = replay(&mut absent, &input, 160);
+
+    // A hint that is wrong every other frame — the detector that is wrong half the time §5.5 warns
+    // about. Every frame is still carried and every set is still accepted.
+    let mut thrashed = SubbandSuppressor::new();
+    let format = d8(&mut thrashed);
+    let mut run = Run::default();
+    for (index, window) in input.chunks(160).enumerate() {
+        thrashed
+            .configure(&[flag("voice_active", index % 2 == 0)])
+            .expect("the declared flag is always in the declared schema");
+        run.feed(&mut thrashed, format, window)
+            .expect("a wrong hint is never a refusal");
+    }
+    assert_eq!(run.samples.len(), reference.samples.len());
+    assert_ne!(
+        run.samples, reference.samples,
+        "the hint changes what the reducer does, which is why a wrong one costs anything"
+    );
+
+    // A producer whose observation stream develops a hole degrades to the unhinted behaviour rather
+    // than to anything the caller has to handle.
+    let mut hint = ActivityHint::new(
+        AudioDirection::Inbound,
+        SubbandSuppressor::new().noise_reduction(),
+        HintPolicy::new(),
+    );
+    hint.observe(1_120, &Observation::VoiceStarted { at_sample: 0 });
+    assert!(hint.voice_active());
+    assert_eq!(
+        hint.observe(1_280, &Observation::Lost { count: 2 })
+            .map(|change| change.cause()),
+        Some(HintCause::ObservationsLost)
+    );
+    assert_eq!(hint.parameter(), Some(flag("voice_active", false)));
+    assert!(!hint.voice_active(), "which is `M-66`'s unhinted behaviour");
+
+    // Nothing the reducer emitted claims an activity fact of its own (§2). Every observation it
+    // produced is the processor contract's own vocabulary about a parameter or a pass-through.
+    for observation in &run.observations {
+        let rendered = format!("{observation:?}");
+        assert!(
+            !rendered.contains("Voice") && !rendered.contains("Activity"),
+            "a reducer never presents itself as a detector: {rendered}"
+        );
     }
 }
 

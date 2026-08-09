@@ -204,6 +204,36 @@ class TheRepositoryItself(unittest.TestCase):
         """
         self.assertGreater(len(guard.outstanding_structs(self.published)), 0)
 
+    def test_every_relay_path_byte_buffer_is_redacted_or_argued_at_the_type(self):
+        """`M-110`'s failing-first assertion, over the workspace rather than over a fixture.
+
+        Before `M-110` this named six types: `Packet`, `Rtcp` and `SdesItem`, whose derived `Debug`
+        rendered a call's payload and an RFC 3550 §6.5 identity, and the ICE and STUN carriers that
+        now carry the argument `M-107` had recorded only in a commit message.
+        """
+        self.assertEqual(
+            [], guard.byte_buffer_problems(guard.on_the_relay_path(self.published))
+        )
+
+    def test_the_guard_reads_byte_buffers_out_of_the_crates_it_covers(self):
+        """The blinding assertion the enum and struct rules get, for the byte rule's selector."""
+        self.assertEqual(
+            [],
+            guard.unread_relay_path(
+                guard.byte_buffer_carriers(guard.on_the_relay_path(self.published))
+            ),
+        )
+
+    def test_the_relay_path_scope_names_crates_that_exist(self):
+        for name in guard.RELAY_PATH:
+            with self.subTest(crate=name):
+                self.assertIn(name, self.published)
+
+    def test_what_the_relay_path_scope_holds_out_is_counted(self):
+        """A stated scope reporting zero would mean the workspace had one relay path and no SIP
+        surface, or that the reader had gone blind. It has neither."""
+        self.assertGreater(len(guard.outstanding_byte_buffers(self.published)), 0)
+
     def test_every_claim_every_crate_makes_is_backed(self):
         """`X-35`'s failing-first assertion.
 
@@ -1474,8 +1504,9 @@ class TheSampleBufferRule(unittest.TestCase):
 
         `Vec<u8>` and `Bytes` are a G.711 payload here and a `Call-ID`, a SIP body and a STUN
         attribute three crates over. Selecting them would report the whole SIP surface, where the
-        bytes *are* what a protocol log is for — so encoded audio stays a reviewer's question, and
-        `sipx_media::Encoded` was redacted by hand rather than by this.
+        bytes *are* what a protocol log is for — so this rule holds element types and `M-110`'s
+        holds a scope. `TheByteBufferRule` is the other half; the two must not learn each other's
+        selectors, which is what this asserts from this side.
         """
         for field in ("payload: Vec<u8>", "payload: Bytes", "channels: &'static [u8]"):
             with self.subTest(field=field):
@@ -1559,6 +1590,214 @@ class TheSampleBufferRule(unittest.TestCase):
         """The floor has to leave the thing it was set above."""
         self.assertEqual(
             [], guard.unreadable_surface([("path", "Frame", 0)] * guard._PLAUSIBLE_CARRIERS)
+        )
+
+    def test_the_byte_rules_phrase_does_not_answer_this_one(self):
+        """The two escapes are not interchangeable, asserted from the sample rule's side.
+
+        "Not the call" is a weaker claim than "not call audio" is here: a Hann window is not the
+        call *and* not call audio, but a rule that accepted the first would let a type answer the
+        samples question with a sentence about bytes. `TheByteBufferRule` asserts the other
+        direction, which is the one that matters more.
+        """
+        argued = LEAKING.replace(
+            "/// One frame of call audio.",
+            "/// A window.\n///\n/// Not the call: these are coefficients.",
+        )
+        self.assertEqual(1, len(self.problems(argued)))
+
+
+#: A relay-path type holding octets with nothing but the derive: the shape `M-110` was filed for.
+CARRYING = "/// One packet.\n#[derive(Debug)]\npub struct Packet { payload: Bytes }\n"
+
+#: The redaction that answers the byte rule, written the way the fix writes it.
+LENGTH_ONLY = (
+    "impl std::fmt::Debug for Packet {\n"
+    "    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n"
+    '        f.debug_struct("Packet").field("payload", &self.payload.len()).finish()\n'
+    "    }\n"
+    "}\n"
+)
+
+
+class TheByteBufferRule(unittest.TestCase):
+    """`M-110`: on the relay path a public type holding octets redacts them or says why not.
+
+    `M-107` stated that this could not be checked, and the statement was about `Bytes` in general
+    and correct about `Bytes` in general: 58 reachable public types in this workspace hold a byte
+    buffer, and for a `Call-ID`, a URI, a SIP body or a STUN attribute, rendering the octets is the
+    entire purpose of the log. What that reasoning missed is that the 58 are spread across eleven
+    crates. Narrow by **scope** rather than by element type and the same obligation becomes
+    decidable: on the two crates the call's own bytes pass through as bytes there are eight
+    carriers, and a person can decide all eight once and a checker can hold them afterwards.
+
+    The tests are in four groups, because four separate things have to hold: the rule selects the
+    shape a byte buffer is written in, the right sentence answers it and the wrong one does not,
+    the scope is a scope rather than a suppression list, and every reader fails loudly when it
+    narrows.
+    """
+
+    def problems(self, source):
+        return demo_crate({"lib.rs": source}, guard.byte_buffer_problems)
+
+    # -- what it selects ------------------------------------------------------------------
+
+    def test_a_type_holding_octets_with_only_the_derive_is_reported(self):
+        problems = self.problems(CARRYING)
+        self.assertEqual(1, len(problems))
+        self.assertIn("`Packet`", problems[0])
+        self.assertIn("buffer of octets", problems[0])
+
+    def test_every_shape_a_byte_buffer_is_written_in_is_one(self):
+        """Owned, borrowed, boxed, fixed, and both `bytes` crate types.
+
+        `Packet` and `Encoded` hold `Bytes`, the ICE agent holds `Vec<u8>`, and a rule that read
+        only one of those would have held one end of the relay path and missed the other.
+        """
+        for field in (
+            "payload: Bytes",
+            "buffer: BytesMut",
+            "payload: Vec<u8>",
+            "payload: &'a [u8]",
+            "payload: Box<[u8]>",
+            "secret: [u8; 32]",
+        ):
+            with self.subTest(field=field):
+                problems = self.problems(
+                    f"/// One packet.\n#[derive(Debug)]\npub struct Packet<'a> {{ {field} }}\n"
+                )
+                self.assertEqual(1, len(problems), field)
+
+    def test_an_enum_variant_holding_octets_is_selected_as_a_struct_is(self):
+        """`Rtcp` keeps the body of a packet it does not model in a variant, so a rule that read
+        only structs would have held both ends of the relay path and missed the middle."""
+        problems = self.problems(
+            "/// A control packet.\n"
+            "#[derive(Debug)]\n"
+            "pub enum Control { Other { payload: Bytes } }\n"
+        )
+        self.assertEqual(1, len(problems))
+        self.assertIn("`Control`", problems[0])
+
+    def test_a_sample_buffer_is_not_a_byte_buffer(self):
+        """The two selectors stay apart. A `Vec<i16>` is the other rule's business and is held over
+        every published crate; teaching this one to see it would report it twice and would make the
+        scope look like the workspace."""
+        self.assertEqual(
+            [],
+            self.problems(
+                "/// One frame.\n#[derive(Debug)]\npub struct Frame { samples: Vec<i16> }\n"
+            ),
+        )
+
+    # -- what answers it, and what deliberately does not ----------------------------------
+
+    def test_a_hand_written_debug_answers_the_rule(self):
+        self.assertEqual([], self.problems(CARRYING.replace("#[derive(Debug)]\n", "") + LENGTH_ONLY))
+
+    def test_a_rationale_beside_the_type_answers_it_too(self):
+        """The escape ICE and STUN need, and it opens a doc line like every other rationale here,
+        so a phrase quoted mid-sentence does not classify a type."""
+        argued = CARRYING.replace(
+            "/// One packet.",
+            "/// A check.\n///\n/// Not the call: these are STUN control bytes.",
+        )
+        self.assertEqual([], self.problems(argued))
+        quoted = CARRYING.replace(
+            "/// One packet.",
+            "/// A packet. See [`Check`], whose `/// Not the call:` note explains the escape.",
+        )
+        self.assertEqual(1, len(self.problems(quoted)))
+
+    def test_the_audio_phrase_does_not_answer_this_rule(self):
+        """The `SdesItem` case, and the whole reason there is a fifth phrase (`M-110`).
+
+        An RFC 3550 §6.5 item's bytes are a `CNAME`, a `NAME` or an `EMAIL` — a login name,
+        somebody's real name, somebody's email address. "Not call audio" written over one is
+        **true**, and a rule whose escape was that phrase would have been switched off truthfully
+        by the one type on the relay path that carries personal data. A redaction check that a true
+        sentence disables checks nothing, so the byte rule asks the question it actually has:
+        neither the call nor a participant.
+        """
+        audio = CARRYING.replace(
+            "/// One packet.",
+            "/// An SDES item.\n///\n/// Not call audio: RFC 3550 §6.5 makes this a CNAME.",
+        )
+        problems = self.problems(audio)
+        self.assertEqual(1, len(problems))
+        self.assertIn("`Packet`", problems[0])
+
+    # -- the scope, and what it holds out -------------------------------------------------
+
+    def test_the_scope_is_the_relay_path_and_nothing_else(self):
+        self.assertEqual(list(guard.RELAY_PATH), guard.on_the_relay_path(list(guard.RELAY_PATH)))
+        self.assertEqual([], guard.on_the_relay_path(["sipx-sip", "sipx-call", "sipx-demo"]))
+
+    def test_widening_the_struct_rollout_boundary_does_not_widen_this_scope(self):
+        """`RELAY_PATH` and `MEDIA_SURFACE` name the same two crates and mean opposite things about
+        their own future: one is a rollout boundary `M-83` expects to be paid down and widened, the
+        other is a stated scope whose widening would report forty SIP headers. One constant used
+        twice would have made the first change silently perform the second."""
+        boundary = guard.MEDIA_SURFACE
+        guard.MEDIA_SURFACE = (*boundary, "sipx-sip")
+        try:
+            self.assertNotIn("sipx-sip", guard.on_the_relay_path(["sipx-sip", *boundary]))
+        finally:
+            guard.MEDIA_SURFACE = boundary
+
+    def test_a_carrier_outside_the_scope_is_counted_rather_than_reported(self):
+        """A scope whose remainder nobody prints is a suppression list with a better name — the
+        argument `outside_the_rule` and `outstanding_structs` each make. The count is also how the
+        one real gap stays visible: `sipx_app_protocol::Source::Inline` documents itself as PCM and
+        derives its `Debug`, and is `M-117`."""
+        self.assertEqual(
+            [],
+            demo_crate(
+                {"lib.rs": CARRYING},
+                lambda crates: guard.byte_buffer_problems(guard.on_the_relay_path(crates)),
+            ),
+        )
+        self.assertEqual(
+            1, len(demo_crate({"lib.rs": CARRYING}, guard.outstanding_byte_buffers))
+        )
+
+    # -- how each reader fails when it narrows --------------------------------------------
+
+    def test_a_reader_blind_to_the_implementation_reports_every_carrier(self):
+        """`sample_buffer_problems`' argument, unchanged: the side of a rule that gets narrowed has
+        to be the side whose failure reports types. Asking for the implementation means a reader
+        that stops recognising one reports all eight carriers; forbidding the derive would have
+        excused all eight at exit 0."""
+        pattern = guard._IMPLEMENTS_DEBUG
+        guard._IMPLEMENTS_DEBUG = r"(?!)"
+        try:
+            problems = self.problems(
+                CARRYING.replace("#[derive(Debug)]\n", "") + LENGTH_ONLY
+            )
+        finally:
+            guard._IMPLEMENTS_DEBUG = pattern
+        self.assertEqual(1, len(problems))
+        self.assertIn("`Packet`", problems[0])
+
+    def test_a_reader_blind_to_a_byte_buffer_fails_the_run_rather_than_passing_it(self):
+        """The selector is the one narrowing no report of types can cover, so the population it
+        selected is held to a floor and a run that recognises almost none of the relay path says so
+        instead of passing."""
+        buffer = guard._BYTE_BUFFER
+        guard._BYTE_BUFFER = re.compile(r"(?!)")
+        try:
+            carriers = demo_crate({"lib.rs": CARRYING}, guard.byte_buffer_carriers)
+        finally:
+            guard._BYTE_BUFFER = buffer
+        self.assertEqual([], carriers)
+        self.assertEqual(1, len(guard.unread_relay_path(carriers)))
+        self.assertIn("has narrowed", guard.unread_relay_path(carriers)[0])
+
+    def test_a_relay_path_that_still_reads_is_not_reported(self):
+        """The floor has to leave the thing it was set above."""
+        self.assertEqual(
+            [],
+            guard.unread_relay_path([("path", "Packet", 0)] * guard._PLAUSIBLE_RELAY_CARRIERS),
         )
 
 

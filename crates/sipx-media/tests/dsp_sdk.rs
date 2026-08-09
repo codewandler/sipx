@@ -22,11 +22,11 @@ use std::time::Duration;
 
 use sipx_media::dsp::{
     BuiltIn, DspCapability, DspFrame, DspResetCause, ExecutionPolicy, ExecutionProfile,
-    FormatError, FrameAdmission, FrameProcessor, FrameSink, GraphBounds, GraphError, GraphPlan,
-    GraphTransition, Parameter, ParameterDomain, ParameterError, ParameterValue, ProcessError,
-    Scratch, StreamFormat,
+    FailureAction, FormatError, FrameAdmission, FrameProcessor, FrameSink, GraphBounds, GraphError,
+    GraphPlan, GraphTransition, Parameter, ParameterDomain, ParameterError, ParameterValue,
+    ProcessError, Scratch, StreamFormat,
 };
-use sipx_media::{AudioDirection, Codec, Config, MediaPort, MediaSession};
+use sipx_media::{AudioDirection, Codec, Config, MediaPort, MediaSession, PcmEncoding, PcmFormat};
 use tokio::net::UdpSocket;
 
 /// A bound on failure and never a window anything is measured in.
@@ -461,4 +461,110 @@ async fn a_stage_with_no_parameter_wire_is_refused_rather_than_silently_ignored(
         ),
         Err(GraphError::Parameter { .. })
     ));
+}
+
+/// A processor that misses every frame, so a chain of them bypasses on the first one.
+struct AlwaysMisses;
+
+impl FrameProcessor for AlwaysMisses {
+    fn capability(&self) -> DspCapability {
+        DspCapability::new("app.misses").with_execution(
+            ExecutionPolicy::new(ExecutionProfile::TrustedCooperativeNative)
+                .with_max_consecutive_misses(1)
+                .with_on_failure(FailureAction::BypassOpen),
+        )
+    }
+    fn configure(&mut self, _parameters: &[Parameter]) -> Result<(), ParameterError> {
+        Ok(())
+    }
+    fn prepare(
+        &mut self,
+        _direction: AudioDirection,
+        _format: StreamFormat,
+    ) -> Result<(), FormatError> {
+        Ok(())
+    }
+    fn process(
+        &mut self,
+        _frame: &DspFrame<'_>,
+        _scratch: &mut Scratch<'_>,
+        _sink: &mut FrameSink<'_>,
+    ) -> Result<(), ProcessError> {
+        Err(ProcessError::MalformedFrame)
+    }
+    fn flush(&mut self, _sink: &mut FrameSink<'_>) -> Result<(), ProcessError> {
+        Ok(())
+    }
+    fn reset(&mut self, _cause: DspResetCause) {}
+    fn cancel(&mut self) {}
+    fn retained(&self) -> u32 {
+        0
+    }
+}
+
+/// The seam `M-67` and `M-68` meet on: **a bypass the media worker journals wakes a reader, and
+/// two stages missing on one frame are two events rather than one.**
+///
+/// Neither story proves this on its own. `M-67`'s wake test drives a `configure` from the caller's
+/// own thread, where the signal and the wait are obviously the same lock; `M-68`'s bypass tests
+/// drain the queue rather than wait on it. The combination is the thing that could regress
+/// silently: `Generation::run` journals a bypass from the media worker, mid-frame, with no
+/// knowledge that anybody is waiting — and `Journal::push` is what has to trip the signal, which is
+/// why the signal lives on the journal and not on the call sites.
+#[tokio::test]
+async fn a_bypass_the_media_worker_journals_wakes_a_waiting_reader() {
+    let (session, _peer, _addr) = session_and_peer().await;
+    let graph = session
+        .attach_dsp(
+            GraphPlan::new(AudioDirection::Outbound, GraphBounds::new())
+                .with_processor(Box::new(AlwaysMisses))
+                .with_processor(Box::new(AlwaysMisses)),
+        )
+        .expect("a validated chain activates");
+    let mut transmitted = session
+        .attach_processor(sipx_media::Processing::new(
+            AudioDirection::Outbound,
+            PcmFormat::new(8_000, PcmEncoding::Signed16).expect("a supported format"),
+        ))
+        .expect("attaches");
+
+    // Take the activation, so the queue is empty and the next wait is on something still to come.
+    let first = tokio::time::timeout(ARRIVAL_BOUND, graph.next_transitions())
+        .await
+        .expect("the activation is already queued");
+    assert!(matches!(
+        first.first(),
+        Some(GraphTransition::Activated { .. })
+    ));
+
+    let graph = std::sync::Arc::new(graph);
+    let waiting = tokio::spawn({
+        let graph = std::sync::Arc::clone(&graph);
+        async move { graph.next_transitions().await }
+    });
+
+    // One frame, which both stages miss. Nothing on the caller's side touches the journal.
+    assert!(session.send(vec![1_000_i16; 160]).await, "queues audio");
+    tokio::time::timeout(ARRIVAL_BOUND, transmitted.recv())
+        .await
+        .expect("the call keeps carrying audio")
+        .expect("a frame");
+
+    let woken = tokio::time::timeout(ARRIVAL_BOUND, waiting)
+        .await
+        .expect("the media worker's own journal write woke the reader, not a clock")
+        .expect("the task did not panic");
+
+    // Two stages spent their budget on the same frame, so there are two entries: an `Option` on
+    // the frame's report would have kept only the last (`M-68`).
+    let bypasses = woken
+        .iter()
+        .filter(|transition| matches!(transition, GraphTransition::Bypassed { .. }))
+        .count();
+    assert_eq!(bypasses, 2, "{woken:?}");
+    assert_eq!(
+        graph.counters().bypasses(),
+        2,
+        "and the counters moved for the same two"
+    );
 }

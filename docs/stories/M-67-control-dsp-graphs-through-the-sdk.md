@@ -96,3 +96,41 @@ bounded, non-callback execution model.
   A supervised stage is unreachable from the wire at all (a program to spawn is host configuration,
   not something a document may name), so an application-assembled chain is always proven-inline
   today; that is stated in `call-dsp-graph.md` §10.1 rather than worked around.
+
+- **2026-08-09 — merged `main` at `1a97409`, eight conflicts.** `M-68` rewrote the same file, and
+  every conflict was a combination rather than a choice.
+
+  **`Generation::run` carries both.** `M-68`'s signature won —
+  `run(direction, samples, counters, journal)` — and `M-67`'s `report.bypassed` is gone, because
+  `M-68`'s approach *subsumes* it: an `Option` on the frame's report holds one bypass, and a chain
+  of three misbehaving stages spends three budgets on one frame, so the report would have silently
+  kept the last. What `M-67` needed from that path was not the value but the **wake**, so the wake
+  moved into `Journal::push`. Recording a transition and waking a reader is now one step, in one
+  place, and the media worker gets it without knowing a reader exists. `Slot::record` was deleted:
+  there is one journal door again, and all five writers — the activation, the in-`run` bypass, the
+  teardown, the format-change teardown and §10.2's `Configured` — go through it.
+  `dsp_sdk.rs::a_bypass_the_media_worker_journals_wakes_a_waiting_reader` is the new test for
+  exactly this seam, and it hangs for the full bound and fails if the `stop()` is removed from
+  `push`.
+
+  **The other seven.** `Journal` keeps `M-67`'s coalescing paragraph and loses `#[derive(Debug)]`
+  for `M-68`'s hand-written one, which now also renders `superseded` and carries an `#[expect]` for
+  the omitted signal, worded as `Slot`'s is for `torn`. `Slot` takes `M-68`'s `sizing`/`counters`
+  and `M-67`'s signal moved off it onto the journal. `Slot::retire` keeps `M-68`'s teardown and
+  terminal-failure counters and pushes through the journal. `SlotRef` keeps both sides' new methods
+  whole — `configure`/`next_transitions` beside `counters`/`re_anchor`/`reinstall`. `dsp/mod.rs` is
+  the export union. `call-dsp-graph.md`'s header attributes both stories, and §10.3 now says the
+  wake belongs to recording rather than to the callers that record.
+
+  **`transitions_coalesced()` joins `GraphCounters`**, folded in from the journal exactly as
+  `M-68` folds `transitions_dropped`, and documented as the figure read *beside* it and never added
+  to it: coalesced entries are ones the application replaced itself.
+
+  **Neither of `M-68`'s findings was reintroduced.** `check-audio-claims.py --check` and
+  `check-dsp-heap.sh` are green; nothing added derives `Debug` through to a sample. `re_anchor` was
+  not touched — it is on the `SlotRef` side of the union, taken whole from `main` — and
+  `dsp_adversarial.rs`'s format-change and recovery tests pass unmodified.
+
+  Verified after the merge: 54 test binaries green across the four crates, clippy `-D warnings`
+  clean, `cargo fmt --all` clean, and the four checkers plus `sync-website --check`,
+  `check-provenance.sh` and `check-story-closure.py`.

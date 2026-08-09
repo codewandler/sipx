@@ -1,7 +1,7 @@
 # The call-local DSP graph
 
 **Status:** normative · **Epic:** `custom-call-dsp` · **Stories:** `M-64`, `M-102` (§7's process),
-`M-67` (§10's door) ·
+`M-68` (§5.5, §6.4), `M-67` (§10's door) ·
 **Design:** [custom-call-dsp](../designs/custom-call-dsp.md) · **Crate:** `sipx-media` (`dsp`)
 
 [custom-call-dsp.md](custom-call-dsp.md) defines what one processor is and says, in its §1, that it
@@ -237,6 +237,36 @@ It does not, because the outgoing tail is audio at old positions and there is no
 place it in a new epoch. `flush` remains what an end of input deserves, and a graph replacement is
 not an end of input.
 
+### 5.5 A renegotiation carries a graph over; a format change does not
+
+A graph belongs to the **call**, not to a media worker generation, so an application does not
+re-attach across a re-INVITE. A renegotiation re-anchors both directions: every stage is reset and
+the epoch reopens at position 0, exactly as a `Realign` does (§6.2).
+
+That holds only while the two things a chain was **validated against** are unchanged: the
+`StreamFormat` every stage was prepared for, and the packetisation every buffer was sized from
+(§4). A renegotiation that changes either **tears the graph down** and reports
+`TornDown { cause: FormatChanged }`. Both halves of that are forced:
+
+- Carrying the chain over would hand every stage frames at a rate it never accepted, under a
+  declaration saying otherwise. [custom-call-dsp.md](custom-call-dsp.md) §8.3 makes a rate change a
+  `prepare` and never a frame, and a stage prepared at 8,000 Hz cannot be told 8,000 Hz about
+  16,000 Hz audio — it would refuse a truthful frame and silently mis-filter an untruthful one.
+- Re-preparing the chain in place is not available either. A supervised stage's worker was sent a
+  `Hello` naming the old format before its first frame (§7.4) and §7.2 forbids respawning it
+  silently; an inline stage's audio state belongs to an epoch at the old rate. Re-preparing would
+  be a reset the application did not ask for, dressed as continuity.
+
+Nothing is re-attached on the application's behalf. A graph for the format the call is now carrying
+is the application's to plan and attach, exactly as a replacement is (§5.4), and a handle that
+survives the teardown validates its next `replace` against **the session's** current format rather
+than the one the handle was created for.
+
+`M-68` found this: before it, a renegotiation that changed the codec's audio rate or the
+packetisation carried the chain over, and a frame longer than the sized buffer then passed through
+untouched for the rest of the call under §4's pass-through rule — so a `TerminateClosed` stage whose
+absence is a policy breach stopped running with nothing saying so.
+
 ## 6. Failure, and what the media worker never does
 
 ### 6.1 The minimum policy, implemented
@@ -293,6 +323,30 @@ Normatively, on the live path the media worker:
 A `TrustedCooperativeNative` stage runs on the media worker and every one of those sentences is
 still about the *runtime*: the callback itself is outside them, which is precisely why that profile
 claims nothing (§3.3).
+
+### 6.4 Counters, and what is not one
+
+§5.3's transitions are the detail — which stage, which position, which generation — and their queue
+is bounded and drops its oldest at capacity. A **counter** is what survives that. Every direction
+carries a cumulative tally, per call and across every generation of its graph, of what the runtime
+observed: frames seen, deadline misses, refusals, malformed results, lost workers, bypasses, resets,
+teardowns, terminal failures, frames passed through untouched for exceeding §4's sized frame, and
+transitions the queue dropped. A replacement does not reset them and neither does a teardown — after
+a fail-closed teardown the graph is gone and the counters are what is left to say why.
+
+**Nothing a processor observed about a frame is a counter.** `DspObservation` is
+[custom-call-dsp.md](custom-call-dsp.md) §6's vocabulary and belongs to the processor; a counter here
+belongs to the runtime. That document's §6 states the reason and this is its other half: an
+intentional glitch effect emits `Saturated` about audio it meant to clip, an overloaded processor
+moves a counter, and **no door of this stack may present the second as the first**. There is
+therefore no counter a processor can move by emitting an observation, and no observation the runtime
+can synthesise from a counter.
+
+The four counters that correspond to §6.1's *miss* — deadline misses, refusals, malformed results
+and lost workers — are exactly the four things that increment a stage's consecutive-miss budget, and
+nothing else. A frame passed through for exceeding §4's bound is **not** one of them: no stage was
+late and no stage refused, the frame was never offered to the chain at all, and counting it as a
+miss would fail a processor for a producer's mistake.
 
 ## 7. Supervised stages
 
@@ -604,7 +658,10 @@ driver turning transitions into application events:
 - **never polls, and never times a look.** The drain has a suspension point: a waiting reader is
   woken where a transition is recorded, and the signal is installed under the same take that found
   the queue empty, so a transition recorded between the two cannot be missed. No fixed duration is
-  part of this.
+  part of this. The wake belongs to **recording**, not to the callers that record: §6.1's bypass is
+  journalled by the media worker mid-frame and §5.5's format-change teardown by a renegotiation, and
+  neither knows a reader exists. An implementation that made waking a caller's responsibility would
+  be one story away from a transition that never wakes anybody.
 - **never runs on the media worker.** Recording a transition on the live path costs a flag store and
   a waker wake, which is neither an await, a block nor an allocation (§6.3). Everything a reader
   then does with it happens on the reader's own thread.

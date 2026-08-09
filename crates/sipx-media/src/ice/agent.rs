@@ -69,6 +69,11 @@ pub enum Timer {
 }
 
 /// Something that happened.
+///
+/// Not the call: the only octets an `Input` carries are a datagram [`crate::dtls::classify`] has
+/// already called STUN, and neither the media nor an RFC 3550 §6.5 identity is ever routed here.
+/// A payload reaching the agent would be a demultiplexing defect rather than a rendering one, so
+/// its `Debug` is the derived one (`M-110`).
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum Input {
@@ -126,6 +131,13 @@ pub enum Input {
 /// A `Send` always precedes the `SetTimer` that will retransmit it — the same rule the transaction
 /// machines follow, so a retransmission timer can never start before the thing it retransmits has
 /// gone out.
+///
+/// Not the call: the only octets an `Output` carries are a STUN check this agent assembled, and
+/// [spec] §11.1 lists what one carries with no audio on the list. Media leaves over the socket
+/// [`Self::Selected`] names, which is the driver's own path and never a `Send` — so its `Debug` is
+/// the derived one (`M-110`).
+///
+/// [spec]: https://github.com/codewandler/sipx/blob/main/docs/specs/ice.md
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Output {

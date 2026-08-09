@@ -49,7 +49,12 @@ pub enum RtpError {
 /// both answers reachable; shipping `1.0.0` unmarked would have spent the choice on the answer
 /// that two stories had already shown to be wrong. See `docs/roadmap.md`'s v1 predicate 4, which
 /// is where a contract stops being editable to fit a change.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// # Diagnostics
+///
+/// Its [`Debug`] is hand-written and carries the header, never the media (`M-110`). See the
+/// implementation for why, and for what the same argument decides about the header extension.
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Packet {
     /// Whether this packet marks a significant event — the start of a talkspurt, or the end of
@@ -218,6 +223,44 @@ impl Packet {
             csrc,
             payload: bytes.slice(offset..end),
         })
+    }
+}
+
+/// The header, never the media (`M-110`).
+///
+/// [`Packet::payload`] is the call still encoded. For G.711 that is one octet per sample, so a
+/// derived `Debug` — which renders the whole buffer — puts the conversation into whatever record
+/// carries a packet: a `tracing` field, an `expect` message, a test failure an operator pastes
+/// into a ticket. `M-107` fixed the same derive on `sipx_media::Encoded`, which is these bytes one
+/// layer up, and `M-80` marked the two `#[non_exhaustive]` **together** "because they are the two
+/// ends of one relay path"; that sentence decides this the same way. What stays is what a relay
+/// log is for — which codec, which stream, where in it, and how much audio there was.
+///
+/// **The header extension is a length too, and that is a decision rather than a copy of the rule
+/// above it.** Its bytes are RFC 8285 metadata rather than media, so the payload's argument does
+/// not reach them; two others do. This crate never interprets an extension, so it cannot say what
+/// a profile put in one — and RFC 7941 puts SDES items, `CNAME` included, in exactly this place,
+/// which makes an extension a carrier of the personal data [`crate::rtcp::SdesItem`] redacts for
+/// its own reasons. `M-107` rendered `Encoded::extension` as a length for the same reason, and the
+/// two ends of the relay path agreeing is the whole point of the pair.
+///
+/// **Bounded by this implementation and not by the packet.** Every variable-length member is a
+/// count, the contributing-source list included: the wire caps that list at fifteen through the
+/// header's four-bit `CC` field, but the `Vec` does not, and a redaction whose own length followed
+/// the value would close half of one defect. Reaching any of it takes a field access and a
+/// deliberate decision, which is the property this leaves intact.
+impl std::fmt::Debug for Packet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Packet")
+            .field("payload_type", &self.payload_type)
+            .field("sequence", &self.sequence)
+            .field("timestamp", &self.timestamp)
+            .field("ssrc", &self.ssrc)
+            .field("marker", &self.marker)
+            .field("csrc", &self.csrc.len())
+            .field("extension", &self.extension.as_ref().map(Bytes::len))
+            .field("payload", &self.payload.len())
+            .finish()
     }
 }
 

@@ -507,10 +507,46 @@ Onset recovery is **42 positions** and is hand-derivable rather than observed: t
 slew moves `ceil(1000/64) = 16` per position, so `250 + 16·43 = 938` lands at the position 42 after
 the step. Onset recovery under this design *is* the gain slew's length, counted in positions.
 
-**CPU and memory are not measured here.** `X-109` owns the measurement corpus for this epic, and a
+**CPU and memory were not measured here.** `X-109` owns the measurement corpus for this epic, and a
 figure this story produced on the machine that happened to run it is not a measurement — §9's
 vectors therefore assert the bounded *shape* of the state (§7) and leave the cost to the story that
-owns it.
+owns it. §8.1 is what that story brought back.
+
+### 8.1 Memory, measured; cost, refused (`X-109`)
+
+**Memory.** `./scripts/check-dsp-heap.sh` — `X-128`'s counting allocator, outside the workspace
+because `unsafe_code` is forbidden inside it — now covers this reducer, and the run measures
+
+| Processor | Declared `state_bytes` | Inline | Peak live heap | Allocated after `prepare` |
+|---|---|---|---|---|
+| `sipx.subband_suppressor` | 256 | 256 | **0** | **0** |
+
+which is §7's bound turned from a construction argument into a figure: three bands of fixed-width
+followers and a recursive minimum, and not one byte of heap behind them, across construction,
+`prepare`, `process`, `flush`, `reset` and `cancel`. It went unmeasured for two stories because
+that probe's processor list was written by hand; the list is now held to `BUILT_IN_IDS` and
+`NOISE_REDUCTION_IDS`, so the next processor that ships without a measurement is a red run.
+
+**Cost is not recorded, and this is the row deliberately left empty.** `crates/sipx-audio/examples/dsp_cost.rs`
+takes it — per processor, per condition, over these four signals at their §8 lengths, reported as
+nanoseconds per thousand positions and as parts per million of one core at 8,000 Hz. It refuses to
+report when the one-minute load average is above a tenth of the machine's cores, and refuses again
+when its own control workload drifts by more than 10% between the start of the run and the end.
+**On the machine available to `X-109` both guards fired**, so there is no figure here rather than a
+figure with a caveat. The command is in that story's `## Progress`.
+
+The two generators of this corpus — the vectors' and the cost harness's — are held to one set of
+FNV-1a checksums by `the_corpus_is_the_same_corpus_the_cost_harness_measures`, so a cost figure and
+a quality figure are always about the same samples. That test found a real divergence the day it
+was written.
+
+**Response.** The reducer also runs through `sipx_audio::dsp::response`'s packaged sweep, which is
+integer arithmetic and needs no quiet box. What it shows is worth stating and easy to misread: after
+the 1,024-position warm-up a **settled tone is essentially untouched** — 4 thousandths off at worst
+after 2,048 positions, 17 after 8,192 — because a tone raises the envelope as fast as it raises the
+floor and §5.3's ratio barely moves. That is **not** a noise-reduction figure; this section's four
+conditions are. What it rules out is the opposite failure: a reducer that gated a steady talker would
+show there as a collapse toward `min_band_gain`, and this one does not.
 
 ## 9. Vectors
 
@@ -535,3 +571,172 @@ Unless a row says otherwise it runs on `D8` with the §5.3 defaults.
 | NR-V15 | the §8 corpus, all four conditions | §8's recorded integers exactly; every attenuation between 250 and 1,000 thousandths because `min_band_gain` bounds it below and unity bounds it above; and `overlapping` above `transient` above `stationary`, which is §5.6's ordering rather than one run's arithmetic |
 | NR-V16 | `stationary` cut at 1, 7, 13, 160 and 4,096 positions per frame against one frame | identical samples, whatever the framing |
 | NR-V17 | a step from amplitude 500 to amplitude 16,000 after the gain has settled | the output is within one sixteenth of the input 42 positions later — §8's derivation, and no other quantity in the design |
+| NR-V18 | a producer built from the baseline's declaration, and one built from a declaration whose `activity` is `Ignored` | the first names `voice_active` and reports the baseline's 1,024-position warm-up; the second has no parameter to set at all (§3.3) |
+| NR-V19 | §10.3's transitions at stated positions: an opening at 160 for a sample at 0, an active window at 320, no refresh until 4,320, a closing at 3,200 for a sample at 1,600, a 240-position release guard, a lost marker, a reset | the lags are 160 and 1,600 exactly; the cap fires at 4,320; the guard clears at 3,440 with a lag of 1,840; the lost marker and the reset each clear the hint |
+| NR-V20 | §8's four conditions and §10.5's `sustained`, each replayed wired and unwired at 160 positions per frame | §10.5's ten integers exactly; `silence` and `stationary` sample-identical to the unwired run; the hinted, unprotected and overheld position counts of §10.5 |
+| NR-V21 | `overlapping` with the hint produced, with it never set, and with it pinned true before the first frame | speech distortion 173, 177 and 593 thousandths — the asymmetry §10.4 is built around |
+| NR-V22 | `overlapping` with `voice_active` flipped every frame; a producer given `Lost` mid-hold | every frame is carried and every set accepted; the producer clears to `M-66`'s unhinted behaviour; no observation the reducer emitted names voice or activity |
+
+## 10. The hint's producer (`M-114`)
+
+§5.5 defines what a reducer does with `voice_active`, and until `M-114` nothing in this workspace
+set it: a declared input with no producer, reachable only by an application driving the control
+surface by hand. This section is the producer's **policy**, and it is a policy rather than a wire
+because §5.6's fifth row already says a wrong hint makes speech worse in both directions. What had
+to be settled was not how to carry an observation to a parameter — that is one assignment — but
+*when* to set the flag, and §10.5 is the measurement that settled it.
+
+`ActivityHint` is on the **caller's** side of [custom-call-dsp.md](custom-call-dsp.md) §10's arrow.
+It holds no reducer and no analyser: a caller feeds it observations it drained from an analyser and
+reads back a parameter to set. Nothing about it lets a reducer emit, redefine, delay or suppress a
+voice-activity observation, and nothing about it presents a reducer as a detector.
+
+### 10.1 Detector latency, in positions
+
+The producer is downstream of a detector whose verdicts do not exist until the audio they describe
+has been measured, and [call-audio-processing.md](call-audio-processing.md) states both delays in
+sample counts:
+
+- **The leading edge is late by at least `W`.** `VoiceStarted { at_sample }` names the first sample
+  of the active window, and that window does not complete until `at_sample + W`. Those `W` positions
+  of speech ran through an adapting estimator, and no configuration recovers them: a reducer under
+  this document has zero declared latency (§5) and therefore no lookahead to spend on them.
+- **The trailing edge is late by at least the hangover.** `VoiceEnded { at_sample }` names the end
+  of the last active window and is not emitted until the hangover has elapsed, so the hint is
+  already held over `hangover` positions of non-speech before the producer sees the transition.
+
+Both are **counted and not described**: `unprotected_positions()` accumulates the first over the
+call and `overheld_positions()` the second. The policy does not correct either. It cannot correct
+the leading edge at all, and §10.5 measures the trailing edge as the *expensive* direction, so
+adding to it would be the wrong lever even if one existed.
+
+### 10.2 Placement, and the warm-up deferral
+
+The hint's granularity is one frame (§3.3), so it is set **between** frames. The stated order for
+one seam frame is: process it through the reducer, then through the analyser, then feed the drained
+observations to the producer at the position that frame ended, then advance the producer to that
+position. What the next frame is processed with is then decided entirely by frames already
+processed, which is the only placement a processor declaring zero latency can honestly be given.
+A consequence stated rather than hidden: a wired stream is framing-dependent where §9's NR-V16
+unwired stream is not, because a parameter set between frames can only land on a frame boundary.
+
+**An opening transition inside the reducer's declared warm-up arms the hint and does not set it.**
+The hint is set at the first boundary at or after `warm_up_positions`, provided the analyser still
+has voice open there. The reason is §5.4's own: during the warm-up every band gain is held at unity
+and the reducer is the exact identity, so a hint there buys nothing — while a hint there *freezes*
+the floor §5.2 seeded from the first position of the epoch, which is precisely the floor the warm-up
+exists to distrust. §10.5 measured the difference and it is not marginal: without the deferral the
+`overlapping` condition's speech distortion rises from 177 to 497 thousandths, which is more damage
+than the hint avoids anywhere.
+
+The count is the reducer's own declared `warm_up_positions` and not a number this policy invents, so
+a reducer with no warm-up defers by nothing.
+
+### 10.3 The policy
+
+Two fields, both sample counts, for the reason §3.1 gives for the warm-up — sample position is the
+only clock anything on this path has, and a wall-clock rule here would make `M-60`'s and `M-66`'s
+vectors irreproducible.
+
+| Field | Default | What it is |
+|---|---|---|
+| `release_positions` | 0 | positions the hint is held past a closing transition, for a profile whose hangover is short |
+| `hold_positions` | 4,000 | the ceiling on one hold that nothing refreshes |
+
+`hold_positions` defaults to §5.3's `adaptation_positions` default, reused rather than reinvented: a
+hint held past one whole adaptation period has already cost the estimator a complete recovery cycle.
+
+The transitions, in full:
+
+| Input | What happens |
+|---|---|
+| `VoiceStarted { at_sample }` | voice opens; the hold is refreshed; the hint is set at once, or armed if the warm-up has not elapsed (§10.2) |
+| `Window { active: true }` | refreshes the hold while voice is open. Not a second edge |
+| `Window { active: false }` | **ignored**. The hangover owns the trailing edge, and a second rule here would be a second detector with no vectors of its own |
+| `VoiceEnded { at_sample }` | voice closes; the hint clears once `release_positions` have elapsed |
+| `Lost { count }` | the hint clears. One of the dropped observations may have been the closing transition, and §10.5 prices that direction at 420 thousandths against the other's 4 |
+| `Reset { .. }` | the hint clears. The epoch it described no longer exists, and the reducer's warm-up re-opens with it (§5.4) |
+| `SilenceElapsed`, `ThresholdUpdated` | ignored |
+| the hold elapsing with no refresh | the hint clears. This is the recovery path for a closing transition that never arrived |
+
+**Every uncertainty resolves toward not hinting.** That is one rule and it is derived from one
+measurement rather than from caution: §10.5 prices a hint held past its speech at roughly a hundred
+times a hint dropped during it.
+
+### 10.4 Degradation, never refusal
+
+There is no fallible operation in the producer and no refusal it can raise. A hint that is absent,
+stale, dropped or wrong leaves the reducer at §5.5's unhinted behaviour, which is a quality outcome
+and not a policy breach — the same decision, and for the same reason, as §5's `BypassOpen`. A
+reducer declaring `Ignored` yields a producer with no parameter to set at all, which is §3.3's "a
+caller wiring a VAD to it is wiring it to nothing" made checkable rather than read.
+
+Nothing here is an observation, an event or a metric. The producer emits none, the reducer's
+vocabulary is unchanged, and no record either of them writes presents a reducer as a detector (§2).
+
+### 10.5 What it was measured on, and what the measurement says
+
+§8's four conditions plus one more, all on `D8` with the §5.3 defaults, at 160 positions per frame,
+against the reference analysis profile of [call-audio-processing.md](call-audio-processing.md) §11.1
+— 20 ms windows, so `W = 160`, and a 200 ms hangover, so 1,600 positions. The fifth condition is
+this section's own; §8's four rows are `M-66`'s and stay four.
+
+```
+sustained(n) = a 100-position sawtooth at amplitude 8,000, never gated off,
+               over noise(n) at amplitude 800, for 12,288 positions
+```
+
+It exists because §5.6's fifth row reasons about *continuous* speech and §8 has none: `overlapping`
+gates its talkers off for 800 positions at a time, which is exactly the pause the estimator needs to
+find a minimum in.
+
+| Condition | Unwired | Wired | Hinted | Unprotected | Overheld |
+|---|---|---|---|---|---|
+| `silence` | 1,000 / 0 | 1,000 / 0 | 0 | 0 | 0 |
+| `stationary` | 298 / 707 | 298 / 707 | 0 | 0 | 0 |
+| `transient` | 377 / 643 | 397 / 631 | 1,600 | 160 | 1,600 |
+| `overlapping` | 859 / 177 | 855 / 173 | 11,168 | 1,120 | 0 |
+| `sustained` | 611 / 392 | 594 / 407 | 11,168 | 1,120 | 0 |
+
+Attenuation and distortion in thousandths, §8's own measures; the last three columns are positions.
+
+Row by row, because the aggregate hides the argument:
+
+- **`silence` and `stationary` are sample-identical to the unwired run**, not merely equal in
+  measure. Amplitude-2,000 noise has a window deviation near 1,155, well under the reference
+  profile's activation amplitude of 2,048, so the detector never fires and the producer never sets
+  anything. This is the evidence that wiring the producer to a call that has no voice in it changes
+  nothing at all.
+- **`transient` is a false active produced by the shipped detector on stated input.** A 32-position
+  full-scale burst carries a whole window past the activation threshold, the detector calls it
+  voice, and the hint then freezes the floor for the 1,600 positions of hangover that follow. The
+  reducer removes *less* of the noise it exists to remove — 377 to 397 — and the cost of that wrong
+  hint is measured rather than asserted.
+- **`overlapping` is the only row where both measures move the right way**, and it is the condition
+  §5.6's third row reasons about: 4 thousandths more noise removed and 4 thousandths less speech
+  damaged. It is a small margin and it is the whole of the case for wiring this.
+- **`sustained` is a *correct* hint that still costs 15 thousandths of speech.** A sawtooth's
+  envelope dips every period, so the unwired floor keeps finding minima; freezing it at 1,120 locks
+  in one that is already higher. The policy cannot see this and never will: the arrow runs one way,
+  and the reducer's floor is not readable from the producer.
+
+**The asymmetry, which is what the policy is built around.** On `overlapping`, the hint wrongly
+pinned true from the first frame gives 593 thousandths of distortion against the produced hint's
+173, while the hint wrongly absent gives 177. A hint held past the speech it describes costs 420
+thousandths; a hint dropped during speech costs 4. That is the sentence behind every "clears" in
+§10.3's table, behind the release guard's default of zero, and behind §10.2's deferral.
+
+**The recommendation, stated as narrowly as the evidence supports.** Wiring the producer is
+**opt-in, per direction, and off unless a caller turns it on**. Of five conditions measured, one
+improves, two are unchanged, and two get worse. The improvement is real and it is on the condition
+the design reasoned about, which is why the producer ships at all; the margin is 4 thousandths,
+which is why nothing here recommends it by default. A caller whose channel resembles `overlapping`
+— a near talker over stationary babble, with pauses long enough for the estimator to find a floor in
+— has evidence for turning it on. A caller whose channel resembles `sustained` or whose detector
+produces false actives like `transient`'s has evidence for leaving it off. No claim is made about a
+channel unlike either.
+
+**CPU is not measured here**, for §8's reason: `X-109` owns the measurement corpus for this epic.
+What §10.3's policy costs per frame is a handful of integer comparisons against no allocation, and
+the shape of that is asserted rather than timed.
+| NR-V23 (`X-109`) | each §8 condition, hashed | the four FNV-1a checksums of §8.1, and §8's lengths — the cost harness's copy of the recurrences is the same corpus these vectors measure |

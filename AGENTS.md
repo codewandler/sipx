@@ -98,6 +98,14 @@ that reclaims by directory name has already destroyed a running implementor's bu
 "this branch is merged" is **not** a safe predicate on its own: an implementor that has not committed
 yet has `HEAD` on the commit it branched from, which is always merged.
 
+**An implementor removes nothing outside its own worktree — ever.** Not a build directory, not a
+log, not a temporary file. On 2026-08-09 an implementor short of disk reclaimed
+`/home/timo/projects/sipx/target` — 115 GiB belonging to the integration checkout — and another
+implementor's own `target/` went with it mid-run. Nothing was lost, because a build directory is
+always regenerable, but the same reflex applied to a directory holding uncommitted work would not
+have been recoverable. If a worktree is short of disk, say so and stop; the coordinator owns
+reclaiming, because only the coordinator knows what else is running.
+
 **Before removing any worktree that is not yours to remove**, all three must hold:
 
 1. no live `rustc`/`cargo` under that path, and no agent currently working in it;

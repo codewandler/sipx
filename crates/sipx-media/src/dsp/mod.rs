@@ -21,10 +21,24 @@
 //! one stage's old parameters beside another's new ones. Every change is reported as a typed
 //! [`GraphTransition`] naming the generation and the position it took effect at.
 //!
-//! **Teardown is a barrier, not a wait.** Detach, a fail-closed failure, `stop()`, `shutdown()` and
-//! drop all reach [`GraphBarrier`], and it is clear only when the graph holds zero workers, zero
-//! frames in flight, zero retained positions and zero processors. Nothing here is observed by
-//! waiting a fixed duration.
+//! **Teardown is a barrier, not a wait.** Detach, a fail-closed failure, a renegotiation that
+//! changed the audio format, `stop()`, `shutdown()` and drop all reach [`GraphBarrier`], and it is
+//! clear only when the graph holds zero workers, zero frames in flight, zero retained positions and
+//! zero processors. Nothing here is observed by waiting a fixed duration.
+//!
+//! # What is counted, and what is not (`M-68`)
+//!
+//! [`GraphTransition`]s carry the detail and their queue is bounded, so it drops its oldest at
+//! capacity. [`GraphCounters`] is what survives that: cumulative for the life of the call, across
+//! every generation, and still answering after the graph has ended. Nothing a *processor* observed
+//! about a frame is in there — a [`DspObservation`] is the processor's own vocabulary, and an
+//! intentional glitch effect's `Saturated` is not a defect the runtime counted.
+//!
+//! A graph is torn down rather than carried over when a `MediaSession::reconfigure` changes the
+//! audio format or the packetisation, because both are things every stage was validated, prepared
+//! and sized against and `docs/specs/custom-call-dsp.md` §8.3 makes a rate change a `prepare` and
+//! never a frame. [`TeardownCause::FormatChanged`] says so; attaching a graph for the format the
+//! call now carries is the application's to do.
 //!
 //! # What attaching a graph promises, per profile
 //!
@@ -74,8 +88,8 @@ mod worker;
 
 pub use builtin::BuiltIn;
 pub use graph::{
-    BypassCause, GraphBarrier, GraphBounds, GraphError, GraphPlan, GraphTransition, MAX_PROCESSORS,
-    MAX_WORKER_QUEUE, ParameterUpdate, TeardownCause,
+    BypassCause, GraphBarrier, GraphBounds, GraphCounters, GraphError, GraphPlan, GraphTransition,
+    MAX_PROCESSORS, MAX_WORKER_QUEUE, ParameterUpdate, TeardownCause,
 };
 pub use supervised::WorkerProcess;
 pub use wire::WorkerProtocolError;
@@ -106,8 +120,9 @@ pub use sipx_audio::dsp::{
 /// the substitution the interface exists for; [`BuiltIn::SubbandSuppressor`] is the workspace's own
 /// implementation of it, and its documentation states what it damages as well as what it removes.
 pub use sipx_audio::dsp::noise::{
-    ActivityInput, HostRequirement, MAX_WARM_UP_POSITIONS, NOISE_REDUCTION_IDS, NoiseReducer,
-    NoiseReduction, NoiseReductionError, SUBBAND_SUPPRESSOR, SubbandSuppressor,
+    ActivityHint, ActivityInput, DEFAULT_HOLD_POSITIONS, HintCause, HintChange, HintPolicy,
+    HostRequirement, MAX_WARM_UP_POSITIONS, NOISE_REDUCTION_IDS, NoiseReducer, NoiseReduction,
+    NoiseReductionError, SUBBAND_SUPPRESSOR, SubbandSuppressor,
 };
 
 pub(crate) use graph::{CallDsp, SlotRef};
@@ -118,20 +133,27 @@ pub(crate) use graph::{CallDsp, SlotRef};
 /// Returned by [`MediaSession::attach_dsp`](crate::MediaSession::attach_dsp). Holding it is what
 /// keeps the graph attached: dropping it cancels every stage, and
 /// [`detach`](Self::detach) is the same teardown with its barrier awaited.
-#[derive(Debug)]
 pub struct DspGraph {
     slot: SlotRef,
-    format: StreamFormat,
-    frame_samples: usize,
+}
+
+/// What the graph is and what it is holding, never the audio it is holding (`M-107`, `M-68`).
+///
+/// A graph's buffers are the call's own audio — one of them is literally the frame in flight — and
+/// a rendering that listed them would put raw call audio into whatever record named the graph, at a
+/// length that is the frame's. This reports the same shape the accessors do, under one take of the
+/// graph's lock rather than one per field, so a diagnostic never sees half of a transition either.
+impl std::fmt::Debug for DspGraph {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DspGraph")
+            .field("slot", &self.slot)
+            .finish()
+    }
 }
 
 impl DspGraph {
-    pub(crate) const fn new(slot: SlotRef, format: StreamFormat, frame_samples: usize) -> Self {
-        Self {
-            slot,
-            format,
-            frame_samples,
-        }
+    pub(crate) const fn new(slot: SlotRef) -> Self {
+        Self { slot }
     }
 
     /// Which side of the call this graph transforms.
@@ -267,6 +289,22 @@ impl DspGraph {
         self.slot.barrier()
     }
 
+    /// What the runtime has observed about this direction's processors (`M-68`).
+    ///
+    /// Deadline misses, refusals, malformed results, lost workers, bypasses, resets and terminal
+    /// failures, counted rather than queued: [`Self::transitions`] carries the detail and drops its
+    /// oldest at capacity, and these cannot be dropped. Cumulative for the life of the call and not
+    /// reset by a replacement or a teardown, so they still answer after the graph has ended.
+    ///
+    /// Nothing a *processor* observed about a frame is here — a
+    /// [`DspObservation`] is the processor's own vocabulary, and
+    /// an intentional glitch effect's `Saturated` is not a defect the runtime counted. See
+    /// [`GraphCounters`].
+    #[must_use]
+    pub fn counters(&self) -> GraphCounters {
+        self.slot.counters()
+    }
+
     /// Validate a new chain whole and publish it as the next generation (§5.4).
     ///
     /// The outgoing generation is cancelled and its retained audio discarded rather than flushed —
@@ -277,9 +315,14 @@ impl DspGraph {
     ///
     /// A [`GraphError`] naming the first thing §3.1 refuses. **A refused replacement leaves the
     /// graph in force untouched**: it is the caller's error, not the call's.
+    ///
+    /// The new chain is validated against the format and packetisation the **session** is running
+    /// now, which is not necessarily the one this handle was created for: a graph outlives a
+    /// [`MediaSession::reconfigure`](crate::MediaSession::reconfigure), and a handle that
+    /// remembered its own sizing would go on preparing stages for a rate the call stopped carrying
+    /// (`M-68`).
     pub fn replace(&self, plan: GraphPlan) -> Result<u64, GraphError> {
-        self.slot
-            .install(plan, self.format, self.frame_samples, true)
+        self.slot.reinstall(plan)
     }
 
     /// Tear this graph down and wait for its barrier (§8).

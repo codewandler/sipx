@@ -159,12 +159,57 @@ pub const SDES_CNAME: u8 = 1;
 /// value, and the length is derived from the value rather than carried. The type octet is what
 /// varies — CNAME, NAME, PRIV and the rest — and it is already a field, so a new attribute is a
 /// new `kind` and never a new member here.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// # Diagnostics
+///
+/// Its [`Debug`] is hand-written and carries the item's type and its length, never its value
+/// (`M-110`). This is **not** the argument [`crate::Packet`] makes: an item's bytes are not audio
+/// at all, they are personal data about a participant. See the implementation.
+#[derive(Clone, PartialEq, Eq)]
 pub struct SdesItem {
     /// Which attribute this is; 1 is CNAME (RFC 3550 §6.5).
     pub kind: u8,
     /// The text, carried verbatim. UTF-8 by the RFC, but never trusted to be.
+    ///
+    /// Whose text depends on `kind`, and §6.5 answers with a person every time: §6.5.1's `CNAME`
+    /// is `user@host` built from a login name, §6.5.2's `NAME` is "the real name used to describe
+    /// the source", §6.5.3's is an email address and §6.5.4's a phone number. That is the reason
+    /// this field is redacted from the type's `Debug` and the reason it is redacted for something
+    /// other than the payload's.
     pub value: Bytes,
+}
+
+/// Which item, never whose (`M-110`).
+///
+/// **This is the sensitivity `M-107` did not have and the payload's rule does not cover.** An SDES
+/// item carries no audio; RFC 3550 §6.5 makes its bytes a `CNAME`, a `NAME`, an `EMAIL`, a `PHONE`
+/// or a `LOC`, which is a login name, somebody's real name, somebody's email address, somebody's
+/// telephone number or somebody's location. A derived `Debug` puts that in every record an item
+/// reaches, and personal data in an operator's ticket is the more serious of this story's two
+/// defects even though it is the smaller buffer.
+///
+/// **The CNAME is the one worth arguing rather than assuming, and it still loses.** It is a real
+/// correlation key — §6.5.1 makes it the identifier that ties two streams to one participant
+/// across an SSRC change, which is why [`Sdes::cname`] exists — so a rendering that keeps it buys
+/// something a log genuinely uses. Three things outweigh it. §6.5.1's recommended form is
+/// `user@host` derived from the login name, so "an identifier rather than personal data" is not
+/// true of the shape the RFC asks for. The `kind` octet that would select the exception is chosen
+/// by the far end, which makes a redaction turn on a value a peer controls. And the value is
+/// `Bytes`: the wire's one-octet length field caps an item at 255 octets and the field in memory
+/// is uncapped, so a kind-dependent rendering would need a truncation of its own — a redaction
+/// bounded except for the one kind we chose to print is the half-fix this story exists to avoid.
+/// Correlating on a CNAME stays available through [`Self::value`], which is a field access and a
+/// deliberate decision away.
+///
+/// What stays is the type octet, because "the peer sent a `NAME` item" is a protocol fact about a
+/// packet rather than a fact about a person, and it is what an operator reading a compound needs.
+impl std::fmt::Debug for SdesItem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SdesItem")
+            .field("kind", &self.kind)
+            .field("value", &self.value.len())
+            .finish()
+    }
 }
 
 /// What one source says about itself.
@@ -213,7 +258,13 @@ impl Sdes {
 }
 
 /// An RTCP packet.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// # Diagnostics
+///
+/// Its [`Debug`] is hand-written, and only because of [`Self::Other`] (`M-110`). The three
+/// modelled variants render as they always did: [`SdesItem`] redacts itself, so [`Self::Sdes`] is
+/// safe by composition, and a report is counters. See the implementation.
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Rtcp {
     /// A sender report.
@@ -237,8 +288,50 @@ pub enum Rtcp {
         /// to travel with the bytes it describes.
         padding: bool,
         /// Its body, verbatim.
+        ///
+        /// Unclassifiable by construction: this crate models neither the packet type nor its
+        /// body, so these bytes are §6.6's free-text leaving reason, §6.7's application data, or
+        /// a profile's. That is why the `Debug` renders their length and not them.
         payload: Bytes,
     },
+}
+
+/// What the packet is; and for the one this crate does not model, how much of it there is
+/// (`M-110`).
+///
+/// The three modelled variants keep the rendering they had, and each has a reason that is theirs.
+/// A [`SenderReport`] and a [`ReceiverReport`] are integer counters — loss, jitter, the highest
+/// sequence number seen — which is what RTCP is *for*: a log that could not read them could not
+/// say why a call sounded bad, and none of them is the call or a participant. [`Self::Sdes`] is
+/// safe by composition rather than by omission, because [`SdesItem`] redacts its own value.
+///
+/// [`Self::Other`] is the variant that needs a hand. It exists so a compound arrives and leaves
+/// intact — an element that discarded the types it does not model could not forward one — and
+/// keeping bytes this crate cannot classify is a reason to hold them, not a reason to print them.
+/// RFC 3550 §6.6 makes a `BYE`'s optional reason free text a participant typed and §6.7 leaves
+/// `APP` data entirely to a profile, so the honest rendering of an unmodelled body is its length.
+/// The packet type, the header's count nibble and the padding bit stay, which is everything a
+/// forwarding log needs to say what went past.
+impl std::fmt::Debug for Rtcp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Sender(report) => f.debug_tuple("Sender").field(report).finish(),
+            Self::Receiver(report) => f.debug_tuple("Receiver").field(report).finish(),
+            Self::Sdes(sdes) => f.debug_tuple("Sdes").field(sdes).finish(),
+            Self::Other {
+                packet_type,
+                count,
+                padding,
+                payload,
+            } => f
+                .debug_struct("Other")
+                .field("packet_type", packet_type)
+                .field("count", count)
+                .field("padding", padding)
+                .field("payload", &payload.len())
+                .finish(),
+        }
+    }
 }
 
 fn put_header(out: &mut BytesMut, count: u8, packet_type: u8, body_words: u16, padding: bool) {
