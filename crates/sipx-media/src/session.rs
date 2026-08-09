@@ -1209,6 +1209,22 @@ impl Shared {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PlaybackId(u64);
 
+impl PlaybackId {
+    /// An id with a stated value, for a caller that needs one where no session has issued any
+    /// (`M-98`).
+    ///
+    /// Ids mean something only inside the session that issued them — this crate compares them for
+    /// equality against the ones it handed out and does nothing else with them — so a value built
+    /// here names no playback of any session and could match one only by collision. It exists
+    /// because a call's playback-completion event carries one, and a consumer of that event had no
+    /// way to build the event at all: `M-98` found `sipx-app-protocol`'s bridge into the
+    /// application contract untested for exactly that class of reason.
+    #[must_use]
+    pub const fn new(id: u64) -> Self {
+        Self(id)
+    }
+}
+
 impl std::fmt::Display for PlaybackId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)

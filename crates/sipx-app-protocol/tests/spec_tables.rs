@@ -163,6 +163,82 @@ fn section_5_3_lists_exactly_the_event_types_the_crate_has() {
     assert_eq!(fixture, implemented, "the fixture misses an event type");
 }
 
+/// **§5.3** — every row a call can reach has an arm in the bridge (`M-98`).
+///
+/// The test above is the claim *the crate has the variant*. This is the different claim *a call can
+/// produce it*, and only the first was ever checked: `M-59` shipped `call.signal.metrics` and
+/// `call.signal.silence` — the rows, the variants, the wire round trip — and no arm in
+/// [`sipx_app_protocol::event_from_call`], so the contract named two events no host could ever
+/// emit and every derived test in this file passed.
+///
+/// So the section's rows are held against the bridge's own source. A row whose [`EventKind`]
+/// variant `src/call.rs` never names is a row nothing reaches. The variant name is read out of the
+/// fixture's `Debug` spelling rather than typed here, for the reason this file's header gives: a
+/// list of variant names next to a list of variant names tests that a list equals itself.
+///
+/// [`COMPOSED_BY_THE_DRIVER`] is the other half of the answer, and it is asserted *absent* rather
+/// than skipped — a type that grows a bridge arm has to leave the list in the same change.
+#[test]
+fn section_5_3_s_rows_are_reachable_through_the_bridge() {
+    /// The bridge, as text. Read rather than called so that this runs with the `call` feature off:
+    /// the question is which arms exist, and that is answered by the source either way.
+    const BRIDGE: &str = include_str!("../src/call.rs");
+
+    /// §5.3 rows no `sipx-call` event carries, so the driver composes them from what it knows.
+    ///
+    /// - `call.incoming` — a call's event stream begins after the INVITE matched an app; the
+    ///   arrival is the host's fact, not one of the call's.
+    /// - `call.gather.finished` — §6.2's `gather` is composed from `call.dtmf` by the interpreter
+    ///   against the instruction's own bounds. No `CallEvent` says a gather resolved.
+    /// - `call.dial.finished` — about the second leg the driver created, which is a different call
+    ///   from the one whose stream this bridges.
+    /// - `call.bridged` / `call.unbridged` — §5.3 names the other `leg`, and `CallEvent::Bridged`
+    ///   and `CallEvent::Unbridged` deliberately do not carry it: the host made the coupling and
+    ///   already knows which call it was made to, and a second call's identity on a stream about
+    ///   exactly one is a second thing that can disagree.
+    const COMPOSED_BY_THE_DRIVER: [&str; 5] = [
+        "call.incoming",
+        "call.gather.finished",
+        "call.dial.finished",
+        "call.bridged",
+        "call.unbridged",
+    ];
+
+    let rows: BTreeSet<String> = table_after("5.3 Event types")
+        .iter()
+        .flat_map(|row| backticked(&row[0]))
+        .collect();
+    assert!(rows.len() > COMPOSED_BY_THE_DRIVER.len(), "§5.3 lost rows");
+
+    for kind in sipx_app_protocol::testing::one_of_every_event() {
+        let type_name = kind.type_name().to_owned();
+        assert!(rows.contains(&type_name), "{type_name} is not a §5.3 row");
+
+        // `Ringing { reliable: true }` names its variant first; everything after the identifier is
+        // the fixture's payload and not part of the spelling `src/call.rs` writes.
+        let variant: String = format!("{kind:?}")
+            .chars()
+            .take_while(char::is_ascii_alphanumeric)
+            .collect();
+        let arm = format!("EventKind::{variant}");
+
+        if COMPOSED_BY_THE_DRIVER.contains(&type_name.as_str()) {
+            assert!(
+                !BRIDGE.contains(&arm),
+                "{type_name} is listed as the driver's to compose and `src/call.rs` produces \
+                 `{arm}` — say which it is in one place"
+            );
+        } else {
+            assert!(
+                BRIDGE.contains(&arm),
+                "§5.3 lists {type_name} and the bridge has no arm producing `{arm}`, so no call \
+                 can reach it — add the arm, or name the row in `COMPOSED_BY_THE_DRIVER` with the \
+                 reason the driver composes it"
+            );
+        }
+    }
+}
+
 /// **§5.3**, the enumerations inside it: `reason`, `outcome`, `state` and `cause` are each written
 /// as a `·`-separated list in the table, and each has a Rust enum behind it.
 ///
