@@ -58,3 +58,10 @@ path = "fuzz_targets/transaction_sequence.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "call_audio_sequence"
+path = "fuzz_targets/call_audio_sequence.rs"
+test = false
+doc = false
+bench = false

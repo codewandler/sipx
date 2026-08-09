@@ -28,6 +28,7 @@ untouched() {
 
 failed=0
 untouched crates/sipx-testkit/corpus/transaction-sequences "the transaction-sequence corpus" || failed=1
+untouched crates/sipx-testkit/corpus/call-audio-sequences "the call-audio-sequence corpus" || failed=1
 if [[ $failed -ne 0 ]]; then
     echo >&2
     echo "A fuzz corpus is the campaign's input set. It changes deliberately, by a commit that says" >&2

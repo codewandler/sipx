@@ -482,12 +482,27 @@ jobs:
           cargo fuzz run transaction_sequence \
             fuzz/corpus/transaction_sequence crates/sipx-testkit/corpus/transaction-sequences \
             -- -max_total_time=60 -max_len=512
+      # M-61. Adversarial *audio* and the lifecycle around it, which neither of the above reaches.
+      # The input decodes into a program over the analyser's whole vocabulary — frames in every
+      # supported PCM format, declared format changes, resets, sequence gaps and replays, and a
+      # consumer that stops draining — and the oracle is `docs/specs/call-audio-processing.md`'s
+      # own bounds rather than "did it panic": a queue that grew, a refusal that moved the stream,
+      # a threshold outside its declared interval, a position naming audio nobody fed. Same time
+      # budget and the same -max_len as the transaction driver, and for the same reason: four bytes
+      # is an event, so 512 is already a 128-step program.
+      - name: Fuzz the call-audio analyser
+        run: |
+          mkdir -p fuzz/corpus/call_audio_sequence
+          cargo fuzz run call_audio_sequence \
+            fuzz/corpus/call_audio_sequence crates/sipx-testkit/corpus/call-audio-sequences \
+            -- -max_total_time=60 -max_len=512
       # The corpora are committed test data: prove the fuzzer did not modify them.
       - name: Verify the RFC 4475 corpus is untouched
         run: ./scripts/import-rfc4475-corpus.sh --check
-      - name: Verify the transaction-sequence corpus is untouched
+      - name: Verify the generated fuzz corpora are untouched
         # `git diff` is blind to untracked files, so a seed added by hand would pass. Additions and
-        # modifications are both checked (X-31), as the RFC 4475 corpus check has always done.
+        # modifications are both checked (X-31), as the RFC 4475 corpus check has always done. One
+        # script, both generated corpora: it names which one drifted.
         run: ./scripts/check-corpus-untouched.sh
 
   # X-56. No corpus under crates/sipx-testkit/corpus/ was transcribed: each is recovered from its

@@ -16,8 +16,9 @@
 //!
 //! **Supported:** [`call`], [`rtp_echo`], [`link`] and [`time`] — the real application-call harness
 //! over socket-free SIP signalling, bounded RTP media peer, seeded fault link and nanosecond virtual
-//! clock. **Experimental:** [`realtime_peer`], certificate, corpus, soak and transaction-sequence
-//! utilities; these primarily serve workspace verification and their shape follows those suites.
+//! clock. **Experimental:** [`realtime_peer`], certificate, corpus, soak, transaction-sequence and
+//! call-audio-sequence utilities; these primarily serve workspace verification and their shape
+//! follows those suites.
 //!
 //! This is a test-product surface, not production application reachability. Its package metadata
 //! names the independently compiled `rtp_echo` example as the executable caller; the app-surface
@@ -31,6 +32,7 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 pub mod call;
+pub mod call_audio_sequence;
 pub mod certs;
 pub mod link;
 pub mod realtime_peer;
