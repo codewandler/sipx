@@ -60,3 +60,33 @@ the same claim has to hold end to end on a call.
 ## Progress
 
 - Filed by `M-114` on 2026-08-09. Blocked on `M-67` for the parameter path.
+
+- 2026-08-10: unblocked. `M-67` landed in `1.0.0-rc.18`, so the parameter path this story waited on
+  exists. No implementation has begun; what follows is the integration path traced against the
+  source at `5492b05`, so the first session on this does not re-derive it.
+
+  **The four pieces, and the one join that is missing.**
+
+  | Piece | Where | What it gives |
+  |---|---|---|
+  | `AudioAnalyzer::process` / `drain` | `sipx-audio/src/analysis.rs:1408,1473` | `Observation`s from a call's frames |
+  | `ActivityHint::observe` / `parameter` | `sipx-audio/src/dsp/noise/hint.rs:380,327` | `Option<HintChange>` → `Option<Parameter>` |
+  | `DspGraph::configure(generation, processor, parameters)` | `sipx-media/src/dsp/mod.rs:277` | `M-67`'s door; one terminal outcome, refusals leave the graph untouched |
+  | `MediaSession::attach_processor` | `sipx-media/src/processing.rs` | `PcmFrame`s at the direction-aware seam |
+
+  Every link exists **except** the one that makes it a property of a call: today an application
+  drains the analyser, drives the hint and calls `configure` itself, which is precisely the "assembled
+  by hand" this story's Goal refuses.
+
+  **What that means for the Acceptance rows.** Row 1 is a new call-layer join, not new policy — the
+  policy is `M-114`'s and settled. Row 3's typed refusal has a natural home: `ActivityHint::direction`
+  (`hint.rs:49`) already carries the direction it follows and a graph is bound to one at `prepare`,
+  so the refusal is a comparison the wiring can make at attach time rather than a runtime surprise.
+  Row 4's bound is the one to design for first: `configure` validates off the media path already, so
+  the wiring must not add a drain, an allocation or a callback *on* the worker — the hint has to be
+  driven from the side that already owns the frames.
+
+  **Not started because it needs a full implementation session**, not a boundary slot: a new public
+  surface in `sipx-media`, failing-first tests on a live session proving sample-identical audio when
+  unwired, a vector for §10.2's frame boundary, and a gate run.
+
