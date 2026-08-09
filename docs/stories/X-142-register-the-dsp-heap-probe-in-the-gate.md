@@ -28,7 +28,7 @@ today it runs only when somebody remembers. A measurement nobody runs decays int
       matching `check-wasm-kernel.sh` and the gate's own distinction.
 - [x] The added CI time is measured and stated in the story, not estimated. `heap-probe/` resolves
       its own lock and builds its own copy of `sipx-audio`, so this is not free.
-- [ ] A deliberately broken declaration fails the new gate step, proved by running it — not by
+- [x] A deliberately broken declaration fails the new gate step, proved by running it — not by
       reasoning that it would.
 
 ## Progress
@@ -69,3 +69,19 @@ today it runs only when somebody remembers. A measurement nobody runs decays int
   `./scripts/gate.py --check` reports **51 steps over 24 CI jobs, none unaccounted for**.
 
 - 2026-08-09: closed at the `1.0.0-rc.17` boundary, against the wave gate run on this tree.
+
+- 2026-08-09: **the last row, proved rather than reasoned.** I had registered the step without
+  running it against a broken declaration, which is the acceptance row's whole point, so:
+  `sipx.stutter`'s `with_state_bytes` was quartered, the step run, and the fixtures restored from a
+  copy taken first.
+
+      sipx.stutter(1)              FAILED
+      sipx.stutter(4)              FAILED
+      sipx.stutter(4096)           FAILED
+          the processor held 16384 heap bytes at once against a budget of 4096 — its declared
+          4192 `state_bytes` less the 96 it occupies inline
+
+  Exit 1, all three delay lines caught, and the message names the arithmetic rather than asserting
+  a mismatch. Restored, re-run, exit 0: *every declaration held and both violating fixtures were
+  caught*. `glitch.rs` is byte-identical to what it was — verified with `git diff`, not assumed.
+
