@@ -2,8 +2,8 @@
 id: M-52
 title: Adapt browser-native WebRTC audio
 pillar: Media
-status: backlog
-priority: 16
+status: ready
+priority: 27
 design: docs/designs/browser-sdk.md
 epic: browser-sdk
 areas: [browser, webrtc, audio, opus, m15]

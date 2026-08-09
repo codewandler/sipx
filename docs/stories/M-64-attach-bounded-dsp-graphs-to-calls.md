@@ -3,7 +3,7 @@ id: M-64
 title: Attach bounded DSP graphs to calls
 pillar: Media
 status: in-progress
-priority: 38
+priority: 13
 design: docs/designs/custom-call-dsp.md
 epic: custom-call-dsp
 areas: [sipx-call, sipx-media, dsp, realtime, m18]

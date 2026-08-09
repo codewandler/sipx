@@ -2,8 +2,8 @@
 id: M-117
 title: Redact the byte buffers outside the relay path
 pillar: Quality
-status: backlog
-priority: 6
+status: ready
+priority: 2
 design:
 epic: media
 areas: [sipx-app-protocol, sipx-testkit, sipx-ua]

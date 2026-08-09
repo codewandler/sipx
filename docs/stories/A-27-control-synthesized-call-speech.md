@@ -2,8 +2,8 @@
 id: A-27
 title: Control synthesized call speech through the application SDK
 pillar: Application
-status: backlog
-priority: 26
+status: ready
+priority: 39
 design: docs/designs/local-speech.md
 epic: local-speech
 areas: [app-sdk, speech, synthesis, audio-analysis, m16]

@@ -2,8 +2,8 @@
 id: X-100
 title: Prove the packaged browser SDK
 pillar: Build
-status: backlog
-priority: 19
+status: ready
+priority: 30
 design: docs/designs/browser-sdk.md
 epic: browser-sdk
 areas: [browser, ci, package, website, m15]

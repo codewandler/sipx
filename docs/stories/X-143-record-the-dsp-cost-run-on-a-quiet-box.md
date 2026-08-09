@@ -2,8 +2,8 @@
 id: X-143
 title: Record the DSP cost run on a quiet box
 pillar: Build
-status: backlog
-priority: 42
+status: ready
+priority: 17
 design: docs/designs/custom-call-dsp.md
 epic: custom-call-dsp
 areas: [dsp, benchmark, documentation, m18]

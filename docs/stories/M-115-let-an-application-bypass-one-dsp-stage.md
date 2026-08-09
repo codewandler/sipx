@@ -2,8 +2,8 @@
 id: M-115
 title: Let an application bypass one DSP stage without replacing the chain
 pillar: Media
-status: backlog
-priority: 41
+status: ready
+priority: 5
 design: docs/designs/custom-call-dsp.md
 epic: custom-call-dsp
 areas: [sipx-media, app-sdk, dsp, m18]

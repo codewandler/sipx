@@ -2,8 +2,8 @@
 id: X-140
 title: Carry the modelled registry allowance across frontier invocations, not just its cost
 pillar: Build
-status: backlog
-priority: 46
+status: ready
+priority: 10
 design: docs/specs/release-rehearsal.md
 epic: conformance
 areas: [release, ci]

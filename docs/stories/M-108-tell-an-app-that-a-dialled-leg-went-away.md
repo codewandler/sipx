@@ -2,8 +2,8 @@
 id: M-108
 title: Tell an app that a dialled leg went away
 pillar: Media
-status: backlog
-priority: 30
+status: ready
+priority: 4
 design: docs/designs/app-sdk.md
 epic: app-sdk
 areas: [sipx-app, sipx-app-protocol, app-sdk, m16]

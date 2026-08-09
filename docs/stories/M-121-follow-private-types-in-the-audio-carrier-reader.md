@@ -2,8 +2,8 @@
 id: M-121
 title: Follow private types in the raw-audio carrier reader
 pillar: Media
-status: backlog
-priority: 42
+status: ready
+priority: 3
 design:
 epic:
 areas: [tooling, audio, security, media]

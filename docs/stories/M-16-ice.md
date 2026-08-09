@@ -3,7 +3,7 @@ id: M-16
 title: Implement ICE
 pillar: Media
 status: blocked
-priority:
+priority: 31
 design: docs/designs/media.md
 epic: ice
 areas: [sipx-media, sipx-sdp, sipx-rtp]

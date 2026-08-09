@@ -84,50 +84,44 @@ appeared twice before anyone named it.
 - [X-109 — Measure custom DSP quality and real-time cost](X-109-measure-custom-dsp-quality-and-cost.md) · Build · after M-65/M-66/M-68 · exact effects, quality, cost, isolation and packaged conformance
 
 ## Next (ready — take the top one unless the user named a story)
-
-### Reliable diagnostic automation
-- [P-30 — Bound the first NOTIFY in a registrar subscription](P-30-bound-the-first-notify-in-a-registrar-subscription.md) · Phone · peers --registrar waits Timer N — 64*T1, 32 seconds — with no operator control · the dominant unbounded wait once resolution is bounded
-
-## Blocked
-- [M-16 — Implement ICE](M-16-ice.md) · Media · epic tracker · split into M-19 … M-24 · spec is docs/specs/ice.md, written first
-- [T-24 — Discover SIP endpoints on the local link](T-24-discover-on-the-local-link.md) · Transport · blocked on a scope decision — mDNS is a second protocol and a new parser eating unauthenticated multicast
-
-## Backlog
 - [M-121 — Follow private types in the raw-audio carrier reader](M-121-follow-private-types-in-the-audio-carrier-reader.md) · Media · after M-68 · the checker reads one level deep, and M-68 found a carrier two levels down
 
 ### The application host
 _The [app-sdk](https://github.com/codewandler/sipx/blob/main/docs/designs/app-sdk.md) epic ends where a process has to exist: something must hold real_
-- [A-3 — The TypeScript SDK and the two reference applications](A-3-typescript-sdk.md) · Application · app-host phase 2 · the reference apps are the contract's exit-from-experimental gate
-- [A-5 — Implement the embedded TypeScript runtime](A-5-embedded-runtime.md) · Application · app-host phase 3 · needs A-6 (the binding spec) and A-3 (the SDK it hosts)
 - [A-6 — Finish the engine-binding spec — isolation, lifecycle, budgets](A-6-engine-binding-spec.md) · Application · app-host phase 3 · spec before code, decided with measurements where the design says so
+- [A-5 — Implement the embedded TypeScript runtime](A-5-embedded-runtime.md) · Application · app-host phase 3 · needs A-6 (the binding spec) and A-3 (the SDK it hosts)
+- [A-3 — The TypeScript SDK and the two reference applications](A-3-typescript-sdk.md) · Application · app-host phase 2 · the reference apps are the contract's exit-from-experimental gate
 
 ### Application SDK
 _The measure of this stack's reach is what can be built on it **without writing Rust**. Today the_
-- [C-9 — Carry a bridge and a conference across a renegotiation](C-9-carry-a-bridge-across-a-renegotiation.md) · Signalling · filed from C-6 · a re-INVITE, a hold/resume or an ICE restart replaces a call's MediaSession and the bridge keeps forwarding the stopped one · size S/M
 - [M-108 — Tell an app that a dialled leg went away](M-108-tell-an-app-that-a-dialled-leg-went-away.md) · Media · filed by M-103 · §5.2's `legs` is only ever rewritten by `call.dial.finished`, so a leg that answers and later hangs up stays in the snapshot forever
+- [C-9 — Carry a bridge and a conference across a renegotiation](C-9-carry-a-bridge-across-a-renegotiation.md) · Signalling · filed from C-6 · a re-INVITE, a hold/resume or an ICE restart replaces a call's MediaSession and the bridge keeps forwarding the stopped one · size S/M
 
 ### browser audio SDK
 _Beta.4 proves that sipx can interoperate with a browser audio endpoint, but it does not let a web_
+- [T-43 — Reach a real WSS endpoint from a browser fixture](T-43-reach-a-real-wss-endpoint-from-a-browser-fixture.md) · Transport · T-33's last acceptance row · needs a hosted runner's browser and WebDriver
+- [M-52 — Adapt browser-native WebRTC audio](M-52-adapt-browser-native-webrtc-audio.md) · Media · after A-16 · reuse beta.4 profile through RTCPeerConnection, do not implement WebRTC in WASM
 - [A-17 — Generate and package the browser SDK](A-17-generate-and-package-the-browser-sdk.md) · Application · after S-41, T-33 and M-52 · generated ABI types plus small handwritten ergonomic layer
 - [A-18 — Publish a runnable browser-audio demo](A-18-publish-a-runnable-browser-audio-demo.md) · Application · after A-17 · static public demo for register, dial, answer and non-silent audio
-- [M-52 — Adapt browser-native WebRTC audio](M-52-adapt-browser-native-webrtc-audio.md) · Media · after A-16 · reuse beta.4 profile through RTCPeerConnection, do not implement WebRTC in WASM
-- [T-43 — Reach a real WSS endpoint from a browser fixture](T-43-reach-a-real-wss-endpoint-from-a-browser-fixture.md) · Transport · T-33's last acceptance row · needs a hosted runner's browser and WebDriver
 - [X-100 — Prove the packaged browser SDK](X-100-prove-the-packaged-browser-sdk.md) · Build · M15 exit · clean consumer, supported browser matrix, both SIP roles and fail-closed negatives
 
 ### real-time call-audio analysis
 _Applications need small, predictable facts about live audio even when no speech model is enabled:_
-- [A-29 — Publish a runnable live call-audio analysis example](A-29-publish-call-audio-analysis-example.md) · Application · M16 analysis exit after X-106 · no model or special hardware required
 - [X-106 — Measure call-audio analysis accuracy and resource cost](X-106-measure-call-audio-analysis.md) · Build · after M-58 through M-61 · versioned corpus, error rates, event latency, CPU and memory
+- [A-29 — Publish a runnable live call-audio analysis example](A-29-publish-call-audio-analysis-example.md) · Application · M16 analysis exit after X-106 · no model or special hardware required
 
 ### Conformance
 - [X-140 — Carry the modelled registry allowance across frontier invocations, not just its cost](X-140-carry-the-modelled-registry-allowance-across-frontier-invocations.md) · Build · found while implementing X-127 · the budget now spans invocations, the token buckets do not
 
 ### custom call-audio DSP
 _Applications need to shape live call audio without forking the media runtime: ordinary gain and_
-- [A-34 — Publish a runnable custom call-DSP example](A-34-publish-custom-call-dsp-example.md) · Application · M18 exit after M-67 and X-109 · live graph, custom fixture, effects/noise reduction, bypass
 - [M-115 — Let an application bypass one DSP stage without replacing the chain](M-115-let-an-application-bypass-one-dsp-stage.md) · Media · after M-67 · `BypassCause::Requested` is in the spec and nothing sets it
 - [M-122 — Fuzz the supervised DSP worker protocol](M-122-fuzz-the-supervised-worker-protocol.md) · Media · after M-68 · the one hostile-octet surface of the epic, unreachable from fuzz/ today
+- [A-34 — Publish a runnable custom call-DSP example](A-34-publish-custom-call-dsp-example.md) · Application · M18 exit after M-67 and X-109 · live graph, custom fixture, effects/noise reduction, bypass
 - [X-143 — Record the DSP cost run on a quiet box](X-143-record-the-dsp-cost-run-on-a-quiet-box.md) · Build · after X-109 · the harness exists and refuses to report under load; the figure is untaken
+
+### Reliable diagnostic automation
+- [P-30 — Bound the first NOTIFY in a registrar subscription](P-30-bound-the-first-notify-in-a-registrar-subscription.md) · Phone · peers --registrar waits Timer N — 64*T1, 32 seconds — with no operator control · the dominant unbounded wait once resolution is bounded
 
 ### Endpoint discovery
 _sipx can call any endpoint you can already name, and cannot help you name one. `sipx dial` takes a_
@@ -142,16 +136,18 @@ _A programmable SIP and media edge — transports, endpoints and routes, with di
 
 ### local live-call speech
 _A live call on a machine with a local accelerator should be able to transcribe received speech and_
-- [A-26 — Emit speech-recognition events through the application SDK](A-26-emit-speech-recognition-sdk-events.md) · Application · after C-3, C-5, A-25, M-54 and M-55 · ordered utterance and provider lifecycle
-- [A-27 — Control synthesized call speech through the application SDK](A-27-control-synthesized-call-speech.md) · Application · after A-25, M-17, M-56 and M-58 · bounded playback, cancellation and activity-aware ducking
 - [M-55 — Ship a practical local offline speech-recognition provider](M-55-ship-local-offline-speech-recognition.md) · Media · after A-25, A-28 and M-54 · accelerator path plus defined CPU behavior
 - [M-56 — Ship a practical local offline speech-synthesis provider](M-56-ship-local-offline-speech-synthesis.md) · Media · after A-25, A-28 and M-54 · accelerator path plus defined CPU behavior
-- [X-104 — Publish a runnable local live-call speech example and measurements](X-104-publish-local-call-speech-example.md) · Build · M16 exit after X-105 · accelerator when available and bounded CPU fixture everywhere
+- [A-26 — Emit speech-recognition events through the application SDK](A-26-emit-speech-recognition-sdk-events.md) · Application · after C-3, C-5, A-25, M-54 and M-55 · ordered utterance and provider lifecycle
+- [A-27 — Control synthesized call speech through the application SDK](A-27-control-synthesized-call-speech.md) · Application · after A-25, M-17, M-56 and M-58 · bounded playback, cancellation and activity-aware ducking
 - [X-105 — Prove speech-provider substitution with one conformance suite](X-105-prove-speech-provider-substitution.md) · Build · after M-55, M-56, A-26, A-27 and A-28 · same suite for bundled and downstream providers
+- [X-104 — Publish a runnable local live-call speech example and measurements](X-104-publish-local-call-speech-example.md) · Build · M16 exit after X-105 · accelerator when available and bounded CPU fixture everywhere
 
 ### Media
 _Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
 - [M-117 — Redact the byte buffers outside the relay path](M-117-redact-the-byte-buffers-outside-the-relay-path.md) · Quality · after M-110 · four named carriers outside RELAY_PATH — two are call audio, one is PCM in a document, one is a nonce-signing key
+- [M-123 — Refuse an advertised media address the far end will read as its own](M-123-refuse-an-advertised-address-the-far-end-owns.md) · Media · found while dialling a real endpoint · answered, and no audio, with no error anywhere
+- [M-124 — Resolve cluster-internal SIP names after ordinary DNS declines](M-124-resolve-cluster-internal-sip-names.md) · Core · after M-123 · RFC 3263 runs first and unchanged; this is only what happens when it returns nothing
 
 ### Bridge a call to an OpenAI realtime agent
 _Every capability sipx claims — TLS held to [sip-tls.md](../specs/sip-tls.md) §3, SRTP held to_
@@ -168,6 +164,13 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 
 ### Quic
 - [T-13 — Verify QUIC against a real peer](T-13-verify-quic-against-a-real-peer.md) · Signalling · track: quic · T-12 delivered the transport; independent-peer evidence remains
+
+## Blocked
+- [M-16 — Implement ICE](M-16-ice.md) · Media · epic tracker · split into M-19 … M-24 · spec is docs/specs/ice.md, written first
+- [T-24 — Discover SIP endpoints on the local link](T-24-discover-on-the-local-link.md) · Transport · blocked on a scope decision — mDNS is a second protocol and a new parser eating unauthenticated multicast
+
+## Backlog
+_None._
 
 ## Done
 - [A-1 — Finish the host configuration and failure-semantics schema](A-1-host-configuration-schema.md) · Application · app-host phase 1 · spec work, no dependency on the app-sdk stories

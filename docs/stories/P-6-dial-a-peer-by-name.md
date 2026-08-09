@@ -2,8 +2,8 @@
 id: P-6
 title: Dial a peer by name
 pillar: Phone
-status: backlog
-priority:
+status: ready
+priority: 34
 design: docs/designs/discovery.md
 epic: discovery
 areas: [sipx-cli]

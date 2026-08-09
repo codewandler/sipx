@@ -2,8 +2,8 @@
 id: C-10
 title: Answer a delayed offer in the 2xx and its answer in the ACK
 pillar: Signalling
-status: backlog
-priority: 60
+status: ready
+priority: 8
 design: docs/designs/edge.md
 epic: edge
 areas: [sipx-call]

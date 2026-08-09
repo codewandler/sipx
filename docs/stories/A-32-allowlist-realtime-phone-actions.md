@@ -2,8 +2,8 @@
 id: A-32
 title: Allowlist Realtime requests into phone actions
 pillar: Application
-status: backlog
-priority: 34
+status: ready
+priority: 45
 design: docs/designs/openai-realtime-phone.md
 epic: openai-realtime-phone
 areas: [testkit, app-sdk, call-control, tools, openai-realtime, security, m17]

@@ -2,8 +2,8 @@
 id: A-31
 title: Emit typed Realtime understanding and transcript events
 pillar: Application
-status: backlog
-priority: 33
+status: ready
+priority: 44
 design: docs/designs/openai-realtime-phone.md
 epic: openai-realtime-phone
 areas: [testkit, app-sdk, transcript, openai-realtime, m17]

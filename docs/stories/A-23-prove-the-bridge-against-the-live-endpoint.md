@@ -2,8 +2,8 @@
 id: A-23
 title: Prove the bridge against the live endpoint
 pillar: Application
-status: backlog
-priority: 4
+status: ready
+priority: 42
 design: docs/designs/openai.md
 epic: openai
 areas: [sipx-app, interop, security]

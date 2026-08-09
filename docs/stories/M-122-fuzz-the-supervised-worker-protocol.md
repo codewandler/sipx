@@ -2,8 +2,8 @@
 id: M-122
 title: Fuzz the supervised DSP worker protocol
 pillar: Media
-status: backlog
-priority: 43
+status: ready
+priority: 6
 design:
 epic: custom-call-dsp
 areas: [sipx-media, dsp, security, fuzzing, m18]

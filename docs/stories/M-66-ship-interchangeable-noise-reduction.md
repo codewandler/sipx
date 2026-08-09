@@ -3,7 +3,7 @@ id: M-66
 title: Ship interchangeable local noise reduction
 pillar: Media
 status: in-progress
-priority: 39
+priority: 20
 design: docs/designs/custom-call-dsp.md
 epic: custom-call-dsp
 areas: [sipx-audio, dsp, noise-reduction, realtime, m18]

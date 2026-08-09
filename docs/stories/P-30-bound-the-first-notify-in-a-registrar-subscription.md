@@ -3,7 +3,7 @@ id: P-30
 title: Bound the first NOTIFY in a registrar subscription
 pillar: Phone
 status: ready
-priority: 34
+priority: 1
 design:
 epic: diagnostic-automation
 areas: [sipx-cli, sipx-ua]

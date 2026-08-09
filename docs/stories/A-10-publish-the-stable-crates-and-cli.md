@@ -3,7 +3,7 @@ id: A-10
 title: Publish the stable crate set and diagnostic CLI artifacts
 pillar: Application
 status: in-progress
-priority: 13
+priority: 51
 design: docs/specs/release-artifacts.md
 epic: app-sdk
 areas: [release, docs, sipx-cli]

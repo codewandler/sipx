@@ -2,8 +2,8 @@
 id: A-5
 title: Implement the embedded TypeScript runtime
 pillar: Application
-status: backlog
-priority:
+status: ready
+priority: 22
 design: docs/designs/embedded-runtime.md
 epic: app-host
 areas: [sipx-app]
