@@ -102,7 +102,6 @@ pub(crate) enum Exchange {
 }
 
 /// One frame offered to a worker, carrying the buffer it borrows.
-#[derive(Debug)]
 struct Request {
     sequence: u64,
     position: u64,
@@ -110,12 +109,34 @@ struct Request {
     samples: Vec<i16>,
 }
 
+/// What the request is, never the audio it carries (`M-107`, `M-68`).
+impl std::fmt::Debug for Request {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Request")
+            .field("sequence", &self.sequence)
+            .field("position", &self.position)
+            .field("discontinuity", &self.discontinuity)
+            .field("samples", &self.samples.len())
+            .finish()
+    }
+}
+
 /// One worker answer, carrying the buffer the runtime lent it back again.
-#[derive(Debug)]
 struct Response {
     sequence: u64,
     result: WorkerResult,
     samples: Vec<i16>,
+}
+
+/// What the answer is, never the audio it carries (`M-107`, `M-68`).
+impl std::fmt::Debug for Response {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Response")
+            .field("sequence", &self.sequence)
+            .field("result", &self.result)
+            .field("samples", &self.samples.len())
+            .finish()
+    }
 }
 
 /// The runtime half of a supervised stage: two bounded channels and one process it owns.
@@ -124,7 +145,6 @@ struct Response {
 /// that one frame can be in flight for every slot of the request channel and one more can be being
 /// filled; when it is empty the stage misses rather than allocating, because a bounded channel that
 /// grows a buffer under pressure is not bounded.
-#[derive(Debug)]
 pub(crate) struct Supervised {
     requests: Option<SyncSender<Request>>,
     results: Receiver<Response>,
@@ -137,6 +157,30 @@ pub(crate) struct Supervised {
     sequence: u64,
     in_flight: u32,
     lost: bool,
+}
+
+/// What the stage is holding, never the audio it is holding (`M-107`, `M-68`).
+///
+/// The pool and the held answers are frames of the call, and the pool's own length is a configured
+/// bound rather than a constant — so both are rendered as counts for the same two reasons
+/// [`FrameSink`](sipx_audio::dsp::FrameSink)'s are.
+#[expect(
+    clippy::missing_fields_in_debug,
+    reason = "the channels, the reaper handle and the reap signal render as `{ .. }` or worse and \
+              say nothing `live` and `in_flight` do not"
+)]
+impl std::fmt::Debug for Supervised {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Supervised")
+            .field("pid", &self.pid)
+            .field("live", &self.is_live())
+            .field("sequence", &self.sequence)
+            .field("in_flight", &self.in_flight)
+            .field("held", &self.held.len())
+            .field("pool", &self.pool.len())
+            .field("lost", &self.lost)
+            .finish()
+    }
 }
 
 impl Supervised {
