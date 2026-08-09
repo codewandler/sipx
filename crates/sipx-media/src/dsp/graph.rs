@@ -13,7 +13,7 @@ use sipx_audio::dsp::{
 };
 
 use super::builtin::BuiltIn;
-use super::supervised::{Exchange, Supervised, SupervisedWorker};
+use super::supervised::{Exchange, Supervised, WorkerProcess};
 use crate::processing::{AudioDirection, DiscontinuityKind, Processing, hold};
 use crate::session::Stop;
 
@@ -339,6 +339,18 @@ pub enum GraphError {
     /// The handle's graph has already been torn down.
     #[error("this graph has been torn down")]
     Detached,
+    /// A supervised stage's worker program could not be spawned (§7.4).
+    ///
+    /// Carries the operating system's own classification rather than its message, because this
+    /// error is `Copy` and comparable: a caller that wants the message has the program name and can
+    /// say it better than a formatted `io::Error` would.
+    #[error("the supervised worker `{processor}` could not be spawned: {error:?}")]
+    WorkerSpawn {
+        /// The stage.
+        processor: &'static str,
+        /// What the operating system said.
+        error: std::io::ErrorKind,
+    },
 }
 
 // ----------------------------------------------------------------------- transitions ----
@@ -501,7 +513,7 @@ enum Planned {
         /// admit the application's `ProvenInline` declaration beside it.
         workspace: bool,
     },
-    Supervised(Box<dyn SupervisedWorker>),
+    Supervised(Box<WorkerProcess>),
 }
 
 impl Planned {
@@ -615,13 +627,17 @@ impl GraphPlan {
         Ok(self)
     }
 
-    /// Append one supervised worker, to run off the media worker behind bounded channels.
+    /// Append one supervised worker, to run in a process of its own behind bounded channels.
     ///
     /// Its declared capability must name the supervised profile. This is the door an application
-    /// selects when it requires the stack to contain a stall rather than to report one.
+    /// selects when it requires the stack to contain a stall rather than to report one, and what it
+    /// names is a **program**: the worker runs in an operating-system process this runtime spawns,
+    /// reached over `docs/specs/call-dsp-graph.md` §7.4's protocol, so a worker that will not stop
+    /// can be killed and a worker's memory and CPU are bounded by whatever the operating system is
+    /// configured to bound (`M-102`).
     #[must_use]
-    pub fn with_supervised(mut self, worker: Box<dyn SupervisedWorker>) -> Self {
-        self.stages.push(Planned::Supervised(worker));
+    pub fn with_supervised(mut self, worker: WorkerProcess) -> Self {
+        self.stages.push(Planned::Supervised(Box::new(worker)));
         self
     }
 
@@ -707,6 +723,14 @@ impl Stage {
         }
     }
 
+    /// The operating-system process this stage's worker runs in, if it has one (§7).
+    fn worker_pid(&self) -> Option<u32> {
+        match &self.kind {
+            Running::Inline(_) => None,
+            Running::Supervised(supervised) => supervised.is_live().then(|| supervised.pid()),
+        }
+    }
+
     fn reset(&mut self, cause: DspResetCause) {
         if let Running::Inline(processor) = &mut self.kind {
             processor.reset(cause);
@@ -772,6 +796,11 @@ impl Live {
             retained_positions: self.stages.iter().map(Stage::retained).sum(),
             processors: u32::try_from(self.stages.len()).unwrap_or(u32::MAX),
         }
+    }
+
+    /// The processes this generation's supervised stages run in, in chain order (§7).
+    fn worker_pids(&self) -> Vec<u32> {
+        self.stages.iter().filter_map(Stage::worker_pid).collect()
     }
 
     /// Run one frame through the whole chain, in place.
@@ -961,6 +990,8 @@ fn run_stage(
             buffers.back.clear();
             match supervised.exchange(
                 &buffers.front,
+                position,
+                downstream,
                 stage.policy.deadline_frames(),
                 &mut buffers.back,
             ) {
@@ -1224,6 +1255,16 @@ impl SlotRef {
                 .chain(slot.live.as_ref())
                 .map(Live::barrier)
                 .fold(GraphBarrier::default(), GraphBarrier::add)
+        })
+    }
+
+    /// The processes this direction's live supervised stages run in, in chain order (§7).
+    pub(crate) fn worker_pids(&self) -> Vec<u32> {
+        self.with(|slot| {
+            slot.live
+                .as_ref()
+                .map(Live::worker_pids)
+                .unwrap_or_default()
         })
     }
 
@@ -1551,11 +1592,19 @@ fn prepare(
                     })?;
                 Running::Inline(processor)
             }
-            Planned::Supervised(worker) => Running::Supervised(Box::new(Supervised::spawn(
-                worker,
-                bounds.worker_queue_capacity(),
-                frame_samples,
-            ))),
+            Planned::Supervised(worker) => Running::Supervised(Box::new(
+                Supervised::spawn(
+                    &worker,
+                    bounds.worker_queue_capacity(),
+                    frame_samples,
+                    direction,
+                    format,
+                )
+                .map_err(|error| GraphError::WorkerSpawn {
+                    processor: capability.id(),
+                    error: error.kind(),
+                })?,
+            )),
         };
         running.push(Stage {
             capability,

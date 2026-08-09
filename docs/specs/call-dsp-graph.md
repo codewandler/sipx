@@ -1,6 +1,6 @@
 # The call-local DSP graph
 
-**Status:** normative · **Epic:** `custom-call-dsp` · **Story:** `M-64` ·
+**Status:** normative · **Epic:** `custom-call-dsp` · **Stories:** `M-64`, `M-102` (§7's process) ·
 **Design:** [custom-call-dsp](../designs/custom-call-dsp.md) · **Crate:** `sipx-media` (`dsp`)
 
 [custom-call-dsp.md](custom-call-dsp.md) defines what one processor is and says, in its §1, that it
@@ -283,7 +283,20 @@ A `SupervisedIsolated` stage's `process` is **never** called on the media worker
   a non-blocking send;
 - a **bounded result channel**, the same depth, that the media worker takes from with a
   non-blocking receive;
-- a **worker the runtime owns**, running the processor off the media path.
+- a **worker process the runtime spawns and owns**, running the processor in an operating-system
+  process of its own, reached over §7.4's framed protocol.
+
+The worker is a process and not a thread, and that is the whole of what
+[custom-call-dsp.md](custom-call-dsp.md) §7.2's two operating-system sentences rest on: a worker's
+memory and CPU are bounded by what the operating system is configured to bound, and a worker that
+will not stop can be terminated regardless of what it is doing. A thread can be neither bounded nor
+killed, so a thread-hosted worker cannot carry that profile's claim (`M-102`).
+
+Nothing between the media worker and the process runs on the media worker. The runtime owns a
+**pump**, off the media path, which is the only thing that touches the pipes: it takes a request
+from the request channel, writes one `Frame`, reads one `Result`, and offers it to the result
+channel with a non-blocking send. Spawning happens once, at validation, and never on the live path
+(§3.1).
 
 ### 7.1 The deadline is a pipeline depth
 
@@ -305,12 +318,15 @@ deadline" is the same fact whatever caused it.
 |---|---|
 | does not answer by the deadline | a miss; the result, if it ever arrives, is abandoned unread |
 | answers with a position count other than the frame's | a miss, `MalformedResult` |
-| fails terminally, panics, or its channel closes | a miss, `WorkerLost`; the worker is terminated and reaped at once and never restarted silently |
+| answers with a message §7.4 refuses | a miss, `MalformedResult`; the pump stops and the worker is lost |
+| exits, is killed, crashes, or closes its output | a miss, `WorkerLost`; the worker is terminated and reaped at once and never restarted silently |
 
-All three then follow §6.1: the declared `on_failure` applies at `max_consecutive_misses`. A worker
+All four then follow §6.1: the declared `on_failure` applies at `max_consecutive_misses`. A worker
 is never restarted behind the application's back — a processor that crashed is a processor whose
 state is gone, and a silent restart would be a silent reset of audio state the application believes
-is continuous.
+is continuous. **A worker process is never respawned**, for the same reason and one more: a
+respawned process is a new process with none of the state the previous one had built, and an
+application that wants one asks for one by replacing the graph (§5.4).
 
 ### 7.3 Termination and reaping
 
@@ -318,6 +334,112 @@ Cancellation of a supervised stage is: close the request channel, signal the wor
 the result channel, and **reap** — wait for the worker to have finished, not for a duration. The
 wait is an event with a suspension point, so a stopped session's teardown answers rather than
 holding a runtime worker nothing can reclaim.
+
+For a process that is four steps, and the order matters:
+
+1. **Close the request channel.** The media worker's side is done; nothing further is offered.
+2. **Signal the worker to stop.** The signal is *end of file on the worker's standard input*, which
+   the pump produces by dropping its end of the pipe. It cannot be missed and it needs no
+   cooperation to deliver.
+3. **Terminate.** The runtime kills the process. This does not wait for the worker to agree and is
+   not conditional on it having failed: a worker that is stuck inside one `process` call never sees
+   step 2, and step 3 is what makes "a worker that will not stop can be terminated regardless" a
+   fact rather than a hope. There is no grace period, because a grace period is a wall-clock
+   duration standing in for a happens-before relation, and because a cancelled stage's retained
+   audio is discarded rather than flushed ([custom-call-dsp.md](custom-call-dsp.md) §8.4) — a
+   worker has nothing to finish that anyone will read.
+4. **Reap.** `wait` for the process, so the operating system's entry for it is gone. §8's barrier
+   reports `workers: 0` **only once `wait` has returned**, never merely once the kill was sent: a
+   zombie is a worker that still exists.
+
+**When the runtime is gone, the worker still ends.** If the media process dies without running any
+of the four steps — `SIGKILL`, a crash, an operator's interrupt — the worker's standard input
+closes because the only writer is gone, and step 2 is delivered by the operating system rather than
+by us. A conforming worker MUST exit at that end of file **whatever its processing is doing** (§7.4),
+which is why a worker keeps reading on a different thread from the one it processes on. A worker
+that is stuck and orphaned is the one case the runtime cannot reach, and it is the worker's own
+conformance requirement rather than a claim made on its behalf.
+
+### 7.4 The worker protocol
+
+A supervised worker is a **program**. The runtime spawns it, writes to its standard input, reads
+from its standard output, and agrees nothing else about it: it may be the application's own
+executable re-invoked with an argument, a separate program, or §7.5's reference worker. Standard
+error is the worker's, untouched, so a worker can report to the operator without corrupting the
+stream. The protocol is **lockstep** — one `Frame` written, one `Result` read — so neither pipe ever
+holds more than one message and neither side can deadlock the other by filling one.
+
+**Framing.** Every message is a fixed 8-octet header followed by exactly `length` octets of payload.
+Integers are unsigned and big-endian; samples are signed 16-bit two's complement, big-endian, and
+interleaved by channel exactly as [custom-call-dsp.md](custom-call-dsp.md) §3.2 defines them.
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 2 | magic, `0x5344` |
+| 2 | 1 | type |
+| 3 | 1 | reserved, MUST be zero |
+| 4 | 4 | `length`, the payload's size in octets |
+
+| Type | Direction | Fixed payload | Trailing |
+|---|---|---|---|
+| `0x01` `Hello` | runtime → worker | version `u16`, direction `u8`, sample rate `u32`, channels `u8`, `max_samples` `u32` — 12 octets | none |
+| `0x02` `Frame` | runtime → worker | sequence `u64`, position `u64`, discontinuity `u8`, `samples` `u32` — 21 octets | `samples` × 2 octets |
+| `0x81` `Result` | worker → runtime | sequence `u64`, outcome `u8`, `samples` `u32` — 13 octets | `samples` × 2 octets |
+
+`direction` is `1` inbound and `2` outbound. `discontinuity` is `0` none, `1` loss, `2` overflow and
+`3` realign — [call-audio-seam.md](call-audio-seam.md) §7's kinds, numbered here and not renamed.
+`outcome` is `0` produced, `1` withheld and `2` failed, which are §7.2's three answers. `samples`
+counts interleaved 16-bit samples and not positions; at `channels` channels a frame of *n* positions
+carries *n · channels* of them.
+
+`Hello` is sent once, before any frame, and carries the direction, the format and the ceiling every
+later message is bounded by. There is no reply to it: a handshake the runtime waited for would be a
+wait on application code before the call could proceed, which is the one thing this profile exists to
+avoid. A worker that cannot accept the `Hello` exits, and the runtime learns that as §7.2's
+`WorkerLost` like any other ending.
+
+**A message is refused by its type, never by its length prefix.** The type determines the arithmetic
+and the length prefix is checked against it — the reverse, sizing a read or an allocation from a
+number the peer chose, is how a malformed message becomes a memory fault. In order:
+
+| Refusal | When |
+|---|---|
+| `BadMagic` | the first two octets are not `0x5344` |
+| `Reserved` | the reserved octet is not zero |
+| `UnknownType` | the type octet is not one this version defines |
+| `Undersized` | `length` is below the type's fixed payload |
+| `Oversized` | `length` exceeds the type's fixed payload plus `2 × max_samples` |
+| `LengthMismatch` | the payload's own `samples` field does not account for `length` exactly |
+| `Truncated` | the stream ended inside a message |
+
+`Oversized` is decided from the header alone, before a single octet of payload is read, so no
+declared length ever sizes a buffer. `LengthMismatch` is decided after the fixed payload is read out
+of a buffer already bounded by the previous rule. A refused message is terminal for the connection
+in both directions: the runtime stops the pump and records `MalformedResult` (§7.2), and a worker
+stops reading and exits.
+
+The runtime's `max_samples` is the frame length its buffers were sized for (§4.3). A `Result` whose
+`samples` is not the offered frame's own count is **not** a wire refusal — it is well-formed and
+wrong, which is §7.2's `MalformedResult` at the contract level.
+
+**What a conforming worker must do.**
+
+1. Read `Hello` first and refuse to run at a `version` it does not implement.
+2. Answer every `Frame` with exactly one `Result` carrying that frame's `sequence`, in order.
+3. **Exit at end of file on its input, whatever its processing is doing.** This is the requirement
+   §7.3 leans on for an orphaned worker, and it is why a worker reads on a different thread from the
+   one it processes on: a worker that only notices end of file between frames does not notice it at
+   all once a frame has hung.
+4. Never write anything but `Result` messages to its standard output.
+
+### 7.5 The reference worker
+
+`sipx-media` ships one conforming worker, `sipx-dsp-worker`, so that §7.4 has a runnable peer rather
+than only a written one — [vision.md](../vision.md) principle 6, applied to a protocol whose failure
+modes are the point. It applies one declared transform, and its remaining modes exist to produce the
+four endings §7.2 tabulates on demand: withhold every frame, hang inside one, answer with the wrong
+sample count, and exit mid-call. It is what this document's §9 vectors drive, and an application can
+drive it from a shell to check its own supervision before writing a worker of its own.
 
 ## 8. Teardown and the barrier
 
@@ -367,4 +489,10 @@ named in [custom-call-dsp.md](custom-call-dsp.md) §12.1 reachable through the p
 | GRAPH-11 | detach a graph holding one inline and one supervised stage | the barrier is clear: zero workers, zero frames in flight, zero retained positions, zero processors |
 | GRAPH-12 | `shutdown()` a session with a graph attached, then attach again | the graph settles clear; the second attach is refused `SessionStopped` |
 | GRAPH-13 | two sessions, each with a counting stage; drive only the first | the first stage saw every frame and the second saw none |
+| GRAPH-14 | a supervised gain-2 worker process; drive frames and read the pid it reports | the pid is not the media process's own, and the process is alive while the stage is |
+| GRAPH-15 | the same stage, detached | the barrier is clear and `wait` has returned: the pid is no longer a process this runtime owns, reaped rather than merely killed |
+| GRAPH-16 | a worker process killed from outside mid-call, `BypassOpen` | `WorkerLost`, the declared action, RTP still flowing, and no respawn |
+| GRAPH-17 | a worker process that hangs inside one frame, then detach | every frame after it misses, RTP never stalls, and the detach's barrier is still clear — the reap did not wait for the worker to agree |
+| GRAPH-18 | a worker process answering with one sample fewer than the frame carried | `MalformedResult`, not audio — well formed on the wire and wrong at the contract |
+| GRAPH-19 | a `Result` header declaring a length above `2 × max_samples` | refused `Oversized` from the header alone; no payload is read and nothing of that size is allocated |
 | GRAPH-14 | attach to a direction that already has a graph | refused `DirectionInUse` |

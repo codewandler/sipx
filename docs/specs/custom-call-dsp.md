@@ -1,7 +1,7 @@
 # The custom call-DSP contract
 
 **Status:** normative · **Epic:** `custom-call-dsp` · **Contract story:** `M-63` ·
-**Implementing stories:** `M-64` (graphs), `M-65` (effects), `M-66` (noise reduction),
+**Implementing stories:** `M-64` (graphs), `M-102` (§7.2's process), `M-65` (effects), `M-66` (noise reduction),
 `M-67` (SDK control), `M-68` (hardening), `X-109` (measurement), `A-34` (example) ·
 **Design:** [custom-call-dsp](../designs/custom-call-dsp.md) ·
 **Crates:** `sipx-audio` (`dsp`), `sipx-media`/`sipx-call` (attachment, per `M-54` and `M-64`)
@@ -316,7 +316,8 @@ ceiling. They run **on the media worker**, synchronously.
 
 ### 7.2 Supervised isolated — `BoundedWait`, `AbandonResult`
 
-Application-supplied processors running in a supervised OS process that `M-64` owns. `process` is
+Application-supplied processors running in a supervised OS process that `M-64` plans and
+`M-102` spawns, kills and reaps ([call-dsp-graph.md](call-dsp-graph.md) §7.3, §7.4). `process` is
 **never** called on the media worker. The worker offers a frame to a bounded request channel and
 takes a result from a bounded result channel only if one is present by that frame's deadline.
 
