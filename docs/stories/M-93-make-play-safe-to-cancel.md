@@ -56,3 +56,30 @@ accounting in `docs/specs/media-runtime.md` §4 — nothing is discarded here. S
 - 2026-08-09: filed from a measurement rather than a reading. `--media idle` (no tones) tears down
   ten calls in 4 s; `--media full` with `abort()` did not finish in 90 s; `--media full` stopping
   between frames does it in 6 s. The example carries the workaround and the comment explaining it.
+
+- 2026-08-09: **not merged into `1.0.0-rc.13`, and the branch is where the work is.** The implementor
+  was ended by an auth failure rather than by anything about the work; its worktree is preserved on
+  `impl/M-93` as a WIP commit that asserts no acceptance row.
+
+  What it established is worth more than what it left unfinished, because **it refutes this story's
+  own hypothesis and the coordinator's public statement of it**. Aborting a task parked *inside*
+  `play` was never the problem: the clip stops, its queued packets are discarded, and the session
+  tears down in milliseconds. What wedges is the other order — a call ending underneath a loop that
+  is still playing. Once the session has stopped, every long-running entry point answers immediately
+  *without suspending*, so `loop { play().await }` stops being paced and becomes a bare busy loop; a
+  task that never reaches a suspension point cannot be cancelled at all, `abort()` never lands,
+  `JoinHandle::await` never returns, and dropping the runtime blocks. **The resource held is a
+  runtime worker**, and that is what the teardown was really waiting on.
+
+  The fix in progress adds a `yield_now` hop on the paths that can answer without parking. It works
+  — `crates/sipx-media/tests/play_cancellation.rs` passes 3 of 3 — but it **regresses**
+  `sipx-call`'s `every_playback_reports_its_own_end_by_id`, which passes on `main` and fails
+  deterministically on the branch. The implementor had already named the cause in its last words:
+  the hop fires on the `Completed` path the `C-3` watchers observe, and two watchers that both park
+  before their clips end must be woken in the order the clips ended. It judged that a sharper rule
+  was available — hop only where the wait genuinely could not have parked — and did not get to
+  write it.
+
+  So the remaining work is exactly that rule, plus proof that the ordering test goes green with the
+  cancellation tests still passing. Do not merge before both hold.
+
