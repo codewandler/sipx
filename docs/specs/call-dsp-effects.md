@@ -396,8 +396,9 @@ statement of "a peaking filter changes a band and not a level".
 **Does not:** make `band_gain` the magnitude response at the centre frequency. It is the scale
 applied to the extracted band, and a first-order pair's band does not reach unity, so the resulting
 peak is smaller than the number suggests. The parameter is named after what it multiplies rather
-than after what a sweep would measure; `X-109` owns the measurement that would let anyone claim
-otherwise. There is no `Q` and no bandwidth parameter — the width is two octaves and fixed — no
+than after what a sweep would measure. **§10 measured it**: the extracted band reaches 667
+thousandths of unity, so a `band_gain` of 4.0 peaks at 3.001 and one of 2.0 at 1.667 — and a cut is
+shallower still, 336 where the same model says 333. There is no `Q` and no bandwidth parameter — the width is two octaves and fixed — no
 shelving mode and no cascade. A centre frequency whose upper edge would pass 0.45 of the rate is
 clamped there, so a band pushed past the folding frequency narrows and then vanishes rather than
 folding back.
@@ -453,3 +454,105 @@ established, which EFFECT-V19 cannot:
 The stutter row is the point. Its delay line is the one heap allocation any built-in makes, its
 `state_bytes` stated the line's size on the author's word, and nothing checked it until there was a
 mechanism that could. It is exact, not merely within budget.
+
+## 10. Measured response (`X-109`)
+
+§9's vectors run at one cutoff, where the coefficient is exactly 0.5 and the section is a two-tap
+average anyone can check on paper. That is what makes them derivable and also what they cannot
+answer: **what any of these filters does to a tone at some other frequency.** §8.4 states a negative
+it could not size, and this section is the measurement that sizes it.
+
+The instrument is `sipx_audio::dsp::response`, packaged in the crate and open to any processor —
+built-in or application-supplied — through the same factory the conformance harness takes. The
+corpus is a fixed one: a probe tone from a shipped 65-entry quarter-wave Q15 table, at
+**bin *k* = `k·rate/256`**, amplitude 8,192, measured over one 256-position block after eight
+settling blocks. The figure is
+
+```
+magnitude = round(1000·√(Σy² / Σx²))          in thousandths of unity
+```
+
+over that block, which spans a whole number of the probe's cycles — so `Σ sin²(2πkn/N + φ) = N/2`
+holds for every phase and the figure is a magnitude rather than something that moves when the filter
+shifts the waveform in time.
+
+**It is integer arithmetic end to end, so a response here is the same figure on every machine, at
+any load, in debug and in release.** Nothing in this section needs a quiet box. What does — CPU cost
+— is not here; see §10.4.
+
+### 10.1 The one-pole filters on a narrowband call
+
+Bins 2, 4, 8, 16, 32, 64, 96, 112, which at 8,000 Hz are 62.5, 125, 250, 500, 1,000, 2,000, 3,000
+and 3,500 Hz.
+
+| Filter | 62.5 | 125 | 250 | 500 | 1,000 | 2,000 | 3,000 | 3,500 |
+|---|---|---|---|---|---|---|---|---|
+| `low_pass` 300 | 979 | 923 | 768 | 511 | 275 | 117 | 49 | 24 |
+| `low_pass` 1,000 | 998 | 993 | 973 | 901 | 707 | 383 | 169 | 82 |
+| `low_pass` 3,400 | 1,000 | 1,000 | 1,000 | 999 | 995 | 972 | 865 | 638 |
+| `high_pass` 300 | 203 | 384 | 640 | 860 | 962 | 993 | 999 | 1,000 |
+| `high_pass` 1,000 | 59 | 118 | 231 | 433 | 707 | 924 | 986 | 997 |
+| `high_pass` 3,400 | 6 | 12 | 24 | 48 | 99 | 233 | 501 | 770 |
+
+On a 16,000 Hz call the same hertz sits an octave lower on the curve, and the bins are 125 Hz apart
+rather than 62.5:
+
+| Filter | 125 | 250 | 500 | 1,000 | 2,000 | 4,000 | 6,000 | 7,000 |
+|---|---|---|---|---|---|---|---|---|
+| `low_pass` 3,400 | 1,000 | 998 | 992 | 970 | 885 | 619 | 310 | 155 |
+| `high_pass` 300 | 385 | 641 | 859 | 959 | 990 | 998 | 1,000 | 1,000 |
+
+**`cutoff_hz` is the half-power point, exactly.** At 125, 250, 500, 1,000 and 2,000 Hz — every cutoff
+a bin lands on — both filters measure **707** thousandths, which is `⌊1000/√2⌉`. §8.2 describes the
+coefficient as a 65-entry table with integer interpolation and says nothing about where the corner
+lands; until this run "cutoff" was a parameter name. It is now a measured property of the table, at
+five cutoffs four octaves apart.
+
+### 10.2 `sipx.peaking`, and what `band_gain` is worth
+
+At `centre_hz = 1,000`:
+
+| `band_gain` | 62.5 | 125 | 250 | 500 | 1,000 | 2,000 | 3,000 | 3,500 |
+|---|---|---|---|---|---|---|---|---|
+| 0 | 990 | 963 | 866 | 620 | 336 | 620 | 902 | 975 |
+| 0.5 | 994 | 977 | 919 | 784 | 667 | 784 | 940 | 985 |
+| 1.0 | 1,000 | 1,000 | 1,000 | 1,000 | 1,000 | 1,000 | 1,000 | 1,000 |
+| 2.0 | 1,019 | 1,071 | 1,225 | 1,494 | **1,667** | 1,494 | 1,172 | 1,048 |
+| 4.0 | 1,083 | 1,289 | 1,803 | 2,559 | **3,001** | 2,559 | 1,637 | 1,199 |
+
+**The extracted band reaches 667 thousandths of unity and no more.** Above unity that single number
+is the whole of §8.4's shortfall: `1000 + (band_gain − 1000)·667/1000` is the measured peak to the
+thousandth at 2.0 and at 4.0. **Below unity the same model under-reads by more than rounding** — at
+`band_gain = 0` it says 333 and the filter measures 336 — because a cut subtracts something not
+exactly in phase with what it is subtracted from, so it cancels slightly less than a scalar model
+expects. A caller sizing a notch gets less notch than the arithmetic suggests, on top of the
+shortfall the peak already has.
+
+The band is also two octaves wide as §8.4 says and no wider: at 250 and 3,500 Hz — two octaves below
+the centre and one and a half above — a `band_gain` of 4.0 is still lifting by 803 and 199
+thousandths.
+
+### 10.3 What the sweep is shown catching
+
+A measurement nothing has ever been seen to fail is not evidence, so the recorded suite carries the
+controls that would catch a broken one:
+
+| Control | What it establishes |
+|---|---|
+| an identity, and a polarity inversion | 1,000 at every bin — the sweep invents no roll-off, and reports magnitude rather than similarity |
+| `gain` at 0.5 and 2.0 | exactly 500 and 2,000 at every bin: the one response known in advance, and it comes back exact |
+| the same peaking filter at amplitude 1,024, 8,192 and 16,384 | identical to within one thousandth at the first two and **not** at the third, where its own lift reaches the clamp: 3,001 becomes 2,451. The sweep sees a nonlinearity, which is why the corpus amplitude is a quarter of full scale — a sweep run at half would have recorded the clamp in §10.1 and called it a filter |
+| a processor declaring latency, a tail, a non-preserving length, a refused format, or a bin above 127 | a typed refusal naming the reason, never a missing row |
+
+### 10.4 What §10 does not measure
+
+- **Phase, group delay and linearity.** The figure is an energy ratio. A nonlinear processor gets a
+  number out of it, and that number is not a transfer magnitude — which is exactly what the
+  amplitude control above demonstrates.
+- **Anything finer than `rate/256`, or at or above `rate·112/256`.**
+- **CPU cost.** That is a clock reading, and a clock reading has none of the properties this section
+  has. `crates/sipx-audio/examples/dsp_cost.rs` takes it, refuses to report under load, and
+  `X-109`'s `## Progress` records that on the machine available to it **the quiet-box run was not
+  taken**.
+- **Heap.** `./scripts/check-dsp-heap.sh` measures every processor's heap against its declared
+  `state_bytes` exactly; §9.1's table is that measurement and this one does not repeat it.

@@ -1,7 +1,7 @@
 //! The signing key never reaches a diagnostic (`M-110`'s adjacent finding, `M-117`).
 //!
 //! `Authenticator` derived `Debug` over `secret: [u8; 32]`. That is not a credential leak in the
-//! ordinary sense — it is the key every self-describing nonce is MACed with, so a reader of that
+//! ordinary sense — it is the key every self-describing nonce is `MACed` with, so a reader of that
 //! record can mint nonces this authenticator accepts as its own, which is the whole of the replay
 //! protection. Nothing logged one, which is what made it latent rather than live: exactly the state
 //! `PcmFrame` was in for one release before `M-107`.

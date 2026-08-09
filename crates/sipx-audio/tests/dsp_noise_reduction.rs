@@ -858,6 +858,41 @@ fn corpus(condition: &str) -> Vec<i16> {
     }
 }
 
+/// FNV-1a over each §8 condition, and the one thing holding two generators to one corpus.
+///
+/// `crates/sipx-audio/examples/dsp_cost.rs` measures what the reducer *costs* on these four
+/// signals; the vectors below measure what it *does* to them. A test helper is not reachable from
+/// an example, so the example carries its own copy of §8's recurrences — and a cost figure taken
+/// on a signal that had quietly drifted from the one the quality figures describe would be two
+/// measurements of two different things, presented as one. These numbers are printed by every
+/// `dsp_cost` run under `corpus`, and `X-109` found a real divergence with them: the example
+/// spliced `transient` with `i16::MIN` where §8 and this file use `-i16::MAX`.
+const CORPUS_CHECKSUMS: &[(&str, u64)] = &[
+    ("silence", 0xb93a_0c83_ce3b_6325),
+    ("stationary", 0x8934_3e5d_b98e_8306),
+    ("transient", 0xe980_f030_62d9_50a3),
+    ("overlapping", 0x05b2_2294_c65e_ee88),
+];
+
+fn checksum(samples: &[i16]) -> u64 {
+    samples.iter().fold(0xcbf2_9ce4_8422_2325, |hash, sample| {
+        (hash ^ u64::from(u16::from_ne_bytes(sample.to_ne_bytes())))
+            .wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+/// NR-V23 (`X-109`) — the corpus is these exact samples, and the cost harness measures the same
+/// ones.
+#[test]
+fn the_corpus_is_the_same_corpus_the_cost_harness_measures() {
+    for (name, expected) in CORPUS_CHECKSUMS {
+        let signal = corpus(name);
+        assert_eq!(checksum(&signal), *expected, "{name}");
+    }
+    assert_eq!(corpus("silence").len(), 4_096);
+    assert_eq!(corpus("stationary").len(), 12_288);
+}
+
 /// Summed magnitude of the output over the input's, in thousandths, after the warm-up (§8).
 fn attenuation(input: &[i16], output: &[i16], from: usize) -> i64 {
     let sum = |samples: &[i16]| -> i64 {

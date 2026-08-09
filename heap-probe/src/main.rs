@@ -29,6 +29,10 @@
 //!    allocation after `prepare` — not per frame, not per position, not per observation", and until
 //!    `X-128` nothing checked it at all.
 //!
+//! And one figure about the run itself, which `X-109` added: **every identifier this workspace
+//! ships was measured**. See [`Covered`] — a hand-written call list had already let `M-66`'s
+//! reducer through unmeasured, and the list is now held to the crate's own.
+//!
 //! Neither figure is computed here. [`sipx_audio::dsp::Conformance::run_with_heap_meter`] holds
 //! them to the declaration; this package supplies the bytes and nothing else. That split is
 //! deliberate — if the comparison lived out here, a change in the workspace could stop calling it
@@ -52,9 +56,10 @@ use std::process::ExitCode;
 
 use sipx_audio::analysis::AudioDirection;
 use sipx_audio::dsp::effects::{
-    BitCrush, Gain, HardClip, HighPass, LowPass, MAX_STUTTER_POSITIONS, Peaking, Polarity,
-    SoftClip, Stutter,
+    BUILT_IN_IDS, BitCrush, Gain, HardClip, HighPass, LowPass, MAX_STUTTER_POSITIONS, Peaking,
+    Polarity, SoftClip, Stutter,
 };
+use sipx_audio::dsp::noise::{NOISE_REDUCTION_IDS, SubbandSuppressor};
 use sipx_audio::dsp::{
     CHECK_ALLOCATION, CheckStatus, Conformance, ConformanceReport, DspCapability, DspFrame,
     DspResetCause, FormatError, FrameAdmission, FrameProcessor, FrameSink, HeapMeter, HeapUse,
@@ -313,19 +318,23 @@ impl FrameProcessor for HeapLiar {
 
 /// What one processor's `DSP-K9` outcome was, reduced to what this binary prints.
 struct Measured {
+    /// The identifier the processor declares, which is what [`Covered`] is checked against — a
+    /// display name would let a typo pass for coverage.
+    id: String,
     status: CheckStatus,
     detail: String,
     other_failures: Vec<String>,
 }
 
 /// Run one processor through the harness with the meter installed and pull out `DSP-K9`.
-fn measure<P, F>(factory: F) -> Measured
+fn measure<P, F>(mut factory: F) -> Measured
 where
     P: FrameProcessor,
     F: FnMut() -> P,
 {
+    let id = factory().capability().id().to_owned();
     let report: ConformanceReport =
-        Conformance::new().run_with_heap_meter(factory, &ThreadHeapMeter);
+        Conformance::new().run_with_heap_meter(&mut factory, &ThreadHeapMeter);
     let allocation = report
         .checks()
         .iter()
@@ -337,15 +346,57 @@ where
         .collect();
     match allocation {
         Some(check) => Measured {
+            id,
             status: check.status(),
             detail: check.detail().to_owned(),
             other_failures,
         },
         None => Measured {
+            id,
             status: CheckStatus::Failed,
             detail: "DSP-K9 was absent from the report".to_owned(),
             other_failures,
         },
+    }
+}
+
+/// Every declared identifier this run measured, so the list below can be held to the crate's own.
+///
+/// `X-128` wrote the call list by hand and `X-109` found what a hand-written list does: `M-66`
+/// shipped `sipx.subband_suppressor` two stories later and nothing here noticed, so the one
+/// processor with adaptive state was the one processor whose `state_bytes` went unmeasured. A
+/// second hand correction would leave the arrangement that produced the first, so the list is now
+/// checked against [`BUILT_IN_IDS`] and [`NOISE_REDUCTION_IDS`] and the run fails if a processor
+/// this workspace ships is not in it.
+#[derive(Default)]
+struct Covered(Vec<String>);
+
+impl Covered {
+    fn note(&mut self, id: &str) {
+        self.0.push(id.to_owned());
+    }
+
+    /// Every shipped identifier appears, and nothing claims to have measured one that does not
+    /// ship. Both directions matter: the first catches a new processor, the second a renamed one.
+    fn holds(&self) -> bool {
+        let mut ok = true;
+        for id in BUILT_IN_IDS.iter().chain(NOISE_REDUCTION_IDS) {
+            if !self.0.iter().any(|measured| measured == id) {
+                println!("  {id} ships and was not measured");
+                ok = false;
+            }
+        }
+        for measured in &self.0 {
+            if !BUILT_IN_IDS
+                .iter()
+                .chain(NOISE_REDUCTION_IDS)
+                .any(|id| id == measured)
+            {
+                println!("  {measured} was measured and is not a declared identifier");
+                ok = false;
+            }
+        }
+        ok
     }
 }
 
@@ -402,16 +453,21 @@ where
 
 fn main() -> ExitCode {
     let mut ok = true;
+    let mut covered = Covered::default();
+    let run = |name: &str, measured: &Measured, covered: &mut Covered| {
+        covered.note(&measured.id);
+        expect_measured(name, measured)
+    };
 
     println!("built-in processors, measured against their declared state_bytes:");
-    ok &= expect_measured("sipx.gain", &measure(Gain::new));
-    ok &= expect_measured("sipx.polarity", &measure(Polarity::new));
-    ok &= expect_measured("sipx.hard_clip", &measure(HardClip::new));
-    ok &= expect_measured("sipx.soft_clip", &measure(SoftClip::new));
-    ok &= expect_measured("sipx.bit_crush", &measure(BitCrush::new));
-    ok &= expect_measured("sipx.low_pass", &measure(LowPass::new));
-    ok &= expect_measured("sipx.high_pass", &measure(HighPass::new));
-    ok &= expect_measured("sipx.peaking", &measure(Peaking::new));
+    ok &= run("sipx.gain", &measure(Gain::new), &mut covered);
+    ok &= run("sipx.polarity", &measure(Polarity::new), &mut covered);
+    ok &= run("sipx.hard_clip", &measure(HardClip::new), &mut covered);
+    ok &= run("sipx.soft_clip", &measure(SoftClip::new), &mut covered);
+    ok &= run("sipx.bit_crush", &measure(BitCrush::new), &mut covered);
+    ok &= run("sipx.low_pass", &measure(LowPass::new), &mut covered);
+    ok &= run("sipx.high_pass", &measure(HighPass::new), &mut covered);
+    ok &= run("sipx.peaking", &measure(Peaking::new), &mut covered);
     // The one built-in with a heap component. Its declaration is a function of the line it was
     // built with, so every size is a separate claim and gets a separate measurement.
     //
@@ -420,7 +476,27 @@ fn main() -> ExitCode {
     #[allow(clippy::unwrap_used)]
     for delay in [0, 1, 4, MAX_STUTTER_POSITIONS] {
         let name = format!("sipx.stutter({delay})");
-        ok &= expect_measured(&name, &measure(|| Stutter::new(delay).unwrap()));
+        ok &= run(&name, &measure(|| Stutter::new(delay).unwrap()), &mut covered);
+    }
+
+    println!();
+    // `M-66`'s reducer, and the only processor in the workspace with adaptive state. §7 of
+    // `docs/specs/call-dsp-noise-reduction.md` bounds that state by construction — three bands of
+    // fixed-width followers, no history buffer — and until `X-109` nothing held the claim to a
+    // figure. It owns no heap, and this is what says so.
+    println!("noise reducers, measured against their declared state_bytes:");
+    ok &= run(
+        "sipx.subband_suppressor",
+        &measure(SubbandSuppressor::new),
+        &mut covered,
+    );
+
+    println!();
+    println!("the processors this workspace ships, all of which must appear above:");
+    if covered.holds() {
+        println!("  every declared identifier was measured");
+    } else {
+        ok = false;
     }
 
     println!();

@@ -121,6 +121,7 @@ pub mod conformance;
 mod contract;
 pub mod effects;
 pub mod noise;
+pub mod response;
 
 pub use conformance::{
     CHECK_ALLOCATION, CHECK_CANCELLATION, CHECK_CAPABILITY, CHECK_CHUNK_BOUNDARY,
