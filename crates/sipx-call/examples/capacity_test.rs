@@ -68,6 +68,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use sipx_call::{Call, DialOptions, Dispatched, Dispatcher, dial, serve};
@@ -111,18 +112,19 @@ const FRAME: usize = CLOCK / 50;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let options = Options::parse(std::env::args().skip(1))?;
 
+    let tone = tone(CLOCK);
+    let running = Arc::new(AtomicBool::new(true));
     let server = if let Some(address) = options.server {
         println!("client only: holding calls against {address}");
         address
     } else {
-        let address = start_server().await?;
+        let address = start_server(Arc::clone(&tone), options.media, Arc::clone(&running)).await?;
         println!("server in this process, listening on {address}");
         address
     };
 
     let (endpoint, _incoming) = bind(Config::new("127.0.0.1:0".parse()?)).await?;
     let endpoint = Arc::new(endpoint);
-    let tone = tone(CLOCK);
 
     println!(
         "ramp {:?}, {} s dwell between steps\n",
@@ -134,16 +136,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Every call placed so far, held for the whole run. Dropping one would end it, which is the
     // difference between this and `load_test`.
     let mut held: Vec<Call> = Vec::new();
+    let mut playing: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     let mut steps: Vec<Step> = Vec::new();
     let mut stopped_early = None;
 
     let run_started = Instant::now();
     for (index, target) in options.ramp.iter().copied().enumerate() {
         let step_started = Instant::now();
-        let (placed, setup, failures) =
-            place_many(&endpoint, server, target, &tone, options.media).await;
+        let (placed, tones, setup, failures) =
+            place_many(&endpoint, server, target, &tone, options.media, &running).await;
         let established_now = placed.len();
         held.extend(placed);
+        playing.extend(tones);
 
         tokio::time::sleep(options.dwell).await;
 
@@ -191,11 +195,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
     }
 
+    if options.media == Media::Full && steps.iter().any(|step| !step.audio_observed) {
+        println!(
+            "warning: some steps saw no RTP at all, so their loss/jitter/mos are withheld rather \
+             than reported as perfect"
+        );
+    }
     if let Some(path) = &options.record {
         std::fs::write(path, record(&steps, &options, stopped_early.as_deref()))?;
         println!("recorded to {path}");
     }
 
+    // Stop the tones **before** hanging up, and stop them by asking rather than by aborting. A
+    // thousand play loops competing with a thousand teardowns is what made the first version of
+    // this example sit at sixteen cores for ten minutes after it had already written its results.
+    running.store(false, Ordering::Relaxed);
+    for task in playing {
+        let _ = task.await;
+    }
     // Hanging up is not required for the measurement, but leaving a thousand dialogs for the
     // process teardown to reap makes the next run measure the last one's leftovers.
     for mut call in held {
@@ -215,11 +232,18 @@ async fn place_many(
     target: usize,
     tone: &Arc<Vec<i16>>,
     media: Media,
-) -> (Vec<Call>, Vec<Duration>, Vec<String>) {
+    running: &Arc<AtomicBool>,
+) -> (
+    Vec<Call>,
+    Vec<tokio::task::JoinHandle<()>>,
+    Vec<Duration>,
+    Vec<String>,
+) {
     let mut placing = tokio::task::JoinSet::new();
     for _ in 0..target {
         let endpoint = Arc::clone(endpoint);
         let tone = Arc::clone(tone);
+        let running = Arc::clone(running);
         let media_mode = media;
         placing.spawn(async move {
             let started = Instant::now();
@@ -227,17 +251,22 @@ async fn place_many(
             match result {
                 Ok(call) => {
                     let elapsed = started.elapsed();
+                    let mut tone_task = None;
                     if media_mode == Media::Full {
                         // Keep audio flowing for the rest of the run, so loss and jitter are
                         // measurements rather than a report about an idle stream.
                         let media = call.media_handle();
-                        tokio::spawn(async move {
-                            loop {
+                        tone_task = Some(tokio::spawn(async move {
+                            // The flag is read *between* plays, never inside one. Aborting a task
+                            // parked in `play` leaves the session's playback path holding
+                            // something `hang_up` then waits on: with abort, ten calls took over
+                            // ninety seconds to tear down; stopping between frames, four.
+                            while running.load(Ordering::Relaxed) {
                                 media.play(&tone, FRAME).await;
                             }
-                        });
+                        }));
                     }
-                    Ok((call, elapsed))
+                    Ok((call, tone_task, elapsed))
                 }
                 Err(error) => Err(error),
             }
@@ -245,12 +274,16 @@ async fn place_many(
     }
 
     let mut calls = Vec::with_capacity(target);
+    let mut tone_tasks = Vec::with_capacity(target);
     let mut setup = Vec::with_capacity(target);
     let mut failures = Vec::new();
     while let Some(joined) = placing.join_next().await {
         match joined {
-            Ok(Ok((call, elapsed))) => {
+            Ok(Ok((call, tone_task, elapsed))) => {
                 calls.push(call);
+                if let Some(tone_task) = tone_task {
+                    tone_tasks.push(tone_task);
+                }
                 setup.push(elapsed);
             }
             Ok(Err(error)) => failures.push(error),
@@ -258,7 +291,7 @@ async fn place_many(
         }
     }
     setup.sort_unstable();
-    (calls, setup, failures)
+    (calls, tone_tasks, setup, failures)
 }
 
 async fn place_one(endpoint: &sipx_transport::Handle, server: SocketAddr) -> Result<Call, String> {
@@ -296,6 +329,14 @@ struct Step {
     overhead: Duration,
     /// Cumulative wall clock minus what the schedule said it should be by now.
     drift: Duration,
+    /// Whether any RTP arrived at all.
+    ///
+    /// **The audio columns are suppressed when this is false, and that is the point.** `loss`,
+    /// `jitter` and `mos` are computed from a receive stream; over an empty one they read 0%, 0 ms
+    /// and 4.40 — a perfect score for a call that carried nothing. The first run of this example
+    /// printed exactly that for a thousand calls, because the server never talked back. A figure
+    /// that cannot be anything but good is not a measurement.
+    audio_observed: bool,
 }
 
 /// Sample every live call and the process itself.
@@ -353,6 +394,7 @@ async fn sample(
         packets,
         discards,
         rss_bytes: resident_set(),
+        audio_observed: packets > 0,
         wall: Duration::ZERO,
         sample_wall,
         overhead: Duration::ZERO,
@@ -422,8 +464,17 @@ fn row(step: &Step) {
             |bytes| format!("{:>6.0}MB", bytes as f64 / 1_048_576.0),
         )
     };
+    let (loss, jitter, mos) = if step.audio_observed {
+        (
+            format!("{:>5.2}%", step.loss * 100.0),
+            format!("{:>6.2}ms", step.jitter.as_secs_f64() * 1000.0),
+            format!("{:>4.2}", step.mos),
+        )
+    } else {
+        ("    —".to_owned(), "     —".to_owned(), "   —".to_owned())
+    };
     println!(
-        "{:>4}  {:>7}  {:>7}  {:>6}  {:>8} {:>8} {:>8}  {:>7}  {:>5.2}%  {:>6.2}ms  {:>4.2}  {:>8}  {:>7}  {:>6.2}s  {:>6.2}s  {:>6.2}s",
+        "{:>4}  {:>7}  {:>7}  {:>6}  {:>8} {:>8} {:>8}  {:>7}  {:>6}  {:>8}  {:>4}  {:>8}  {:>7}  {:>6.2}s  {:>6.2}s  {:>6.2}s",
         step.index,
         step.target,
         step.established,
@@ -432,9 +483,9 @@ fn row(step: &Step) {
         ms(percentile(&step.setup, 0.95)),
         ms(percentile(&step.setup, 0.99)),
         ms(step.rtt),
-        step.loss * 100.0,
-        step.jitter.as_secs_f64() * 1000.0,
-        step.mos,
+        loss,
+        jitter,
+        mos,
         mib(step.rss_bytes),
         step.rss_bytes.map_or_else(
             || "      —".to_owned(),
@@ -459,10 +510,13 @@ fn row(step: &Step) {
 fn record(steps: &[Step], options: &Options, stopped_early: Option<&str>) -> String {
     let mut out = String::from("{\n");
     out.push_str(&format!(
-        "  \"ramp\": {:?},\n  \"dwell_seconds\": {},\n  \"media\": {:?},\n",
+        "  \"ramp\": {:?},\n  \"dwell_seconds\": {},\n  \"media\": \"{}\",\n",
         options.ramp,
         options.dwell.as_secs(),
-        options.media
+        match options.media {
+            Media::Full => "full",
+            Media::Idle => "idle",
+        }
     ));
     out.push_str(&format!(
         "  \"stopped_early\": {},\n",
@@ -479,7 +533,7 @@ fn record(steps: &[Step], options: &Options, stopped_early: Option<&str>) -> Str
         out.push_str(&format!(
             "    {{\"step\": {}, \"target\": {}, \"established\": {}, \"held\": {}, \
              \"setup_p50_ms\": {}, \"setup_p95_ms\": {}, \"setup_p99_ms\": {}, \
-             \"rtt_p50_ms\": {}, \"loss\": {:.5}, \"jitter_ms\": {:.2}, \"mos\": {:.3}, \
+             \"rtt_p50_ms\": {}, \"audio_observed\": {}, \"loss\": {}, \"jitter_ms\": {}, \"mos\": {}, \
              \"packets_received\": {}, \"discards\": {}, \"rss_bytes\": {}, \"failures\": {}, \
              \"wall_s\": {:.2}, \"sample_s\": {:.3}, \"overhead_s\": {:.2}, \"drift_s\": {:.2}}}{}\n",
             step.index,
@@ -490,9 +544,14 @@ fn record(steps: &[Step], options: &Options, stopped_early: Option<&str>) -> Str
             ms(percentile(&step.setup, 0.95)),
             ms(percentile(&step.setup, 0.99)),
             ms(step.rtt),
-            step.loss,
-            step.jitter.as_secs_f64() * 1000.0,
-            step.mos,
+            step.audio_observed,
+            if step.audio_observed { format!("{:.5}", step.loss) } else { "null".to_owned() },
+            if step.audio_observed {
+                format!("{:.2}", step.jitter.as_secs_f64() * 1000.0)
+            } else {
+                "null".to_owned()
+            },
+            if step.audio_observed { format!("{:.3}", step.mos) } else { "null".to_owned() },
             step.packets,
             step.discards,
             step.rss_bytes
@@ -522,7 +581,11 @@ fn tone(rate: usize) -> Arc<Vec<i16>> {
 }
 
 /// A server that answers everything and holds each dialog until the caller ends it.
-async fn start_server() -> Result<SocketAddr, Box<dyn std::error::Error>> {
+async fn start_server(
+    tone: Arc<Vec<i16>>,
+    media_mode: Media,
+    running: Arc<AtomicBool>,
+) -> Result<SocketAddr, Box<dyn std::error::Error>> {
     let (endpoint, incoming) = bind(Config::new("127.0.0.1:0".parse()?)).await?;
     let address = endpoint.local_addr();
 
@@ -535,8 +598,30 @@ async fn start_server() -> Result<SocketAddr, Box<dyn std::error::Error>> {
             match invitation.answer(&endpoint, LOOPBACK).await {
                 Ok(mut call) => {
                     let (_, mut requests) = invitation.into_parts();
+                    // The server talks back. Without this the client's receive stream is empty and
+                    // every audio-quality figure is computed from nothing — which is how the first
+                    // run of this example reported a perfect MOS over zero packets.
+                    let ringing = Arc::new(AtomicBool::new(true));
+                    let playing = (media_mode == Media::Full).then(|| {
+                        let media = call.media_handle();
+                        let tone = Arc::clone(&tone);
+                        let running = Arc::clone(&running);
+                        let ringing = Arc::clone(&ringing);
+                        tokio::spawn(async move {
+                            while running.load(Ordering::Relaxed) && ringing.load(Ordering::Relaxed)
+                            {
+                                media.play(&tone, FRAME).await;
+                            }
+                        })
+                    });
                     tokio::spawn(async move {
                         let _ = serve(&mut call, &mut requests).await;
+                        // The call is over; the tone stops with it, between frames rather than
+                        // mid-frame for the same reason the client's does.
+                        ringing.store(false, Ordering::Relaxed);
+                        if let Some(playing) = playing {
+                            let _ = playing.await;
+                        }
                     });
                 }
                 Err(error) => eprintln!("server could not answer: {error}"),

@@ -86,6 +86,7 @@ appeared twice before anyone named it.
 
 ### Media
 _Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
+- [M-93 — Make a cancelled play safe to tear down](M-93-make-play-safe-to-cancel.md) · Media · aborting a task parked in MediaSession::play wedges hang_up · ten calls took over 90 s to tear down, four without
 - [M-83 — Extend the extensibility guard past the media path](M-83-extend-the-reachability-guard-past-the-media-path.md) · Media · 98 reachable public enums outside the guarded five crates · the boundary names crates, so no enum is individually excused
 
 ## Blocked
