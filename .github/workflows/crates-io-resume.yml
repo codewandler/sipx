@@ -242,6 +242,14 @@ jobs:
           public_count="$(cargo metadata --manifest-path "$SIPX_RELEASE_ROOT/Cargo.toml" --no-deps --format-version 1 | python3 -c 'import json, sys; print(sum(package.get("publish") != [] for package in json.load(sys.stdin)["packages"]))')"
           max_invocations=$((public_count + 1))
           report="$RUNNER_TEMP/sipx-recovery-frontier.txt"
+          # The same total-pacing bound the ordinary release states, sized for a job that does not
+          # also run the complete gate: 7200s of registry waiting inside a 180-minute recovery
+          # still leaves an hour for the tag rechecks, the visible-byte proofs and the consumer
+          # verification. Recovery is the invocation that inherits an unfinished publication, so
+          # this is where a whole-publication budget has to be readable — and where a per-
+          # invocation one would put nothing between pacing and `timeout-minutes`. The ledger is
+          # created outside the loop for the same reason it is in crates-io.yml.
+          pacing_ledger="$RUNNER_TEMP/sipx-recovery-pacing.json"
           complete=false
           for ((invocation = 1; invocation <= max_invocations; invocation++)); do
             echo "recovery frontier invocation $invocation of $max_invocations"
@@ -257,6 +265,8 @@ jobs:
               --confirm-publish "$RELEASE_TAG" \
               --authorize-ci-recovery "$RELEASE_TAG@$RELEASE_SHA@$SIPX_FAILED_RELEASE_RUN_ID" \
               --registry-wait-seconds 300 \
+              --registry-retry-budget-seconds 7200 \
+              --registry-retry-ledger "$pacing_ledger" \
               --command-timeout-seconds 1800 2>&1 | tee "$report"
             if grep -Fqx "all public packages are already registry-visible" "$report"; then
               complete=true

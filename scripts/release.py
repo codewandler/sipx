@@ -109,6 +109,17 @@ class RateLimitRefusal(NamedTuple):
 # already exists is allowed once a minute after a burst of thirty. Modelling both is what keeps an
 # ordinary version bump out of the new-name pacing; modelling one would be the constant delay this
 # replaces.
+#
+# Where the two values come from, and what would make them stale: both are crates.io's published
+# publication policy transcribed by hand, and nothing in this repository re-reads that policy —
+# there is no probe that could, short of provoking the refusals the model exists to avoid. They
+# therefore go stale silently the moment the registry restates its own limits, and the symptom is a
+# `429` whose stated deadline is routinely longer than the refill modelled here. That costs pacing
+# accuracy and never correctness: `rate_limit_restate` hands the authority back to the registry's
+# own deadline the first time it answers one, and `publish_frontier`'s budget bounds what a wrong
+# model can spend. Re-reading the policy means updating these two values and §4.1 of
+# `docs/specs/release-rehearsal.md` together — `test-release.py` holds the specification's numbers
+# to these constants, so a change to one of the two transcriptions cannot land alone.
 NEW_CRATE_RATE_LIMIT = RegistryRateLimit(burst=5, refill_seconds=600.0)
 NEW_VERSION_RATE_LIMIT = RegistryRateLimit(burst=30, refill_seconds=60.0)
 NEW_CRATE = "new-crate"
@@ -1268,12 +1279,55 @@ def _resume_note(published: Sequence[str]) -> str:
     )
 
 
+def pacing_ledger_spent(path: pathlib.Path) -> float:
+    """Read the rate-limit wait one publication has already spent across earlier invocations.
+
+    A frontier loop is `public_count + 1` separate processes, so a budget that bounds a whole
+    publication rather than one invocation has nowhere to live but a file. This one holds elapsed
+    seconds and nothing else. It never records what was published, so losing it can neither skip
+    nor repeat an upload: every invocation still derives its frontier from registry visibility and
+    checksum-proven bytes. An absent ledger is therefore the first invocation of a publication and
+    not a lost bound. A ledger that exists but cannot be read is refused instead of assumed empty,
+    because a bound nobody can read is not a bound.
+    """
+
+    if not path.exists():
+        return 0.0
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ReleaseError(f"registry pacing ledger {path} is unreadable: {error}") from error
+    spent = record.get("spent_seconds") if isinstance(record, dict) else None
+    if isinstance(spent, bool) or not isinstance(spent, (int, float)) or spent < 0.0:
+        raise ReleaseError(
+            f"registry pacing ledger {path} states no non-negative spent_seconds: {record!r}"
+        )
+    return float(spent)
+
+
+def pacing_ledger_record(path: pathlib.Path, seconds: float) -> None:
+    """Charge one wait to the publication's ledger, before that wait is served.
+
+    Charged first rather than afterwards, so a run killed inside its own `pause` leaves the bound
+    overstated rather than unrecorded. Overstating it can only stop a later invocation earlier,
+    which is the resumable outcome; understating it is how a budget silently stops bounding.
+    """
+
+    spent = pacing_ledger_spent(path) + max(0.0, float(seconds))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    staging = path.with_name(f"{path.name}.partial")
+    staging.write_text(json.dumps({"spent_seconds": spent}) + "\n", encoding="utf-8")
+    staging.replace(path)
+
+
 def publish_frontier(
     frontier: Sequence[str],
     dispatch: Callable[[str], subprocess.CompletedProcess[str]],
     *,
     new_crates: Sequence[str],
     budget_seconds: float,
+    spent_seconds: float = 0.0,
+    record_wait: Callable[[float], None] = lambda _seconds: None,
     monotonic: Callable[[], float] = time.monotonic,
     pause: Callable[[float], None] = time.sleep,
     now: Callable[[], float] = time.time,
@@ -1285,6 +1339,11 @@ def publish_frontier(
     registry publishes for the class of upload, and from the deadline the registry states when it
     answers `429`. Exhausting the budget or the retry attempts raises before the next upload is
     dispatched, which is what keeps a stopped run resumable rather than partly repeated.
+
+    `budget_seconds` bounds the publication and not this invocation: `spent_seconds` is what
+    earlier invocations of the same publication already waited, and `record_wait` is told each
+    wait as it is taken so a later invocation can be given it. A caller that passes neither gets
+    the single-invocation bound, which is all a local release has to reason about.
     """
 
     if budget_seconds <= 0:
@@ -1294,7 +1353,8 @@ def publish_frontier(
         NEW_CRATE: rate_limit_bucket(NEW_CRATE_RATE_LIMIT, monotonic()),
         NEW_VERSION: rate_limit_bucket(NEW_VERSION_RATE_LIMIT, monotonic()),
     }
-    remaining = float(budget_seconds)
+    already = max(0.0, float(spent_seconds))
+    remaining = float(budget_seconds) - already
     published: list[str] = []
     for package in frontier:
         kind = NEW_CRATE if package in names else NEW_VERSION
@@ -1304,12 +1364,21 @@ def publish_frontier(
             if wait > 0.0:
                 if wait > remaining:
                     stated = "" if refusal is None else f": {refusal.detail}"
+                    earlier = (
+                        ""
+                        if already <= 0.0
+                        else (
+                            f" ({budget_seconds:g}s less the {already:g}s earlier invocations of "
+                            "this publication already spent)"
+                        )
+                    )
                     raise ReleaseError(
                         f"{package}: the registry's {kind} rate limit needs {wait:g}s before this "
                         f"upload, beyond the {remaining:g}s left in the rate-limit "
-                        f"budget{stated}" + _resume_note(published)
+                        f"budget{earlier}{stated}" + _resume_note(published)
                     )
                 report(f"{package}: waiting {wait:g}s for the registry's stated {kind} limit")
+                record_wait(wait)
                 pause(wait)
                 remaining -= wait
             buckets[kind] = rate_limit_consume(buckets[kind], monotonic())
@@ -1912,6 +1981,15 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--registry-retry-ledger",
+        metavar="PATH",
+        help=(
+            "file carrying the rate-limit wait earlier invocations of this publication already "
+            "spent, so the budget bounds the whole frontier loop rather than each invocation of "
+            "it (publish mode only)"
+        ),
+    )
+    parser.add_argument(
         "--consumer-timeout-seconds",
         type=float,
         default=900.0,
@@ -1959,6 +2037,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     if args.registry_retry_budget_seconds <= 0:
         print("--registry-retry-budget-seconds must be greater than zero", file=sys.stderr)
+        return 1
+    if args.registry_retry_ledger is not None and mode != "publish":
+        print("--registry-retry-ledger is valid only with --publish", file=sys.stderr)
         return 1
     if args.consumer_timeout_seconds <= 0:
         print("--consumer-timeout-seconds must be greater than zero", file=sys.stderr)
@@ -2118,19 +2199,43 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             uploads = dict(zip(frontier, commands_for(mode, frontier), strict=True))
             new_crates = []
+            unread = 0
             for name in frontier:
                 known = _registry_name_exists(name, 15.0, release_root)
                 if known is None:
+                    unread += 1
                     print(
                         f"{name}: the registry gave no readable name answer; pacing it under the "
                         "stated new-crate limit"
                     )
                 if not known:
                     new_crates.append(name)
+            # Names the registry would not answer are counted apart from names it called new. Both
+            # are paced as new, but only the unread ones are pacing this run cannot prove it owes,
+            # and a budget bounding a whole publication is readable only if the log says how much
+            # of it went on a conservative guess.
             print(
                 f"registry pacing: {len(new_crates)} new crate name(s), "
-                f"{len(frontier) - len(new_crates)} existing name(s)"
+                f"{len(frontier) - len(new_crates)} existing name(s), "
+                f"{unread} unread name(s) paced as new"
             )
+            ledger = (
+                pathlib.Path(args.registry_retry_ledger).resolve()
+                if args.registry_retry_ledger is not None
+                else None
+            )
+            spent = 0.0 if ledger is None else pacing_ledger_spent(ledger)
+            print(
+                f"registry pacing budget: {args.registry_retry_budget_seconds:g}s for this "
+                f"publication, {spent:g}s spent by earlier invocations"
+            )
+
+            def charge(seconds: float) -> None:
+                """Hand one wait to the ledger the frontier loop's invocations share, if any."""
+
+                if ledger is not None:
+                    pacing_ledger_record(ledger, seconds)
+
             publish_frontier(
                 frontier,
                 lambda package: _dispatch(
@@ -2138,6 +2243,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ),
                 new_crates=new_crates,
                 budget_seconds=args.registry_retry_budget_seconds,
+                spent_seconds=spent,
+                record_wait=charge,
             )
         else:
             excluded = tuple(package.name for package in packages if not package.public)

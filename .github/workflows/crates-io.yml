@@ -317,6 +317,16 @@ jobs:
           public_count="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys; print(sum(package.get("publish") != [] for package in json.load(sys.stdin)["packages"]))')"
           max_invocations=$((public_count + 1))
           report="$RUNNER_TEMP/sipx-release-frontier.txt"
+          # What this publication may spend waiting on the registry's stated limits, in total
+          # rather than per invocation. Twelve public crates against crates.io's stated new-crate
+          # allowance — a burst of five, then one name every 600s — is 4200s of unavoidable
+          # waiting on a first publication; 4800 leaves room for one restated deadline without
+          # letting pacing eat the 180-minute job that also runs the complete gate. The ledger is
+          # what makes it one budget instead of `max_invocations` of them: it is created here,
+          # outside the loop, so every invocation reads what its predecessors spent. Exhausting it
+          # stops resumably and hands the rest to crates-io-resume.yml, which is a reviewable
+          # outcome; exhausting `timeout-minutes` is not.
+          pacing_ledger="$RUNNER_TEMP/sipx-release-pacing.json"
           complete=false
           for ((invocation = 1; invocation <= max_invocations; invocation++)); do
             echo "release frontier invocation $invocation of $max_invocations"
@@ -326,6 +336,8 @@ jobs:
               --confirm-publish "$RELEASE_TAG" \
               --authorize-ci-publish "$RELEASE_TAG@$RELEASE_SHA" \
               --registry-wait-seconds 300 \
+              --registry-retry-budget-seconds 4800 \
+              --registry-retry-ledger "$pacing_ledger" \
               --command-timeout-seconds 1800 2>&1 | tee "$report"
             if grep -Fqx "all public packages are already registry-visible" "$report"; then
               complete=true
