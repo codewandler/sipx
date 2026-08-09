@@ -370,12 +370,23 @@ sipx load-responder --max-active 32 --calls 100 --cleanup 40 --seed 41 --json
 
 | Flag | Meaning |
 |---|---|
-| `--max-active <N>` | Positive ceiling on simultaneously owned dialogs; required |
+| `--max-active <N>` | Positive ceiling on simultaneously owned dialogs; required. Size it above the generator's `--concurrency` — see below |
 | `--calls <N>` | Close admission after this many surfaced INVITEs |
 | `--duration <S>` | Close admission after this many seconds |
 | `--cleanup <S>` | Positive deadline for dialog, task and transaction drain; required |
 | `--seed <N>` | Reproduce policy choices and generated media (default 0) |
 | `--provisional-percent <P>` | Percentage of admitted INVITEs receiving one `100 Trying` (default 0) |
+
+**Sizing `--max-active` against a generator.** Give it headroom over the generator's
+`--concurrency` rather than matching it. A slot is released only after this responder has answered
+that dialog's BYE, while the generator frees its own slot on receiving that 200 and places the
+replacement INVITE at once — so a retiring call is counted by both ends across a window no
+responder-side accounting can close, and at an equal ceiling that window sits on the happy path of
+every handover. **Twice the generator's concurrency** covers the worst case, where every slot hands
+over at once; smaller headroom is usually enough, but only twice is enough by argument rather than
+by observation. A refusal at the ceiling is admission control holding its contract and is **not a
+defect**: `sipx load` reports it as `rejected`, distinct from `failed` and `timed_out`, precisely so
+the difference is readable.
 | `--answer-percent <P>` | Percentage answered with `200`; the remainder use `--reject-status` (default 100) |
 | `--reject-status <CODE>` | Policy rejection from 400 through 699 (default 486) |
 | `--dialog-duration <S>` | Positive maximum lifetime of an accepted dialog (default 40) |

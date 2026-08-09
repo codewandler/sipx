@@ -106,3 +106,22 @@ question than this story; if that is ever wanted it should be filed on its own e
   > generator's concurrency: the responder frees a slot only after answering that dialog's BYE, so
   > an equal ceiling refuses the replacement call by design, and the public reference carries the
   > headroom that avoids it.
+
+- 2026-08-09: **finished by the coordinator.** The implementor was ended by an auth failure with the
+  failing-first test written and the guidance itself unwritten — and with three acceptance rows
+  ticked that its own test proved unsatisfied. Verified: `the_max_active_sizing_guidance_is_documented_where_a_run_is_sized`
+  failed on its branch. The rows were re-read against the tree rather than trusted.
+
+  The guidance now exists in both carriers the test holds: `--max-active`'s own help, which is what
+  someone sizing a run reads first, and `website/docs/reference/cli.md`, which
+  `check-cli-reference.py` already pins to that surface. Every figure is `X-126`'s: the mechanism
+  (a slot released only after this responder answers the BYE, while the generator retires on the
+  same 200), twice-the-concurrency as the worst case where every slot hands over at once, and that a
+  refusal at the ceiling is admission control holding its contract.
+
+  **The implementor's `X-131` was right and I hit it immediately.** Writing `` `--concurrency` `` in
+  `load-responder`'s help made `check-cli-reference.py` report `executable option --concurrency is
+  not documented` — it reads a flag spelling out of prose as a flag of that command. The help now
+  says "the generator's concurrency setting" and the reference row keeps the literal flag, which is
+  where a reader needs it. That is a workaround; `X-131` is the fix.
+
