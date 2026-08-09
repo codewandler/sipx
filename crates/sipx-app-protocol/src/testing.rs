@@ -6,6 +6,7 @@
 //! rather than a promise that a reviewer checks by eye.
 
 use crate::document::{DtmfMode, Gather, Instruction, Source, TransferTarget, Verb};
+use crate::dsp::{DspBypassCause, DspRefusal, DspStage, DspTeardownCause, DspValue};
 use crate::event::{
     AudioDirection, CallSnapshot, CallState, DialOutcome, Direction, EndCause, EventKind,
     GatherReason, Leg, TransferState, VoiceEndCause, VoiceThresholds,
@@ -96,6 +97,61 @@ pub fn one_of_every_event() -> Vec<EventKind> {
         EventKind::Unbridged {
             leg: "b".to_owned(),
         },
+    ]
+    .into_iter()
+    .chain(dsp_events())
+    .chain(tail_events())
+    .collect()
+}
+
+/// §5.3's five `call.dsp.*` rows, one of each (`M-67`).
+///
+/// A function of its own because five rows sharing four members push [`one_of_every_event`] past
+/// this workspace's function-length limit on their own. The split is where §5.3 puts them, so the
+/// section's order is still the list's order.
+fn dsp_events() -> Vec<EventKind> {
+    vec![
+        EventKind::DspActivated {
+            instruction_id: "x1".to_owned(),
+            direction: AudioDirection::Outbound,
+            generation: 2,
+            previous: Some(1),
+            processors: 2,
+            contains_overrun: true,
+        },
+        EventKind::DspConfigured {
+            instruction_id: "x2".to_owned(),
+            direction: AudioDirection::Outbound,
+            generation: 2,
+            at_position: 320,
+            processor: "sipx.gain".to_owned(),
+        },
+        EventKind::DspBypassed {
+            direction: AudioDirection::Inbound,
+            generation: 2,
+            at_position: 480,
+            processor: "sipx.low_pass".to_owned(),
+            cause: DspBypassCause::DeadlineMissed,
+        },
+        EventKind::DspRemoved {
+            instruction_id: Some("x3".to_owned()),
+            direction: AudioDirection::Outbound,
+            generation: 2,
+            at_position: 640,
+            processor: None,
+            cause: DspTeardownCause::Requested,
+        },
+        EventKind::DspRefused {
+            instruction_id: "x4".to_owned(),
+            direction: AudioDirection::Inbound,
+            reason: DspRefusal::UnknownProcessor,
+        },
+    ]
+}
+
+/// The rows §5.3 lists after the DSP ones, in the section's order.
+fn tail_events() -> Vec<EventKind> {
+    vec![
         EventKind::Hold,
         EventKind::Resumed,
         EventKind::Ended {
@@ -193,10 +249,55 @@ pub fn one_of_every_verb() -> Vec<Instruction> {
                 value: "renewal".to_owned(),
             },
         ),
+    ]
+    .into_iter()
+    .chain(dsp_verbs())
+    .chain(vec![Instruction::new(
+        "i23",
+        Verb::Hangup {
+            cause: EndCause::Hangup,
+        },
+    )])
+    .collect()
+}
+
+/// §6.2's three `dsp` verbs, one of each (`M-67`).
+///
+/// Split from [`one_of_every_verb`] for the reason [`dsp_events`] is split from
+/// [`one_of_every_event`]: three verbs carrying a nested chain and a parameter set between them
+/// push that function past this workspace's function-length limit on their own.
+fn dsp_verbs() -> Vec<Instruction> {
+    vec![
         Instruction::new(
             "i20",
-            Verb::Hangup {
-                cause: EndCause::Hangup,
+            Verb::Dsp {
+                direction: AudioDirection::Outbound,
+                processors: vec![
+                    DspStage::new("sipx.gain")
+                        .with_parameter("gain", DspValue::Ratio(2_000))
+                        .with_parameter("smoothing_positions", DspValue::Integer(160)),
+                    DspStage::new("sipx.stutter")
+                        .with_shape(480)
+                        .with_parameter("repeat", DspValue::Flag(true)),
+                ],
+            },
+        ),
+        Instruction::new(
+            "i21",
+            Verb::DspParam {
+                direction: AudioDirection::Outbound,
+                generation: 3,
+                processor: 0,
+                parameters: vec![crate::dsp::DspParameter::new(
+                    "gain",
+                    DspValue::Ratio(1_500),
+                )],
+            },
+        ),
+        Instruction::new(
+            "i22",
+            Verb::DspRemove {
+                direction: AudioDirection::Inbound,
             },
         ),
     ]

@@ -89,7 +89,7 @@ mod worker;
 pub use builtin::BuiltIn;
 pub use graph::{
     BypassCause, GraphBarrier, GraphBounds, GraphCounters, GraphError, GraphPlan, GraphTransition,
-    MAX_PROCESSORS, MAX_WORKER_QUEUE, TeardownCause,
+    MAX_PROCESSORS, MAX_WORKER_QUEUE, ParameterUpdate, TeardownCause,
 };
 pub use supervised::WorkerProcess;
 pub use wire::WorkerProtocolError;
@@ -220,10 +220,67 @@ impl DspGraph {
     ///
     /// The queue is bounded by the configured observation capacity and drops its oldest entries at
     /// capacity: a transition is a fact about the past, and the newest are the ones a caller can
-    /// still act on.
+    /// still act on. The one exception is a superseded
+    /// [`GraphTransition::Configured`] — a stage of a generation has one current parameter state,
+    /// so an earlier entry for the same stage coalesces into the later one rather than costing the
+    /// queue an activation, a bypass or a teardown.
+    ///
+    /// This never blocks and never waits. [`Self::next_transitions`] is the same drain with a
+    /// suspension point, for a caller that would otherwise poll.
     #[must_use]
     pub fn transitions(&self) -> Vec<GraphTransition> {
         self.slot.transitions()
+    }
+
+    /// Drain the typed transitions, waiting for one if the queue is empty (§10.3, `M-67`).
+    ///
+    /// The wait is an event and never a duration: a driver turning transitions into application
+    /// events never polls this graph and never reads a clock to decide when to look. What it does
+    /// **not** do is reach the media worker — the signal is tripped where the transition is
+    /// recorded, which for a bypass is on the media path and costs a flag store and a waker wake
+    /// there, and for everything else is on the caller's own thread.
+    ///
+    /// Cancelling this future loses nothing: the queue is drained under the same take that finds it
+    /// non-empty, so a transition is either returned or still queued.
+    pub async fn next_transitions(&self) -> Vec<GraphTransition> {
+        self.slot.next_transitions().await
+    }
+
+    /// Move one live stage's parameters, whole, at a declared sample boundary (§10.2, `M-67`).
+    ///
+    /// `generation` is the chain the set was composed against and `processor` is its stage index,
+    /// counting from 0 in plan order. Both are checked: stage 2 of one generation is a different
+    /// processor from stage 2 of the next, so an update that named the chain it last saw never
+    /// lands on the chain that replaced it.
+    ///
+    /// The set is validated against the stage's **declared schema** before anything is assigned,
+    /// and on the caller's own thread — the media worker validates nothing. It is then applied
+    /// under the same take a frame needs, so the new values are in force from the first position of
+    /// the next frame and no frame ever sees half a set.
+    ///
+    /// **What it does not do.** It does not add a parameter, widen a domain, or reach a processor
+    /// this chain does not hold; it does not reorder, add or remove a stage — that is
+    /// [`Self::replace`], and it has a generation of its own; and it does not reach a supervised
+    /// stage, whose protocol has no message for a parameter set.
+    ///
+    /// # Errors
+    ///
+    /// Exactly one terminal outcome: this returns either the [`ParameterUpdate`] that applied or a
+    /// [`GraphError`], and **every refusal leaves the live graph exactly as it was** — not one
+    /// value, not the position expectation, not the generation.
+    ///
+    /// [`GraphError::StaleGeneration`] for a generation that is not live (including `0`, which is
+    /// a direction with no graph), [`GraphError::UnknownProcessor`] for a stage index this chain
+    /// does not have, [`GraphError::Parameter`] for an identifier outside the declared schema, a
+    /// value of the wrong kind or a value outside its declared range, and
+    /// [`GraphError::NotConfigurable`] for a supervised stage.
+    pub fn configure(
+        &self,
+        generation: u64,
+        processor: usize,
+        parameters: &[Parameter],
+    ) -> Result<ParameterUpdate, GraphError> {
+        self.slot.configure(generation, processor, parameters)
     }
 
     /// What this graph is holding right now (§8).

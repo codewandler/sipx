@@ -81,8 +81,45 @@ corresponding completion events:
 ```
 
 The vocabulary includes answer, ring, reject, play, gather, record, DTMF, dial, bridge, hold,
-mute, transfer, pause, tag, and hangup operations. A word in the contract is not itself evidence
-that the current host or public call API can perform that operation end to end.
+mute, transfer, pause, tag, hangup, and the three DSP operations below. A word in the contract is
+not itself evidence that the current host or public call API can perform that operation end to end.
+
+## Shaping the call's audio
+
+Three instructions compose a bounded DSP chain on one direction of a call, and five
+`call.dsp.*` events report what happened to it:
+
+```json
+{
+  "contract": "sipx.app.v1",
+  "instructions": [
+    { "id": "d1", "do": "dsp", "direction": "outbound", "processors": [
+        { "id": "sipx.gain", "shape": 0, "parameters": { "gain": { "ratio": 2000 } } },
+        { "id": "sipx.low_pass", "shape": 0, "parameters": { "cutoff_hz": { "integer": 3400 } } } ] }
+  ]
+}
+```
+
+`dsp` sets the chain, `dsp_param` moves one stage's parameters against the generation the chain
+was last reported at, and `dsp_remove` takes it away and waits for the graph to hold nothing. Each
+resolves with exactly one event: its outcome, or `call.dsp.refused`. Two more arrive unasked —
+`call.dsp.bypassed` when a stage stops contributing, and `call.dsp.removed` when a fail-closed
+stage or a stopped session ends the chain.
+
+**What an application can say is names, a shape and finite values, and nothing else.** A `dsp`
+instruction has no field for a processor, a program, a callback, an execution profile, a deadline,
+a failure action or a graph bound — those are not filtered out, they are not expressible, in the
+same way that `play.source` has no URL. So `contains_overrun` on `call.dsp.activated`, which says
+whether over-budget work in the chain can stall RTP, is something the host derives from the chain's
+stages and reports; there is no instruction that sets it. Parameter values carry their kind
+(`{"flag": …}`, `{"integer": …}`, `{"ratio": …}` in thousandths) because integers and ratios are
+both JSON numbers and there is no floating-point parameter to fall back on.
+
+Which processors exist is the host's registry, and every identifier that resolves is one of this
+workspace's own. The normative rules — the closed schemas, the sample boundary a change lands on,
+what each refusal leaves untouched — are
+[`docs/specs/call-dsp-graph.md`](https://github.com/codewandler/sipx/blob/main/docs/specs/call-dsp-graph.md)
+§10.
 
 ## Replacement and ordering
 

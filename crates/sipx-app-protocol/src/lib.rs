@@ -58,6 +58,7 @@
 
 mod base64;
 mod document;
+mod dsp;
 mod error;
 mod event;
 mod interpreter;
@@ -74,6 +75,9 @@ pub mod testing;
 mod call;
 
 pub use crate::document::{Document, DtmfMode, Gather, Instruction, Source, TransferTarget, Verb};
+pub use crate::dsp::{
+    DspBypassCause, DspParameter, DspRefusal, DspStage, DspTeardownCause, DspValue,
+};
 pub use crate::error::{Error, Result};
 pub use crate::event::{
     AudioDirection, CONTRACT, CallSnapshot, CallState, DialOutcome, Direction, EndCause, Envelope,

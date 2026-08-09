@@ -32,8 +32,11 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use crate::document::{Document, DtmfMode, Gather, Instruction, Source, TransferTarget, Verb};
+use crate::dsp::{DspParameter, DspStage};
 use crate::error::Error;
-use crate::event::{CallSnapshot, CallState, EndCause, Envelope, EventKind, GatherReason, Leg};
+use crate::event::{
+    AudioDirection, CallSnapshot, CallState, EndCause, Envelope, EventKind, GatherReason, Leg,
+};
 use crate::policy::{Failure, OnFailure, Policy};
 use crate::program::Program;
 use crate::time::Timestamp;
@@ -195,6 +198,40 @@ pub enum Effect {
     RefuseTransfer {
         /// The status.
         status: u16,
+    },
+    /// Set one direction's DSP chain from registered identifiers (`M-67`).
+    ///
+    /// The driver resolves each identifier against **its own** registry and refuses one it does
+    /// not publish. Nothing here is a processor, a program or a profile: this carries names, a
+    /// shape and finite values, which is the whole of what an application may say about a graph
+    /// (`docs/specs/call-dsp-graph.md` §10.1).
+    SetDsp {
+        /// The instruction this belongs to; its terminal event must carry it.
+        instruction_id: String,
+        /// Which side of the call's audio.
+        direction: AudioDirection,
+        /// The stages, in order.
+        processors: Vec<DspStage>,
+    },
+    /// Move one live stage's parameters at a declared sample boundary (`M-67`).
+    ConfigureDsp {
+        /// The instruction this belongs to; its terminal event must carry it.
+        instruction_id: String,
+        /// Which side of the call's audio.
+        direction: AudioDirection,
+        /// The generation the set was composed against.
+        generation: u64,
+        /// The stage's index in that generation's plan order.
+        processor: u32,
+        /// The finite set.
+        parameters: Vec<DspParameter>,
+    },
+    /// Remove one direction's DSP chain and wait for its barrier (`M-67`).
+    RemoveDsp {
+        /// The instruction this belongs to; its terminal event must carry it.
+        instruction_id: String,
+        /// Which side of the call's audio.
+        direction: AudioDirection,
     },
     /// End the call.
     HangUp {
@@ -488,6 +525,26 @@ impl Interpreter {
             {
                 self.running = None;
             }
+            // §10.2's "exactly one terminal outcome": each of the three DSP verbs resolves on its
+            // own success event or on the refusal, and on nothing else. A `call.dsp.bypassed` is
+            // not an outcome of anything the application asked for, so it never resolves one.
+            (Verb::Dsp { .. }, EventKind::DspActivated { instruction_id, .. })
+            | (Verb::DspParam { .. }, EventKind::DspConfigured { instruction_id, .. })
+            | (
+                Verb::Dsp { .. } | Verb::DspParam { .. } | Verb::DspRemove { .. },
+                EventKind::DspRefused { instruction_id, .. },
+            ) if *instruction_id == id => {
+                self.running = None;
+            }
+            (
+                Verb::DspRemove { .. },
+                EventKind::DspRemoved {
+                    instruction_id: Some(instruction_id),
+                    ..
+                },
+            ) if *instruction_id == id => {
+                self.running = None;
+            }
             // A `gather`'s prompt finishing does not resolve the gather — the gather is collecting
             // digits, and the prompt was only ever something to listen to while doing it.
             (Verb::GatherDigits(_), EventKind::PlaybackFinished { instruction_id, .. })
@@ -610,6 +667,30 @@ impl Interpreter {
             Verb::AcceptTransfer => Effect::AcceptTransfer,
             Verb::RefuseTransfer { status } => Effect::RefuseTransfer { status: *status },
             Verb::Hangup { cause } => Effect::HangUp { cause: *cause },
+            Verb::Dsp {
+                direction,
+                processors,
+            } => Effect::SetDsp {
+                instruction_id: id.to_owned(),
+                direction: *direction,
+                processors: processors.clone(),
+            },
+            Verb::DspParam {
+                direction,
+                generation,
+                processor,
+                parameters,
+            } => Effect::ConfigureDsp {
+                instruction_id: id.to_owned(),
+                direction: *direction,
+                generation: *generation,
+                processor: *processor,
+                parameters: parameters.clone(),
+            },
+            Verb::DspRemove { direction } => Effect::RemoveDsp {
+                instruction_id: id.to_owned(),
+                direction: *direction,
+            },
             // The rest need more than an effect — a timer, a snapshot write, or a note that
             // audio is playing — and `start` has them. Spelled out rather than left to `_` so
             // that a verb added to §6.2 is a compile error here until someone classifies it.

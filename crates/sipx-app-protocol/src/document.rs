@@ -14,8 +14,9 @@
 use std::collections::BTreeMap;
 
 use crate::base64;
+use crate::dsp::{DspParameter, DspStage};
 use crate::error::{Error, Result};
-use crate::event::{CONTRACT, EndCause, check_contract, string_field};
+use crate::event::{AudioDirection, CONTRACT, EndCause, check_contract, string_field};
 use crate::json::Json;
 
 /// Where a `play` gets its audio (§6.2, §6.5).
@@ -218,6 +219,42 @@ pub enum Verb {
         /// The value.
         value: String,
     },
+    /// Set one direction's DSP chain, naming registered processors in order (`M-67`).
+    ///
+    /// Attaches when the direction has no graph and replaces when it has one — both are
+    /// `docs/specs/call-dsp-graph.md` §3.1's *validate the whole plan, then publish it*, and both
+    /// produce a generation. Completes with `call.dsp.activated`, or `call.dsp.refused` when the
+    /// host refused the plan and the direction kept running exactly as it was.
+    Dsp {
+        /// Which side of the call's audio the chain runs on.
+        direction: AudioDirection,
+        /// The stages, in order: index 0 first, and stage *k*'s output is stage *k+1*'s input.
+        /// An empty list is refused rather than read as a removal — `dsp_remove` is that, and it
+        /// has a teardown of its own.
+        processors: Vec<DspStage>,
+    },
+    /// Move one live stage's parameters, whole, at a declared sample boundary (`M-67`).
+    ///
+    /// Completes with `call.dsp.configured`, or `call.dsp.refused`. It cannot add, remove or
+    /// reorder a stage: that is [`Self::Dsp`], and it has a generation of its own.
+    DspParam {
+        /// Which side of the call's audio.
+        direction: AudioDirection,
+        /// The generation the set was composed against. An update never lands on the chain that
+        /// replaced the one the application last saw.
+        generation: u64,
+        /// The stage's index in that generation's plan order, from 0.
+        processor: u32,
+        /// The finite set, validated whole against the stage's declared schema.
+        parameters: Vec<DspParameter>,
+    },
+    /// Remove one direction's DSP chain and wait for its barrier (`M-67`).
+    ///
+    /// Completes with `call.dsp.removed`, or `call.dsp.refused` when the direction had no graph.
+    DspRemove {
+        /// Which side of the call's audio.
+        direction: AudioDirection,
+    },
     /// End the call. Completes with `call.ended`.
     Hangup {
         /// Why, for the snapshot and the event.
@@ -249,6 +286,9 @@ impl Verb {
             Self::RefuseTransfer { .. } => "refuse_transfer",
             Self::Pause { .. } => "pause",
             Self::Tag { .. } => "tag",
+            Self::Dsp { .. } => "dsp",
+            Self::DspParam { .. } => "dsp_param",
+            Self::DspRemove { .. } => "dsp_remove",
             Self::Hangup { .. } => "hangup",
         }
     }
@@ -258,7 +298,7 @@ impl Verb {
     /// Enumerable so that "the crate covers the table" is a test rather than a promise;
     /// `tests/spec_tables.rs` reads §6.2 out of the spec and compares against this.
     #[must_use]
-    pub fn names() -> [&'static str; 20] {
+    pub fn names() -> [&'static str; 23] {
         [
             "answer",
             "ring",
@@ -279,6 +319,9 @@ impl Verb {
             "refuse_transfer",
             "pause",
             "tag",
+            "dsp",
+            "dsp_param",
+            "dsp_remove",
             "hangup",
         ]
     }
@@ -299,6 +342,9 @@ impl Verb {
                 | Self::Pause { .. }
                 | Self::Reject { .. }
                 | Self::Hangup { .. }
+                | Self::Dsp { .. }
+                | Self::DspParam { .. }
+                | Self::DspRemove { .. }
         )
     }
 }
@@ -409,6 +455,9 @@ impl Instruction {
             Verb::Tag { key, value } => {
                 members.push(("key", Some(Json::Str(key.clone()))));
                 members.push(("value", Some(Json::Str(value.clone()))));
+            }
+            Verb::Dsp { .. } | Verb::DspParam { .. } | Verb::DspRemove { .. } => {
+                members.extend(dsp_members(&self.verb));
             }
             Verb::Hangup { cause } => members.push(("cause", Some(cause.to_json()))),
         }
@@ -551,6 +600,37 @@ impl Instruction {
         }))
     }
 
+    /// §6.2's verbs that compose a DSP chain on one direction of the call's audio (`M-67`).
+    ///
+    /// Every one of them carries a `direction` and nothing that names another call: an instruction
+    /// acts on the call whose event stream produced it (§2), and none of these verbs has a shape
+    /// for saying otherwise.
+    fn dsp_verb(name: &str, value: &Json) -> Result<Option<Verb>> {
+        Ok(Some(match name {
+            "dsp" => Verb::Dsp {
+                direction: direction_field(value)?,
+                processors: crate::dsp::stages_from_json(value.get("processors"))?,
+            },
+            "dsp_param" => Verb::DspParam {
+                direction: direction_field(value)?,
+                generation: value
+                    .get("generation")
+                    .and_then(Json::as_i64)
+                    .and_then(|raw| u64::try_from(raw).ok())
+                    .ok_or(Error::BadField {
+                        field: "generation",
+                    })?,
+                processor: optional_u32(value, "processor")?
+                    .ok_or(Error::MissingField { field: "processor" })?,
+                parameters: crate::dsp::parameters_from_json(value.get("parameters"))?,
+            },
+            "dsp_remove" => Verb::DspRemove {
+                direction: direction_field(value)?,
+            },
+            _ => return Ok(None),
+        }))
+    }
+
     fn from_json(value: &Json) -> Result<Self> {
         let name = value
             .get("do")
@@ -563,6 +643,8 @@ impl Instruction {
         } else if let Some(verb) = Self::leg_verb(name, value)? {
             verb
         } else if let Some(verb) = Self::internal_verb(name, value)? {
+            verb
+        } else if let Some(verb) = Self::dsp_verb(name, value)? {
             verb
         } else {
             // §4: an unknown verb is an error, never a skip. A host that ran the rest of the
@@ -654,6 +736,55 @@ impl Document {
         }
         Ok(Self { instructions })
     }
+}
+
+/// The three `dsp` verbs' fields (§6.6), written in one place.
+///
+/// Split out of [`Instruction::to_json`] for the reason §5.3's signal events are split out of
+/// [`crate::EventKind::to_json`]: three rows sharing a `direction` and carrying a nested list
+/// between them read better together than spread across a match whose other twenty arms carry two
+/// fields each.
+fn dsp_members(verb: &Verb) -> Vec<(&'static str, Option<Json>)> {
+    let mut members: Vec<(&'static str, Option<Json>)> = Vec::new();
+    let direction = match verb {
+        Verb::Dsp { direction, .. }
+        | Verb::DspParam { direction, .. }
+        | Verb::DspRemove { direction } => *direction,
+        // The caller matched the three before it delegated.
+        _ => return members,
+    };
+    members.push(("direction", Some(Json::Str(direction.as_str().to_owned()))));
+    match verb {
+        Verb::Dsp { processors, .. } => members.push((
+            "processors",
+            Some(Json::Array(
+                processors.iter().map(DspStage::to_json).collect(),
+            )),
+        )),
+        Verb::DspParam {
+            generation,
+            processor,
+            parameters,
+            ..
+        } => {
+            members.push(("generation", Some(Json::from(*generation))));
+            members.push(("processor", Some(Json::from(*processor))));
+            members.push((
+                "parameters",
+                Some(crate::dsp::parameters_to_json(parameters)),
+            ));
+        }
+        _ => {}
+    }
+    members
+}
+
+fn direction_field(value: &Json) -> Result<AudioDirection> {
+    value
+        .get("direction")
+        .and_then(Json::as_str)
+        .and_then(AudioDirection::parse)
+        .ok_or(Error::BadField { field: "direction" })
 }
 
 fn status_field(value: &Json, field: &'static str) -> Result<u16> {

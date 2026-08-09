@@ -67,6 +67,11 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 pub mod config;
+/// The host's DSP door (`M-67`): §6.2's `dsp` verbs and §5.3's `call.dsp.*` rows.
+///
+/// Private because it is the driver's own composition of a contract row and not a surface anybody
+/// depends on; [`host`] is the only caller.
+mod dsp;
 pub mod harness;
 pub mod host;
 pub mod realtime;

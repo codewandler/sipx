@@ -17,6 +17,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::dsp::{DspBypassCause, DspRefusal, DspTeardownCause};
 use crate::error::{Error, Result};
 use crate::json::Json;
 use crate::tagged;
@@ -971,6 +972,85 @@ pub enum EventKind {
         /// The other leg.
         leg: String,
     },
+    /// One direction's DSP chain became what every later frame sees (`M-67`).
+    ///
+    /// Carries what the graph *is*, including whether it may claim that over-budget work in it
+    /// cannot stall RTP — a fact derived from the stages' execution profiles and reported to the
+    /// application. There is no instruction, field or value through which an application states it
+    /// (`docs/specs/call-dsp-graph.md` §10.1).
+    DspActivated {
+        /// The `dsp` this completes.
+        instruction_id: String,
+        /// Which side of the call's audio.
+        direction: AudioDirection,
+        /// The new generation, counting from 1.
+        generation: u64,
+        /// The generation it replaced, or `null` when this direction had no graph.
+        previous: Option<u64>,
+        /// How many stages it holds.
+        processors: u32,
+        /// Whether over-budget work in this chain cannot stall RTP. False for a chain holding one
+        /// stage the stack cannot preempt, whatever else is beside it.
+        contains_overrun: bool,
+    },
+    /// One live stage's parameters were moved, whole, at a sample boundary (`M-67`).
+    DspConfigured {
+        /// The `dsp_param` this completes.
+        instruction_id: String,
+        /// Which side of the call's audio.
+        direction: AudioDirection,
+        /// The generation the update applied to — the one the instruction named.
+        generation: u64,
+        /// The first position of the first frame the new values apply to, in the graph's epoch.
+        /// A sample count and never a clock reading.
+        at_position: u64,
+        /// The stage's declared identifier.
+        processor: String,
+    },
+    /// One stage stopped contributing; the frames after it carry a discontinuity (`M-67`).
+    ///
+    /// Never solicited: an application does not ask for this, it is told. The call keeps working
+    /// and the audio that stage owed is not in it.
+    DspBypassed {
+        /// Which side of the call's audio.
+        direction: AudioDirection,
+        /// The generation the stage belongs to.
+        generation: u64,
+        /// Where in the epoch it stopped contributing.
+        at_position: u64,
+        /// The stage's declared identifier.
+        processor: String,
+        /// Why.
+        cause: DspBypassCause,
+    },
+    /// One direction's DSP chain ended: no stage of that generation sees another frame (`M-67`).
+    DspRemoved {
+        /// The `dsp_remove` this completes, or `null` when nothing asked for it.
+        instruction_id: Option<String>,
+        /// Which side of the call's audio.
+        direction: AudioDirection,
+        /// The generation that ended.
+        generation: u64,
+        /// Where in the epoch it ended.
+        at_position: u64,
+        /// The stage that failed closed, or `null` for every other cause.
+        processor: Option<String>,
+        /// Why.
+        cause: DspTeardownCause,
+    },
+    /// A `dsp`, `dsp_param` or `dsp_remove` was refused, and the active graph is unchanged
+    /// (`M-67`).
+    ///
+    /// It carries no delta and no repair: §2's rule is that a snapshot corrects an application
+    /// rather than a history of what it got wrong.
+    DspRefused {
+        /// The instruction this refuses.
+        instruction_id: String,
+        /// Which side of the call's audio the instruction named.
+        direction: AudioDirection,
+        /// Why.
+        reason: DspRefusal,
+    },
     /// The far end changed the media direction to hold.
     Hold,
     /// The far end took it off hold.
@@ -1014,6 +1094,11 @@ impl EventKind {
             Self::TransferProgress { .. } => "call.transfer.progress",
             Self::Bridged { .. } => "call.bridged",
             Self::Unbridged { .. } => "call.unbridged",
+            Self::DspActivated { .. } => "call.dsp.activated",
+            Self::DspConfigured { .. } => "call.dsp.configured",
+            Self::DspBypassed { .. } => "call.dsp.bypassed",
+            Self::DspRemoved { .. } => "call.dsp.removed",
+            Self::DspRefused { .. } => "call.dsp.refused",
             Self::Hold => "call.hold",
             Self::Resumed => "call.resumed",
             Self::Ended { .. } => "call.ended",
@@ -1026,7 +1111,7 @@ impl EventKind {
     /// Enumerable so that "the crate covers the table" is a test rather than a promise; the
     /// derived test in `tests/spec_tables.rs` reads the section and compares.
     #[must_use]
-    pub fn type_names() -> [&'static str; 21] {
+    pub fn type_names() -> [&'static str; 26] {
         [
             "call.incoming",
             "call.ringing",
@@ -1046,6 +1131,11 @@ impl EventKind {
             "call.transfer.progress",
             "call.bridged",
             "call.unbridged",
+            "call.dsp.activated",
+            "call.dsp.configured",
+            "call.dsp.bypassed",
+            "call.dsp.removed",
+            "call.dsp.refused",
             "call.hold",
             "call.resumed",
             "call.ended",
@@ -1059,7 +1149,11 @@ impl EventKind {
             Self::PlaybackFinished { instruction_id, .. }
             | Self::GatherFinished { instruction_id, .. }
             | Self::RecordingFinished { instruction_id, .. }
-            | Self::DialFinished { instruction_id, .. } => Some(instruction_id),
+            | Self::DialFinished { instruction_id, .. }
+            | Self::DspActivated { instruction_id, .. }
+            | Self::DspConfigured { instruction_id, .. }
+            | Self::DspRefused { instruction_id, .. } => Some(instruction_id),
+            Self::DspRemoved { instruction_id, .. } => instruction_id.as_deref(),
             _ => None,
         }
     }
@@ -1158,6 +1252,11 @@ impl EventKind {
             Self::Bridged { leg } | Self::Unbridged { leg } => {
                 members.push(("leg", Some(Json::Str(leg.clone()))));
             }
+            Self::DspActivated { .. }
+            | Self::DspConfigured { .. }
+            | Self::DspBypassed { .. }
+            | Self::DspRemoved { .. }
+            | Self::DspRefused { .. } => members.extend(self.dsp_members()),
             Self::Ended { cause } => members.push(("cause", Some(cause.to_json()))),
         }
         Json::object(members)
@@ -1257,6 +1356,7 @@ impl EventKind {
             "call.unbridged" => Self::Unbridged {
                 leg: string_field(value, "leg")?,
             },
+            other if is_dsp(other) => Self::dsp_from_json(other, value)?,
             "call.hold" => Self::Hold,
             "call.resumed" => Self::Resumed,
             "call.ended" => Self::Ended {
@@ -1403,6 +1503,169 @@ fn optional_count(value: &Json, field: &'static str) -> Result<Option<u64>> {
                 .map_err(|_| Error::BadField { field })
         }
     }
+}
+
+/// The `M-67` DSP events' extra fields (§5.3), read and written in one place.
+///
+/// Split out of [`EventKind::to_json`] and [`EventKind::from_json`] for the reason the signal
+/// events are: five rows sharing four of their members read better together than spread across a
+/// match whose other twenty-one arms carry two fields each.
+impl EventKind {
+    fn dsp_members(&self) -> Vec<(&'static str, Option<Json>)> {
+        let mut members: Vec<(&'static str, Option<Json>)> = Vec::new();
+        match self {
+            Self::DspActivated {
+                instruction_id,
+                direction,
+                generation,
+                previous,
+                processors,
+                contains_overrun,
+            } => {
+                members.push(("instruction_id", Some(Json::Str(instruction_id.clone()))));
+                members.push(("direction", Some(Json::Str(direction.as_str().to_owned()))));
+                members.push(("generation", Some(Json::from(*generation))));
+                members.push(("previous", Some(previous.map_or(Json::Null, Json::from))));
+                members.push(("processors", Some(Json::from(*processors))));
+                members.push(("contains_overrun", Some(Json::from(*contains_overrun))));
+            }
+            Self::DspConfigured {
+                instruction_id,
+                direction,
+                generation,
+                at_position,
+                processor,
+            } => {
+                members.push(("instruction_id", Some(Json::Str(instruction_id.clone()))));
+                members.push(("direction", Some(Json::Str(direction.as_str().to_owned()))));
+                members.push(("generation", Some(Json::from(*generation))));
+                members.push(("at_position", Some(Json::from(*at_position))));
+                members.push(("processor", Some(Json::Str(processor.clone()))));
+            }
+            Self::DspBypassed {
+                direction,
+                generation,
+                at_position,
+                processor,
+                cause,
+            } => {
+                members.push(("direction", Some(Json::Str(direction.as_str().to_owned()))));
+                members.push(("generation", Some(Json::from(*generation))));
+                members.push(("at_position", Some(Json::from(*at_position))));
+                members.push(("processor", Some(Json::Str(processor.clone()))));
+                members.push(("cause", Some(Json::Str(cause.as_str().to_owned()))));
+            }
+            Self::DspRemoved {
+                instruction_id,
+                direction,
+                generation,
+                at_position,
+                processor,
+                cause,
+            } => {
+                members.push((
+                    "instruction_id",
+                    Some(instruction_id.clone().map_or(Json::Null, Json::Str)),
+                ));
+                members.push(("direction", Some(Json::Str(direction.as_str().to_owned()))));
+                members.push(("generation", Some(Json::from(*generation))));
+                members.push(("at_position", Some(Json::from(*at_position))));
+                members.push((
+                    "processor",
+                    Some(processor.clone().map_or(Json::Null, Json::Str)),
+                ));
+                members.push(("cause", Some(Json::Str(cause.as_str().to_owned()))));
+            }
+            Self::DspRefused {
+                instruction_id,
+                direction,
+                reason,
+            } => {
+                members.push(("instruction_id", Some(Json::Str(instruction_id.clone()))));
+                members.push(("direction", Some(Json::Str(direction.as_str().to_owned()))));
+                members.push(("reason", Some(Json::Str(reason.as_str().to_owned()))));
+            }
+            _ => {}
+        }
+        members
+    }
+
+    fn dsp_from_json(type_name: &str, value: &Json) -> Result<Self> {
+        let direction = audio_direction_field(value)?;
+        Ok(match type_name {
+            "call.dsp.activated" => Self::DspActivated {
+                instruction_id: string_field(value, "instruction_id")?,
+                direction,
+                generation: u64_field(value, "generation")?,
+                previous: optional_u64(value, "previous")?,
+                processors: u32_field(value, "processors")?,
+                contains_overrun: bool_field(value, "contains_overrun")?,
+            },
+            "call.dsp.configured" => Self::DspConfigured {
+                instruction_id: string_field(value, "instruction_id")?,
+                direction,
+                generation: u64_field(value, "generation")?,
+                at_position: u64_field(value, "at_position")?,
+                processor: string_field(value, "processor")?,
+            },
+            "call.dsp.bypassed" => Self::DspBypassed {
+                direction,
+                generation: u64_field(value, "generation")?,
+                at_position: u64_field(value, "at_position")?,
+                processor: string_field(value, "processor")?,
+                cause: crate::dsp::bypass_cause_field(value)?,
+            },
+            "call.dsp.removed" => Self::DspRemoved {
+                instruction_id: optional_string(value, "instruction_id"),
+                direction,
+                generation: u64_field(value, "generation")?,
+                at_position: u64_field(value, "at_position")?,
+                processor: optional_string(value, "processor"),
+                cause: crate::dsp::teardown_cause_field(value)?,
+            },
+            // The caller matched this set before it delegated, so the fallthrough is unreachable
+            // rather than a type nobody handled.
+            _ => Self::DspRefused {
+                instruction_id: string_field(value, "instruction_id")?,
+                direction,
+                reason: crate::dsp::refusal_field(value)?,
+            },
+        })
+    }
+}
+
+/// Whether a type name is one of §5.3's five `call.dsp.*` rows.
+///
+/// A closed set rather than a prefix test: `call.dsp.` followed by a word this version does not
+/// define is an unknown *event type*, which §4 requires an app to be able to ignore, so it has to
+/// reach [`EventKind::Other`] like every other unknown.
+fn is_dsp(type_name: &str) -> bool {
+    matches!(
+        type_name,
+        "call.dsp.activated"
+            | "call.dsp.configured"
+            | "call.dsp.bypassed"
+            | "call.dsp.removed"
+            | "call.dsp.refused"
+    )
+}
+
+/// An optional count: `null` and absent both read as absent (§5.2.1's own rule).
+fn optional_u64(value: &Json, field: &'static str) -> Result<Option<u64>> {
+    match value.get(field) {
+        None | Some(Json::Null) => Ok(None),
+        Some(found) => {
+            let raw = found.as_i64().ok_or(Error::BadField { field })?;
+            u64::try_from(raw)
+                .map(Some)
+                .map_err(|_| Error::BadField { field })
+        }
+    }
+}
+
+/// An optional string: `null` and absent both read as absent.
+fn optional_string(value: &Json, field: &'static str) -> Option<String> {
+    value.get(field).and_then(Json::as_str).map(str::to_owned)
 }
 
 /// The `M-59` signal events' extra fields (§5.3).

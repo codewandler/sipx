@@ -64,6 +64,7 @@ verb that has no operation, which is why the epic's kernel stories exist:
 | `hold`, `resume` | `reinvite(Direction)` | shipped |
 | `mute`, `unmute` | local media gate | M-18 |
 | `transfer`, `accept_transfer`, `refuse_transfer` | `refer`/`refer_attended`/`accept_referral`/`refuse_referral` | shipped |
+| `dsp`, `dsp_param`, `dsp_remove` | `MediaSession::attach_dsp`/`DspGraph::replace`, `DspGraph::configure`, `DspGraph::detach` | M-67 |
 | `hangup`, `pause`, `tag` | `hang_up`; interpreter-internal | shipped |
 
 ## 4. Versioning
@@ -191,6 +192,11 @@ here cannot go stale except by moving, and moving announces itself.
 | `call.transfer.requested` | `target`, `attended` | an inbound REFER arrived; the app must decide (§6.3) |
 | `call.transfer.progress` | `state` (`trying · ringing · succeeded · failed{status}`) | a NOTIFY moved the transfer |
 | `call.bridged` / `call.unbridged` | `leg` | the media coupling changed |
+| `call.dsp.activated` | `instruction_id`, `direction`, `generation`, `previous`, `processors`, `contains_overrun` | a `dsp` validated whole and became what every later frame sees |
+| `call.dsp.configured` | `instruction_id`, `direction`, `generation`, `at_position`, `processor` | a `dsp_param` applied, whole, at a sample boundary |
+| `call.dsp.bypassed` | `direction`, `generation`, `at_position`, `processor`, `cause` (`requested · refused · deadline_missed · malformed_result · worker_lost`) | one stage stopped contributing; nobody asked for it |
+| `call.dsp.removed` | `instruction_id`, `direction`, `generation`, `at_position`, `processor`, `cause` (`requested · detached · session_stopped · failed_closed`) | a direction's chain ended |
+| `call.dsp.refused` | `instruction_id`, `direction`, `reason` (`unknown_processor · unknown_parameter · out_of_range · stale_generation · too_many_processors · no_graph · not_configurable · rejected`) | a `dsp`, `dsp_param` or `dsp_remove` was refused and the active graph is unchanged |
 | `call.hold` / `call.resumed` | — | the far end changed the media direction |
 | `call.ended` | `cause` (`hangup · remote · rejected{status} · timeout · error`) | the call is over; always the last event, never dropped |
 
@@ -275,6 +281,24 @@ try" would put a host diagnosis into a vocabulary that otherwise says only what 
 the operator's log is where that belongs. Either way §5.2's `legs` stops listing the leg, which is
 the fact an app acts on.
 
+**[sipx]** The five `call.dsp.*` events are [call-dsp-graph.md](call-dsp-graph.md) §5.3's typed
+transitions, carried onto the wire. Three of them are the **terminal outcome** of an instruction and
+carry its `instruction_id`; `call.dsp.bypassed` is never one — an application does not ask a stage to
+start failing, it is told that one did — and `call.dsp.removed` carries `null` for
+`instruction_id` when a fail-closed failure or a stopped session ended the graph rather than a
+`dsp_remove`. Every instruction has **exactly one** of these outcomes: its success event or
+`call.dsp.refused`, never both and never neither.
+
+`at_position` is a sample count in the graph's own epoch and never a clock reading, for the reason
+the voice events' `sample_time` is: the same change against the same call lands at the same position
+on every host. `generation` counts one direction's chains from 1, and `0` is not a generation — it is
+"this direction has no graph", which is why a `dsp_param` naming it is refused `stale_generation`
+rather than `unknown_processor`.
+
+Neither `call.dsp.refused` nor any other of the five carries a delta or a repair. §2's rule holds:
+the envelope's own snapshot is what corrects an application that got out of step, and a history of
+what it got wrong is not something this contract sends.
+
 ## 6. Instructions (app → host)
 
 ### 6.1 Document
@@ -312,6 +336,9 @@ strictly in order; a verb with a completion event blocks the queue until it reso
 | `transfer` | `target` **or** `via_leg` (attended) | `call.transfer.progress` |
 | `accept_transfer` / `refuse_transfer` | — / `status` | transfer events / immediate |
 | `pause` | `ms` | timer-driven |
+| `dsp` | `direction`, `processors` (an ordered list of `{id, shape, parameters}` — §6.6) | `call.dsp.activated` or `call.dsp.refused` |
+| `dsp_param` | `direction`, `generation`, `processor`, `parameters` | `call.dsp.configured` or `call.dsp.refused` |
+| `dsp_remove` | `direction` | `call.dsp.removed` or `call.dsp.refused` |
 | `tag` | `key`, `value` | immediate; lands in every later snapshot |
 | `hangup` | `cause` | `call.ended` |
 
@@ -342,6 +369,55 @@ value is rejected **whole** — no partial application — and the app's declare
   host capability behind an allowlist, outside this contract; a TTS verb is a non-goal.
 - `dial.headers` may only set fields on a host-configured allowlist. The kernel's builders make
   header injection unrepresentable; a free header map here would hand that property away.
+
+### 6.6 The DSP verbs: what an application may say about a graph (`M-67`)
+
+**[sipx]** The three `dsp` verbs are a door onto
+[call-dsp-graph.md](call-dsp-graph.md) §10, and everything normative about the graph is there. What
+belongs here is what the *wire* can carry, and it is deliberately three things:
+
+```json
+{ "id": "d1", "do": "dsp", "direction": "outbound", "processors": [
+    { "id": "sipx.gain", "shape": 0, "parameters": { "gain": { "ratio": 2000 } } },
+    { "id": "sipx.stutter", "shape": 480, "parameters": { "repeat": { "flag": true } } } ] }
+```
+
+- **`id`** names a processor the **host's registry publishes**. There is no other way to put a
+  stage in a chain, and a name the registry does not publish is `call.dsp.refused` with
+  `unknown_processor` — never resolved into something plausible nearby.
+- **`shape`** is the one property a parameter cannot express, because the graph sizes its buffers
+  from it before the first frame. It is `0` for every processor that declares none.
+- **`parameters`** is an object keyed by the identifier the processor declares, whose values are
+  `{"flag": …}`, `{"integer": …}` or `{"ratio": …}` — [custom-call-dsp.md](custom-call-dsp.md)
+  §3.6's whole vocabulary, with the kind written out. The kind is written out because `integer` and
+  `ratio` are both JSON numbers and a contract that guessed between them would be inventing a
+  reading; **there is no floating-point parameter**, so a NaN gain is unrepresentable rather than
+  refused.
+
+**A third deliberate limit, beside §6.5's two.** This vocabulary has **no shape at all** for a
+processor, a program, a callback, an execution profile, a deadline, a failure action or a graph
+bound. Those are not fields a host filters — they are things a `v1` document cannot say, exactly as
+`play.source` cannot say "fetch this URL". Two properties follow, and both are the reason the limit
+is drawn here rather than checked somewhere:
+
+- **An application cannot claim containment.** `contains_overrun` on `call.dsp.activated` is derived
+  from what the chain's stages *are* ([call-dsp-graph.md](call-dsp-graph.md) §3.3) and is only ever
+  reported. No instruction sets it, and no combination of registered names moves it.
+- **Naming one processor lends another nothing.** Provenance is a property of the stage
+  ([call-dsp-graph.md](call-dsp-graph.md) §3.2), and a document that names two processors reaches
+  the registry door once per stage.
+
+**One call, one graph vocabulary.** None of the three verbs carries a call identifier. §2's rule —
+instructions act on the call whose event stream produced them — is therefore what decides which
+call a `dsp` reaches, and there is no field through which a document could name another call's
+graph or another call's generation. In session mode the enclosing document names the `call` whose
+program it replaces (§8), and that is the only place a call is named.
+
+**`generation` is why `dsp_param` is safe to send.** Stage 2 of one generation is a different
+processor from stage 2 of the next, so an update composed against the chain an application last saw
+is refused `stale_generation` rather than landing on the chain that replaced it. An application
+reads the current generation off the last `call.dsp.activated` it received — §2's rule that events
+are authoritative, applied to a graph.
 
 ## 7. Document binding (HTTP)
 

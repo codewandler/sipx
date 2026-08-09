@@ -216,6 +216,8 @@ struct DocumentCall {
     binding: DocumentBinding,
     timers: [Option<Instant>; 3],
     playbacks: BTreeMap<PlaybackId, (String, Playback)>,
+    /// The DSP chains this call owns, at most one per direction (`M-67`).
+    graphs: crate::dsp::CallGraphs,
     legs: DialTasks,
     shutdown: watch::Receiver<bool>,
     stopping: bool,
@@ -341,6 +343,7 @@ impl DocumentCall {
             binding,
             timers: [None; 3],
             playbacks: BTreeMap::new(),
+            graphs: crate::dsp::CallGraphs::default(),
             legs: DialTasks::new(),
             shutdown,
             stopping: false,
@@ -382,6 +385,7 @@ impl DocumentCall {
             binding: DocumentBinding::Session(session),
             timers: [None; 3],
             playbacks: BTreeMap::new(),
+            graphs: crate::dsp::CallGraphs::default(),
             legs: DialTasks::new(),
             shutdown,
             stopping: false,
@@ -456,6 +460,7 @@ impl DocumentCall {
         let shutdown = &mut self.shutdown;
         let binding = &mut self.binding;
         let resolved = &mut self.legs.resolved;
+        let graphs = &mut self.graphs;
         tokio::select! {
             _ = shutdown.changed() => ActorAction::Shutdown,
             event = events.recv() => event.map_or(ActorAction::Closed, ActorAction::CallEvent),
@@ -474,6 +479,10 @@ impl DocumentCall {
             // This actor holds a sender of its own, so the channel never closes while it lives and
             // a `None` here is unreachable rather than an ending to interpret.
             Some(leg) = resolved.recv() => ActorAction::Dialed(Box::new(leg)),
+            // Woken where the graph records a transition, never on a timer and never by looking
+            // (`docs/specs/call-dsp-graph.md` §10.3). Pends forever while this call has no graph,
+            // and is safe to lose this race: a losing branch is one that never drained.
+            event = graphs.next_event() => ActorAction::DspEvent(Box::new(event)),
         }
     }
 
@@ -520,6 +529,11 @@ impl DocumentCall {
                         outcome,
                     }),
                 )
+            }
+            // §5.3's `call.dsp.bypassed` and the unsolicited half of `call.dsp.removed`: facts
+            // about a graph that no instruction is waiting on, composed by `crate::dsp`.
+            ActorAction::DspEvent(event) => {
+                self.interpreter.handle(timestamp(), Input::Event(*event))
             }
             ActorAction::Shutdown => {
                 self.stopping = true;
@@ -848,11 +862,62 @@ impl DocumentCall {
                 timeout_ms,
                 headers,
             }),
+            Effect::SetDsp { .. } | Effect::ConfigureDsp { .. } | Effect::RemoveDsp { .. } => {
+                self.dsp_effect(effect).await;
+            }
             // These operations need host facilities outside phase 1 (recording storage, coupling
             // and transfers). The interpreter has still made the sole decision about what the
             // document means; the driver refuses an operation it cannot perform.
             _ => self.fail_effect().await,
         }
+    }
+
+    /// Perform one of §6.2's three `dsp` operations and queue its terminal outcome (`M-67`).
+    ///
+    /// Every one of them resolves to exactly one §5.3 row, and that row goes back through
+    /// [`crate::dsp::CallGraphs::next_event`] like an unsolicited one rather than being fed here:
+    /// one ordering then decides them all, so an outcome never overtakes a bypass this call had
+    /// already recorded.
+    async fn dsp_effect(&mut self, effect: Effect) {
+        let outcome = match effect {
+            Effect::SetDsp {
+                instruction_id,
+                direction,
+                processors,
+            } => match self.call.as_ref() {
+                Some(call) => self
+                    .graphs
+                    .set(call.media(), instruction_id, direction, &processors),
+                // No media session yet, so there is no direction to attach to. Refused as the
+                // application's own mistake rather than as a host failure: a `dsp` before
+                // `answer` is a program that ran in the wrong order.
+                None => EventKind::DspRefused {
+                    instruction_id,
+                    direction,
+                    reason: sipx_app_protocol::DspRefusal::NoGraph,
+                },
+            },
+            Effect::ConfigureDsp {
+                instruction_id,
+                direction,
+                generation,
+                processor,
+                parameters,
+            } => self.graphs.configure(
+                instruction_id,
+                direction,
+                generation,
+                processor,
+                &parameters,
+            ),
+            Effect::RemoveDsp {
+                instruction_id,
+                direction,
+            } => self.graphs.remove(instruction_id, direction).await,
+            // The caller matched the three before it delegated.
+            _ => return,
+        };
+        self.graphs.enqueue(outcome);
     }
 
     /// Place §6.2's `dial` as a second leg of this call, and report how it went (`M-103`).
@@ -970,6 +1035,9 @@ impl DocumentCall {
     /// them instead of dropping the call state, so a confirmed dialog gets its BYE and a pending
     /// invitation gets an explicit final response while its endpoint is still usable.
     async fn teardown(&mut self) {
+        // Released before the BYE: a chain running on a call that is ending is a chain nobody is
+        // reading events from. The session's own shutdown is what reaches the barrier.
+        self.graphs.detach_all();
         if let Some(call) = self.call.as_mut()
             && !call.is_ended()
         {
@@ -1022,6 +1090,9 @@ enum ActorAction {
     /// A `dial` this actor placed resolved (`M-103`). Boxed for the same reason `Incoming` is: the
     /// enum is held across an await in a future whose size is already lint-budgeted.
     Dialed(Box<DialedLeg>),
+    /// A DSP transition nobody asked for — a bypass, or a teardown this call did not request
+    /// (`M-67`). Boxed for the same reason the two above are.
+    DspEvent(Box<EventKind>),
     Timer(Timer),
     SessionDeadline,
     Session(SessionInput),
