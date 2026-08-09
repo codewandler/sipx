@@ -50,7 +50,7 @@ process", and the profile's documentation must not be read as promising otherwis
       stop, and the teardown barrier reports zero workers only once `wait` has returned.
 - [x] A worker that exits, crashes or is killed applies the declared failure action and is never
       restarted silently.
-- [ ] Failing-first tests cover deadline, hang, crash, malformed result and reap against a real
+- [x] Failing-first tests cover deadline, hang, crash, malformed result and reap against a real
       child process, and the full gate is green.
 
 ## Progress
@@ -116,3 +116,19 @@ process", and the profile's documentation must not be read as promising otherwis
   and it is why the tests wait for the process to be gone rather than for a duration.
 
 - 2026-08-09: closed at the `1.0.0-rc.17` boundary, against the wave gate run on this tree.
+
+- 2026-08-09: the five behaviours were checked against the tests rather than against the report, at
+  integration, before this row was ticked. Each has one and each names what it covers:
+
+  | behaviour | test |
+  |---|---|
+  | deadline | `dsp_graph.rs::a_supervised_worker_that_never_answers_costs_its_declared_action` |
+  | hang | `a_worker_that_will_not_stop_is_terminated_and_reaped_regardless` |
+  | crash | `a_crashing_worker_is_an_ending_the_media_process_survives` |
+  | malformed | `a_worker_answering_with_the_wrong_position_count_is_malformed`, plus `wire.rs`'s header and count refusals |
+  | reap | `a_worker_killed_from_outside_costs_its_declared_action_and_is_never_respawned`, `a_dropped_graph_still_reaps_its_worker_process` |
+
+  A sixth, `a_worker_ends_at_end_of_file_even_inside_a_frame_it_will_never_return_from`, covers the
+  orphan case the row does not name — the parent dying without running any of the teardown.
+  `dsp_worker.rs` is 7 of 7 green.
+
