@@ -2,7 +2,7 @@
 id: M-98
 title: Close and test the call-to-contract event bridge
 pillar: Media
-status: in-progress
+status: done
 priority: 27
 design: docs/designs/app-sdk.md
 epic: app-sdk
@@ -33,7 +33,7 @@ make the one function that maps between the two vocabularies testable.
       style as `tests/spec_tables.rs` — the gap this story exists for went unnoticed because
       "the crate has the variant" and "a call can produce it" are different claims and only the
       first was checked.
-- [ ] The full gate is green.
+- [x] The full gate is green.
 
 ## Progress
 
@@ -103,3 +103,4 @@ make the one function that maps between the two vocabularies testable.
   second time that has happened. Only the id moved. A reservation has to be disjoint per agent, not
   merely stated.
 
+- 2026-08-09: closed at the `1.0.0-rc.15` boundary, against the wave gate run on this tree.

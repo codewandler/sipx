@@ -77,12 +77,8 @@ appeared twice before anyone named it.
 - [M-64 — Attach bounded DSP graphs to calls](M-64-attach-bounded-dsp-graphs-to-calls.md) · Media · after M-54 and M-63 · ordered per-direction graphs, atomic replacement and teardown barrier
 - [M-70 — Accept multiplexed browser offers with unused component candidates](M-70-accept-multiplexed-browser-offers-with-unused-component-candidates.md) · Media · external review finding 9 · a second browser engine reaches SDP then fails the multiplexed profile
 - [M-72 — Prove the AEAD SRTP key derivation against an independent peer](M-72-prove-the-aead-srtp-key-derivation-against-a-peer.md) · Media · RFC 7714 publishes no KDF vector · a wrong salt placement makes two sipx endpoints interoperate with each other and nobody else, and every round-trip test still passes
-- [M-97 — Make the extensibility guard tell the attribute from prose about it](M-97-tell-the-attribute-from-prose-about-it.md) · Media · `preamble` is searched as one string, so a doc comment containing `#[non_exhaustive]` satisfies the rule; `sipx-media`'s `ProviderKind` passes on prose alone today
-- [M-98 — Close and test the call-to-contract event bridge](M-98-close-the-call-to-contract-event-bridge.md) · Media · filed by M-84 · `call.signal.metrics` is specified and typed but unreachable, and `event_from_call` has no tests at all
 - [T-33 — Bind browser WebSocket signalling](T-33-bind-browser-websocket-signalling.md) · Transport · after A-16 and S-41 · browser owns I/O, WASM core consumes bytes
 - [X-93 — Make protected release evidence faster without weakening it](X-93-make-protected-release-evidence-faster.md) · Build · measure cache and preflight changes against the 12m37 cold beta gate · follow-up
-- [X-133 — The JSON contract reader accepts rows that do not render](X-133-the-json-contract-reader-accepts-rows-that-do-not-render.md) · Quality · X-132 narrowed the flag half of check-cli-reference to real tables; `_document_json_contracts` in the same file still counts any three-celled `|` line between the region markers
-- [X-136 — The load candidate count goes null under suite load](X-136-the-load-candidate-count-goes-null-under-suite-load.md) · Quality · a_load_run_that_reaches_no_address_reports_what_it_attempted reported candidates_attempted null in a full workspace run and 3 alone
 
 ## Next (ready — take the top one unless the user named a story)
 
@@ -278,6 +274,8 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [M-92 — Give the remaining public-field structs a constructor, then mark them](M-92-give-the-remaining-public-field-structs-a-constructor.md) · Media · M-80's struct guard holds 6 types; 155 reachable public-field structs workspace-wide and 29 on the media surface are still literal-constructible
 - [M-93 — Make a cancelled play safe to tear down](M-93-make-play-safe-to-cancel.md) · Media · aborting a task parked in MediaSession::play wedges hang_up · ten calls took over 90 s to tear down, four without
 - [M-96 — Fix the preamble reader's off-by-one](M-96-fix-the-preamble-reader-off-by-one.md) · Media · an item at byte 0 with no blank line above it loses the first character of its preamble · cannot fire on this tree, which is why it needs a test rather than a reader
+- [M-97 — Make the extensibility guard tell the attribute from prose about it](M-97-tell-the-attribute-from-prose-about-it.md) · Media · `preamble` is searched as one string, so a doc comment containing `#[non_exhaustive]` satisfies the rule; `sipx-media`'s `ProviderKind` passes on prose alone today
+- [M-98 — Close and test the call-to-contract event bridge](M-98-close-the-call-to-contract-event-bridge.md) · Media · filed by M-84 · `call.signal.metrics` is specified and typed but unreachable, and `event_from_call` has no tests at all
 - [P-1 — Build the CLI scaffold and machine-readable output](P-1-cli-scaffold-and-output.md) · Phone
 - [P-2 — Implement `sipx register`](P-2-cli-register.md) · Phone
 - [P-3 — Implement `sipx dial`](P-3-cli-dial.md) · Phone
@@ -511,6 +509,8 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [X-130 — The generated-media load pair test now sheds a call too](X-130-the-generated-media-load-pair-test-now-sheds-a-call-too.md) · Quality · generated_media_load_pair_retains_the_rtp_workload runs --concurrency 2 against --max-active 2 and was observed rejecting one of four calls in a full cli suite run
 - [X-131 — Help prose cannot name another command's flag](X-131-help-prose-cannot-name-another-commands-flag.md) · Quality · check-cli-reference reads --flag tokens out of a command's whole help text, so a cross-reference in prose reads as an undocumented option
 - [X-132 — The CLI reference reader accepts rows that do not render](X-132-the-cli-reference-reader-accepts-rows-that-do-not-render.md) · Quality · check-cli-reference counts any `|`-leading line in a section as a documented flag, and load-responder's last six flags sit below a paragraph with no delimiter row — documented to the checker, prose to a reader
+- [X-133 — The JSON contract reader accepts rows that do not render](X-133-the-json-contract-reader-accepts-rows-that-do-not-render.md) · Quality · X-132 narrowed the flag half of check-cli-reference to real tables; `_document_json_contracts` in the same file still counts any three-celled `|` line between the region markers
+- [X-136 — The load candidate count goes null under suite load](X-136-the-load-candidate-count-goes-null-under-suite-load.md) · Quality · a_load_run_that_reaches_no_address_reports_what_it_attempted reported candidates_attempted null in a full workspace run and 3 alone
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

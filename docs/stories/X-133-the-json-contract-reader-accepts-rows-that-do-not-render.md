@@ -2,7 +2,7 @@
 id: X-133
 title: The JSON contract reader accepts rows that do not render
 pillar: Quality
-status: in-progress
+status: done
 priority: 6
 design:
 epic:
@@ -46,7 +46,7 @@ cells happen to contain a triple dash.
       skip is gone with it.
 - [x] The over-narrowing property is pinned the way `X-131` and `X-132` pinned theirs: a reader
       that saw no rows reports every discovered contract as undocumented rather than going quiet.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -94,3 +94,5 @@ cells happen to contain a triple dash.
 Found while implementing `X-132`, and reported rather than folded into it: `X-132`'s Acceptance
 names `document_command_flags`, and widening a narrowing diff to a second reader would have put two
 behaviour changes behind one failing-first test.
+
+- 2026-08-09: closed at the `1.0.0-rc.15` boundary, against the wave gate run on this tree.

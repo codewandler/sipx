@@ -2,7 +2,7 @@
 id: X-136
 title: The load candidate count goes null under suite load
 pillar: Quality
-status: in-progress
+status: done
 priority: 3
 design:
 epic: test-surfaces
@@ -53,7 +53,7 @@ looks like "no pass was walked".
       genuinely lost, that is a defect in `load` and this story fixes it there, not in the test.
 - [x] Whatever is decided, the assertion afterwards is non-vacuous: a run that truly walked no pass
       must still be distinguishable from one whose count was dropped.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -108,3 +108,5 @@ looks like "no pass was walked".
   *Owed CHANGELOG sentence* (not written here — the ledger is the coordinator's):
   `Fixed: a candidate pass ended by an answer now reports how far it got, so sipx load no longer
   prints candidates_attempted: null for a run that walked the list (X-136).`
+
+- 2026-08-09: closed at the `1.0.0-rc.15` boundary, against the wave gate run on this tree.

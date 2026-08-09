@@ -2,7 +2,7 @@
 id: M-97
 title: Make the extensibility guard tell the attribute from prose about it
 pillar: Media
-status: in-progress
+status: done
 priority: 8
 design:
 epic: media
@@ -54,7 +54,7 @@ grep for.
       are `///` phrases and so are genuinely prose, but a doc comment quoting one of them over a
       *different* type would classify this one. Decide whether that is worth closing here or is a
       separate finding.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -113,3 +113,5 @@ grep for.
   `#[non_exhaustive]` as an attribute rather than as a substring of the text above a type, so a doc
   comment naming the attribute no longer stands in for carrying it; `sipx-media`'s `ProviderKind`
   states its argument as `Exhaustive by design:`.*
+
+- 2026-08-09: closed at the `1.0.0-rc.15` boundary, against the wave gate run on this tree.

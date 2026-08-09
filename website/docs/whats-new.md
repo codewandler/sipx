@@ -1,13 +1,38 @@
 ---
 title: What's new
-description: Release highlights and adoption notes for the sipx 1.0.0-rc.14 release candidate.
+description: Release highlights and adoption notes for the sipx 1.0.0-rc.15 release candidate.
 ---
 
 # What's new
 
 <!-- BEGIN generated:release-heading -->
-## 1.0.0-rc.14 — 2026-08-09
+## 1.0.0-rc.15 — 2026-08-09
 <!-- END generated:release-heading -->
+
+RC.15 is mostly things that existed on paper and could not be reached in practice, plus the first
+measurement of what media actually costs.
+
+```bash
+cargo install --locked --version =1.0.0-rc.15 sipx-cli
+```
+
+- **Media costs about four times the memory of plain signalling — and most of that is the stack,
+  not the audio.** Measured at 1000 concurrent calls on an idle box: 51 MB with no session
+  negotiated, 119 MB with one that sends nothing, 218 MB carrying audio both ways. A deployment
+  running media elsewhere works at roughly a quarter of the footprint. `--media none` on the load
+  examples is what makes that measurable.
+- **`call.signal.metrics` and `call.signal.silence` can be emitted at last.** Both were specified,
+  typed and round-tripped over the wire, and no host could produce either — the bridge had no arm
+  and no tests. A specified event with no arm is now a red build.
+- **A call the far end cancelled is reported as `remote`, not `error`.** An invitation the peer
+  withdrew is not the host failing to continue.
+- **`sipx load` reports how far a candidate pass got** when a response deadline ended it. It had
+  been printing `candidates_attempted: null` for runs that walked the whole list.
+- **A bounded DSP graph can be attached to a live call**, validated whole before it activates and
+  replaced atomically at a sample boundary. It claims that over-budget work cannot stall RTP only
+  when every stage is proven-inline or supervised-isolated.
+
+## 1.0.0-rc.14 — 2026-08-09
 
 RC.14 finishes the extensibility rollout while it is still reversible, and repairs three checkers
 that were accepting what they could not see.
@@ -741,5 +766,5 @@ answer calls, but application callback bindings are not implemented.
 This website is built from `main`, so a page or API link may describe work newer than the tagged
 release. Use the exact crates.io version when reproducibility matters, and consult the
 [complete changelog](https://github.com/codewandler/sipx/blob/main/CHANGELOG.md) before updating a
-Git revision. Unreleased behavior is not part of `1.0.0-rc.14` merely because it appears on this
+Git revision. Unreleased behavior is not part of `1.0.0-rc.15` merely because it appears on this
 site.
