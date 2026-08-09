@@ -2,7 +2,7 @@
 id: T-46
 title: Measure plain SIP throughput without media
 pillar: Transport
-status: in-progress
+status: done
 priority: 12
 design:
 epic: diagnostic-automation
@@ -41,14 +41,14 @@ always creates a session.
 - [x] `capacity_test` and `load_test` gain a mode that negotiates no media: no SDP offer, no RTP
       socket bound, on **both** ends. Reusing the CLI's path or lifting it into the library are both
       acceptable; duplicating it in an example is not.
-- [ ] A run in that mode records memory and setup latency beside the existing two, so the three
+- [x] A run in that mode records memory and setup latency beside the existing two, so the three
       shapes — no media, idle media, flowing media — are one comparison rather than three runs a
       reader has to align by hand.
 - [x] The `audio_observed` guard keeps holding: a media-free run must report no audio figures at
       all, not zeros.
-- [ ] `docs/measurements/README.md` gains the third column and says which of the three a deployment
+- [x] `docs/measurements/README.md` gains the third column and says which of the three a deployment
       running external media should read.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -112,3 +112,25 @@ always creates a session.
   `sipx load --mode signalling`.*
 
   `./scripts/gate.py` was not run here by dispatch; one gate runs per wave.
+
+- 2026-08-09: **the measurement is taken, on an idle box, and it answers the question the story was
+  filed for.** Three runs of the same ramp to 1000 held calls, back to back, nothing else building:
+
+  | | RSS | per call | setup p50 | drift |
+  |---|---|---|---|---|
+  | `--media none` | 51 MB | 52 KB | 17.5 ms | 0.07 s |
+  | `--media idle` | 119 MB | 121 KB | 36.5 ms | 0.73 s |
+  | `--media full` | 218 MB | 223 KB | 34.7 ms | 0.74 s |
+
+  **Most of the media cost is the stack, not the audio.** Negotiating a session and binding a socket
+  takes 51 MB to 119 MB before a packet is sent; carrying audio then takes it to 218 MB. And the
+  drift and setup columns say it more sharply than memory does — `none` is an order of magnitude
+  steadier (0.07 s against 0.73 s), while carrying audio on top of an already-negotiated session
+  adds essentially nothing to either. A deployment running media elsewhere is not saving a fraction;
+  it is working at roughly a quarter of the footprint.
+
+  `audio_observed` is `false` for both `none` and `idle`, so their loss/jitter/mos columns are
+  withheld rather than reported as perfect — the guard holding in the direction that matters.
+  `docs/measurements/README.md` carries the third column and the reproduce command; the earlier
+  `capacity-media.json`, taken on a loaded box, is replaced by `capacity-full.json` from this set.
+

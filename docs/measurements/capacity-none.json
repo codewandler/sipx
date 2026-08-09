@@ -1,0 +1,12 @@
+{
+  "ramp": [50, 200, 250, 500],
+  "dwell_seconds": 10,
+  "media": "none",
+  "stopped_early": null,
+  "steps": [
+    {"step": 1, "target": 50, "established": 50, "held": 50, "setup_p50_ms": 1.6, "setup_p95_ms": 2.5, "setup_p99_ms": 2.6, "rtt_p50_ms": null, "audio_observed": false, "loss": null, "jitter_ms": null, "mos": null, "packets_received": 0, "discards": 0, "rss_bytes": 10567680, "failures": 0, "wall_s": 10.00, "sample_s": 0.000, "overhead_s": 0.00, "drift_s": 0.00},
+    {"step": 2, "target": 200, "established": 200, "held": 250, "setup_p50_ms": 6.5, "setup_p95_ms": 9.7, "setup_p99_ms": 10.1, "rtt_p50_ms": null, "audio_observed": false, "loss": null, "jitter_ms": null, "mos": null, "packets_received": 0, "discards": 0, "rss_bytes": 20152320, "failures": 0, "wall_s": 10.01, "sample_s": 0.000, "overhead_s": 0.01, "drift_s": 0.02},
+    {"step": 3, "target": 250, "established": 250, "held": 500, "setup_p50_ms": 8.0, "setup_p95_ms": 12.7, "setup_p99_ms": 13.0, "rtt_p50_ms": null, "audio_observed": false, "loss": null, "jitter_ms": null, "mos": null, "packets_received": 0, "discards": 0, "rss_bytes": 31502336, "failures": 0, "wall_s": 10.02, "sample_s": 0.000, "overhead_s": 0.02, "drift_s": 0.03},
+    {"step": 4, "target": 500, "established": 500, "held": 1000, "setup_p50_ms": 17.5, "setup_p95_ms": 24.3, "setup_p99_ms": 25.1, "rtt_p50_ms": null, "audio_observed": false, "loss": null, "jitter_ms": null, "mos": null, "packets_received": 0, "discards": 0, "rss_bytes": 53223424, "failures": 0, "wall_s": 10.03, "sample_s": 0.000, "overhead_s": 0.03, "drift_s": 0.07}
+  ]
+}

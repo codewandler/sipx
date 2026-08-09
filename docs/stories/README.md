@@ -77,7 +77,6 @@ appeared twice before anyone named it.
 - [M-70 — Accept multiplexed browser offers with unused component candidates](M-70-accept-multiplexed-browser-offers-with-unused-component-candidates.md) · Media · external review finding 9 · a second browser engine reaches SDP then fails the multiplexed profile
 - [M-72 — Prove the AEAD SRTP key derivation against an independent peer](M-72-prove-the-aead-srtp-key-derivation-against-a-peer.md) · Media · RFC 7714 publishes no KDF vector · a wrong salt placement makes two sipx endpoints interoperate with each other and nobody else, and every round-trip test still passes
 - [T-33 — Bind browser WebSocket signalling](T-33-bind-browser-websocket-signalling.md) · Transport · after A-16 and S-41 · browser owns I/O, WASM core consumes bytes
-- [T-46 — Measure plain SIP throughput without media](T-46-measure-plain-sip-throughput-without-media.md) · Transport · audio doubles memory and costs 8x on burst setup at 1000 calls · neither example can isolate signalling from the media stack
 - [X-93 — Make protected release evidence faster without weakening it](X-93-make-protected-release-evidence-faster.md) · Build · measure cache and preflight changes against the 12m37 cold beta gate · follow-up
 
 ## Next (ready — take the top one unless the user named a story)
@@ -407,6 +406,7 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [T-42 — Take the shared candidate pass in dial, load and scenario](T-42-take-the-shared-pass-in-dial-load-and-scenario.md) · Transport · five hand-rolled candidate loops remain across dial, load and scenario; three of them count no attempts, so their connection failures cannot say how far they got
 - [T-44 — Stop the last admitted load call racing its own cleanup](T-44-stop-the-last-admitted-load-call-racing-its-own-cleanup.md) · Transport · reaching the call bound requests cleanup immediately, so the call that reached it is cancelled mid-setup and `load --calls 1` can never report a connected call
 - [T-45 — Give each load candidate its own call identity](T-45-give-each-load-candidate-its-own-call-identity.md) · Transport · load's signalling workload reuses one Call-ID and From tag across every address of a target, so a second candidate arrives at the same server as a merged request
+- [T-46 — Measure plain SIP throughput without media](T-46-measure-plain-sip-throughput-without-media.md) · Transport · audio doubles memory and costs 8x on burst setup at 1000 calls · neither example can isolate signalling from the media stack
 - [X-1 — Scaffold the Cargo workspace, lint policy, licensing and CI](X-1-workspace-scaffold.md) · Core
 - [X-2 — Import the RFC 4475 torture corpus and its harness](X-2-rfc4475-torture-corpus.md) · Core
 - [X-3 — Enforce the provenance policy in CI and pre-commit](X-3-provenance-gate.md) · Core
