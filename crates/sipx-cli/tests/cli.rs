@@ -5222,6 +5222,26 @@ async fn bounded_load_stops_at_the_call_limit_and_emits_one_stable_summary() {
     );
 }
 
+/// The `--max-active` a load pair must give a generator running at `concurrency`, and the argument
+/// for the factor rather than the number.
+///
+/// The responder frees a slot only after its worker future is joined, which is strictly after it has
+/// put the 200 on the wire for that dialog's BYE; the generator frees its own slot on receiving that
+/// same 200 and places the replacement INVITE immediately. Every retiring call is therefore counted
+/// by both ends for as long as the machine takes to schedule the responder's accept loop, and in the
+/// worst case all `concurrency` of them retire together. Twice the concurrency covers that worst
+/// case, so this is a bound and not a tolerance: nothing an equal ceiling would have caught is
+/// weakened, and a refusal at the ceiling was the responder honouring its contract rather than a
+/// defect (`X-126`, `X-130`).
+///
+/// One function rather than the same expression in each pair, because a per-fixture copy is headroom
+/// each fixture can lose on its own, and only a shared one can be held by a measurement:
+/// `contention_subject_a_long_generated_media_pair_admits_every_call` is that measurement, and it
+/// can only defend the derivation it shares.
+fn responder_ceiling(concurrency: u64) -> u64 {
+    concurrency * 2
+}
+
 /// P-18: the two bounded-load commands are documented as a pair, so their neutral defaults must
 /// drive the same bodyless signalling workload. Both summaries prove the requested concurrency was
 /// carried and every requested call completed, then prove that every owned resource drained.
@@ -5236,19 +5256,14 @@ async fn default_load_pair_completes_the_requested_signalling_workload() {
     // The generator's in-flight ceiling, and the number of dialogs the responder must therefore
     // carry at once for this workload to have been driven at all.
     let concurrency: u64 = 8;
-    // Twice that, and the factor is derived rather than tuned: it is headroom for the dialog a
-    // retiring call has left behind. The responder frees a slot when its worker future ends, which
-    // is strictly after it has put the 200 on the wire for that dialog's BYE; the generator frees
-    // its own slot on receiving that same 200 and places the replacement INVITE immediately. Every
-    // retiring call is therefore counted by both ends for as long as the machine takes to schedule
-    // the responder's accept loop, and all `concurrency` of them may retire together.
+    // Headroom for the dialog a retiring call has left behind; `responder_ceiling` carries the
+    // derivation, and it is shared so that this line cannot be edited away here alone.
     //
-    // At an equal ceiling that put admission control on the happy path, and `connected` measured
-    // the scheduler: at two CPU burners per core this test refused a call in 4 of 10 runs, always
-    // a 503 with `active_high_water` exactly at the ceiling — the responder honouring its own
-    // contract, not failing (`X-126`). The headroom is not a tolerance and does not weaken
-    // anything below; it removes a limit that was never what this test is about.
-    let max_active = concurrency * 2;
+    // At an equal ceiling admission control was on the happy path, and `connected` measured the
+    // scheduler: at two CPU burners per core this test refused a call in 4 of 10 runs, always a 503
+    // with `active_high_water` exactly at the ceiling — the responder honouring its own contract,
+    // not failing (`X-126`).
+    let max_active = responder_ceiling(concurrency);
     let concurrency_arg = concurrency.to_string();
     let max_active_arg = max_active.to_string();
     let mut command = sipx();
@@ -5507,25 +5522,17 @@ async fn generated_media_load_pair_retains_the_rtp_workload() {
     // The generator's in-flight ceiling, and the number of dialogs the responder must therefore
     // carry at once for this workload to have been driven at all.
     let concurrency: u64 = 2;
-    // Twice that, and the factor is the signalling pair's argument rather than its number: it is
-    // headroom for the dialog a retiring call has left behind. The responder frees a slot when its
-    // worker future is joined, which is strictly after it has put the 200 on the wire for that
-    // dialog's BYE; the generator frees its own slot on receiving that same 200 and places the
-    // replacement INVITE immediately. Every retiring call is therefore counted by both ends for as
-    // long as the machine takes to schedule the responder's accept loop, and all `concurrency` of
-    // them may retire together.
+    // Headroom for the dialog a retiring call has left behind; `responder_ceiling` carries the
+    // derivation, and it is shared so that this line cannot be edited away here alone.
     //
-    // An equal ceiling put admission control on the happy path of both of this run's slot
-    // handovers, and a full `sipx-cli` suite refused one of the four calls that way — a 503 with
+    // An equal ceiling put admission control on the happy path of both of this run's slot handovers,
+    // and a full `sipx-cli` suite refused one of the four calls that way — a 503 with
     // `active_high_water` exactly at the ceiling, nothing failed and nothing timed out (`X-130`).
     // Four calls is only two handovers, which is why deliberate contention almost never catches it
-    // and why the equal ceiling looked safe: 46 runs at two and four CPU burners per core shed
-    // nothing, and every one of them still sat exactly at the ceiling. Lengthening the same pair to
-    // 40 calls — 38 handovers instead of 2, nothing else changed — sheds 3 calls over 6 runs at an
-    // equal ceiling and 0 over 6 at this one, where `active_high_water` reaches 3 in half the runs.
-    // That third slot is the call an equal ceiling refuses. The headroom is not a tolerance and
-    // does not weaken anything below; it removes a limit that was never what this test is about.
-    let max_active = concurrency * 2;
+    // here and why the equal ceiling looked safe: 46 runs at two and four CPU burners per core shed
+    // nothing, and every one of them still sat exactly at the ceiling. What this length cannot
+    // measure, `contention_subject_a_long_generated_media_pair_admits_every_call` does.
+    let max_active = responder_ceiling(concurrency);
     let concurrency_arg = concurrency.to_string();
     let max_active_arg = max_active.to_string();
     let (mut responder, mut lines, ready) =
@@ -5607,6 +5614,149 @@ async fn generated_media_load_pair_retains_the_rtp_workload() {
     // `max_active` proves admission control still held. The exact figure inside that band is the
     // count of retiring dialogs the accept loop had not joined yet, which is the scheduling detail
     // this test does not assert on — and which the headroom above exists to leave room for.
+    let high_water = summary["counts"]["active_high_water"]
+        .as_u64()
+        .expect("active_high_water is a count");
+    assert!(
+        (concurrency..=max_active).contains(&high_water),
+        "responder carried {high_water} dialogs at once, outside {concurrency}..={max_active}: \
+         {summary}"
+    );
+    assert_eq!(summary["post_drain"]["active_dialogs"], 0);
+    assert_eq!(summary["post_drain"]["owned_tasks"], 0);
+}
+
+/// `X-135`: the subject `scripts/contention-proof.py` runs to hold [`responder_ceiling`] to a
+/// measurement rather than to a comment.
+///
+/// The pair above cannot do this job, and that is a measurement rather than an opinion. A slot
+/// handover is one chance for the replacement INVITE to arrive while the dialog it replaced is still
+/// counted by both ends; four calls at concurrency 2 is **two** of them, so at the shed rate `X-130`
+/// measured under this load that fixture passes identically with and without the headroom. Adding it
+/// here would have bought minutes of runtime and no discrimination — green for the same reason an
+/// empty test suite is, which is the failure `contention-proof.py` exists to refuse.
+///
+/// So this rolls the same race two hundred times instead of twice. Handovers are what discriminate
+/// and wall clock is what they cost, so the run buys them at the rate the generator retires calls:
+/// `concurrency` per one-second call rather than two per run. Measured at two CPU burners per core,
+/// `X-135`:
+///
+/// | ceiling | runs | red | calls shed | `active_high_water` |
+/// |---|---|---|---|---|
+/// | `responder_ceiling` (this) | 6 | 0 | 0 | 9 in 4 of 4 sampled |
+/// | equal to `--concurrency` | 6 | 6 | 6 to 13 per run, every one a 503 | 8 in every run |
+///
+/// Both halves are there. The reds are the responder refusing a replacement INVITE it had no slot
+/// for, with nothing failed and nothing timed out; the green half's ninth simultaneous dialog is the
+/// call an equal ceiling refuses, seen directly rather than inferred.
+///
+/// `#[ignore]` because that discrimination is bought with wall-clock time — about 27 seconds under
+/// this load — and that belongs to a proof somebody runs on purpose, not to every `cargo test`. The
+/// proof invokes it by name with `--ignored`, and `--check` fails if this attribute and that
+/// declaration ever disagree, in either direction.
+#[tokio::test]
+#[ignore = "half a minute under load: the headroom subject for scripts/contention-proof.py"]
+async fn contention_subject_a_long_generated_media_pair_admits_every_call() {
+    let _scenario = process_scenario().await;
+    // The signalling pair's concurrency, deliberately: `responder_ceiling` is one derivation for
+    // both pairs, so the subject that defends it should run at the scale where a slot is handed over
+    // eight times per second rather than twice per run.
+    let concurrency: u64 = 8;
+    let max_active = responder_ceiling(concurrency);
+    // `calls - concurrency` handovers, which is 192 — enough that the race is answered rather than
+    // sampled. It was 6 of 6 red at an equal ceiling with the least of those runs shedding six
+    // calls, so this is not a subject that goes red only on a good day.
+    let calls: u64 = 200;
+    let concurrency_arg = concurrency.to_string();
+    let max_active_arg = max_active.to_string();
+    let calls_arg = calls.to_string();
+    let (mut responder, mut lines, ready) =
+        start_mode_responder("generated-media", &calls_arg, &max_active_arg).await;
+    let address = ready["address"].as_str().expect("readiness address");
+    // Three seconds of bound per one-second call is the run failing to return at all, not a slow
+    // one: the work is `calls / concurrency` seconds plus setup, and `bound` stretches this again
+    // by however much slower the machine measured itself to be.
+    let ceiling = Duration::from_secs(calls / concurrency * 3);
+    let output = tokio::time::timeout(
+        bound(ceiling),
+        sipx()
+            .args([
+                "load",
+                &format!("sip:load@{address}"),
+                "--mode",
+                "generated-media",
+                "--rate",
+                "20",
+                "--concurrency",
+                &concurrency_arg,
+                "--calls",
+                &calls_arg,
+                "--call-duration",
+                "1",
+                // Ten rather than the pair's five, and it is not a tolerance on what is asserted
+                // below. This subject exists to see refusals; a setup that ran out of clock under
+                // deliberate contention would be a different outcome wearing the same red, and
+                // telling those two apart is the entire product here.
+                "--timeout",
+                "10",
+                "--json",
+            ])
+            .output(),
+    )
+    .await
+    .expect("the long generated-media run is bounded")
+    .expect("load runs");
+    let load: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("load summary JSON");
+    let summary: serde_json::Value = serde_json::from_str(
+        &tokio::time::timeout(bound(Duration::from_secs(10)), lines.next_line())
+            .await
+            .expect("responder summary is bounded")
+            .expect("responder summary can be read")
+            .expect("responder summary exists"),
+    )
+    .expect("responder summary JSON");
+    let complaint = drain_stderr(&mut responder).await;
+    let responder_status = responder.wait().await.expect("responder exits");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(load["status"], "completed", "{load}");
+    assert_eq!(load["outcomes"]["attempted"], calls, "{load}");
+    assert_eq!(load["outcomes"]["failed"], 0, "{load}");
+    assert_eq!(load["outcomes"]["timed_out"], 0, "{load}");
+    // The discriminating assertion, and what the run's wall clock buys. A rejection here is the
+    // responder refusing a replacement INVITE while the dialog it replaced still holds a slot —
+    // correct behaviour at a ceiling with no room for it, and a fixture asking for a workload its
+    // peer was never configured to carry.
+    assert_eq!(
+        load["outcomes"]["rejected"], 0,
+        "the responder refused a call at --max-active {max_active} against --concurrency \
+         {concurrency}: the ceiling has no room for a retiring dialog. load: {load}; responder: \
+         {summary}"
+    );
+    assert_eq!(
+        load["outcomes"]["connected"], calls,
+        "load: {load}; responder: {summary}"
+    );
+    assert_eq!(
+        load["media"]["snapshots"], load["outcomes"]["connected"],
+        "{load}"
+    );
+    assert_eq!(responder_status.code(), Some(0), "{complaint}");
+    assert_eq!(summary["status"], "completed", "{summary}");
+    assert_eq!(summary["counts"]["failed"], 0, "{summary}");
+    assert_eq!(summary["counts"]["completed"], calls, "{summary}");
+    // The same range the pair above asserts, for the same two reasons, and deliberately not the
+    // strict lower bound the measurement would support. An equal ceiling collapses this band to a
+    // point and stays inside it, so this is not what discriminates; the value it reports is, and it
+    // read 9 in four of four sampled runs — the ninth simultaneous dialog is the one an equal
+    // ceiling refuses. Asserting `> concurrency` would turn that evidence into a claim about when
+    // the accept loop was scheduled, which is the class of assertion `X-118` spent a story removing.
     let high_water = summary["counts"]["active_high_water"]
         .as_u64()
         .expect("active_high_water is a count");

@@ -39,10 +39,12 @@ evaluated under, which is what the story asked for.
 
 # Costs, stated
 
-This takes minutes and rebuilds nothing it does not have to, so it is **not** a gate step. `--check`
-is: it resolves every subject and control name against the source and verifies the control is still
-ignored and still unbounded, in milliseconds, so the proof cannot rot into naming tests that no
-longer exist. A renamed test is the way this script would quietly stop proving anything.
+This takes minutes from cold and rebuilds nothing it does not have to, so it is **not** a gate step.
+Warm it measured 38 seconds, most of that the one long subject `X-135` added; the cost of each
+subject is stated beside it. `--check` is a gate step: it resolves every subject and control name
+against the source and verifies each is run the way it is declared and that the control is still
+unbounded, in milliseconds, so the proof cannot rot into naming tests that no longer exist. A
+renamed test is the way this script would quietly stop proving anything.
 """
 
 from __future__ import annotations
@@ -64,14 +66,21 @@ BURNER = "while True: pass"
 
 @dataclass(frozen=True)
 class Subject:
-    """A test to run, and where the source that defines it lives."""
+    """A test to run, and where the source that defines it lives.
+
+    `ignored` is a property of the test rather than an argument the caller passes, because getting
+    it wrong in either direction is silent. Cargo asked for a test it will not run reports zero
+    tests and exits 0, which reads here as a pass — the same false green as a renamed test, and the
+    reason `--check` verifies the attribute against the source.
+    """
 
     selector: str
     target: str
     name: str
     source: str
+    ignored: bool = False
 
-    def command(self, ignored: bool = False) -> tuple[str, ...]:
+    def command(self) -> tuple[str, ...]:
         """The cargo invocation that runs exactly this test and nothing else."""
         command = (
             "cargo",
@@ -85,18 +94,29 @@ class Subject:
             "--exact",
             self.name,
         )
-        return command + ("--ignored",) if ignored else command
+        return command + ("--ignored",) if self.ignored else command
 
 
 #: The assertions this proof covers. Each has been seen red on a busy box at least once, and each
 #: is green on an idle one, which is the only property that makes a subject worth the minutes.
 #:
 #: The first three are `X-118`'s mechanism: a wall-clock bound that expired because the machine had
-#: not scheduled the process yet. The last is not, and it is here because the technique transfers
-#: even though the diagnosis did not — `X-126` was a *protocol* rejection, a 503 the responder was
-#: configured to send, and it was reproduced by loading the box exactly like this (4 of 10 runs at
-#: two burners per core). Its fixture now gives the responder headroom over the generator; running
-#: it here is what stops that headroom being quietly taken back.
+#: not scheduled the process yet. The last two are not, and they are here because the technique
+#: transfers even though the diagnosis did not — `X-126` was a *protocol* rejection, a 503 the
+#: responder was configured to send, and it was reproduced by loading the box exactly like this
+#: (4 of 10 runs at two burners per core). Those fixtures now give the responder headroom over the
+#: generator; running them here is what stops that headroom being quietly taken back.
+#:
+#: The last subject is `#[ignore]`d and adds about 27 seconds to every run of this script. Stated
+#: without flattering it: on a warm build the whole run measured 38 seconds, so this one subject is
+#: most of it. `X-130` measured why that is worth paying — the generated-media pair as the ordinary
+#: suite runs it is four calls at concurrency 2, which is *two* slot handovers, and at that rate it
+#: passes identically with and without the headroom. Adding that fixture would have bought minutes
+#: of runtime and no discrimination, a green for the same reason an empty test suite is. The subject
+#: rolls the same race 192 times instead, and `X-135` measured both halves under this load: 6 of 6
+#: runs red at an equal ceiling, 0 of 6 with the headroom. A subject that fires on a coin toss would
+#: be noise rather than a proof, which is why the length was chosen from that measurement and not
+#: from the fixture it replaces.
 SUBJECTS = (
     Subject(
         "--test",
@@ -122,6 +142,13 @@ SUBJECTS = (
         "default_load_pair_completes_the_requested_signalling_workload",
         "crates/sipx-cli/tests/cli.rs",
     ),
+    Subject(
+        "--test",
+        "cli",
+        "contention_subject_a_long_generated_media_pair_admits_every_call",
+        "crates/sipx-cli/tests/cli.rs",
+        ignored=True,
+    ),
 )
 
 #: The deliberate failure. See the module docstring: without this going red, the subjects going
@@ -131,6 +158,7 @@ CONTROL = Subject(
     "cli",
     "contention_control_an_unbounded_wait_is_still_reported",
     "crates/sipx-cli/tests/cli.rs",
+    ignored=True,
 )
 
 PROVEN = "proven"
@@ -197,10 +225,10 @@ def stop_burners(burners: list[subprocess.Popen]) -> None:
             burner.kill()
 
 
-def run(subject: Subject, ignored: bool = False) -> bool:
+def run(subject: Subject) -> bool:
     """True when the test passed. Cargo's own exit status, never a pipeline's."""
     completed = subprocess.run(
-        subject.command(ignored=ignored),
+        subject.command(),
         cwd=ROOT,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -210,11 +238,35 @@ def run(subject: Subject, ignored: bool = False) -> bool:
     return completed.returncode == 0
 
 
-def check_problems() -> list[str]:
-    """Every name this script runs still exists, and the control is still a control.
+#: Lines that may sit between a test's own `#[ignore]` and its `fn`, and nothing else. Walking back
+#: over exactly these stops at the previous item, which a fixed character window does not: the
+#: control is followed immediately by an ordinary subject, so a window wide enough to clear a doc
+#: comment also reaches back into the control's attributes and reports the neighbour as ignored.
+_ATTRIBUTE_LINE = re.compile(r"\s*(#!?\[|//|\)\]|\)|,)")
 
-    Cheap enough for a gate step, and it catches the one way this proof rots silently: a test gets
-    renamed, cargo matches nothing, `--exact` reports zero tests run, and cargo exits 0.
+
+def _is_ignored(text: str, leaf: str) -> bool | None:
+    """Whether `fn <leaf>` carries `#[ignore]`. `None` when the function is not there at all."""
+    match = re.search(rf"\bfn {re.escape(leaf)}\b", text)
+    if match is None:
+        return None
+    lines = text.splitlines()
+    for line in reversed(lines[: text[: match.start()].count("\n")]):
+        if not line.strip() or not _ATTRIBUTE_LINE.match(line):
+            return False
+        if "#[ignore" in line:
+            return True
+    return False
+
+
+def check_problems() -> list[str]:
+    """Every name this script runs still exists, is run the way it is declared, and the control is
+    still a control.
+
+    Cheap enough for a gate step, and it catches the two ways this proof rots silently. A test gets
+    renamed, cargo matches nothing, `--exact` reports zero tests run, and cargo exits 0. Or a test's
+    `#[ignore]` and this file's `ignored` drift apart, cargo is asked for a test it will not run,
+    and it reports zero tests run and exits 0 — the same false green, reached from either side.
     """
     problems: list[str] = []
     for subject in SUBJECTS + (CONTROL,):
@@ -224,17 +276,29 @@ def check_problems() -> list[str]:
             continue
         text = source.read_text(encoding="utf-8")
         leaf = subject.name.rsplit("::", 1)[-1]
-        if not re.search(rf"\bfn {re.escape(leaf)}\b", text):
+        ignored = _is_ignored(text, leaf)
+        if ignored is None:
             problems.append(
                 f"{subject.name} is not defined in {subject.source}; `--exact` would match no "
                 "test and cargo would exit 0, so the run would report a proof of nothing"
+            )
+        elif ignored and not subject.ignored:
+            problems.append(
+                f"{subject.name} is `#[ignore]`d in {subject.source} but is run here without "
+                "`--ignored`, so cargo would skip it, report zero tests run and exit 0"
+            )
+        elif subject.ignored and not ignored:
+            problems.append(
+                f"{subject.name} is run here with `--ignored` but is not `#[ignore]`d in "
+                f"{subject.source}, so cargo would match no test and exit 0"
             )
     control = ROOT / CONTROL.source
     if control.exists():
         text = control.read_text(encoding="utf-8")
         body = text[text.find(f"fn {CONTROL.name}") :] if f"fn {CONTROL.name}" in text else ""
-        head = text[: text.find(f"fn {CONTROL.name}")] if body else ""
-        if "#[ignore" not in head[-600:]:
+        # Reported beside the loop's own finding above rather than instead of it: losing this
+        # attribute breaks two different things, and only one of them is about this script.
+        if _is_ignored(text, CONTROL.name) is False:
             problems.append(
                 f"{CONTROL.name} is not `#[ignore]`d. A control that fails on purpose must stay "
                 "out of every ordinary run, or the suite is permanently red"
@@ -279,7 +343,7 @@ def main() -> int:
     print(f"loading {cores} cores with {count} burners, then running the proof", flush=True)
     burners = start_burners(count)
     try:
-        control_failed = not run(CONTROL, ignored=True)
+        control_failed = not run(CONTROL)
         subjects = {subject.name: run(subject) for subject in SUBJECTS}
     finally:
         stop_burners(burners)
