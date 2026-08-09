@@ -30,6 +30,7 @@ use crate::message::{Message, Request, Response};
 /// retransmit it, so a retransmission timer can never start before the thing it retransmits
 /// has gone out.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum Output {
     /// Put this message on the wire.
     Send(Box<Message>),
@@ -60,6 +61,7 @@ impl Output {
 
 /// What the transaction has to tell the transaction user.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum TuEvent {
     /// A request arrived that the TU has not seen before.
     ///
@@ -82,6 +84,11 @@ pub enum TuEvent {
 }
 
 /// Why a transaction ended.
+///
+/// Exhaustive by design: every arc into the terminated state of RFC 3261 §17's machines is one of
+/// three things — the transaction ran its course, its timeout timer fired, or the transport
+/// reported a failure. RFC 6026 rearranged those arcs and added no fourth kind, which is the only
+/// evidence available that the set is the RFC's rather than this crate's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reason {
     /// It ran its course.
@@ -93,6 +100,10 @@ pub enum Reason {
 }
 
 /// Whether the transport delivers reliably, which decides half the timer behaviour.
+///
+/// Exhaustive by design: RFC 3261 §17's timer tables are indexed on one bit of the transport —
+/// either it retransmits for the transaction or the transaction retransmits for itself. This is
+/// that bit. A transport sipx adds later is one or the other of them, not a third column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reliability {
     /// TCP, TLS, WebSocket: no retransmission timers, and the absorption timers fire at once.

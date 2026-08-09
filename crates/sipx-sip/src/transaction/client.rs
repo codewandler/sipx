@@ -12,6 +12,11 @@ use crate::transaction::{Output, Reason, Reliability, TuEvent};
 /// `Calling` belongs to the INVITE machine and `Trying` to the non-INVITE one; the rest are
 /// shared. `Accepted` is RFC 6026's addition and exists so that a retransmitted 2xx — which
 /// forking proxies produce as a matter of course — still has a transaction to arrive at.
+///
+/// Exhaustive by design: this is the union of the states of RFC 3261 §17.1's two client machines
+/// with RFC 6026's `Accepted`, and a client transaction is one of those machines. A state neither
+/// machine has is not a state a client transaction can be in — a new one would be a new machine,
+/// and that is a new RFC rather than a variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientState {
     /// INVITE: the request has gone out and nothing has come back.

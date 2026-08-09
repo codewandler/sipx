@@ -24,6 +24,10 @@ pub const REGINFO_TYPE: &str = "application/reginfo+xml";
 /// The five states of the RFC's own state machine, and they are not decoration: a watcher renders
 /// `early` as "ringing" and `confirmed` as "on a call", so collapsing them is a busy-lamp field
 /// that lights up at the wrong time.
+///
+/// Exhaustive by design: §3.7.1's state machine has these five states and the `dialog` element's
+/// `state` carries no other token, so a document with a sixth is one this package cannot have
+/// produced. A watcher's own richer labelling is a rendering of these, not a value beside them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DialogState {
     /// The UAC has sent an INVITE and heard nothing.
@@ -53,6 +57,10 @@ impl DialogState {
 }
 
 /// Which side started the dialog (RFC 4235 §4.1).
+///
+/// Exhaustive by design: §4.1's `direction` attribute is `initiator` or `recipient`, and a dialog
+/// has the two ends those name. This says which one the endpoint publishing the document was, and
+/// a dialog it neither placed nor received is not one it can report on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     /// This endpoint placed the call.
@@ -158,6 +166,7 @@ impl DialogWatch {
 
 /// What happened to a registered contact (RFC 3680 §5.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ContactEvent {
     /// A new binding.
     Registered,

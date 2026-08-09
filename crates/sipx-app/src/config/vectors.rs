@@ -170,6 +170,7 @@ signing_secrets = ["reception-hook"]
 
 /// What a call arriving on a listener must be met with.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AdmitExpect {
     /// Admitted to this app.
     App(&'static str),
@@ -185,6 +186,7 @@ pub enum AdmitExpect {
 /// the loader's own types, so a vector says what the *document* means and cannot accidentally
 /// assert what the reader happened to produce.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BindingExpect {
     /// Document mode.
     Webhook {
@@ -463,6 +465,10 @@ impl Expect {
 }
 
 /// What a reload must do.
+///
+/// Exhaustive by design: a reload is applied or it is refused, and the configuration in force
+/// afterwards is decided by which. There is no third outcome for a vector to assert — a refusal
+/// that changed what is running would be the defect these vectors exist to catch, not a case.
 #[derive(Debug)]
 pub enum ReloadExpect {
     /// Applied; this app now declares this.
@@ -481,6 +487,7 @@ pub enum ReloadExpect {
 
 /// What a vector does.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Case {
     /// A document that must load, and what it must load as.
     Accepts {

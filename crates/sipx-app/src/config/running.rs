@@ -40,6 +40,7 @@ pub struct AppPolicy {
 /// What happened to a call arriving on a listener. Total (N6): there is no fourth answer in which
 /// nothing is decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Admission {
     /// Admitted to this app, under this policy.
     App(Box<AppPolicy>),

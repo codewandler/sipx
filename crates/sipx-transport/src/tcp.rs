@@ -25,6 +25,7 @@ use crate::target::{ConnectionKey, TransportKind};
 
 /// Something that happened on a connection.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Event {
     /// A complete message arrived.
     Message {
@@ -147,6 +148,10 @@ impl Default for PoolConfig {
 
 /// How a connection came to exist, which decides whether it may be reused for outbound
 /// requests.
+///
+/// Exhaustive by design: a socket exists because one of its two ends connected, and a socket has
+/// two ends. The reuse rule this feeds asks exactly that question — did we open it — and there is
+/// no third answer for it to receive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
     /// We opened it.

@@ -122,6 +122,7 @@ pub enum CommandError {
 
 /// Publisher timer kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Timer {
     /// Automatic refresh deadline.
     Refresh,
@@ -140,6 +141,7 @@ pub struct PublishedState {
 
 /// Typed terminal outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Termination {
     /// A conditional tag was rejected and was discarded.
     StaleTag,
@@ -165,6 +167,7 @@ pub enum Termination {
 
 /// Observable publisher change.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum StateChange {
     /// A successful operation installed fresh authority.
     Published(PublishedState),
@@ -174,6 +177,7 @@ pub enum StateChange {
 
 /// One pure action for an I/O driver.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Output {
     /// Send a complete request apart from transport-owned Via.
     SendPublish {

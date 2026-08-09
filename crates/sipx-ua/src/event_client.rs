@@ -30,6 +30,7 @@ pub const DEFAULT_PROBATION_BACKOFF: Duration = Duration::from_secs(60);
 
 /// A transport identity supplied by the I/O driver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Transport {
     /// UDP datagrams.
     Udp,
@@ -297,6 +298,7 @@ impl SubscriptionId {
 
 /// A fired timer name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Timer {
     /// Initial/refresh/unsubscribe NOTIFY wait.
     N,
@@ -310,6 +312,7 @@ pub enum Timer {
 
 /// Public lifecycle state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Lifecycle {
     /// Waiting for the first matching NOTIFY.
     NotifyWait,
@@ -325,6 +328,7 @@ pub enum Lifecycle {
 
 /// Typed terminal outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Termination {
     /// Timer N fired before the required NOTIFY.
     NoInitialNotify,
@@ -356,6 +360,7 @@ pub enum Termination {
 
 /// Observable lifecycle facts.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum StateChange {
     /// The subscription entered a framework state.
     State(Lifecycle),
@@ -380,6 +385,7 @@ pub struct NotificationMeta {
 
 /// One pure action for the I/O-facing driver.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Output<V> {
     /// Send a complete SUBSCRIBE through a real client transaction.
     SendSubscribe {
@@ -1186,6 +1192,12 @@ impl<C: PackageConsumer> EventClient<C> {
                     }
                 }
             }
+            // `State` is `#[non_exhaustive]` since `M-83`, and a subscription state this client
+            // cannot read is one it must not act on: treating it as active would report a
+            // subscription it has not been granted, and treating it as terminated would release
+            // a usage the notifier still holds. The NOTIFY is answered 200 above either way, so
+            // the usage is left exactly as it stands and the next one decides.
+            _ => {}
         }
         finish_if_terminal(&mut self.entries, id, &outputs);
         outputs
@@ -1631,6 +1643,10 @@ fn route_peer(uri: &Uri, fallback: &Peer) -> Result<Peer, ()> {
         UriTransport::Ws => Transport::Ws,
         UriTransport::Wss => Transport::Wss,
         UriTransport::Quic => Transport::Quic,
+        // `UriTransport` is `#[non_exhaustive]` since `M-83`. A route URI naming a transport this
+        // client cannot open selects no safe peer, which is what `Err(())` already means here —
+        // and is why `Termination::UnsupportedRouteTransport` exists.
+        _ => return Err(()),
     };
     let ip = match uri.host() {
         Some(Host::Ip(ip)) => *ip,
@@ -1697,9 +1713,12 @@ fn retry_policy(state: &Subscription, probation_backoff: Duration) -> RetryPolic
         Some(Reason::GiveUp) | None => state
             .retry_after
             .map_or(RetryPolicy::Immediate, RetryPolicy::After),
-        Some(Reason::Rejected | Reason::NoResource | Reason::Invariant | Reason::BadFilter) => {
-            RetryPolicy::Never
-        }
+        // `rejected`, `noresource`, `invariant` and `badfilter` each say do not come back.
+        // `Reason` is `#[non_exhaustive]` since `M-83`, so a reason this client cannot read falls
+        // here too, and that is the safe reading rather than a convenient one: re-subscribing on
+        // a reason whose retry rule is unknown is how a client ends up in a loop against a
+        // notifier that told it to stop.
+        _ => RetryPolicy::Never,
     }
 }
 

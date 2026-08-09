@@ -33,6 +33,7 @@ impl Event {
 /// This is an observation format, not an instruction vocabulary. Values are produced only by
 /// matching [`sipx_app_protocol::Output`] from the sole interpreter.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Effect {
     /// Answer the call.
     Answer,

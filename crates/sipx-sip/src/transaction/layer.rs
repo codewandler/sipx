@@ -10,6 +10,10 @@ use crate::transaction::timing::{Timer, Timers};
 use crate::transaction::{Output, Reliability, TuEvent};
 
 /// Where a message went.
+///
+/// Exhaustive by design: the layer looks a message up, and a lookup either found a transaction,
+/// made one, or found nothing. A message cannot both match and create — the lookup runs once — and
+/// one that did neither has already been passed up whole, so there is no fourth destination.
 #[derive(Debug)]
 pub enum Dispatch {
     /// It matched a transaction, which produced these outputs.

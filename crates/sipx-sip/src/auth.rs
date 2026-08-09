@@ -23,6 +23,7 @@ use sha2::{Digest, Sha256};
 
 /// Which digest algorithm a challenge asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum Algorithm {
     /// RFC 2617's original, and still what most registrars offer.
     #[default]

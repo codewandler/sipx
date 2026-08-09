@@ -397,8 +397,13 @@ impl<C: PackageConsumer> Driver<C> {
             let (outputs, incoming) = match event {
                 DriverInput::Incoming(incoming) => {
                     let incoming = *incoming;
-                    let source = peer_from_incoming(&incoming);
-                    let outputs = self.core.notify(1, &incoming.request, source);
+                    // `None` when the NOTIFY arrived over a transport the event client cannot
+                    // name — see `from_transport`. There is no peer to hand the core and no
+                    // honest substitute for one, so the notification produces no outputs and
+                    // the notifier retransmits into a subscription that is still up.
+                    let outputs = peer_from_incoming(&incoming)
+                        .map(|source| self.core.notify(1, &incoming.request, source))
+                        .unwrap_or_default();
                     (outputs, Some(incoming))
                 }
                 DriverInput::Command(Some(Command::Drained(count))) => {
@@ -477,6 +482,13 @@ impl<C: PackageConsumer> Driver<C> {
                     let _ = self.states.try_send(change);
                 }
                 Output::Stopped => {}
+                // `Output` is `#[non_exhaustive]` since `M-83`, so this driver has to write the
+                // arm. An instruction it cannot perform is one `sipx-ua` added without teaching
+                // the subscriber to carry it out; reporting it is all that is left, and it is
+                // better than a guess that would answer a NOTIFY the core meant to leave alone.
+                _ => {
+                    tracing::warn!("a subscription asked for an output this driver cannot perform");
+                }
             }
         }
     }
@@ -488,7 +500,11 @@ impl<C: PackageConsumer> Driver<C> {
         let Some((events, _)) = self.events.as_ref() else {
             return;
         };
-        match self.endpoint.send(request, target(peer)).await {
+        let Some(target) = target(peer) else {
+            tracing::warn!("no SUBSCRIBE target: the peer's transport has no transport-layer name");
+            return;
+        };
+        match self.endpoint.send(request, target).await {
             Ok(mut responses) => {
                 self.core
                     .connection_selected(self.id, responses.connection_generation());
@@ -619,43 +635,54 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn peer_from_incoming(incoming: &Incoming) -> Peer {
-    let mut peer = Peer::new(incoming.source, from_transport(incoming.transport));
+fn peer_from_incoming(incoming: &Incoming) -> Option<Peer> {
+    let mut peer = Peer::new(incoming.source, from_transport(incoming.transport)?);
     peer.connection = incoming.connection_generation;
-    peer
+    Some(peer)
 }
 
-fn target(peer: Peer) -> Target {
-    let mut target = Target::new(peer.address, to_transport(peer.transport));
+fn target(peer: Peer) -> Option<Target> {
+    let mut target = Target::new(peer.address, to_transport(peer.transport)?);
     if let Some(identity) = peer.identity {
         target = target.verifying(identity);
     }
     if let Some(path) = peer.path {
         target = target.at_path(path);
     }
-    target
+    Some(target)
 }
 
-fn from_transport(transport: TransportKind) -> Transport {
-    match transport {
+/// Translate between the transport layer's name for a wire transport and the event client's.
+///
+/// Both halves return `None` for a transport the other side cannot name, and that is `M-83`'s
+/// doing: [`TransportKind`] and [`Transport`] are both `#[non_exhaustive]`, because the SIP
+/// transport set is one that grows — QUIC is the proof — and neither crate may promise otherwise
+/// across a release. There is no honest total mapping to write here. Every candidate default
+/// downgrades: answering a secure flow over UDP, or opening a cleartext socket for a peer that
+/// asked for a protected one, are both worse than declining to send at all.
+fn from_transport(transport: TransportKind) -> Option<Transport> {
+    Some(match transport {
         TransportKind::Udp => Transport::Udp,
         TransportKind::Tcp => Transport::Tcp,
         TransportKind::Tls => Transport::Tls,
         TransportKind::Ws => Transport::Ws,
         TransportKind::Wss => Transport::Wss,
         TransportKind::Quic => Transport::Quic,
-    }
+        _ => return None,
+    })
 }
 
-fn to_transport(transport: Transport) -> TransportKind {
-    match transport {
+/// The other half of [`from_transport`], with the same argument for returning `None`.
+fn to_transport(transport: Transport) -> Option<TransportKind> {
+    Some(match transport {
         Transport::Udp => TransportKind::Udp,
         Transport::Tcp => TransportKind::Tcp,
         Transport::Tls => TransportKind::Tls,
         Transport::Ws => TransportKind::Ws,
         Transport::Wss => TransportKind::Wss,
         Transport::Quic => TransportKind::Quic,
-    }
+        _ => return None,
+    })
 }
 
 async fn answer_notify(

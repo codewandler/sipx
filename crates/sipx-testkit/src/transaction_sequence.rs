@@ -959,7 +959,12 @@ impl Driver {
                     }
                     Output::ClearTimer(timer) => entry.armed.retain(|t| t != timer),
                     Output::Terminated(_) => entry.armed.clear(),
-                    Output::Send(_) | Output::ToTu(_) => {}
+                    // A send and a TU handover arm and clear no timer, and neither does an output
+                    // this model cannot read: `Output` is `#[non_exhaustive]` since `M-83`, so
+                    // the wildcard is required rather than chosen. What it costs is that a new
+                    // output is invisible to the armed-timer model *and* to `summarise` below —
+                    // a trace line for a batch containing only one reads `absorbed`.
+                    _ => {}
                 }
             }
         }
@@ -1318,6 +1323,10 @@ fn summarise(outputs: &[Output]) -> String {
                 TuEvent::Ack(_) => "ack",
                 TuEvent::Timeout => "timeout",
                 TuEvent::TransportError => "transport-error",
+                // `TuEvent` is `#[non_exhaustive]` since `M-83`. A trace is a diagnostic, so an
+                // event this summary cannot name is printed as one rather than dropped — a line
+                // reading `tu=[unknown]` is what sends somebody to this match.
+                _ => "unknown",
             }),
             _ => None,
         })

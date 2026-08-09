@@ -187,10 +187,12 @@ impl Selection {
             config.cleartext = match self.kind {
                 TransportKind::Udp => sipx_transport::CleartextTransports::Udp,
                 TransportKind::Tcp => sipx_transport::CleartextTransports::Tcp,
-                TransportKind::Tls
-                | TransportKind::Ws
-                | TransportKind::Wss
-                | TransportKind::Quic => sipx_transport::CleartextTransports::None,
+                // TLS, WSS and QUIC are protected, WS is protected by the report's own rule, and
+                // `TransportKind` is `#[non_exhaustive]` since `M-83` — so a transport this
+                // command cannot name is reported as carrying no cleartext. That is the safe
+                // direction: the other one would promise a plaintext capture of a flow nobody
+                // here can read.
+                _ => sipx_transport::CleartextTransports::None,
             };
         }
         match self.kind {
@@ -221,6 +223,10 @@ impl Selection {
                 "the command-line QUIC listener is not wired yet; use the sipx-transport API"
                     .to_owned(),
             ),
+            // `TransportKind` is `#[non_exhaustive]` since `M-83`. A listener this command cannot
+            // configure is refused rather than started on a transport nobody asked for, which is
+            // the same answer QUIC already gets.
+            _ => Err("the command line cannot open a listener on that transport".to_owned()),
         }
     }
 
@@ -232,7 +238,9 @@ impl Selection {
             TransportKind::Tls => handle.tls_addr(),
             TransportKind::Ws => handle.ws_addr(),
             TransportKind::Wss => handle.wss_addr(),
-            TransportKind::Quic => None,
+            // QUIC has no command-line listener to dial, and neither does a transport this
+            // command cannot name: `TransportKind` is `#[non_exhaustive]` since `M-83`.
+            _ => None,
         }
     }
 }
@@ -247,6 +255,10 @@ pub(crate) fn name(kind: TransportKind) -> &'static str {
         TransportKind::Ws => "ws",
         TransportKind::Wss => "wss",
         TransportKind::Quic => "quic",
+        // `TransportKind` is `#[non_exhaustive]` since `M-83`. A flag or a report that printed a
+        // guessed spelling would be a name no `--transport` value accepts, so this says plainly
+        // that the transport has no command-line name yet.
+        _ => "unknown",
     }
 }
 

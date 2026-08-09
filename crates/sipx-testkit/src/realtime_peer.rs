@@ -114,6 +114,7 @@ pub fn tone_bytes(frames: usize) -> Vec<u8> {
 
 /// How one upgrade attempt was answered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum UpgradeOutcome {
     /// The bearer matched and the peer replied 101.
     Accepted,
@@ -148,6 +149,7 @@ pub struct Upgrade {
 /// that *only* the three arrive, and a record that could not represent a fourth would prove it
 /// vacuously.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum ClientEvent {
     /// `session.update`, kept whole — a test reads the session object from it to check the
     /// formats §3 pins to the call's negotiated codec.
@@ -276,6 +278,7 @@ impl Record {
 /// is not silence on the socket: the peer keeps reading, so the client's timer is the only thing
 /// that can end the session, which is exactly the claim the vector makes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum Withhold {
     /// Answer setup the way the spec says.
     #[default]
@@ -291,6 +294,7 @@ pub enum Withhold {
 /// A stall is not a close: the connection stays established and unread, so no Pong is ever
 /// written and the client's liveness timer (§6: 30 s + 10 s) is the only thing that can end it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum StallPoint {
     /// Answer the upgrade, then nothing at all — not even `session.created`. This is ORB-14's
     /// script: "peer answers the upgrade then goes silent".
@@ -303,6 +307,7 @@ pub enum StallPoint {
 
 /// What the peer does with a response after the client cancels it (§4.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum CancelPolicy {
     /// Send no further delta for the cancelled response: a directed delta is suppressed and
     /// counted in [`Record::deltas_suppressed`]. This is what lets a bridge test assert
@@ -320,6 +325,7 @@ pub enum CancelPolicy {
 /// Each variant is one row of the read-set rule, and each is a real frame on the wire rather
 /// than an error injected into the client.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum Malformed {
     /// `not json{` — a text frame that is not JSON at all.
     NotJson,
@@ -343,6 +349,7 @@ pub enum Malformed {
 
 /// What became of a directed event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Emission {
     /// The frame was written to the socket before this result was returned.
     Sent,

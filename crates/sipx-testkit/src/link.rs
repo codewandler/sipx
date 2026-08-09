@@ -19,6 +19,11 @@ use std::time::Duration;
 
 use bytes::Bytes;
 /// Which end of the link.
+///
+/// Exhaustive by design: the link is a pipe between two stacks, so an end of it is one end or the
+/// other. [`Side::peer`] is a total function for that reason and no other — it can name the far end
+/// because there is exactly one — and a third end would be a different topology rather than a
+/// third variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Side {
     /// The end that opened the conversation.

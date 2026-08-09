@@ -417,6 +417,13 @@ impl Kernel {
                 }),
                 Output::ToTu(event) => self.deliver_to_tu(key, *event),
                 Output::Terminated(_) => self.clear_transaction_timers(key),
+                // `Output` is `#[non_exhaustive]` since `M-83`, so a downstream crate must write
+                // this arm. sipx-wasm is not downstream in the sense that matters — it moves in
+                // lockstep with `sipx-sip` inside this workspace, so an instruction it does not
+                // know is one added in a commit that did not come back here. Ignoring it is the
+                // only answer available: the kernel may not panic, and inventing wire traffic or
+                // a timer for an instruction it cannot read would be worse than doing nothing.
+                _ => {}
             }
         }
     }
@@ -431,6 +438,11 @@ impl Kernel {
             // failed end the same work the same way; only the diagnostic differs, and §5.3 has
             // no field for it.
             TuEvent::Timeout | TuEvent::TransportError => self.on_timeout(key),
+            // `TuEvent` is `#[non_exhaustive]` since `M-83`, so this arm has to exist. It is
+            // unreachable in practice — sipx-wasm moves in lockstep with `sipx-sip` inside this
+            // workspace — and ignoring the event is the only answer a kernel that may not panic
+            // has for an event it cannot read.
+            _ => {}
         }
     }
 }

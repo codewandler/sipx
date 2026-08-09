@@ -59,6 +59,11 @@ impl Stack {
                 Output::ClearTimer(timer) => self.timers.clear(&(key.clone(), timer)),
                 Output::ToTu(event) => events.push(*event),
                 Output::Terminated(_) => self.timers.forget_matching(|(k, _)| k == key),
+                // `Output` is `#[non_exhaustive]` since `M-83`, so a driver written outside
+                // `sipx-sip` has to write this arm — which this test is, deliberately: it is the
+                // shape a caller's driver takes. An instruction it cannot perform puts nothing on
+                // the wire and arms no timer.
+                _ => {}
             }
         }
         wire

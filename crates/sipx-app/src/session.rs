@@ -83,6 +83,7 @@ pub enum PinError {
 
 /// The result of routing one app document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RouteDocument {
     /// The call actor owns the whole document.
     Accepted,
@@ -143,6 +144,7 @@ pub struct OriginateRequest {
 
 /// What a parsed text frame asks the driver to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SessionAction {
     /// Send this reply immediately.
     Reply(SessionReply),

@@ -321,13 +321,16 @@ fn permitted(uri: &Uri) -> Vec<TransportKind> {
 fn default_transport(uri: &Uri) -> Option<TransportKind> {
     uri.selected_transport()
         .ok()
-        .map(|transport| match transport {
-            UriTransport::Udp => TransportKind::Udp,
-            UriTransport::Tcp => TransportKind::Tcp,
-            UriTransport::Tls => TransportKind::Tls,
-            UriTransport::Ws => TransportKind::Ws,
-            UriTransport::Wss => TransportKind::Wss,
-            UriTransport::Quic => TransportKind::Quic,
+        .and_then(|transport| match transport {
+            UriTransport::Udp => Some(TransportKind::Udp),
+            UriTransport::Tcp => Some(TransportKind::Tcp),
+            UriTransport::Tls => Some(TransportKind::Tls),
+            UriTransport::Ws => Some(TransportKind::Ws),
+            UriTransport::Wss => Some(TransportKind::Wss),
+            UriTransport::Quic => Some(TransportKind::Quic),
+            // `UriTransport` is `#[non_exhaustive]` since `M-83`, and a transport this crate
+            // cannot carry names nothing reachable — which is what `None` already means here.
+            _ => None,
         })
 }
 

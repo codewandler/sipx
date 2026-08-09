@@ -390,6 +390,10 @@ address_list_header!(
 /// RFC 3261 §10.2.2: `Contact: *` with `Expires: 0` deregisters everything. It is the one
 /// place in the grammar where a header that otherwise holds addresses holds a single asterisk
 /// instead, and a parser that expects an address there will reject a legal deregistration.
+///
+/// Exhaustive by design: §25.1's production has exactly two alternatives — `STAR`, or a list of
+/// `contact-param` — and this is that choice written as a type. A value that is neither is not a
+/// `Contact`, so a third variant could only hold something the grammar rejects.
 #[derive(Debug, Clone)]
 pub enum ContactValue {
     /// `*` — every registration.

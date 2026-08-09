@@ -588,25 +588,22 @@ impl Meters {
     /// Called from the driver, at the two places the socket is written — never from a `Handle`
     /// method, which returns before the transmit happens (see [`UnsentCounts`]).
     ///
-    /// A match rather than an index, so a new [`Method`] variant is a compile error here instead of
-    /// silently landing in `other` — the same reason [`slot`] is a match.
+    /// Four methods have their own number and everything else shares one.
+    ///
+    /// This used to say it was a match so that a new [`Method`] variant would be a compile error
+    /// here instead of silently landing in `other`, the way [`slot`] still is for
+    /// [`TransportKind`]. `M-83` made [`Method`] `#[non_exhaustive]`, which ends that: a foreign
+    /// non-exhaustive enum cannot be matched without a wildcard, so the wildcard is required
+    /// rather than chosen and a method `sipx-sip` names later does land in `other` until somebody
+    /// gives it a counter. [`slot`] keeps the guarantee because [`TransportKind`] is this crate's
+    /// own type, where the attribute has no effect.
     pub(crate) fn unsent(&self, method: &Method) {
         bump(match method {
             Method::Invite => &self.unsent.invite,
             Method::Ack => &self.unsent.ack,
             Method::Bye => &self.unsent.bye,
             Method::Cancel => &self.unsent.cancel,
-            Method::Register
-            | Method::Options
-            | Method::Info
-            | Method::Prack
-            | Method::Update
-            | Method::Subscribe
-            | Method::Notify
-            | Method::Refer
-            | Method::Message
-            | Method::Publish
-            | Method::Other(_) => &self.unsent.other,
+            _ => &self.unsent.other,
         });
     }
 

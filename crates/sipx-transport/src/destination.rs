@@ -419,6 +419,11 @@ pub fn first(candidates: &[Target]) -> Result<&Target, Error> {
 ///
 /// The distinction the pass cannot make for itself: only the caller knows whether the failure it
 /// just produced belongs to *this address* or to the name every address stands for.
+///
+/// Exhaustive by design: an attempt reached the far end or it did not, and a failure belongs
+/// either to the address that produced it or to the name every address stands for. That is the
+/// whole partition, and it is the only reason this is not a `Result` — a third variant would have
+/// to be an attempt that neither succeeded nor failed.
 #[derive(Debug)]
 pub enum Attempted<T, E> {
     /// The attempt succeeded, and the pass is over.
@@ -436,6 +441,7 @@ pub enum Attempted<T, E> {
 /// reports rather than returning one flattened error: a spent budget is a fact about the caller's
 /// deadline, an exhausted list is a fact about the zone, and an answer is a fact about the peer.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Unreached<E> {
     /// Resolution produced no candidate to attempt.
     Nothing,

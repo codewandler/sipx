@@ -96,6 +96,11 @@ impl fmt::Display for RAck {
 }
 
 /// What a UAS must do about reliability for an incoming request.
+///
+/// Exhaustive by design: the answer is a function of two inputs and nothing else — what the peer
+/// said about `100rel` (nothing, `Supported`, or `Require`) crossed with whether this side will
+/// oblige, which only matters in the third case. Three positions plus that one split is four, and
+/// the pair of inputs cannot produce a fifth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reliability {
     /// The peer said nothing about 100rel. §3: the UAS "MUST NOT send the provisional response
@@ -234,6 +239,10 @@ pub struct Sequence {
 }
 
 /// What the UAC should do with a reliable provisional it has just received.
+///
+/// Exhaustive by design: §4 classifies an arriving `RSeq` against the last one accepted, and an
+/// integer is equal to it, one greater than it, or neither. These three variants are those three
+/// comparisons, so a fourth would need a fourth way for two numbers to relate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Received {
     /// In order. Acknowledge it with a PRACK.

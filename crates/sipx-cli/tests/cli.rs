@@ -1907,9 +1907,10 @@ async fn register_selects_every_released_transport() {
             sipx_transport::TransportKind::Tls => handle.tls_addr().expect("TLS address"),
             sipx_transport::TransportKind::Ws => handle.ws_addr().expect("WS address"),
             sipx_transport::TransportKind::Wss => handle.wss_addr().expect("WSS address"),
-            sipx_transport::TransportKind::Quic => {
-                panic!("QUIC is not part of this five-transport command-line matrix")
-            }
+            // QUIC, and — since `M-83` made `TransportKind` `#[non_exhaustive]` — any transport
+            // added after this matrix was written. Both are outside the five it drives, and the
+            // panic names that rather than binding a listener the matrix never asked for.
+            _ => panic!("only the five-transport command-line matrix is driven here"),
         };
         let registrar = handle.clone();
         let serving = tokio::spawn(async move {

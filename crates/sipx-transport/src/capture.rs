@@ -111,6 +111,10 @@ impl CaptureConfig {
 }
 
 /// Which way a message was going.
+///
+/// Exhaustive by design: a captured message crossed this endpoint's boundary, and it crossed it
+/// inwards or outwards. A capture that could not say which way a message went would not be a
+/// capture, and there is no third way past a boundary for it to record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     /// Received by this endpoint.

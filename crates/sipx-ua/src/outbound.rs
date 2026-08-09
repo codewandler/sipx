@@ -223,6 +223,11 @@ pub fn flow_timer(response: &Response) -> Option<Duration> {
 }
 
 /// How a flow is kept alive, which depends on the transport (§4.4).
+///
+/// Exhaustive by design: §4.4 defines two keep-alive techniques and assigns each to a class of
+/// transport — §4.4.1's CRLF ping to connection-oriented flows, §4.4.2's STUN Binding Request to
+/// UDP. A flow uses the one its transport selects and never a choice of its own, so a third
+/// variant would need a third subsection to say when it applies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Keepalive {
     /// Double-CRLF ping, single-CRLF pong (§4.4.1). Required for connection-oriented transports.
@@ -232,6 +237,10 @@ pub enum Keepalive {
 }
 
 /// Whether the device is one where a keep-alive every two minutes is a battery problem (§4.4.1).
+///
+/// Exhaustive by design: §4.4.1 asks one yes-or-no question about the device and multiplies the
+/// interval for the devices where the answer is yes. This is that answer, so it has two values;
+/// how constrained a constrained device is would be a different quantity, not another variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Power {
     /// Mains, or a battery large enough not to care.

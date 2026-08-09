@@ -194,6 +194,7 @@ pub struct Served {
 
 /// What answering a SUBSCRIBE concluded.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Answer {
     /// A new subscription. Answer 2xx, then send the first NOTIFY.
     Established {

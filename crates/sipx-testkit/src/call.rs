@@ -90,6 +90,11 @@ impl Stack {
                 Output::ClearTimer(timer) => self.timers.clear(&(key.clone(), timer)),
                 Output::ToTu(event) => events.push(*event),
                 Output::Terminated(_) => self.timers.forget_matching(|(other, _)| other == key),
+                // `Output` is `#[non_exhaustive]` since `M-83`, so this harness has to write the
+                // arm. Ignoring an instruction it cannot perform keeps the loopback honest about
+                // what it did — nothing goes on the wire and no timer is armed — rather than
+                // inventing a byte the stack under test never asked for.
+                _ => {}
             }
         }
         wire

@@ -25,6 +25,7 @@ use super::contract::{Document, Event};
 
 /// What the app said, once it said it.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Outcome {
     /// A document — the entire new program (§6.3). An empty one means "keep going".
     Document(Document),

@@ -231,6 +231,7 @@ pub struct Registered {
 
 /// What a registration attempt produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Outcome {
     /// Registered, with the lease the registrar granted and the route vectors it returned.
     Registered(Box<Registered>),

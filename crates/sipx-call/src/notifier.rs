@@ -224,18 +224,6 @@ impl Notifier {
             Answer::Malformed => {
                 answer(&endpoint, incoming, 400, "Bad Request", None, None, None).await;
             }
-            Answer::OutOfOrder { .. } => {
-                answer(
-                    &endpoint,
-                    incoming,
-                    500,
-                    "Server Internal Error",
-                    None,
-                    None,
-                    None,
-                )
-                .await;
-            }
             Answer::Unserved { status } => {
                 let allow = lock(&self.store).packages().allow_events();
                 answer(
@@ -270,6 +258,22 @@ impl Notifier {
             }
             Answer::Unsubscribed { id } => {
                 self.unsubscribe(&endpoint, incoming, &id).await;
+            }
+            // `OutOfOrder`: a SUBSCRIBE whose sequence went backwards. `Answer` is
+            // `#[non_exhaustive]` since `M-83`, so this arm also takes a conclusion this
+            // dispatcher cannot read, and 500 is the honest answer for both — the notifier
+            // decided something the host has no response written for.
+            _ => {
+                answer(
+                    &endpoint,
+                    incoming,
+                    500,
+                    "Server Internal Error",
+                    None,
+                    None,
+                    None,
+                )
+                .await;
             }
         }
     }

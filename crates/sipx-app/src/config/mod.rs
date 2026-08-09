@@ -219,6 +219,7 @@ impl std::error::Error for ConfigError {}
 
 /// What connects to a listener.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Protocol {
     /// Calls: a SIP endpoint.
     Sip,
@@ -228,6 +229,7 @@ pub enum Protocol {
 
 /// A SIP listener's transport, per [`sip-transport.md`](../../../../docs/specs/sip-transport.md).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Transport {
     /// UDP.
     Udp,
@@ -243,6 +245,7 @@ pub enum Transport {
 
 /// Where a call arriving on a listener goes. Total by construction (N6).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Route {
     /// To this app.
     App(String),
@@ -323,6 +326,7 @@ impl fmt::Display for SecretRef {
 
 /// Which transport of the contract an app speaks, and what that transport needs named.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AppBinding {
     /// Document mode: the host `POST`s events.
     Webhook {

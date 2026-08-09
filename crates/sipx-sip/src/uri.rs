@@ -15,6 +15,7 @@ use crate::params::{Param, Params};
 /// Comparison is case-insensitive, but `sip` and `sips` are **never** equivalent
 /// (RFC 3261 §19.1.4) — a secure URI is a different address, not a spelling variant.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum Scheme {
     /// `sip:`
     Sip,
@@ -28,6 +29,7 @@ pub enum Scheme {
 
 /// Effective wire transport selected by a SIP/SIPS URI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum UriTransport {
     /// UDP datagrams.
     Udp,
@@ -157,6 +159,10 @@ impl PartialEq<&str> for HostName {
 }
 
 /// The host part of a URI.
+///
+/// Exhaustive by design: RFC 3261 §25.1's `host` is `hostname / IPv4address / IPv6reference`, and
+/// the two address forms are one variant here because [`IpAddr`] already is that choice. Nothing
+/// else appears in the production, so a third variant could only hold what a URI cannot spell.
 #[derive(Debug, Clone)]
 pub enum Host {
     /// A hostname.

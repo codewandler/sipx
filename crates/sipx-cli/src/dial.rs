@@ -548,11 +548,13 @@ fn attempted<T>(
 fn unreached(outcome: Unreachable) -> (sipx_call::Error, Option<crate::destination::Attempts>) {
     let attempts = outcome.attempts();
     let error = match outcome {
-        crate::destination::Unreached::Nothing | crate::destination::Unreached::Expired { .. } => {
-            sipx_call::Error::NoResponse
-        }
         crate::destination::Unreached::Unreachable { last, .. }
         | crate::destination::Unreached::Answered(last) => last,
+        // `Nothing` and `Expired`, and — since `M-83` made `Unreached` `#[non_exhaustive]` — an
+        // ending this command cannot name. All three are "nothing answered": there is no address's
+        // refusal to report for any of them, and inventing one would put a failure the far end
+        // never produced in front of a script.
+        _ => sipx_call::Error::NoResponse,
     };
     (error, attempts)
 }

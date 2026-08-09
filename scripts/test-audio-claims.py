@@ -118,6 +118,10 @@ class TheRepositoryItself(unittest.TestCase):
         `M-74`'s row, once `M-78` corrected which enums the rule selects. Before that it read a
         name suffix, so `MediaProfile`, `IcePolicy`, `Keying`, `RtcpMode` and `Codec` — every data
         enum on the media path — were outside a contract that covered an internal `ParseError`.
+
+        `M-83` retired the rollout boundary, so this now runs over every published crate. It
+        failed against the widened tree naming a hundred enums, which is the population `M-74`
+        held five crates' worth of.
         """
         self.assertEqual([], guard.enum_problems(guard.guarded(self.published)))
 
@@ -127,16 +131,41 @@ class TheRepositoryItself(unittest.TestCase):
         `X-116` put Rust's test-module attribute in a crate-root comment, and `code` truncates
         each file at the first one — that single comment made this reader see thirteen empty
         crates. A count is the cheapest assertion that cannot hold while the reader is blind.
+
+        A binary crate is skipped and not excused: `reachable` returns nothing for one because it
+        has no public API to name, so zero there is the right answer rather than a blind reader.
+        Asserting over it would have made this fail the moment `M-83` widened the rule to
+        `sipx-cli`, which is the opposite of what the assertion is for.
         """
         for name in guard.guarded(self.published):
+            if guard.entry_point(name).name != "lib.rs":
+                continue
             with self.subTest(crate=name):
                 self.assertGreater(len(guard.reachable_enums(name)), 0)
 
-    def test_the_rollout_boundary_names_crates_that_exist(self):
-        """A boundary able to name one enum would be a suppression list with a better name."""
-        for name in guard.GUARDED_SURFACE:
-            with self.subTest(crate=name):
-                self.assertIn(name, self.published)
+    def test_the_enum_rule_holds_every_published_crate_but_the_one_with_a_reason(self):
+        """`M-83`: the rollout boundary is gone, so the only crate outside is a stated decision.
+
+        Before `M-83` this would have named the six crates `GUARDED_SURFACE` left out for the
+        rollout's convenience. Afterwards there is exactly one, and it is out under `A-9` rather
+        than because nobody had got to it yet.
+        """
+        self.assertEqual(
+            sorted(set(self.published) - {guard.CLOSED_VOCABULARY}),
+            sorted(guard.guarded(self.published)),
+        )
+        self.assertEqual([guard.CLOSED_VOCABULARY], guard.outside_the_rule(self.published))
+        self.assertIn(guard.CLOSED_VOCABULARY, self.published)
+
+    def test_the_excused_crates_enums_are_counted_rather_than_suppressed(self):
+        """What `A-9` holds out of the rule is a number on every run, not a silence.
+
+        The same assertion the struct debt gets below, for the same reason: an exclusion that
+        reported zero would mean either that `sipx-app-protocol` had come into line — in which
+        case `A-9` is now free to be retired — or that the reader had gone blind. Neither is
+        something a run should be able to pass over without printing it.
+        """
+        self.assertGreater(len(guard.enum_problems(guard.outside_the_rule(self.published))), 0)
 
     def test_every_breakable_public_struct_is_non_exhaustive_or_argued_at_the_type(self):
         """`M-80`'s failing-first API assertion: additive fields must stay additive.

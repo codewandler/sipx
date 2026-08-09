@@ -54,6 +54,10 @@ fn split_at_params(value: &[u8]) -> (&[u8], &[u8]) {
 }
 
 /// Who refreshes the session.
+///
+/// Exhaustive by design: RFC 4028's `refresher` parameter takes `uac` or `uas`, which are the two
+/// parties a session has. A third refresher would be a third party to a dialog, and the parameter
+/// has no token for one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refresher {
     /// The party that sent the INVITE.
@@ -138,6 +142,11 @@ impl TypedHeader for MinSe {
 }
 
 /// What a UAS should do about the session timer on an incoming request.
+///
+/// Exhaustive by design: RFC 4028 §9's Table 2 is a normative decision table and these are its
+/// outcomes — no timer on the dialog, a timer on stated terms, or 422 with a `Min-SE`. A fourth
+/// variant would be an answer no row of the table selects, which is a decision the UAS is not
+/// entitled to make.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Answer {
     /// No timer on this dialog: the peer neither asked for one nor said it could run one.

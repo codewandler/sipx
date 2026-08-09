@@ -220,6 +220,11 @@ impl HistoryIndex {
 }
 
 /// Why the target represented by a History-Info entry differs from its predecessor.
+///
+/// Exhaustive by design: RFC 7044's `rc`, `mp` and `np` parameters partition what can have changed
+/// at one hop — the Request-URI changed for the same target user, it changed to a different one,
+/// or it did not change. An entry has exactly one predecessor, so exactly one of the three holds
+/// and there is no fourth relation for a variant to name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TargetChange {
     /// Request-URI change for the same target user.
@@ -247,6 +252,11 @@ impl TargetChange {
 }
 
 /// Target-change semantics selected when extending a history.
+///
+/// Exhaustive by design: the same three relations as [`TargetChange`], without the index that
+/// only exists once the entry has been placed. The two types must gain and lose variants together
+/// — the crate maps one onto the other by a total match — so the argument there is the argument
+/// here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetChangeKind {
     /// Same target user, changed Request-URI.

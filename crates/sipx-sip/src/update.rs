@@ -57,6 +57,11 @@ const METHOD: &str = "UPDATE";
 /// randomised interval (RFC 3261 §14.1); 500 with `Retry-After` means the request was
 /// well-formed and badly timed, and the same one will work shortly. A peer told the wrong one
 /// either backs off when it did not need to or retries straight into the same wall.
+///
+/// Exhaustive by design: §5.2 states three conditions under which a UAS refuses an UPDATE and the
+/// paragraph above is why they stay apart instead of collapsing into their two status codes. A
+/// fourth refusal would be a rule §5.2 does not have, and answering one would be answering for a
+/// reason the peer's retry logic cannot read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
     /// A previous UPDATE has not had its final response yet.
@@ -105,6 +110,10 @@ impl Refusal {
 }
 
 /// What to do with an UPDATE that has arrived.
+///
+/// Exhaustive by design: an UPDATE that has arrived is processed or refused, and every reason to
+/// refuse one is [`Refusal`]'s. A third disposition would have to leave the dialog somewhere §5.2
+/// does not describe — no answer sent and the offer neither accepted nor rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reception {
     /// Process it: renegotiate if it carried an offer, and answer 2xx.

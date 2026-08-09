@@ -29,6 +29,11 @@ const LABEL: &str = "Via";
 const OC_SEQUENCE_SCALE: u64 = 100_000;
 
 /// The overload-control capability or value carried by `Via`'s `oc` parameter (RFC 7339 §4.1).
+///
+/// Exhaustive by design: §4.1 gives `oc` two forms and the grammar has nowhere to put a third —
+/// valueless, which is a client saying it understands overload control, or valued, which is a
+/// server reporting one. Which units that value is in is [`OverloadAlgorithm`]'s question, and
+/// that one is marked non-exhaustive because its token set is a registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OcParameter {
     /// A valueless parameter: the client supports overload control.
@@ -39,6 +44,7 @@ pub enum OcParameter {
 
 /// One algorithm token from `oc-algo` (RFC 7339 §4.2, RFC 7415 §3.3).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum OverloadAlgorithm {
     /// Percentage loss control.
     Loss,

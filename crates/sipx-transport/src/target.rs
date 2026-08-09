@@ -8,6 +8,7 @@ use sipx_sip::transaction::Reliability;
 
 /// Which transport a message travels over.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum TransportKind {
     /// UDP: retransmits, one message per datagram.
     Udp,
