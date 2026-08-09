@@ -1,13 +1,35 @@
 ---
 title: What's new
-description: Release highlights and adoption notes for the sipx 1.0.0-rc.17 release candidate.
+description: Release highlights and adoption notes for the sipx 1.0.0-rc.18 release candidate.
 ---
 
 # What's new
 
 <!-- BEGIN generated:release-heading -->
-## 1.0.0-rc.17 — 2026-08-09
+## 1.0.0-rc.18 — 2026-08-10
 <!-- END generated:release-heading -->
+
+RC.18 opens the DSP epic's last door and then spends most of its effort on what was already behind
+it.
+
+```bash
+cargo install --locked --version =1.0.0-rc.18 sipx-cli
+```
+
+- **An application can drive a call's DSP graph** — name registered stages in order, move a live
+  stage's parameters against a generation, and read every transition including the refusals. What it
+  cannot do is stated as plainly as what it can.
+- **A hardening pass on that graph found three real defects**, all reachable from public API: the
+  graph rendered raw call audio in `Debug`; a renegotiation kept a chain prepared for the old format
+  and passed **every subsequent frame through untouched** for the rest of the call; and simultaneous
+  bypasses journalled only the last one.
+- **`cutoff_hz` is now a measured number.** An integer-only magnitude sweep puts both one-pole
+  filters at exactly 707 thousandths — the half-power point — across five decades, and settles what
+  `band_gain` does at lift and at cut.
+- **An RTP packet stops printing its payload** and an SDES item stops printing its owner's identity.
+- **Two examples you can hear**, one of which takes a microphone through a real DSP chain.
+
+## 1.0.0-rc.17 — 2026-08-09
 
 RC.17 finishes three things that had been true on paper and not in fact.
 
@@ -808,5 +830,5 @@ answer calls, but application callback bindings are not implemented.
 This website is built from `main`, so a page or API link may describe work newer than the tagged
 release. Use the exact crates.io version when reproducibility matters, and consult the
 [complete changelog](https://github.com/codewandler/sipx/blob/main/CHANGELOG.md) before updating a
-Git revision. Unreleased behavior is not part of `1.0.0-rc.17` merely because it appears on this
+Git revision. Unreleased behavior is not part of `1.0.0-rc.18` merely because it appears on this
 site.

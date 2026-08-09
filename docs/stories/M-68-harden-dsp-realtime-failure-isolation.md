@@ -164,3 +164,8 @@ boundary honestly.
   the audio format or packetisation now tearing the graph down instead of carrying it onto audio its
   stages never agreed to, and an adversarial suite over hostile audio, hostile processors and
   misbehaving worker processes (`M-68`).*
+
+- 2026-08-10: shipped in `1.0.0-rc.18` and **left in-progress**. Three defects, the
+  containment tests, the typed counters and the refusal-table row are all in the release.
+  Row 1 stays unticked for the reason the implementation gave: it needs *measured* frame CPU
+  and allocation budgets, and CPU is `X-109`'s figure, still untaken on a loaded machine.

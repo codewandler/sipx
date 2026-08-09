@@ -157,3 +157,9 @@ and a `band_gain` of 4.0 peaks at 3.001 rather than 4. `./scripts/check-dsp-heap
 `sipx.subband_suppressor` (0 bytes of heap) and fails if a shipped processor is missing from it.*
 
 **Follow-up filed:** `X-143` — take the quiet-box cost run and record it under `docs/measurements/`.
+
+- 2026-08-10: shipped in `1.0.0-rc.18` and **left in-progress**. The response sweep, the
+  memory figures and the allocation high-water marks are in the release. Rows 2 and 6 stay
+  unticked because per-processor CPU is still untaken: the harness exists and refuses to
+  report a figure from a loaded machine, which is the honest outcome on this box rather
+  than a gap in the code. The story closes when a quiet machine runs it.

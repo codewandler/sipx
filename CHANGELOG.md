@@ -7,6 +7,75 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0-rc.18] — 2026-08-10
+
+Work from five stories, of which two close. An application can now drive a call's DSP graph; the
+graph's own hardening pass found three real defects in what was already shipped; a filter's "cutoff"
+becomes a measured number instead of a parameter name; and two more types stop printing things a
+record should never hold.
+
+Three of the five stay open on purpose, and what each still owes is written in it: per-processor CPU
+is untaken because the harness refuses to report a figure from a loaded machine, and the noise
+reducer's hint is produced but not yet wired through the control surface that landed beside it.
+
+### Added
+
+- **An application can control a call's DSP graph through the SDK.** The built-in registry is
+  published — `BuiltIn::registered()`, `from_id` and `parameters()` — and a live stage's parameters
+  can be moved against a named generation, validated off the media path and applied under the same
+  take a frame needs. Every transition is readable, including the refusals. What an application
+  *cannot* do is stated as plainly: supply a processor, a callback, an execution profile, a deadline
+  or a graph bound; claim containment; reach another call's graph; or reach a supervised stage's
+  parameters.
+
+- **A packaged magnitude sweep, and the numbers it found.** `sipx_audio::dsp::response` measures a
+  processor's frequency response in **integer arithmetic end to end**, so a figure is identical on
+  every machine, at any load, in debug and release. It takes a factory rather than a processor, so a
+  built-in and an application's own processor go through the same door. It settled two things the
+  specs had left as names: `cutoff_hz` is the half-power point to the thousandth — both one-pole
+  filters measure exactly 707 across five decades — and the peaking filter's extracted band reaches
+  667 thousandths of unity, which fixes what `band_gain` actually does at both lift and cut.
+
+- **The noise reducer's declared input has a producer.** `ActivityHint` turns drained analysis
+  observations into the `voice_active` parameter the reducer's own declaration named and nothing in
+  the workspace supplied — a sans-I/O policy with no clock and no allocation after construction,
+  recorded normatively with its vectors.
+
+### Fixed
+
+- **A DSP graph rendered raw call audio in a `Debug` record.** Every type between the graph and the
+  samples derived `Debug`: the frame in flight, the staging buffer, the 4,096-sample scratch region,
+  and up to nine more frames held by a supervised stage. One `tracing` field or failing assertion
+  naming a graph put the call's audio into a record whose length was the frame's — 10,020 octets
+  measured for a two-stage graph.
+
+- **A renegotiation carried a graph onto audio it never agreed to.** `reconfigure` re-anchored both
+  directions and kept the chain whatever the new format said, so a µ-law → G.722 re-INVITE left
+  every stage prepared for the old rate and **every subsequent frame passing through untouched** for
+  the rest of the call, with nothing reporting it. For a stage whose absence is a policy breach
+  rather than a quality regression, that is unprocessed audio leaving the stack while the graph
+  reports itself healthy.
+
+- **Simultaneous bypasses lost all but the last transition.** A chain of three misbehaving stages
+  spending their miss budgets on one frame journalled one bypass. They are now recorded where they
+  happen — and the journal's drop count, which no caller could read, is now readable.
+
+- **An RTP packet no longer renders its payload, and an SDES item no longer renders its owner.**
+  Payload is the call still encoded; an RFC 3550 §6.5 item is personal data about a participant — a
+  `CNAME`, `NAME`, `EMAIL`, `PHONE` or `LOC`. A `CNAME` exception was argued and rejected, because
+  §6.5.1's recommended form is derived from a login name, the selecting octet is chosen by the far
+  end, and the value is uncapped. Report blocks are deliberately still rendered, pinned by a test so
+  that generalising the redaction means arguing with one.
+
+### Changed
+
+- **Examples can be heard.** `call_and_listen` dials an endpoint and plays it; `softphone` adds a
+  microphone and an outbound DSP chain built from the published registry. Both negotiate the
+  capture format the device actually offers rather than demanding one, and `--advertise` separates
+  the address in SDP from the address the socket binds. The troubleshooting guide gains the failure
+  that motivated them: a call that answers and carries no audio because signalling and media took
+  different interfaces.
+
 ## [1.0.0-rc.17] — 2026-08-09
 
 Five stories: nine types stop printing call audio, a supervised worker becomes a real process, a

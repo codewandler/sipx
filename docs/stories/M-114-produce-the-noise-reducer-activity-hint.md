@@ -135,3 +135,9 @@ proves it does not make speech worse.
   > opt-in rather than by default (`M-114`).
 
   **Follow-up.** A story is owed for the `sipx-media` wiring once `M-67` lands — use `M-119`.
+
+- 2026-08-10: shipped in `1.0.0-rc.18` and **left in-progress**. The policy, its vectors and
+  its measured corpus are in the release; rows 1 and 2 are the `sipx-media` wiring, which
+  waited on `M-67`. `M-67` landed in this same candidate, so the wiring is now unblocked and
+  is filed as `M-119` — this story closes when that lands and its two rows can be ticked
+  against real samples rather than against inspection.

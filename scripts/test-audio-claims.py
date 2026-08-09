@@ -397,7 +397,20 @@ class TheModuleReader(unittest.TestCase):
                 # and no device — so it carries no codec claim, no model claim and no accelerator
                 # dependency, which is exactly what `HostRequirement::PortableInteger` declares.
                 "dsp::noise",
+                # `M-114`'s activity hint: the policy that turns drained analysis observations into
+                # the `voice_active` parameter `dsp::noise`'s own declaration names. It decides
+                # *when* to tell a reducer that speech is present and never decides whether it is —
+                # every judgement is a comparison between caller-supplied positions and declared
+                # counts, with no clock, no allocation after construction and no detector of its
+                # own. So it loads no model and makes no claim about recognising anything.
+                "dsp::noise::hint",
                 "dsp::noise::subband",
+                # `X-109`'s magnitude sweep, and the reason it is measurement rather than DSP: it
+                # runs a processor against a shipped quarter-wave probe table and reports a ratio.
+                # Every step is integer arithmetic, so the figure is identical on every machine and
+                # under any load — which is what makes it evidence. It transforms no call audio,
+                # loads no model and names no codec.
+                "dsp::response",
                 "g711",
                 "g722",
                 "l16",

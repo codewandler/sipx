@@ -76,10 +76,13 @@ appeared twice before anyone named it.
 - [M-60 — Calibrate and adapt audio-activity thresholds deterministically](M-60-calibrate-audio-activity-thresholds.md) · Media · after M-58 and M-59 · bounded adaptation with observable reset and limits
 - [M-64 — Attach bounded DSP graphs to calls](M-64-attach-bounded-dsp-graphs-to-calls.md) · Media · after M-54 and M-63 · ordered per-direction graphs, atomic replacement and teardown barrier
 - [M-66 — Ship interchangeable local noise reduction](M-66-ship-interchangeable-noise-reduction.md) · Media · after M-63 · optional M-58 VAD input · provider-neutral contract and local baseline
+- [M-68 — Harden DSP real-time and failure isolation](M-68-harden-dsp-realtime-failure-isolation.md) · Media · after M-63/M-64 · measured budgets and explicit fail-open/fail-closed policy
 - [M-70 — Accept multiplexed browser offers with unused component candidates](M-70-accept-multiplexed-browser-offers-with-unused-component-candidates.md) · Media · external review finding 9 · a second browser engine reaches SDP then fails the multiplexed profile
 - [M-72 — Prove the AEAD SRTP key derivation against an independent peer](M-72-prove-the-aead-srtp-key-derivation-against-a-peer.md) · Media · RFC 7714 publishes no KDF vector · a wrong salt placement makes two sipx endpoints interoperate with each other and nobody else, and every round-trip test still passes
+- [M-114 — Produce the activity hint a noise reducer declares it consumes](M-114-produce-the-noise-reducer-activity-hint.md) · Media · after M-66 and M-67 · the hint is declared and honoured; nothing in the workspace sets it
 - [T-33 — Bind browser WebSocket signalling](T-33-bind-browser-websocket-signalling.md) · Transport · after A-16 and S-41 · browser owns I/O, WASM core consumes bytes
 - [X-93 — Make protected release evidence faster without weakening it](X-93-make-protected-release-evidence-faster.md) · Build · measure cache and preflight changes against the 12m37 cold beta gate · follow-up
+- [X-109 — Measure custom DSP quality and real-time cost](X-109-measure-custom-dsp-quality-and-cost.md) · Build · after M-65/M-66/M-68 · exact effects, quality, cost, isolation and packaged conformance
 
 ## Next (ready — take the top one unless the user named a story)
 
@@ -91,6 +94,7 @@ appeared twice before anyone named it.
 - [T-24 — Discover SIP endpoints on the local link](T-24-discover-on-the-local-link.md) · Transport · blocked on a scope decision — mDNS is a second protocol and a new parser eating unauthenticated multicast
 
 ## Backlog
+- [M-121 — Follow private types in the raw-audio carrier reader](M-121-follow-private-types-in-the-audio-carrier-reader.md) · Media · after M-68 · the checker reads one level deep, and M-68 found a carrier two levels down
 
 ### The application host
 _The [app-sdk](https://github.com/codewandler/sipx/blob/main/docs/designs/app-sdk.md) epic ends where a process has to exist: something must hold real_
@@ -122,10 +126,10 @@ _Applications need small, predictable facts about live audio even when no speech
 ### custom call-audio DSP
 _Applications need to shape live call audio without forking the media runtime: ordinary gain and_
 - [A-34 — Publish a runnable custom call-DSP example](A-34-publish-custom-call-dsp-example.md) · Application · M18 exit after M-67 and X-109 · live graph, custom fixture, effects/noise reduction, bypass
-- [M-67 — Control call DSP graphs through the application SDK](M-67-control-dsp-graphs-through-the-sdk.md) · Media · after M-64 · typed registry and sample-boundary parameters, never SDK callbacks on media work
-- [M-68 — Harden DSP real-time and failure isolation](M-68-harden-dsp-realtime-failure-isolation.md) · Media · after M-63/M-64 · measured budgets and explicit fail-open/fail-closed policy
-- [M-114 — Produce the activity hint a noise reducer declares it consumes](M-114-produce-the-noise-reducer-activity-hint.md) · Media · after M-66 and M-67 · the hint is declared and honoured; nothing in the workspace sets it
-- [X-109 — Measure custom DSP quality and real-time cost](X-109-measure-custom-dsp-quality-and-cost.md) · Build · after M-65/M-66/M-68 · exact effects, quality, cost, isolation and packaged conformance
+- [M-115 — Let an application bypass one DSP stage without replacing the chain](M-115-let-an-application-bypass-one-dsp-stage.md) · Media · after M-67 · `BypassCause::Requested` is in the spec and nothing sets it
+- [M-119 — Wire the activity hint through the DSP control surface](M-119-wire-the-activity-hint-through-the-dsp-control-surface.md) · Media · after M-114 and M-67 · the producer and its measurement exist; the per-call wiring needs M-67's parameter path
+- [M-122 — Fuzz the supervised DSP worker protocol](M-122-fuzz-the-supervised-worker-protocol.md) · Media · after M-68 · the one hostile-octet surface of the epic, unreachable from fuzz/ today
+- [X-143 — Record the DSP cost run on a quiet box](X-143-record-the-dsp-cost-run-on-a-quiet-box.md) · Build · after X-109 · the harness exists and refuses to report under load; the figure is untaken
 
 ### Endpoint discovery
 _sipx can call any endpoint you can already name, and cannot help you name one. `sipx dial` takes a_
@@ -149,7 +153,7 @@ _A live call on a machine with a local accelerator should be able to transcribe 
 
 ### Media
 _Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
-- [M-110 — Stop an RTP packet rendering its payload](M-110-stop-an-rtp-packet-rendering-its-payload.md) · Media · after M-107 · Packet, Rtcp and SdesItem derive Debug over Bytes; M-107 redacted Encoded at the other end of the same relay path
+- [M-117 — Redact the byte buffers outside the relay path](M-117-redact-the-byte-buffers-outside-the-relay-path.md) · Quality · after M-110 · four named carriers outside RELAY_PATH — two are call audio, one is PCM in a document, one is a nonce-signing key
 
 ### Bridge a call to an OpenAI realtime agent
 _Every capability sipx claims — TLS held to [sip-tls.md](../specs/sip-tls.md) §3, SRTP held to_
@@ -257,6 +261,7 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [M-61 — Harden call-audio analysis against adversarial input](M-61-harden-call-audio-analysis.md) · Media · after M-57 · hostile audio, bounded resources, cross-call isolation and no retention
 - [M-63 — Specify the custom call-DSP contract](M-63-specify-custom-call-dsp-contract.md) · Media · after M-54 · M18 admission · frame contract, execution profiles and minimum failure policy
 - [M-65 — Ship deterministic audio effects and filters](M-65-ship-deterministic-audio-effects-and-filters.md) · Media · after M-63 · gain/filter/distortion/bit-crush/stutter processors use the public contract
+- [M-67 — Control call DSP graphs through the application SDK](M-67-control-dsp-graphs-through-the-sdk.md) · Media · after M-64 · typed registry and sample-boundary parameters, never SDK callbacks on media work
 - [M-69 — Reject an unacceptable initial offer on the wire](M-69-reject-an-unacceptable-initial-offer-on-the-wire.md) · Media · external review finding 3 · no-common-codec failure sends no final SIP response
 - [M-71 — Deliver negotiated DTMF receive events through scenario](M-71-deliver-negotiated-dtmf-receive-events-through-scenario.md) · Media · external review finding 10 · digits send successfully but no typed receive event arrives
 - [M-73 — Align the DTLS profile names with the IANA registry](M-73-align-the-dtls-profile-names-with-the-registry.md) · Media · the counter-mode DTLS profile carries OpenSSL's spelling rather than the registry's; M-41 added registry-correct names beside it
@@ -282,6 +287,7 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [M-102 — Run a supervised DSP worker in its own process](M-102-run-a-supervised-dsp-worker-in-its-own-process.md) · Media · after M-64 · the operating-system half of the supervised-isolated profile
 - [M-103 — Give `call.dial.finished` a producer](M-103-give-call-dial-finished-a-producer.md) · Media · filed by M-99 · the last §5.3 row with no producer anywhere, and the driver refuses the effect that would create the leg
 - [M-107 — Stop a PCM frame rendering its audio](M-107-stop-a-pcm-frame-rendering-its-audio.md) · Media · PcmFrame derives Debug over its samples · the same shape M-61 fixed one layer down, where it was reachable from a real refusal record
+- [M-110 — Stop an RTP packet rendering its payload](M-110-stop-an-rtp-packet-rendering-its-payload.md) · Media · after M-107 · Packet, Rtcp and SdesItem derive Debug over Bytes; M-107 redacted Encoded at the other end of the same relay path
 - [P-1 — Build the CLI scaffold and machine-readable output](P-1-cli-scaffold-and-output.md) · Phone
 - [P-2 — Implement `sipx register`](P-2-cli-register.md) · Phone
 - [P-3 — Implement `sipx dial`](P-3-cli-dial.md) · Phone

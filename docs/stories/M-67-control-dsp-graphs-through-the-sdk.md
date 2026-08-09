@@ -2,7 +2,7 @@
 id: M-67
 title: Control call DSP graphs through the application SDK
 pillar: Media
-status: in-progress
+status: done
 priority: 40
 design: docs/designs/custom-call-dsp.md
 epic: custom-call-dsp
@@ -31,7 +31,7 @@ bounded, non-callback execution model.
       refused without changing the active graph.
 - [x] Event queues coalesce safe intermediate parameter state but preserve activation, failure,
       bypass and terminal transitions without blocking media.
-- [ ] Generated bindings, sequence tests, public reference docs and the full gate are green.
+- [x] Generated bindings, sequence tests, public reference docs and the full gate are green.
 
 ## Progress
 
@@ -134,3 +134,5 @@ bounded, non-callback execution model.
   Verified after the merge: 54 test binaries green across the four crates, clippy `-D warnings`
   clean, `cargo fmt --all` clean, and the four checkers plus `sync-website --check`,
   `check-provenance.sh` and `check-story-closure.py`.
+
+- 2026-08-10: closed at the `1.0.0-rc.18` boundary, against the wave gate run on this tree.

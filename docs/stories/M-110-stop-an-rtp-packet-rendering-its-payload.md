@@ -2,7 +2,7 @@
 id: M-110
 title: Stop an RTP packet rendering its payload
 pillar: Media
-status: in-progress
+status: done
 priority: 6
 design:
 epic: media
@@ -58,7 +58,7 @@ person can decide once and a checker can hold afterwards. See `## Progress`.
       not.
 - [x] Whether the header extension's bytes belong in a record is answered either way — they are
       RFC 8285 metadata rather than media, and `M-107` rendered only their length at `Encoded`.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -155,3 +155,5 @@ document's own scope, and no spec owns this crate's public API. The rule and its
 
 *Board.* `status` is `in-progress` and `M-117` is new, so `docs/stories/README.md` needs
 regenerating at integration; it is fenced from this branch.
+
+- 2026-08-10: closed at the `1.0.0-rc.18` boundary, against the wave gate run on this tree.
