@@ -74,6 +74,41 @@ from the RFC editor; if those sources cannot be reached, the gate exits `2` to r
 incomplete rather than claiming the tree passed or failed. Exit `1` means the tree has a real
 finding.
 
+## Worktrees are temporary — remove them when the story lands
+
+Story implementors work in `.claude/worktrees/impl-<ID>` on a scratch `impl/<ID>` branch. **Whoever
+integrates a branch removes its worktree in the same breath as merging it.** Not later, not at the
+end of a wave, not when the disk complains.
+
+```sh
+git merge --no-ff impl/<ID> -m "Merge branch 'impl/<ID>'"
+git worktree remove --force .claude/worktrees/impl-<ID>
+git worktree prune
+```
+
+**The branch survives the worktree's removal**, so nothing is lost and the work is one
+`git worktree add` away if it is ever needed again. What is removed is a redundant checkout and its
+build directory.
+
+**Why this is a rule and not a preference.** Each worktree carries its own `target/`, which reaches
+5–17 GiB once its crate set is built. Left to accumulate they have twice taken this repository from
+tens of gigabytes free to under seven, at which point `gate.py`'s disk guard refuses to run and the
+next reclaim happens under pressure — which is exactly when the wrong thing gets deleted. A sweep
+that reclaims by directory name has already destroyed a running implementor's build cache, and
+"this branch is merged" is **not** a safe predicate on its own: an implementor that has not committed
+yet has `HEAD` on the commit it branched from, which is always merged.
+
+**Before removing any worktree that is not yours to remove**, all three must hold:
+
+1. no live `rustc`/`cargo` under that path, and no agent currently working in it;
+2. `git -C <dir> status --porcelain` is empty, or whatever it reports is committed to that branch
+   first — never discarded;
+3. the branch has commits ahead of `main` and they are merged, **or** the story is abandoned and the
+   branch is being kept deliberately.
+
+A periodic sweep is the fallback, not the plan. The plan is that a worktree lives exactly as long as
+the story does.
+
 ## Before selecting a story
 
 ```sh
