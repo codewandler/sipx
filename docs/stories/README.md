@@ -82,6 +82,7 @@ appeared twice before anyone named it.
 ## Next (ready — take the top one unless the user named a story)
 
 ### Reliable diagnostic automation
+- [T-46 — Measure plain SIP throughput without media](T-46-measure-plain-sip-throughput-without-media.md) · Transport · audio doubles memory and costs 8x on burst setup at 1000 calls · neither example can isolate signalling from the media stack
 - [P-30 — Bound the first NOTIFY in a registrar subscription](P-30-bound-the-first-notify-in-a-registrar-subscription.md) · Phone · peers --registrar waits Timer N — 64*T1, 32 seconds — with no operator control · the dominant unbounded wait once resolution is bounded
 
 ### Media

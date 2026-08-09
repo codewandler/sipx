@@ -60,27 +60,26 @@ No aggregate percentage is given. `media` and `core` differ in size and in how m
 
 | Pillar | Open stories |
 |---|---|
-| Media | 17 |
+| Media | 18 |
 | Application | 16 |
 | Build | 10 |
-| Transport | 4 |
+| Transport | 5 |
 | Signalling | 3 |
 | Phone | 2 |
 | Quality | 1 |
 | Session | 1 |
-| **total** | **54** |
+| **total** | **56** |
 
 327 stories done. `blocked` counts as open: a story parked on a dependency is distance, not progress.
 
 ## Discovery versus closure
 
-<!-- maturity-event-days: {"basis":"sha256:f358da5d6f32e47118ef97ff43bc1b444bff995f8f632f5393a038327a48d0a1","closed":{"2026-07-28":58,"2026-07-29":48,"2026-07-30":40,"2026-07-31":5,"2026-08-01":1,"2026-08-03":12,"2026-08-04":39,"2026-08-05":35,"2026-08-08":89},"filed":{"2026-07-28":95,"2026-07-29":42,"2026-07-30":44,"2026-07-31":3,"2026-08-03":1,"2026-08-04":51,"2026-08-05":73,"2026-08-06":17,"2026-08-08":56}} -->
+<!-- maturity-event-days: {"basis":"sha256:60844c78d3390b38c8564d1724d85a223b5d2306af7d069a138568c6fe155671","closed":{"2026-07-28":58,"2026-07-29":48,"2026-07-30":40,"2026-07-31":5,"2026-08-01":1,"2026-08-03":12,"2026-08-04":39,"2026-08-05":35,"2026-08-08":89},"filed":{"2026-07-28":95,"2026-07-29":42,"2026-07-30":44,"2026-07-31":3,"2026-08-03":1,"2026-08-04":51,"2026-08-05":73,"2026-08-06":17,"2026-08-08":56,"2026-08-09":2}} -->
 
 Burn-down is not a maturity signal while discovery outpaces closure. The marker to watch is not a single day where closure wins but the date that crossover becomes **durable** — that is when the codebase stops surprising its authors.
 
 | Day | Filed | Closed | Net |
 |---|---|---|---|
-| 2026-07-28 | 95 | 58 | -37 |
 | 2026-07-29 | 42 | 48 | +6 |
 | 2026-07-30 | 44 | 40 | -4 |
 | 2026-07-31 | 3 | 5 | +2 |
@@ -90,6 +89,7 @@ Burn-down is not a maturity signal while discovery outpaces closure. The marker 
 | 2026-08-05 | 73 | 35 | -38 |
 | 2026-08-06 | 17 | 0 | -17 |
 | 2026-08-08 | 56 | 89 | +33 |
+| 2026-08-09 | 2 | 0 | -2 |
 
 Filed is a story file being added; closed is a `status: done` line appearing, so a story reopened and closed again counts twice — which is the honest reading of *closed that day*.
 
