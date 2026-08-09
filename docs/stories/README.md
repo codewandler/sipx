@@ -74,23 +74,31 @@ appeared twice before anyone named it.
 - [A-10 — Publish the stable crate set and diagnostic CLI artifacts](A-10-publish-the-stable-crates-and-cli.md) · Application · promote the public beta only after every v1 predicate; stable archives and SBOM live here
 - [A-38 — Publish and verify the second release candidate](A-38-publish-and-verify-rc3.md) · Application · after X-113 · the post-rc.2 wave as one immutable prerelease · no stable-1.0 claim widens
 - [M-60 — Calibrate and adapt audio-activity thresholds deterministically](M-60-calibrate-audio-activity-thresholds.md) · Media · after M-58 and M-59 · bounded adaptation with observable reset and limits
+- [M-61 — Harden call-audio analysis against adversarial input](M-61-harden-call-audio-analysis.md) · Media · after M-57 · hostile audio, bounded resources, cross-call isolation and no retention
 - [M-64 — Attach bounded DSP graphs to calls](M-64-attach-bounded-dsp-graphs-to-calls.md) · Media · after M-54 and M-63 · ordered per-direction graphs, atomic replacement and teardown barrier
+- [M-65 — Ship deterministic audio effects and filters](M-65-ship-deterministic-audio-effects-and-filters.md) · Media · after M-63 · gain/filter/distortion/bit-crush/stutter processors use the public contract
 - [M-70 — Accept multiplexed browser offers with unused component candidates](M-70-accept-multiplexed-browser-offers-with-unused-component-candidates.md) · Media · external review finding 9 · a second browser engine reaches SDP then fails the multiplexed profile
 - [M-72 — Prove the AEAD SRTP key derivation against an independent peer](M-72-prove-the-aead-srtp-key-derivation-against-a-peer.md) · Media · RFC 7714 publishes no KDF vector · a wrong salt placement makes two sipx endpoints interoperate with each other and nobody else, and every round-trip test still passes
+- [M-99 — Give `call.bridged` and `call.unbridged` a producer](M-99-give-the-bridge-events-a-producer.md) · Media · filed by M-98 · two more §5.3 rows are specified, typed and round-tripped with nothing that emits them
 - [T-33 — Bind browser WebSocket signalling](T-33-bind-browser-websocket-signalling.md) · Transport · after A-16 and S-41 · browser owns I/O, WASM core consumes bytes
 - [X-93 — Make protected release evidence faster without weakening it](X-93-make-protected-release-evidence-faster.md) · Build · measure cache and preflight changes against the 12m37 cold beta gate · follow-up
+- [X-127 — Bound registry pacing across the whole publication, not one invocation](X-127-bound-registry-pacing-across-the-whole-publication.md) · Build · found while verifying X-119 against X-93's rate-limit row · the per-run budget resets
+- [X-135 — A contention subject that can tell the load-pair headroom from its absence](X-135-a-contention-subject-that-can-tell-the-load-pair-headroom-from-its-absence.md) · Quality · the generated-media load pair rolls its handover race twice per run, so contention-proof.py cannot make it red and adding it to SUBJECTS would cost minutes to prove nothing
 
 ## Next (ready — take the top one unless the user named a story)
 
 ### Reliable diagnostic automation
 - [P-30 — Bound the first NOTIFY in a registrar subscription](P-30-bound-the-first-notify-in-a-registrar-subscription.md) · Phone · peers --registrar waits Timer N — 64*T1, 32 seconds — with no operator control · the dominant unbounded wait once resolution is bounded
 
+### Media
+_Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
+- [M-107 — Stop a PCM frame rendering its audio](M-107-stop-a-pcm-frame-rendering-its-audio.md) · Media · PcmFrame derives Debug over its samples · the same shape M-61 fixed one layer down, where it was reachable from a real refusal record
+
 ## Blocked
 - [M-16 — Implement ICE](M-16-ice.md) · Media · epic tracker · split into M-19 … M-24 · spec is docs/specs/ice.md, written first
 - [T-24 — Discover SIP endpoints on the local link](T-24-discover-on-the-local-link.md) · Transport · blocked on a scope decision — mDNS is a second protocol and a new parser eating unauthenticated multicast
 
 ## Backlog
-- [X-135 — A contention subject that can tell the load-pair headroom from its absence](X-135-a-contention-subject-that-can-tell-the-load-pair-headroom-from-its-absence.md) · Quality · the generated-media load pair rolls its handover race twice per run, so contention-proof.py cannot make it red and adding it to SUBJECTS would cost minutes to prove nothing
 
 ### The application host
 _The [app-sdk](https://github.com/codewandler/sipx/blob/main/docs/designs/app-sdk.md) epic ends where a process has to exist: something must hold real_
@@ -101,7 +109,7 @@ _The [app-sdk](https://github.com/codewandler/sipx/blob/main/docs/designs/app-sd
 ### Application SDK
 _The measure of this stack's reach is what can be built on it **without writing Rust**. Today the_
 - [C-9 — Carry a bridge and a conference across a renegotiation](C-9-carry-a-bridge-across-a-renegotiation.md) · Signalling · filed from C-6 · a re-INVITE, a hold/resume or an ICE restart replaces a call's MediaSession and the bridge keeps forwarding the stopped one · size S/M
-- [M-99 — Give `call.bridged` and `call.unbridged` a producer](M-99-give-the-bridge-events-a-producer.md) · Media · filed by M-98 · two more §5.3 rows are specified, typed and round-tripped with nothing that emits them
+- [M-103 — Give `call.dial.finished` a producer](M-103-give-call-dial-finished-a-producer.md) · Media · filed by M-99 · the last §5.3 row with no producer anywhere, and the driver refuses the effect that would create the leg
 
 ### browser audio SDK
 _Beta.4 proves that sipx can interoperate with a browser audio endpoint, but it does not let a web_
@@ -114,16 +122,14 @@ _Beta.4 proves that sipx can interoperate with a browser audio endpoint, but it 
 ### real-time call-audio analysis
 _Applications need small, predictable facts about live audio even when no speech model is enabled:_
 - [A-29 — Publish a runnable live call-audio analysis example](A-29-publish-call-audio-analysis-example.md) · Application · M16 analysis exit after X-106 · no model or special hardware required
-- [M-61 — Harden call-audio analysis against adversarial input](M-61-harden-call-audio-analysis.md) · Media · after M-57 · hostile audio, bounded resources, cross-call isolation and no retention
 - [X-106 — Measure call-audio analysis accuracy and resource cost](X-106-measure-call-audio-analysis.md) · Build · after M-58 through M-61 · versioned corpus, error rates, event latency, CPU and memory
 
 ### Conformance
-- [X-127 — Bound registry pacing across the whole publication, not one invocation](X-127-bound-registry-pacing-across-the-whole-publication.md) · Build · found while verifying X-119 against X-93's rate-limit row · the per-run budget resets
+- [X-140 — Carry the modelled registry allowance across frontier invocations, not just its cost](X-140-carry-the-modelled-registry-allowance-across-frontier-invocations.md) · Build · found while implementing X-127 · the budget now spans invocations, the token buckets do not
 
 ### custom call-audio DSP
 _Applications need to shape live call audio without forking the media runtime: ordinary gain and_
 - [A-34 — Publish a runnable custom call-DSP example](A-34-publish-custom-call-dsp-example.md) · Application · M18 exit after M-67 and X-109 · live graph, custom fixture, effects/noise reduction, bypass
-- [M-65 — Ship deterministic audio effects and filters](M-65-ship-deterministic-audio-effects-and-filters.md) · Media · after M-63 · gain/filter/distortion/bit-crush/stutter processors use the public contract
 - [M-66 — Ship interchangeable local noise reduction](M-66-ship-interchangeable-noise-reduction.md) · Media · after M-63 · optional M-58 VAD input · provider-neutral contract and local baseline
 - [M-67 — Control call DSP graphs through the application SDK](M-67-control-dsp-graphs-through-the-sdk.md) · Media · after M-64 · typed registry and sample-boundary parameters, never SDK callbacks on media work
 - [M-68 — Harden DSP real-time and failure isolation](M-68-harden-dsp-realtime-failure-isolation.md) · Media · after M-63/M-64 · measured budgets and explicit fail-open/fail-closed policy

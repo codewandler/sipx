@@ -7,6 +7,41 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Nine deterministic built-in call-DSP processors** — gain, polarity, hard and soft clipping, bit
+  crushing, a bounded delay/stutter line, and one-pole low-pass, high-pass and peaking filters —
+  ship through the public processor contract, and `GraphPlan::with_built_in` is the workspace
+  registry that lets a call-local graph run them inline. Provenance stays a property of the stage
+  rather than of the plan: a built-in beside an application's processor lends that processor
+  nothing, and the same built-in through the public door is still refused.
+
+- **`call.bridged` and `call.unbridged` have a producer.** Both were listed in the contract, written
+  the call snapshot's `bridged` member, and nothing could emit either. The fact belongs to the call
+  — a driver watching its own instructions cannot tell a coupling that ended because a leg ended
+  from one it dropped itself — so the arm carries the leg name the caller supplies.
+
+### Fixed
+
+- **A call-audio frame no longer renders its samples when it is logged.** The derived `Debug` on
+  `sipx_audio::AnalysisFrame` printed every borrowed sample, so any tracing field, panic message or
+  test failure carrying a frame put **raw call audio** into a record whose length was the frame's —
+  up to 65,536 values, and reachable from a refusal record the call layer already writes. It now
+  carries direction, sequence, discontinuity and a sample count.
+
+- **Registry publication spends one rate-limit budget across a whole release** rather than
+  restarting it on every frontier rerun, and both publication workflows state that budget
+  themselves. An unreadable *name* probe paces conservatively and continues, where an unreadable
+  *version* probe still refuses — the specification now says so, because only the second decides
+  what is published.
+
+### Changed
+
+- **The contention proof gained a subject that can go red.** A 200-call generated-media pair, kept
+  out of the ordinary suite, measured **6 of 6** failing at a responder ceiling equal to the
+  generator's concurrency and **0 of 6** with the headroom. The ceiling both load pairs use is now
+  one derivation that subject defends, rather than a comment in each of them.
+
 ## [1.0.0-rc.15] — 2026-08-09
 
 Five stories, four of them events and counts that existed on paper and could not be reached in
