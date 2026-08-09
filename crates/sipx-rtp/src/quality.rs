@@ -65,7 +65,13 @@ pub fn round_trip(now: u32, last_sender_report: u32, delay: u32) -> Option<Durat
 }
 
 /// How a call is going.
+///
+/// Non-exhaustive: this is a derived view rather than anything on the wire, and what can be
+/// derived grows with what the RTCP exchange carries — RFC 3550 §6.4.1 already supplies an
+/// extended highest sequence number this does not use, and RFC 3611's extended reports supply
+/// more. Build one with [`Quality::new`].
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct Quality {
     /// Loss since the last report, as a fraction between 0 and 1.
     pub loss: f64,
@@ -80,6 +86,29 @@ pub struct Quality {
 }
 
 impl Quality {
+    /// The four measured numbers, with the score computed from them.
+    ///
+    /// [`Quality::mos`] is not an argument, and that is the whole reason this exists rather than a
+    /// constructor taking all five fields. The score is a function of the other three — a
+    /// `Quality` whose `mos` disagrees with its own loss, jitter and round trip is a value that
+    /// cannot arise from a call, and it is exactly the value a hand-written literal produces when
+    /// one of the three is edited and the score is not.
+    #[must_use]
+    pub fn new(
+        loss: f64,
+        cumulative_lost: i64,
+        jitter: Duration,
+        round_trip: Option<Duration>,
+    ) -> Self {
+        Self {
+            loss,
+            cumulative_lost,
+            jitter,
+            round_trip,
+            mos: Self::mos(loss, jitter, round_trip),
+        }
+    }
+
     /// Estimate a mean opinion score from loss, jitter and round-trip time.
     ///
     /// **This is an estimate, not a measurement.** A real MOS comes from people listening. What

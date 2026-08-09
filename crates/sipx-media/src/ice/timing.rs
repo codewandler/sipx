@@ -21,7 +21,13 @@ use std::time::Duration;
 /// recommend. Two of them have normative floors that [`Timers::pacing`] and [`Timers::rto`]
 /// enforce rather than trust: Ta may not pace faster than 5 ms across every agent in the process
 /// (§14.2), and an RTO may never be below 500 ms (§14.3).
+///
+/// Non-exhaustive: a timer set grows with the state machine that waits on it, and this one already
+/// carries a value RFC 8445 does not name ([`Timers::tn`]). Start from [`Timers::default`] — the
+/// RFCs' own recommendations — and assign the fields a deployment means to change; the fields stay
+/// public, so what the attribute costs is the literal and not the configuring.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Timers {
     /// Ta — the pacing interval: one check leaves per tick, across the whole checklist set
     /// (§14.2). Default 50 ms.

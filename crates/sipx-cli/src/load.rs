@@ -1284,13 +1284,7 @@ mod tests {
         let measurements = [Measurement {
             setup: Duration::from_millis(2),
             status: 202,
-            quality: Some(sipx_rtp::Quality {
-                loss: 0.0,
-                cumulative_lost: 0,
-                jitter: Duration::ZERO,
-                round_trip: None,
-                mos: 4.4,
-            }),
+            quality: Some(sipx_rtp::Quality::new(0.0, 0, Duration::ZERO, None)),
         }];
         let mut outcome = sipx_call::load::Outcome::default();
         outcome.failures.insert(Cause::Rejected(486), 2);

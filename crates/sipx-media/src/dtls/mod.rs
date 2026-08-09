@@ -204,7 +204,17 @@ pub enum Role {
 }
 
 /// The two SRTP contexts a session needs: one to protect with, one to unprotect with.
+///
+/// Non-exhaustive: what a handshake exports is set by the protection profile it negotiated, and a
+/// profile this stack has yet to support can export more than two directional contexts' worth.
+///
+/// Built by this crate only: `material` below is private, so no caller outside this crate has ever
+/// been able to write this literal and the attribute above takes nothing further away. The value
+/// comes from RFC 5764 §4.2's exporter through [`keys_from_exported`], which is the one place the
+/// two directions can be told apart — [`Role`] decides which write key is whose, and a caller
+/// assembling the contexts itself would be guessing at exactly that.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct Keys {
     /// Protects what this endpoint sends.
     pub outbound: srtp::Context,

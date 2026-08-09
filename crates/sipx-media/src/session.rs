@@ -650,7 +650,12 @@ enum Frame {
 /// SDP and uses the other's to decrypt. Sharing one key between directions would give both ends
 /// the same keystream for the same packet index, which is the classic way to lose a stream
 /// cipher.
+///
+/// Non-exhaustive: what a keying exchange settles grows with the exchange. RFC 3711 §8.2's MKI and
+/// §9.2's master-key lifetime are both things an SDES offer may carry and this type does not, and
+/// each would arrive here rather than beside it.
 #[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SrtpKeys {
     /// The protection profile both ends negotiated.
     ///
@@ -667,6 +672,32 @@ pub struct SrtpKeys {
 }
 
 impl SrtpKeys {
+    /// The master material for one session, keyed by hand.
+    ///
+    /// For a caller doing its own keying — the position `sipx_rtp::srtp` is documented for. The
+    /// two negotiated paths have their own constructors, and they are the ones to prefer:
+    /// [`SrtpKeys::from_answer`] for SDES, because it checks the answer against the offer first,
+    /// and [`crate::dtls::Keys::into_srtp_keys`] for DTLS-SRTP, because only the handshake knows
+    /// which write key belongs to which direction.
+    ///
+    /// The profile is carried rather than inferred, for the reason [`Self::profile`] gives: it is
+    /// what the two ends agreed, not a guess from how many octets arrived. Material whose lengths
+    /// do not match it is refused when the context is built rather than silently keyed to a
+    /// different cipher — `SrtpContext::new` measures both against the profile
+    /// (`docs/specs/media-runtime.md` §4).
+    #[must_use]
+    pub const fn new(
+        profile: sipx_rtp::srtp::Profile,
+        local: (Vec<u8>, Vec<u8>),
+        remote: (Vec<u8>, Vec<u8>),
+    ) -> Self {
+        Self {
+            profile,
+            local,
+            remote,
+        }
+    }
+
     /// The keys an SDES answer settled on, **after** checking it against what was offered
     /// (RFC 4568 §5.1.3; `docs/specs/srtp.md` §5.4).
     ///
@@ -814,7 +845,14 @@ impl Encoded {
 }
 
 /// One peer RTCP report block describing this session's outbound RTP stream.
+///
+/// Non-exhaustive, and this is the type that holds what a report block cannot:
+/// [`sipx_rtp::ReportBlock`] is complete at RFC 3550 §6.4.1's twenty-four octets, so everything
+/// derived from one against local state arrives here instead — the round trip below already did.
+/// The block carries an extended highest sequence number this does not yet turn into a delivered
+/// count, which is the next such field.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct RtcpQualitySample {
     /// SSRC of the peer that sent the sender or receiver report.
     pub reporter_ssrc: u32,
@@ -828,6 +866,36 @@ pub struct RtcpQualitySample {
     pub jitter: Duration,
     /// Round-trip time derived from `LSR` and `DLSR`, when the report carries a usable echo.
     pub round_trip: Option<Duration>,
+}
+
+impl RtcpQualitySample {
+    /// One report block, as this session read it.
+    ///
+    /// Published so that an application can build the value its [`RtcpQualityHook`] is given: a
+    /// hook is application code that runs on sipx's RTCP worker, and a hook nobody can call in a
+    /// test is a hook nobody tests. Every argument is a fact about a report that arrived, and the
+    /// two that are not straight out of the block say so in their own units — the jitter is in
+    /// time rather than RTP timestamp units because the clock rate is a property of the session
+    /// rather than of the report, and `round_trip` is `None` when the block carried no usable echo
+    /// (`sipx_rtp::quality::round_trip`).
+    #[must_use]
+    pub const fn new(
+        reporter_ssrc: u32,
+        stream_ssrc: u32,
+        loss: f64,
+        cumulative_lost: i32,
+        jitter: Duration,
+        round_trip: Option<Duration>,
+    ) -> Self {
+        Self {
+            reporter_ssrc,
+            stream_ssrc,
+            loss,
+            cumulative_lost,
+            jitter,
+            round_trip,
+        }
+    }
 }
 
 /// Application-owned handling for peer RTCP quality reports.
@@ -2745,13 +2813,7 @@ impl MediaSession {
         );
         let round_trip = self.feedback.lock().await.round_trip;
 
-        sipx_rtp::Quality {
-            loss: fraction,
-            cumulative_lost: lost,
-            jitter,
-            round_trip,
-            mos: sipx_rtp::Quality::mos(fraction, jitter, round_trip),
-        }
+        sipx_rtp::Quality::new(fraction, lost, jitter, round_trip)
     }
 
     /// The receiver report this session would send right now (RFC 3550 §6.4.1).
@@ -4292,23 +4354,22 @@ async fn rtcp_loop(
         };
 
         let report = if sent_packets > 0 {
-            Rtcp::Sender(sipx_rtp::rtcp::SenderReport {
+            let mut sender = sipx_rtp::rtcp::SenderReport::new(
                 ssrc,
-                ntp_timestamp: sipx_rtp::quality::ntp_now(),
-                rtp_timestamp: outbound.timestamp.load(Ordering::Relaxed),
-                packet_count: u32::try_from(sent_packets).unwrap_or(u32::MAX),
-                octet_count: u32::try_from(outbound.octets.load(Ordering::Relaxed))
-                    .unwrap_or(u32::MAX),
-                reports: block,
-            })
+                sipx_rtp::quality::ntp_now(),
+                outbound.timestamp.load(Ordering::Relaxed),
+                u32::try_from(sent_packets).unwrap_or(u32::MAX),
+                u32::try_from(outbound.octets.load(Ordering::Relaxed)).unwrap_or(u32::MAX),
+            );
+            sender.reports = block;
+            Rtcp::Sender(sender)
         } else {
             // The first word after the header is the SSRC of the packet's *sender* — us — not
             // of the stream being described (RFC 3550 §6.4.2); the described stream is named
             // inside the block.
-            Rtcp::Receiver(ReceiverReport {
-                ssrc,
-                reports: block,
-            })
+            let mut receiver = ReceiverReport::new(ssrc);
+            receiver.reports = block;
+            Rtcp::Receiver(receiver)
         };
 
         // Never a bare report: RFC 3550 §6.1 requires a compound of at least two packets
@@ -6564,14 +6625,13 @@ mod tests {
 
     fn peer_sender_report(ntp_timestamp: u64) -> Bytes {
         Rtcp::encode_compound(&[
-            Rtcp::Sender(sipx_rtp::rtcp::SenderReport {
-                ssrc: 0x5EED_CAFE,
+            Rtcp::Sender(sipx_rtp::rtcp::SenderReport::new(
+                0x5EED_CAFE,
                 ntp_timestamp,
-                rtp_timestamp: 160,
-                packet_count: 1,
-                octet_count: 160,
-                reports: Vec::new(),
-            }),
+                160,
+                1,
+                160,
+            )),
             Rtcp::Sdes(Sdes::cname(0x5EED_CAFE, "peer@example.invalid")),
         ])
     }

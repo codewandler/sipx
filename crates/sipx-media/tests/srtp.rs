@@ -68,16 +68,12 @@ fn keys(profile: Profile) -> (SrtpKeys, SrtpKeys) {
     let (a_key, a_salt) = (vec![0x11; key_len], vec![0x22; salt_len]);
     let (b_key, b_salt) = (vec![0x33; key_len], vec![0x44; salt_len]);
     (
-        SrtpKeys {
+        SrtpKeys::new(
             profile,
-            local: (a_key.clone(), a_salt.clone()),
-            remote: (b_key.clone(), b_salt.clone()),
-        },
-        SrtpKeys {
-            profile,
-            local: (b_key, b_salt),
-            remote: (a_key, a_salt),
-        },
+            (a_key.clone(), a_salt.clone()),
+            (b_key.clone(), b_salt.clone()),
+        ),
+        SrtpKeys::new(profile, (b_key, b_salt), (a_key, a_salt)),
     )
 }
 
@@ -395,12 +391,10 @@ async fn an_extension_overstating_past_the_packet_costs_no_packet() {
         );
 
         let counted = counters_after_the_frame(&session, profile).await;
+        let mut only_the_extension = sipx_media::MediaDiscardCounts::default();
+        only_the_extension.malformed_extensions_dropped = 1;
         assert_eq!(
-            counted,
-            sipx_media::MediaDiscardCounts {
-                malformed_extensions_dropped: 1,
-                ..Default::default()
-            },
+            counted, only_the_extension,
             "{profile:?}: a dropped extension moved something other than the one counter §4 \
              names for it"
         );

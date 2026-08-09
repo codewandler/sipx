@@ -206,7 +206,13 @@ pub enum ComponentState {
 }
 
 /// Exact, monotonic drops decided by [`ComponentIngress`].
+///
+/// Non-exhaustive for [`crate::MediaDiscardCounts`]'s reason: a counter arrives here whenever the
+/// gate gains a way to refuse a datagram, and the classification rules in §7 are the part of this
+/// component most likely to grow. [`Default`] is derived and every field is public, so
+/// `IngressCounts::default()` and an assignment build any value a literal could.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct IngressCounts {
     /// Empty payloads.
     pub ingress_empty: u64,
@@ -320,7 +326,18 @@ pub enum IngressDisposition {
 }
 
 /// Read-only facts for diagnostics and the independent browser proof.
+///
+/// Non-exhaustive: a snapshot reports whatever the component is holding, and the component gains
+/// state as the security phases do — the DTLS role and the negotiated protection profile are both
+/// facts it settles and does not report here yet.
+///
+/// Built by this crate only: this is a reading taken off a [`ComponentIngress`] by
+/// [`ComponentIngress::snapshot`], and there is no [`ComponentIngress`] outside this crate to take
+/// one off. A caller that built one would be asserting the state of a gate it does not own, which
+/// is not a claim the type is able to be wrong about today and should not become one. Assert on the
+/// fields of a snapshot the gate produced; they are all public and all readable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct BrowserComponentSnapshot {
     /// Current security phase.
     pub state: ComponentState,

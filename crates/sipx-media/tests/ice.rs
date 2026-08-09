@@ -35,12 +35,11 @@ use tokio::net::UdpSocket;
 /// Nothing else is changed: the pacing floor, the RTO floor and Rc are the RFC's, so what is
 /// being measured is still the real convergence path and not a special one.
 fn timers() -> ice::Timers {
-    ice::Timers {
-        ta: Duration::from_millis(20),
-        tn: Duration::from_millis(250),
-        tr: Duration::from_millis(200),
-        ..ice::Timers::default()
-    }
+    let mut timers = ice::Timers::default();
+    timers.ta = Duration::from_millis(20);
+    timers.tn = Duration::from_millis(250);
+    timers.tr = Duration::from_millis(200);
+    timers
 }
 
 fn credentials(ufrag: &str) -> Credentials {

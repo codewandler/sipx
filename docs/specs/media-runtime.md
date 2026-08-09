@@ -222,12 +222,19 @@ carries no counter is a **test** here and not a paragraph —
 `crates/sipx-rtp/tests/srtp_protect_header.rs` protects every packet `Packet::encode` can be made
 to produce, over the adversarial extensions and over-long CSRC lists a caller can reach it with,
 and fails the day one of them is refused. Whoever makes the branch reachable owns restoring its
-counter, and `MediaDiscardCounts` is exhaustive, so restoring one after `1.0.0` costs a major
-release. That asymmetry is real and was weighed against keeping the field as insurance; it lost,
-because the same insurance argument would keep a field for every branch that might one day become
-reachable, and a snapshot whose fields cannot be read as facts about the call is worth less than
-one field's worth of foresight. It is also why this was settled before the freeze rather than
-after it.
+counter. `M-90` weighed that against keeping the field as insurance and the insurance lost, because
+the same argument would keep a field for every branch that might one day become reachable, and a
+snapshot whose fields cannot be read as facts about the call is worth less than one field's worth
+of foresight. It is also why this was settled before the freeze rather than after it.
+
+**What restoring a counter costs changed with `M-92`, and the decision above is unaffected.**
+`M-90` was argued while `MediaDiscardCounts` was exhaustive, when adding a field back after `1.0.0`
+would have needed a major release; `M-92` made the type `#[non_exhaustive]`, so a restored counter
+is now a minor release. That is a change to the *cost of being wrong* and not to the reason: the
+field went because nothing could move it, and a field nothing can move is worth no less for being
+cheap to restore. The two decisions point the same way — a counter is published when a discard can
+reach it, and not before — and after `M-92` the second one is reversible, which is the property
+`M-80` argued every published field set should still have at `1.0.0`.
 
 Every discard site MUST either increment exactly one counter or carry a `// discard: <reason>` on
 the site explaining why no counter can truthfully reach it. A source-enumeration test enforces that

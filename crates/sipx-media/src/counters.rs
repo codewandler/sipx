@@ -7,7 +7,22 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// Each field is exact and monotonic. The snapshot as a whole is not instantaneous: independent
 /// workers can increment fields between these loads, so relationships between fields are exact
 /// only while the session is quiet.
+///
+/// Non-exhaustive, and of everything on this surface this is the type it was least avoidable for
+/// (`M-92`). [`docs/specs/media-runtime.md`][spec] §4 requires every discard site in the media path
+/// to increment exactly one counter or to carry a written reason why none can reach it, so a field
+/// arrives here whenever the path gains a way to lose something — which is what happened when
+/// `M-81` added one and `M-90` removed it again. A field set that demonstrably moved twice in two
+/// releases is not a record anybody can call complete.
+///
+/// It costs a caller nothing. Every field is public and [`Default`] is derived, so
+/// `let mut counts = MediaDiscardCounts::default();` followed by assigning the ones a test means to
+/// set builds any value a literal could — which is why there is no `new` here and why a
+/// twenty-argument one would be worse than the literal it replaced.
+///
+/// [spec]: https://github.com/codewandler/sipx/blob/main/docs/specs/media-runtime.md
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct MediaDiscardCounts {
     /// Audio frames an Opus encoder refused.
     pub opus_encode_failures: u64,
@@ -200,6 +215,11 @@ mod tests {
     /// adding or removing a counter cannot happen without this file saying so, which is what
     /// makes `M-90`'s removal of `srtp_protect_failures` a decision a reader meets rather than a
     /// line that quietly left a struct.
+    ///
+    /// `#[non_exhaustive]` does not reach this literal and does not weaken it: the attribute binds
+    /// callers in *other* crates, and the discipline here is the defining crate's own. What
+    /// changed with `M-92` is only what a field addition costs downstream — a minor release rather
+    /// than a major one — which is the cost this test exists to make somebody look at.
     fn one_bit_per_field() -> MediaDiscardCounts {
         MediaDiscardCounts {
             opus_encode_failures: 1,

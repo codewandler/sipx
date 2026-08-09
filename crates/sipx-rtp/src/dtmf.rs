@@ -178,7 +178,12 @@ pub const END_RETRANSMISSIONS: usize = 3;
 
 /// One packet of a keypress: the event payload, plus where its segment sits in the
 /// event's timeline.
+///
+/// Non-exhaustive because only the [`Event`] half of it is a wire record. The rest is scheduling
+/// this crate derives for a sender, and RFC 4733 gives a sender more of that to carry than is
+/// here today — §2.5.1.2's marker bit on the first packet of an event is the nearest one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TonePacket {
     /// The four-byte payload.
     pub event: Event,
@@ -188,6 +193,22 @@ pub struct TonePacket {
     /// that outlives the 16-bit duration field is continued as a new segment with a fresh
     /// RTP timestamp, and this offset is what that timestamp moves by.
     pub segment_offset: u32,
+}
+
+impl TonePacket {
+    /// One packet of a tone the caller is scheduling itself.
+    ///
+    /// Both arguments, because neither is derivable from the other: the event carries the digit
+    /// and the duration *within* its segment, and the offset says which segment that is. [`tone`]
+    /// is the constructor to reach for when the whole keypress is being built at once; this one is
+    /// for a sender pacing its own, which RFC 4733 §2.5.1.1 leaves to the implementation.
+    #[must_use]
+    pub const fn new(event: Event, segment_offset: u32) -> Self {
+        Self {
+            event,
+            segment_offset,
+        }
+    }
 }
 
 /// Build the packets for one keypress.
@@ -235,7 +256,13 @@ pub fn tone(digit: Digit, packets: usize, samples_per_packet: u16) -> Vec<TonePa
 }
 
 /// One telephone event completed by the receive state machine.
+///
+/// Non-exhaustive: this is [`Receiver`]'s finding about a keypress and not a packet, so what it
+/// can report is bounded by what the receiver observes rather than by a wire layout. The volume
+/// RFC 4733 §2.5.1.2 carries in every packet is the obvious next one, and it is absent today only
+/// because nothing asked for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Completed {
     /// Which key was pressed.
     pub digit: Digit,
@@ -244,6 +271,19 @@ pub struct Completed {
     /// This is wider than the wire's 16-bit duration because a long event can span several
     /// timestamp segments (RFC 4733 §2.5.2.3).
     pub duration: u32,
+}
+
+impl Completed {
+    /// The report a receiver makes for one finished keypress.
+    ///
+    /// Both facts are required and neither has a defensible default: a digit nobody pressed and a
+    /// duration of zero are both events that did not happen. Published so that an application's
+    /// own tests can build the value its digit handler is given without driving a [`Receiver`]
+    /// through a packet sequence to get one.
+    #[must_use]
+    pub const fn new(digit: Digit, duration: u32) -> Self {
+        Self { digit, duration }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

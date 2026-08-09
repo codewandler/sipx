@@ -280,11 +280,11 @@ pub(crate) fn srtp_keys_answering(
 ) -> Option<sipx_media::SrtpKeys> {
     let theirs = theirs?;
     let ours = ours.iter().find(|mine| mine.suite == theirs.suite)?;
-    Some(sipx_media::SrtpKeys {
-        profile: sipx_media::transform_of(theirs.suite),
-        local: (ours.master_key().to_vec(), ours.master_salt().to_vec()),
-        remote: (theirs.master_key().to_vec(), theirs.master_salt().to_vec()),
-    })
+    Some(sipx_media::SrtpKeys::new(
+        sipx_media::transform_of(theirs.suite),
+        (ours.master_key().to_vec(), ours.master_salt().to_vec()),
+        (theirs.master_key().to_vec(), theirs.master_salt().to_vec()),
+    ))
 }
 
 /// The keying the far end offered, from its description. Same shape as the answered one; named
