@@ -251,6 +251,17 @@ addition, which §4 already requires both sides to tolerate, and so needs no new
 the voice events, a host that emits neither of these is conformant: they are reported only where an
 application asked for them.
 
+**[sipx]** The two coupling events name the **other** leg, and that name is the application's own:
+it is what §6.2's `bridge` instruction called the leg, never a SIP identifier and never a second
+spelling of the `call.id` this envelope already carries. Both events are the host's report of a fact
+it observed rather than an acknowledgement of the instruction — §6.2 ends a bridge on `unbridge`
+**or either leg ending**, so `call.unbridged` is frequently not a consequence of anything the app
+just asked for, and it names the leg the coupling was made *to* whichever side dropped it. Why it
+ended is deliberately not a field: that leg's own `call.ended` is where an app reads it, and a
+second spelling here is one that can disagree with it. A host that couples media with no
+application having asked — an in-process bridge of its own — has no §6.2 name for the far leg, and
+emits neither event.
+
 ## 6. Instructions (app → host)
 
 ### 6.1 Document

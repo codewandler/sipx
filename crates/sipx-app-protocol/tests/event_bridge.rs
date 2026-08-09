@@ -73,8 +73,8 @@ fn interpreter() -> Interpreter {
 /// Deliberately the whole path — bridge, interpreter, envelope, text — rather than a comparison
 /// against an [`EventKind`] value. What a remote app receives is the JSON; a test that stopped at
 /// the Rust variant would pass for a client that never sees one.
-fn received(event: &CallEvent, instruction_id: &str) -> Json {
-    let kind = event_from_call(event, instruction_id)
+fn received(event: &CallEvent, instruction_id: &str, bridged_leg: Option<&str>) -> Json {
+    let kind = event_from_call(event, instruction_id, bridged_leg)
         .unwrap_or_else(|| panic!("§5.3 has a row for {event:?} and the bridge produced nothing"));
     for output in interpreter().handle(now(), Input::Event(kind)) {
         if let Output::Deliver { envelope, .. } = output {
@@ -125,7 +125,7 @@ fn an_app_protocol_client_receives_the_metrics_of_a_call_with_reporting_running(
     let reports = measured(SignalReportProfile::new(analysis()), &[32_767i16; 160]);
     assert_eq!(reports.len(), 1, "one window, one report: {reports:?}");
 
-    let event = received(&CallEvent::SignalMetrics(reports[0].clone()), "i09");
+    let event = received(&CallEvent::SignalMetrics(reports[0].clone()), "i09", None);
     assert_eq!(
         event.get("type").and_then(Json::as_str),
         Some("call.signal.metrics"),
@@ -166,7 +166,7 @@ fn an_app_protocol_client_receives_the_metrics_of_a_call_with_reporting_running(
 /// the same rule §5.3 states for a voice ending.
 #[test]
 fn an_app_protocol_client_receives_the_silence_of_a_call_with_reporting_running() {
-    let event = received(&CallEvent::SignalMetrics(silence_transition()), "i09");
+    let event = received(&CallEvent::SignalMetrics(silence_transition()), "i09", None);
     assert_eq!(
         event.get("type").and_then(Json::as_str),
         Some("call.signal.silence")
@@ -251,15 +251,33 @@ fn every_row_the_bridge_produces_is_reached_by_a_call_event() {
             CallEvent::TransferProgress(CallTransferState::Ringing),
             "call.transfer.progress",
         ),
+        (CallEvent::Bridged, "call.bridged"),
+        (
+            CallEvent::Unbridged {
+                cause: UnbridgeCause::Released,
+            },
+            "call.unbridged",
+        ),
         (CallEvent::Hold, "call.hold"),
         (CallEvent::Resumed, "call.resumed"),
         (CallEvent::Ended(CallEndCause::LocalHangup), "call.ended"),
     ];
 
+    // Every case is offered a coupled leg, including the fifteen rows that have no use for one:
+    // the name belongs to two arms, and an arm that started reading it would be putting a field on
+    // a row §5.3 does not give one.
     for (event, expected) in cases {
-        let kind = event_from_call(&event, "i09")
+        let kind = event_from_call(&event, "i09", Some("b"))
             .unwrap_or_else(|| panic!("no host can emit {expected}: {event:?} reaches no arm"));
         assert_eq!(kind.type_name(), expected, "for {event:?}");
+        assert_eq!(
+            kind.to_json().get("leg").and_then(Json::as_str).is_some(),
+            matches!(
+                kind,
+                EventKind::Bridged { .. } | EventKind::Unbridged { .. }
+            ),
+            "only §5.3's coupling rows carry a leg: {expected}"
+        );
     }
 }
 
@@ -270,7 +288,7 @@ fn every_row_the_bridge_produces_is_reached_by_a_call_event() {
 /// the event body is a second thing that can disagree.
 #[test]
 fn a_voice_transition_carries_its_position_and_not_a_second_call_identity() {
-    let started = received(&CallEvent::VoiceStarted(activity(4, 3_200)), "i06");
+    let started = received(&CallEvent::VoiceStarted(activity(4, 3_200)), "i06", None);
     assert_eq!(
         started.get("type").and_then(Json::as_str),
         Some("call.voice.started")
@@ -302,7 +320,8 @@ fn a_voice_transition_carries_its_position_and_not_a_second_call_identity() {
                 activity: activity(5, 4_800),
                 cause: CallVoiceEndCause::Hangover,
             },
-            "i06"
+            "i06",
+            None,
         ),
         Some(EventKind::VoiceEnded {
             direction: AudioDirection::Inbound,
@@ -328,7 +347,11 @@ fn the_threshold_announcement_is_the_record_the_specification_shows() {
         .with_silence_timeout_ms(None)
         .with_calibration(Some(CalibrationProfile::new()));
     assert_eq!(
-        event_from_call(&CallEvent::VoiceThresholds(thresholds(calibrating)), "i08"),
+        event_from_call(
+            &CallEvent::VoiceThresholds(thresholds(calibrating)),
+            "i08",
+            None
+        ),
         Some(EventKind::VoiceThresholds {
             sample_time: 1_600,
             thresholds: sipx_app_protocol::testing::reference_thresholds(),
@@ -337,7 +360,11 @@ fn the_threshold_announcement_is_the_record_the_specification_shows() {
 
     // A profile with no calibration: §12.3 derives the three calibration counts together or not at
     // all, so an analyser whose threshold cannot move says so by carrying none of them.
-    let fixed = match event_from_call(&CallEvent::VoiceThresholds(thresholds(analysis())), "i08") {
+    let fixed = match event_from_call(
+        &CallEvent::VoiceThresholds(thresholds(analysis())),
+        "i08",
+        None,
+    ) {
         Some(EventKind::VoiceThresholds { thresholds, .. }) => thresholds,
         other => panic!("expected an announcement: {other:?}"),
     };
@@ -359,7 +386,11 @@ fn the_threshold_announcement_is_the_record_the_specification_shows() {
     );
 
     // And the same record on the wire, because what an app receives is the JSON.
-    let event = received(&CallEvent::VoiceThresholds(thresholds(analysis())), "i08");
+    let event = received(
+        &CallEvent::VoiceThresholds(thresholds(analysis())),
+        "i08",
+        None,
+    );
     let record = event
         .get("thresholds")
         .expect("the announcement carries the record");
@@ -390,6 +421,7 @@ fn a_completion_is_named_by_the_apps_instruction_id() {
             completed: false,
         },
         "i04",
+        None,
     );
     assert_eq!(
         playback.get("instruction_id").and_then(Json::as_str),
@@ -407,6 +439,7 @@ fn a_completion_is_named_by_the_apps_instruction_id() {
             duration: Duration::from_millis(4_200),
         },
         "i06",
+        None,
     );
     assert_eq!(
         recording.get("instruction_id").and_then(Json::as_str),
@@ -435,7 +468,7 @@ fn a_transfer_reports_the_four_states_the_contract_spells() {
     ];
     for (from, expected) in cases {
         assert_eq!(
-            event_from_call(&CallEvent::TransferProgress(from.clone()), "i10"),
+            event_from_call(&CallEvent::TransferProgress(from.clone()), "i10", None),
             Some(EventKind::TransferProgress { state: expected }),
             "for {from:?}"
         );
@@ -447,6 +480,7 @@ fn a_transfer_reports_the_four_states_the_contract_spells() {
             attended: true,
         },
         "i10",
+        None,
     );
     assert_eq!(
         requested.get("target").and_then(Json::as_str),
@@ -479,7 +513,7 @@ fn both_far_end_endings_are_the_contracts_remote_cause() {
     ];
     for (from, expected) in cases {
         assert_eq!(
-            event_from_call(&CallEvent::Ended(from), "i11"),
+            event_from_call(&CallEvent::Ended(from), "i11", None),
             Some(EventKind::Ended { cause: expected }),
             "for {from:?}"
         );
@@ -495,19 +529,23 @@ fn both_far_end_endings_are_the_contracts_remote_cause() {
 fn the_events_the_contract_does_not_carry_are_not_delivered() {
     // §5.2, not §5.3: mute is a local decision the far end was told nothing about, and a remote app
     // sees it as `media.muted` on the next snapshot.
-    assert_eq!(event_from_call(&CallEvent::Muted, "i12"), None);
-    assert_eq!(event_from_call(&CallEvent::Unmuted, "i12"), None);
+    assert_eq!(event_from_call(&CallEvent::Muted, "i12", None), None);
+    assert_eq!(event_from_call(&CallEvent::Unmuted, "i12", None), None);
 
-    // §5.3 *does* spell `call.bridged` and `call.unbridged`, and both name the other leg — which
-    // `C-6`'s events deliberately do not carry, because the host made the coupling and already
-    // knows which call it was made to.
-    assert_eq!(event_from_call(&CallEvent::Bridged, "i12"), None);
+    // The one case here where §5.3 *does* have a row: a coupling the caller did not name. `C-6`'s
+    // events say the media started or stopped crossing and not what it crossed to, and the row
+    // requires the other leg — so a host that coupled media outside §6.2's `bridge` verb has no
+    // contract name to put on it. This is a `None` the caller can turn into an event by answering
+    // the question, which is what makes it different from the two above; the test below is that
+    // same pair with an answer (`M-99`).
+    assert_eq!(event_from_call(&CallEvent::Bridged, "i12", None), None);
     assert_eq!(
         event_from_call(
             &CallEvent::Unbridged {
                 cause: UnbridgeCause::Released,
             },
-            "i12"
+            "i12",
+            None,
         ),
         None
     );
@@ -528,10 +566,83 @@ fn the_events_the_contract_does_not_carry_are_not_delivered() {
                     CallAudioDirection::Inbound,
                     observation,
                 )),
-                "i12"
+                "i12",
+                None,
             ),
             None,
             "for {observation:?}"
+        );
+    }
+}
+
+/// §5.3's two coupling rows, delivered to the app that asked for the coupling (`M-99`).
+///
+/// The split this asserts is that **the fact is the call's and the name is the driver's**, which is
+/// the same split `instruction_id` has above: `sipx-call` knows the media started crossing and the
+/// contract knows what the app called the far leg, and neither knows the other's half. Only the
+/// coupling can report `UnbridgeCause::PeerEnded` — §6.2's "ended by `unbridge` or *either leg
+/// ending*" — so a driver composing these from the instruction alone would have no way to say the
+/// bridge ended because the other call hung up.
+///
+/// The input is real: `sipx-call`'s own `tests/bridge.rs` is what proves `CallBridge::connect`
+/// emits [`CallEvent::Bridged`] on both calls and gives the survivor of an ended peer
+/// [`CallEvent::Unbridged`]. What is asserted here is the half that had no producer at all — that
+/// those events reach an app-protocol client as §5.3's rows.
+#[test]
+fn a_coupled_call_tells_its_app_which_leg_the_media_crossed_to() {
+    let bridged = received(&CallEvent::Bridged, "i20", Some("b"));
+    assert_eq!(
+        bridged.get("type").and_then(Json::as_str),
+        Some("call.bridged")
+    );
+    assert_eq!(bridged.get("leg").and_then(Json::as_str), Some("b"));
+
+    for cause in [UnbridgeCause::Released, UnbridgeCause::PeerEnded] {
+        let unbridged = received(&CallEvent::Unbridged { cause }, "i20", Some("b"));
+        assert_eq!(
+            unbridged.get("type").and_then(Json::as_str),
+            Some("call.unbridged"),
+            "for {cause:?}"
+        );
+        assert_eq!(
+            unbridged.get("leg").and_then(Json::as_str),
+            Some("b"),
+            "for {cause:?}"
+        );
+        // §5.3's row carries the leg and nothing else. Why the coupling ended is `sipx-call`'s
+        // vocabulary, and putting a word on the wire the contract has not defined is how a field
+        // nobody agreed to becomes one somebody depends on.
+        assert_eq!(unbridged.get("cause"), None, "for {cause:?}");
+    }
+}
+
+/// §5.2's `bridged` member is written by exactly these two events, and by nothing else.
+///
+/// So it is the other half of the same defect: for as long as no host could emit §5.3's coupling
+/// rows, no host could report a coupled call in its snapshot either, and dropping the rows from the
+/// section would have moved the unreachable thing one layer down rather than removed it.
+#[test]
+fn the_snapshot_follows_the_coupling_the_app_was_told_about() {
+    let mut interpreter = interpreter();
+    assert!(!interpreter.snapshot().bridged, "a new call is not coupled");
+
+    for (event, expected) in [
+        (CallEvent::Bridged, true),
+        (
+            CallEvent::Unbridged {
+                cause: UnbridgeCause::PeerEnded,
+            },
+            false,
+        ),
+    ] {
+        let kind = event_from_call(&event, "i21", Some("b")).unwrap_or_else(|| {
+            panic!("§5.3 has a row for {event:?} and the bridge produced nothing")
+        });
+        interpreter.handle(now(), Input::Event(kind));
+        assert_eq!(
+            interpreter.snapshot().bridged,
+            expected,
+            "after {event:?} the snapshot must say the call is coupled: {expected}"
         );
     }
 }

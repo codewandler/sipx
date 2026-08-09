@@ -192,16 +192,16 @@ fn section_5_3_s_rows_are_reachable_through_the_bridge() {
     ///   against the instruction's own bounds. No `CallEvent` says a gather resolved.
     /// - `call.dial.finished` — about the second leg the driver created, which is a different call
     ///   from the one whose stream this bridges.
-    /// - `call.bridged` / `call.unbridged` — §5.3 names the other `leg`, and `CallEvent::Bridged`
-    ///   and `CallEvent::Unbridged` deliberately do not carry it: the host made the coupling and
-    ///   already knows which call it was made to, and a second call's identity on a stream about
-    ///   exactly one is a second thing that can disagree.
-    const COMPOSED_BY_THE_DRIVER: [&str; 5] = [
+    ///
+    /// `call.bridged` and `call.unbridged` were here until `M-99` and are not any more. The reason
+    /// given for them — §5.3 names the other `leg` and `C-6`'s events do not carry it — was a
+    /// missing name rather than a missing event, and this list is for rows no call event reports at
+    /// all. Nothing composed them either, so the entry was a claim about a producer that did not
+    /// exist; they now have an arm, and this test's other branch is what keeps it.
+    const COMPOSED_BY_THE_DRIVER: [&str; 3] = [
         "call.incoming",
         "call.gather.finished",
         "call.dial.finished",
-        "call.bridged",
-        "call.unbridged",
     ];
 
     let rows: BTreeSet<String> = table_after("5.3 Event types")

@@ -256,7 +256,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     CallEvent::PlaybackFinished { .. } => PLAY,
                     _ => GATHER,
                 };
-                match event_from_call(&event, id) {
+                // This program never bridges, so there is no coupled leg to name (§6.2).
+                match event_from_call(&event, id, None) {
                     Some(EventKind::Ended { cause }) => {
                         println!("canned_program: ended cause={}", tag(cause));
                         break;
