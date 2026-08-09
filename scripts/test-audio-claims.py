@@ -144,6 +144,10 @@ class TheRepositoryItself(unittest.TestCase):
         Before `M-80` this reported six types, `Encoded` and `Packet` among them — the two whose
         field additions in `M-75` and `M-79` broke in-tree literals and are the reason the rule
         exists at all.
+
+        `M-92` removed the type boundary that kept the other twenty-nine out of the population, so
+        this failed against the tree it was widened over and names all of them. It now asserts both
+        halves of the rule: marked-or-argued, and — for a marked type — buildable-or-argued.
         """
         self.assertEqual([], guard.struct_problems(guard.guarded_structs(self.published)))
 
@@ -904,20 +908,17 @@ class TheStructExtensibilityRule(unittest.TestCase):
             self.problems_for(self.BREAKABLE.replace("    pub payload_type", "    pub(crate) payload_type")),
         )
 
-    def test_a_struct_with_no_constructor_is_not_reported(self):
-        """The type boundary: marking one of these leaves a caller no way to build it at all."""
-        self.assertEqual([], self.problems_for(self.BREAKABLE.partition("impl Encoded")[0]))
+    def test_a_struct_with_no_constructor_is_reported_too(self):
+        """`M-92` removed the type boundary that used to make this shape quiet.
 
-    def test_another_types_constructor_does_not_hold_this_one(self):
-        """`impl EncodedBuilder` is not `impl Encoded`, however the prefix reads."""
-        problems = self.problems_for(
-            self.BREAKABLE.partition("impl Encoded")[0]
-            + "/// A builder.\npub struct EncodedBuilder {\n    /// Bits.\n    pub bits: u8,\n}\n\n"
-            "impl EncodedBuilder {\n    /// One.\n    pub fn new() -> Self {\n"
-            "        Self { bits: 0 }\n    }\n}\n"
-        )
+        A struct with public fields breaks a downstream literal whether or not the crate also
+        publishes a `new`, so the rule that dropped this one out of scope excused twenty-nine
+        types on the media surface. What the boundary was protecting is now
+        `TheConstructorObligation` below.
+        """
+        problems = self.problems_for(self.BREAKABLE.partition("impl Encoded")[0])
         self.assertEqual(1, len(problems))
-        self.assertIn("EncodedBuilder", problems[0])
+        self.assertIn("Encoded", problems[0])
 
     def test_a_unit_struct_is_not_reported(self):
         self.assertEqual(
@@ -975,6 +976,151 @@ class TheStructExtensibilityRule(unittest.TestCase):
         )
         self.assertEqual(1, len(problems))
         self.assertIn("Encoded", problems[0])
+
+    def problems_for(self, source: str) -> list[str]:
+        return demo_crate({"lib.rs": source}, guard.struct_problems)
+
+
+class TheConstructorObligation(unittest.TestCase):
+    """`M-92`: `#[non_exhaustive]` has a cost, and the rule charges it to the type that took it.
+
+    `M-80` narrowed the struct rule to types that already published a `new`, because marking one
+    that publishes nothing leaves a caller no way to build it at all. That hazard is real; using it
+    to drop the type out of the rule was not, so it is asserted here as the second half of the
+    rule. A marked struct must publish a way to build it or say why nothing outside builds one.
+    """
+
+    #: Marked, with public fields, and nothing to build it with. The shape the obligation is for.
+    STRANDED = (
+        "/// A payload.\n"
+        "#[non_exhaustive]\n"
+        "pub struct Encoded {\n"
+        "    /// What it is encoded in.\n"
+        "    pub payload_type: u8,\n"
+        "}\n"
+    )
+
+    def test_a_marked_struct_with_no_way_to_build_it_is_reported(self):
+        problems = self.problems_for(self.STRANDED)
+        self.assertEqual(1, len(problems))
+        self.assertIn("Encoded", problems[0])
+        self.assertIn("publishes no constructor", problems[0])
+
+    def test_a_new_satisfies_it(self):
+        self.assertEqual(
+            [],
+            self.problems_for(
+                self.STRANDED + "\nimpl Encoded {\n    /// One.\n"
+                "    pub fn new(payload_type: u8) -> Self {\n"
+                "        Self { payload_type }\n    }\n}\n"
+            ),
+        )
+
+    def test_a_constructor_under_another_name_satisfies_it(self):
+        """`Sdes::cname` and `RemoteCandidate::signalled` are constructors; only `new` was not."""
+        self.assertEqual(
+            [],
+            self.problems_for(
+                self.STRANDED + "\nimpl Encoded {\n    /// A silent one.\n"
+                "    pub fn silence() -> Self {\n"
+                "        Self { payload_type: 0 }\n    }\n}\n"
+            ),
+        )
+
+    def test_a_fallible_constructor_satisfies_it(self):
+        """Which of `Self`, `Option<Self>` and `Result<Self, E>` a type returns is its business."""
+        self.assertEqual(
+            [],
+            self.problems_for(
+                self.STRANDED + "\nimpl Encoded {\n    /// Perhaps one.\n"
+                "    pub fn parse(bytes: &[u8]) -> Option<Self> {\n"
+                "        None\n    }\n}\n"
+            ),
+        )
+
+    def test_a_parameter_type_with_parentheses_does_not_hide_the_return(self):
+        """`RtcpQualityHook::new` takes an `impl Fn(..)`, which a first-`)` reader stops inside."""
+        self.assertEqual(
+            [],
+            self.problems_for(
+                self.STRANDED + "\nimpl Encoded {\n    /// From a source.\n"
+                "    pub fn from_source(source: impl Fn(u8) -> u8, seed: u8) -> Self {\n"
+                "        Self { payload_type: source(seed) }\n    }\n}\n"
+            ),
+        )
+
+    def test_a_method_is_not_a_constructor(self):
+        """It needs a value of the type before it can be called, so it builds nobody one."""
+        problems = self.problems_for(
+            self.STRANDED + "\nimpl Encoded {\n    /// A copy.\n"
+            "    pub fn clone_of(&self) -> Self {\n"
+            "        Self { payload_type: self.payload_type }\n    }\n}\n"
+        )
+        self.assertEqual(1, len(problems))
+
+    def test_a_derived_default_satisfies_it(self):
+        """`T::default()` plus an assignment reaches every value the literal did.
+
+        This is what keeps `MediaDiscardCounts` from needing a twenty-argument `new`.
+        """
+        self.assertEqual(
+            [],
+            self.problems_for(
+                self.STRANDED.replace(
+                    "#[non_exhaustive]\n", "#[derive(Debug, Default)]\n#[non_exhaustive]\n"
+                )
+            ),
+        )
+
+    def test_a_hand_written_default_satisfies_it(self):
+        """`ice::Timers`' default is the RFCs' recommended durations and cannot be derived."""
+        self.assertEqual(
+            [],
+            self.problems_for(
+                self.STRANDED + "\nimpl Default for Encoded {\n"
+                "    fn default() -> Self {\n        Self { payload_type: 8 }\n    }\n}\n"
+            ),
+        )
+
+    def test_a_stated_reason_satisfies_it(self):
+        self.assertEqual(
+            [],
+            self.problems_for(
+                self.STRANDED.replace(
+                    "/// A payload.\n",
+                    "/// A payload.\n///\n"
+                    "/// Built by this crate only: a worker hands these out.\n",
+                )
+            ),
+        )
+
+    def test_the_complete_rationale_does_not_stand_in_for_it(self):
+        """They are opposite claims: one argues for the attribute this type already carries."""
+        problems = self.problems_for(
+            self.STRANDED.replace(
+                "/// A payload.\n",
+                "/// A payload.\n///\n/// Complete by design: the wire carries these and no more.\n",
+            )
+        )
+        self.assertEqual(1, len(problems))
+
+    def test_an_unmarked_struct_is_not_asked_for_a_constructor(self):
+        """The obligation follows the attribute. A type that argued its way out owes nothing."""
+        self.assertEqual(
+            [],
+            self.problems_for(
+                self.STRANDED.replace("#[non_exhaustive]\n", "").replace(
+                    "/// A payload.\n",
+                    "/// A payload.\n///\n/// Complete by design: the wire carries these and no more.\n",
+                )
+            ),
+        )
+
+    def test_a_marked_struct_with_no_public_field_owes_nothing(self):
+        """The rule's population is unchanged: no literal, no breakage, no obligation."""
+        self.assertEqual(
+            [], self.problems_for(self.STRANDED.replace("    pub payload_type", "    payload_type"))
+        )
 
     def problems_for(self, source: str) -> list[str]:
         return demo_crate({"lib.rs": source}, guard.struct_problems)

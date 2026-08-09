@@ -213,12 +213,9 @@ fn browser_gathering(ufrag: &str, offerer: bool) -> sipx_media::ice::Gathering {
     let credentials = sipx_sdp::ice::Credentials::new(ufrag, "browserPassword0123456789AB")
         .expect("valid ICE credentials");
     let mut gathering = sipx_media::ice::Gathering::new(credentials, offerer);
-    gathering.agent.timers = sipx_media::ice::Timers {
-        ta: std::time::Duration::from_millis(20),
-        tn: std::time::Duration::from_millis(250),
-        tr: std::time::Duration::from_millis(200),
-        ..sipx_media::ice::Timers::default()
-    };
+    gathering.agent.timers.ta = std::time::Duration::from_millis(20);
+    gathering.agent.timers.tn = std::time::Duration::from_millis(250);
+    gathering.agent.timers.tr = std::time::Duration::from_millis(200);
     gathering
 }
 

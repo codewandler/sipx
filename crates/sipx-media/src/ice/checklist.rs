@@ -121,6 +121,10 @@ pub enum ChecklistState {
 /// Positions are not: §6.1.2.3 re-sorts every checklist on a role change, §8.1.2 removes pairs
 /// once a component is nominated, and a triggered-check queue holding indices into a list that
 /// does both would name a different pair after either.
+///
+/// Complete by design: an allocated identity is a number that is not equal to any other, and
+/// nothing else — see [`LocalId`], which is the same decision for candidates. What it identifies
+/// is [`CandidatePair`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PairId(pub u32);
 
@@ -138,7 +142,13 @@ impl PairIds {
 }
 
 /// One entry in a checklist (§6.1.2.2, figure 5).
+///
+/// Non-exhaustive: figure 5's row is what a pair holds *at this point in §6*, and the sections
+/// after it keep adding to it — §7.2.5.3.4's nomination flag below is one such addition, and a
+/// pair that carried its outstanding transaction rather than leaving it in the agent's table would
+/// be another.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CandidatePair {
     /// Its identity.
     pub id: PairId,
@@ -159,6 +169,37 @@ pub struct CandidatePair {
 }
 
 impl CandidatePair {
+    /// A pair as §6.1.2.6 forms it, before any check has run.
+    ///
+    /// [`Self::state`] and [`Self::nominated`] are not arguments and that is the argument for this
+    /// shape: §6.1.2.6 puts every pair in a newly formed checklist in the Frozen state, and
+    /// §7.2.5.3.4 sets the flag only when a check carrying `USE-CANDIDATE` has already succeeded on
+    /// this pair. A pair that began life Succeeded, or nominated, is a pair no check produced.
+    ///
+    /// The priority is an argument because §6.1.2.3 makes it a function of the *roles* as well as
+    /// the two candidates, and it is recomputed on every role change — [`pair_priority`] is where
+    /// it is derived, and passing the result in is what keeps one formula in one place.
+    #[must_use]
+    pub const fn new(
+        id: PairId,
+        local: LocalId,
+        remote: RemoteId,
+        component: ComponentId,
+        foundation: PairFoundation,
+        priority: u64,
+    ) -> Self {
+        Self {
+            id,
+            local,
+            remote,
+            component,
+            foundation,
+            priority,
+            state: PairState::Frozen,
+            nominated: false,
+        }
+    }
+
     /// Whether §6.1.2.5 may discard this pair.
     ///
     /// A pair with a check in flight or a check that succeeded is holding state outside the
@@ -179,7 +220,11 @@ impl CandidatePair {
 /// of the response and the address the request was sent to, so "it will be very common that the
 /// valid pair will not be in any checklist" — its local candidate is the reflexive address a NAT
 /// showed us, and every checklist pair had its reflexive locals replaced by their bases.
+///
+/// Non-exhaustive for [`CandidatePair`]'s reason: what a valid pair records is what §7.2.5.3.2 has
+/// established about it so far, and §8's nomination and §11's keepalives both keep writing to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ValidPair {
     /// The component it serves.
     pub component: ComponentId,
@@ -193,6 +238,33 @@ pub struct ValidPair {
     pub nominated: bool,
     /// The checklist pair whose check produced it.
     pub generated_by: PairId,
+}
+
+impl ValidPair {
+    /// A pair §7.2.5.3.2 has just added to a valid list.
+    ///
+    /// [`Self::nominated`] is not an argument: §7.2.5.3.4 sets it when a check carrying
+    /// `USE-CANDIDATE` succeeds, and §7.3.1.5 when one arrives, both of which are later than the
+    /// moment a valid pair is constructed. Every other field is something the response established
+    /// — the mapped address it reported, the address the request went to, and the pair whose check
+    /// it was — so none has a default that means anything.
+    #[must_use]
+    pub const fn new(
+        component: ComponentId,
+        local: LocalId,
+        remote: SocketAddr,
+        priority: u64,
+        generated_by: PairId,
+    ) -> Self {
+        Self {
+            component,
+            local,
+            remote,
+            priority,
+            nominated: false,
+            generated_by,
+        }
+    }
 }
 
 /// One data stream's checklist, its triggered-check queue and its valid list.

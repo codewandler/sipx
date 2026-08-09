@@ -861,13 +861,12 @@ mod tests {
     /// break it.
     #[test]
     fn stats_render_the_same_facts_in_both_formats() {
-        let quality = sipx_rtp::Quality {
-            loss: 0.0123,
-            cumulative_lost: 7,
-            jitter: std::time::Duration::from_millis(12),
-            round_trip: Some(std::time::Duration::from_millis(84)),
-            mos: 4.128_745_9,
-        };
+        let quality = sipx_rtp::Quality::new(
+            0.0123,
+            7,
+            std::time::Duration::from_millis(12),
+            Some(std::time::Duration::from_millis(84)),
+        );
         let report = with_quality(Report::new(), &quality);
 
         let text = report.render(Format::Text);
@@ -882,13 +881,11 @@ mod tests {
     /// The model behind it does not support that, so the output does not offer it.
     #[test]
     fn the_score_is_not_reported_to_more_precision_than_it_has() {
-        let quality = sipx_rtp::Quality {
-            loss: 0.0,
-            cumulative_lost: 0,
-            jitter: std::time::Duration::ZERO,
-            round_trip: None,
-            mos: 4.128_745_9,
-        };
+        // The score is assigned rather than derived, because what is being asserted on is the
+        // eight digits and not the model that produced them: `Quality::new` computes a consistent
+        // score from the other three, and this test needs a specific long one to round.
+        let mut quality = sipx_rtp::Quality::new(0.0, 0, std::time::Duration::ZERO, None);
+        quality.mos = 4.128_745_9;
         let rendered = with_quality(Report::new(), &quality).render(Format::Json);
         assert!(rendered.contains("4.13"), "{rendered}");
         assert!(!rendered.contains("4.1287"), "{rendered}");
@@ -898,13 +895,7 @@ mod tests {
     /// `0` would say "instantaneous", and a script would believe it; the field is absent.
     #[test]
     fn an_unmeasurable_round_trip_is_absent_rather_than_zero() {
-        let quality = sipx_rtp::Quality {
-            loss: 0.0,
-            cumulative_lost: 0,
-            jitter: std::time::Duration::ZERO,
-            round_trip: None,
-            mos: 4.4,
-        };
+        let quality = sipx_rtp::Quality::new(0.0, 0, std::time::Duration::ZERO, None);
         let rendered = with_quality(Report::new(), &quality).render(Format::Json);
         assert!(
             !rendered.contains("round_trip"),

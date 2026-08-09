@@ -1094,13 +1094,12 @@ async fn a_reinvite_moves_the_media_without_dropping_the_call() {
     // Prove the retained hook is live, not only present: a peer report after the re-INVITE must
     // reach the same application channel. The report names the current generation's own SSRC.
     let media_addr = caller.media().local_addr();
-    let report = sipx_rtp::Rtcp::Receiver(sipx_rtp::ReceiverReport {
-        ssrc: 0x5566_7788,
-        reports: vec![sipx_rtp::ReportBlock {
-            ssrc: caller.media().local_ssrc(),
-            ..sipx_rtp::ReportBlock::default()
-        }],
-    });
+    let mut receiver = sipx_rtp::ReceiverReport::new(0x5566_7788);
+    receiver.reports = vec![sipx_rtp::ReportBlock {
+        ssrc: caller.media().local_ssrc(),
+        ..sipx_rtp::ReportBlock::default()
+    }];
+    let report = sipx_rtp::Rtcp::Receiver(receiver);
     let rtcp_mode = caller.media().rtcp_mode();
     drop(caller);
     let peer = tokio::net::UdpSocket::bind("127.0.0.1:0")

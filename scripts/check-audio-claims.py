@@ -75,12 +75,19 @@ surface: `M-75` added `Packet::extension`, `M-79` added `Encoded::extension`, an
 change broke in-tree literals — twice in two stories, which is a rate rather than a hypothetical.
 
 Because the corrected selector turns up around two hundred reachable public-field structs at once,
-the struct rule runs behind two boundaries and both are stated where they are defined:
-`MEDIA_SURFACE` names the crates, and `breakable_structs` names the property — a struct the crate
-*already publishes a `new` for*, which is the crate having said construction is the constructor's
-job while leaving the literal legal. What is not yet held is counted and printed on every run, the
-way the enum rollout's remainder is. See `struct_problems` for why `#[non_exhaustive]` is the side
-of this decision that stays reversible, and so the one a pre-1.0 release should take.
+the struct rule runs behind one boundary, stated where it is defined: `MEDIA_SURFACE` names the
+crates. `M-80` had a second, a type boundary holding only a struct the crate already published a
+`new` for; `M-92` removed it, because a struct with public fields and no constructor breaks a
+downstream literal exactly as hard and the boundary excused twenty-nine of them. What is not yet
+held is counted and printed on every run, the way the enum rollout's remainder is. See
+`struct_problems` for why `#[non_exhaustive]` is the side of this decision that stays reversible,
+and so the one a pre-1.0 release should take.
+
+The hazard that type boundary named is real and survives as the rule's second obligation:
+`#[non_exhaustive]` on a struct with no constructor leaves a caller no way to build one at all. A
+type in that position states which it is — it publishes a constructor, or it says beside itself
+that it is a value this crate hands out and nothing outside builds. Both are answers; being
+outside the rule was not one.
 
 Three things this deliberately does not do.
 
@@ -263,10 +270,22 @@ _PUBLIC_TUPLE_FIELD = re.compile(r"(?<![\w:])pub(?![\w(])")
 #: expects the type, so it does not match.
 _INHERENT_IMPL = r"(?m)^impl(?:<[^>]*>)? {name}\b(?![\w:])[^{{]*\{{"
 
-#: A published constructor. `const fn new` counts; a `pub fn new` returning something else does
-#: not need distinguishing, because a type that publishes `new` at all has named the way it is
-#: meant to be built.
-_CONSTRUCTOR = re.compile(r"(?m)^[ \t]*pub (?:const )?fn new\b")
+#: A public associated function, up to its name. The parameter list is scanned rather than matched
+#: (`constructs_self`), because a parameter type can hold parentheses of its own —
+#: `impl Fn(RtcpQualitySample)` is one this workspace writes — and a pattern that stopped at the
+#: first `)` would read half a signature and then guess at the return type.
+_PUBLIC_FN = re.compile(r"(?m)^[ \t]*pub (?:const )?(?:async )?fn \w+")
+
+#: A `self` receiver, in every spelling a method can open with. A function that takes one is not a
+#: constructor: it needs a value of the type before it can be called at all.
+_RECEIVER = re.compile(r"^\s*(?:&\s*(?:'\w+\s*)?)?(?:mut\s+)?self\b")
+
+#: A derived `Default`, read from what is written immediately above the struct.
+_DERIVES_DEFAULT = re.compile(r"#\[derive\([^)]*\bDefault\b")
+
+#: A hand-written `Default`, for the types whose defaults are values rather than zeroes —
+#: `ice::Timers` is the RFCs' recommended durations and cannot be derived.
+_IMPLEMENTS_DEFAULT = r"(?m)^impl(?:<[^>]*>)?\s+Default\s+for\s+{name}\b"
 
 #: A re-export. The body runs to the semicolon and may span lines, because that is how a crate
 #: root writes a long one. What it re-exports is read out of the body by `reexports` below.
@@ -281,6 +300,14 @@ EXHAUSTIVE_REASON = "/// Exhaustive by design:"
 #: domain" and "these fields are the record" — and a reader who writes one at the other's type has
 #: not made the argument the rule asked for.
 COMPLETE_REASON = "/// Complete by design:"
+
+#: The phrase that answers the second obligation `M-92` added: a `#[non_exhaustive]` struct with no
+#: constructor cannot be built from outside the crate at all, and a type in that position has to
+#: say that it is meant to be read rather than built. A third phrase rather than a reuse of
+#: `COMPLETE_REASON`, because the two are opposite claims — "these fields are the whole record" and
+#: "this value comes from inside this crate" — and a type that made the wrong one would be arguing
+#: for the attribute it does not carry.
+UNBUILT_REASON = "/// Built by this crate only:"
 
 #: The crates whose reachable public enums are held to the guard today.
 #:
@@ -781,8 +808,55 @@ def has_a_public_field(shape: str, body: str) -> bool:
     return pattern.search(body) is not None
 
 
-def publishes_a_constructor(source: str, name: str) -> bool:
-    """Whether the crate offers a `pub fn new` for this type in an inherent `impl`."""
+def constructs_self(body: str) -> bool:
+    """Whether an `impl` body publishes an associated function that returns the type.
+
+    Any name and not `new`, which is what `M-92` widened. `Sdes::cname`, `SrtpKeys::from_answer`
+    and `RemoteCandidate::signalled` are the constructors their types publish, each named after the
+    one thing it can honestly build; a rule that only accepted `new` would have asked for a second
+    and worse-named function beside every one of them, which is the mechanical constructor the
+    story that added this rule was told not to write.
+    """
+    for found in _PUBLIC_FN.finditer(body):
+        opening = body.find("(", found.end())
+        if opening < 0:
+            continue
+        depth, scan = 0, opening
+        while scan < len(body):
+            if body[scan] == "(":
+                depth += 1
+            elif body[scan] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            scan += 1
+        end = body.find("{", scan)
+        if end < 0 or _RECEIVER.match(body[opening + 1 : scan]):
+            continue
+        # `-> Self`, `-> Option<Self>` and `-> Result<Self, E>` all build one; which of them a
+        # fallible constructor uses is the type's business and not this rule's.
+        if "Self" in body[scan + 1 : end]:
+            return True
+    return False
+
+
+def publishes_a_constructor(source: str, name: str, above: str) -> bool:
+    """Whether anything outside the crate has a way to build this type.
+
+    The question this answers is whether `#[non_exhaustive]` would strand a caller, so it counts
+    every way the crate offers rather than looking for one spelling.
+
+    A derived or hand-written `Default` counts, and that is the part worth arguing. `T::default()`
+    followed by assigning the public fields reaches every value a struct literal could reach — the
+    same fields, one statement later — so a counter snapshot like `MediaDiscardCounts` is fully
+    constructible without a twenty-argument `new` that no caller would want to read. What
+    `#[non_exhaustive]` takes away from such a type is the literal and the functional-update
+    shorthand, not the ability to build a value.
+    """
+    if _DERIVES_DEFAULT.search(above) or re.search(
+        _IMPLEMENTS_DEFAULT.format(name=re.escape(name)), source
+    ):
+        return True
     for opening in re.finditer(_INHERENT_IMPL.format(name=re.escape(name)), source):
         depth, scan = 0, opening.end() - 1
         while scan < len(source):
@@ -793,37 +867,30 @@ def publishes_a_constructor(source: str, name: str) -> bool:
                 if depth == 0:
                     break
             scan += 1
-        if _CONSTRUCTOR.search(source[opening.end() : scan]):
+        if constructs_self(source[opening.end() : scan]):
             return True
     return False
 
 
 def breakable_structs(crate: str) -> list[tuple[Path, str, str, int]]:
-    """Reachable public structs whose field set is part of the contract and already has a `new`.
+    """Reachable public structs a downstream literal can name, and so a new field can break.
 
-    The rule this narrows is general and stated in `struct_problems`: any reachable struct with a
-    public field breaks downstream literals when a field is added. Two narrowings stand between
-    that rule and what runs, and both are boundaries rather than excuses.
+    One boundary now stands between the rule in `struct_problems` and what runs, and it is
+    `MEDIA_SURFACE`'s crate boundary. `M-80` added a second, a type boundary that held only a
+    struct the crate already published a `new` for, and `M-92` removed it: it was sound about the
+    hazard it named — `#[non_exhaustive]` on a struct with no constructor leaves a caller no way to
+    build one — and wrong to answer that hazard by dropping the type out of the rule. Twenty-nine
+    types on this surface sat outside the contract on the strength of it.
 
-    `MEDIA_SURFACE` is the crate boundary. This one is the type boundary, and it is a property
-    rather than a list: a struct is held when the crate *already publishes a constructor for it*.
-    That is not a proxy for importance. A crate that ships `T::new(..)` and leaves every field
-    `pub` has published two ways to build one value and can only evolve one of them — which is
-    exactly how `M-75` and `M-79` turned two additive changes into two breaking ones. The
-    attribute is how the crate's existing intent becomes something a compiler checks.
-
-    A public-field struct with no constructor is a different piece of work rather than the same
-    work deferred: `#[non_exhaustive]` on one leaves a downstream caller with no way to build it at
-    all, so the constructor has to be designed first. `M-92` carries those.
-
-    The boundary also widens by itself in the right direction. The day a type here gains a `new`,
-    the guard picks it up without anybody remembering to edit a list.
+    What replaced it is an obligation rather than an exemption, and it is the second half of
+    `struct_problems`: a marked struct must leave a way to build it, or say why nothing outside
+    builds one. The hazard is now something the type answers instead of something it escapes.
     """
     found = []
     for path, module, name, offset in reachable_structs(crate):
         source = code(path.read_text(encoding="utf-8"))
         shape, body = declaration(source, offset)
-        if has_a_public_field(shape, body) and publishes_a_constructor(source, name):
+        if has_a_public_field(shape, body):
             found.append((path, module, name, offset))
     return found
 
@@ -846,23 +913,39 @@ def struct_problems(crates: list[str]) -> list[str]:
 
     The argument for an exception lives beside the type — never in a list here — so a reader who
     has to add a field meets it at the moment the question arises.
+
+    Two obligations since `M-92`, because the attribute has a cost as well as a benefit and a rule
+    that charged only the benefit would be answered by marking everything. A struct that carries
+    `#[non_exhaustive]` and publishes no constructor cannot be built from outside the crate at all;
+    that is a real thing to publish — a snapshot, a report a worker hands out — and it is also the
+    accident that happens when the attribute is applied by list. So the second obligation asks the
+    type to say which it is: publish a constructor, or write `UNBUILT_REASON` beside it. That is
+    the type boundary `M-80` used as an exemption, rewritten as something the type answers.
     """
     problems = []
     for crate in crates:
         for path, _module, name, offset in breakable_structs(crate):
             source = code(path.read_text(encoding="utf-8"))
             above = preamble(source, offset)
-            if "#[non_exhaustive]" in above or COMPLETE_REASON in above:
-                continue
             line = source.count("\n", 0, offset) + 1
             try:
                 where = path.relative_to(ROOT)
             except ValueError:
                 where = path
+            if "#[non_exhaustive]" not in above:
+                if COMPLETE_REASON not in above:
+                    problems.append(
+                        f"{where}:{line} `{name}` is reachable from the crate root and has public "
+                        f"fields; add `#[non_exhaustive]` or an adjacent `{COMPLETE_REASON}` "
+                        f"rationale"
+                    )
+                continue
+            if publishes_a_constructor(source, name, above) or UNBUILT_REASON in above:
+                continue
             problems.append(
-                f"{where}:{line} `{name}` is reachable from the crate root, has public fields and "
-                f"publishes a constructor; add `#[non_exhaustive]` or an adjacent "
-                f"`{COMPLETE_REASON}` rationale"
+                f"{where}:{line} `{name}` is `#[non_exhaustive]` and publishes no constructor, so "
+                f"nothing outside the crate can build one; publish a constructor or add an "
+                f"adjacent `{UNBUILT_REASON}` rationale"
             )
     return problems
 
@@ -915,23 +998,27 @@ def guarded_structs(crates: list[str]) -> list[str]:
 def outstanding_structs(crates: list[str]) -> list[str]:
     """Every reachable public-field struct in the workspace the struct rule does not hold yet.
 
-    Counted over all published crates and not only the ones outside `MEDIA_SURFACE`, because the
-    type boundary in `breakable_structs` leaves work inside the guarded crates too. A debt line
-    that reported only the crates outside would have said the media surface was finished.
+    `M-80` counted these over all published crates including the guarded ones, because its type
+    boundary left work inside `MEDIA_SURFACE` too and a debt line that reported only the crates
+    outside would have said the media surface was finished. `M-92` removed that boundary and paid
+    the work down, so inside `MEDIA_SURFACE` there is nothing left for this to find — a struct
+    there is either held or a failure in `struct_problems`, and reporting it twice under two names
+    would double-count it. What remains is what it has always meant: a reachable public-field
+    struct whose field set a downstream literal still depends on.
+
+    The printed number went 155 to 147 across that change and it did not fall by eight. `M-80`
+    computed its `held` set for *every* crate, so a struct outside `MEDIA_SURFACE` that happened to
+    publish a `new` was subtracted from the debt as well — in a crate where no rule holds it,
+    which made it neither guarded nor counted. 155 was 29 inside plus 126 outside; 147 is those
+    same 126 plus the 21 that subtraction was hiding. Paying down the 29 and un-hiding the 21 is
+    the whole of the difference.
     """
     outstanding = []
     for crate in crates:
-        if crate == CLOSED_VOCABULARY:
+        if crate == CLOSED_VOCABULARY or crate in MEDIA_SURFACE:
             continue
-        # Keyed on where the type is written and not on its name: `sipx-media` declares a `Config`
-        # in `session` and another in `ice::agent`, and a name-keyed set would have reported the
-        # second one as held because the first is.
-        held = {(module, offset) for _path, module, _name, offset in breakable_structs(crate)}
-        for path, module, name, offset in reachable_structs(crate):
+        for path, _module, name, offset in breakable_structs(crate):
             source = code(path.read_text(encoding="utf-8"))
-            shape, body = declaration(source, offset)
-            if not has_a_public_field(shape, body) or (module, offset) in held:
-                continue
             above = preamble(source, offset)
             if "#[non_exhaustive]" in above or COMPLETE_REASON in above:
                 continue
@@ -1263,9 +1350,9 @@ def main() -> int:
     # The struct rule's debt, on the same terms and for the same reason (`M-80`).
     structs = outstanding_structs(crates)
     print(
-        f"{len(MEDIA_SURFACE)} crates hold every reachable public struct that has public fields "
-        f"and a constructor non-exhaustive or argued; {len(structs)} reachable public-field "
-        f"structs elsewhere can still be broken by a new field"
+        f"{len(MEDIA_SURFACE)} crates hold every reachable public-field struct non-exhaustive or "
+        f"argued, and every marked one buildable; {len(structs)} reachable public-field structs "
+        f"outside that boundary can still be broken by a new field"
     )
     return 0
 

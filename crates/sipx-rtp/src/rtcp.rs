@@ -44,6 +44,14 @@ pub enum RtcpError {
 }
 
 /// One report block: what one source's stream looked like from here.
+///
+/// Complete by design: RFC 3550 §6.4.1 fixes a report block at twenty-four octets and names every
+/// one of them, and the header's five-bit RC counts blocks of that width, so the size is part of
+/// the packet's framing rather than a property of this type. There is no eighth field to add
+/// without becoming a different packet — RFC 3611's extended reports are that packet. Anything
+/// this stack wants to record *about* a block, rather than out of it, belongs beside it:
+/// [`sipx_media::RtcpQualitySample`](https://docs.rs/sipx-media) is where the arrival-time
+/// arithmetic and the round trip live for exactly that reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ReportBlock {
     /// Whose stream this describes.
@@ -64,7 +72,13 @@ pub struct ReportBlock {
 }
 
 /// A sender report: what we have sent, plus what we have received from others.
+///
+/// Non-exhaustive, unlike [`ReportBlock`]: §6.4.3 gives the sender and receiver reports — and
+/// nothing else in this module — a profile-specific extension area after the last report block,
+/// which is a field this type gains the day sipx reads one. Build one with [`SenderReport::new`]
+/// and push onto [`Self::reports`]; both remain public.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SenderReport {
     /// Our synchronisation source.
     pub ssrc: u32,
@@ -81,8 +95,39 @@ pub struct SenderReport {
     pub reports: Vec<ReportBlock>,
 }
 
+impl SenderReport {
+    /// A sender report carrying §6.4.1's sender information and no report blocks yet.
+    ///
+    /// The five arguments are the sender information block, which is fixed and mandatory: a sender
+    /// report without them describes nothing, so there is no useful shorter form to offer. The
+    /// report blocks are the part that is legitimately absent — a sender that has received nothing
+    /// sends RC=0 — so they are not an argument here and are pushed onto [`Self::reports`]
+    /// afterwards.
+    #[must_use]
+    pub const fn new(
+        ssrc: u32,
+        ntp_timestamp: u64,
+        rtp_timestamp: u32,
+        packet_count: u32,
+        octet_count: u32,
+    ) -> Self {
+        Self {
+            ssrc,
+            ntp_timestamp,
+            rtp_timestamp,
+            packet_count,
+            octet_count,
+            reports: Vec::new(),
+        }
+    }
+}
+
 /// A receiver report: what we have received, from a participant that sends nothing.
+///
+/// Non-exhaustive for the reason [`SenderReport`] is: §6.4.3's profile-specific extension area
+/// applies to both.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ReceiverReport {
     /// Our synchronisation source.
     pub ssrc: u32,
@@ -90,10 +135,30 @@ pub struct ReceiverReport {
     pub reports: Vec<ReportBlock>,
 }
 
+impl ReceiverReport {
+    /// A receiver report from this source, with nothing reported yet.
+    ///
+    /// The SSRC alone, because the blocks are what §6.4.2 lets be empty and requires to be sendable
+    /// empty: "an empty RR packet (RC = 0) MUST be put at the head of a compound RTCP packet when
+    /// there is no data reception to report". Push onto [`Self::reports`] for the other case.
+    #[must_use]
+    pub const fn new(ssrc: u32) -> Self {
+        Self {
+            ssrc,
+            reports: Vec::new(),
+        }
+    }
+}
+
 /// The SDES item type of a canonical name (RFC 3550 §6.5.1).
 pub const SDES_CNAME: u8 = 1;
 
 /// One source description item.
+///
+/// Complete by design: §6.5 makes an item a type octet, a length octet and that many octets of
+/// value, and the length is derived from the value rather than carried. The type octet is what
+/// varies — CNAME, NAME, PRIV and the rest — and it is already a field, so a new attribute is a
+/// new `kind` and never a new member here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SdesItem {
     /// Which attribute this is; 1 is CNAME (RFC 3550 §6.5).
@@ -103,6 +168,10 @@ pub struct SdesItem {
 }
 
 /// What one source says about itself.
+///
+/// Complete by design: §6.5's chunk is an SSRC followed by its items and a null terminator, and
+/// the terminator and the padding to the next 32-bit boundary are framing this type re-derives on
+/// encode rather than facts about the source. Both members are here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SdesChunk {
     /// Who is being described.
@@ -112,6 +181,11 @@ pub struct SdesChunk {
 }
 
 /// A source description packet.
+///
+/// Complete by design: §6.5 defines the packet as its chunks and gives it no extension area — the
+/// one §6.4.3 defines belongs to the sender and receiver reports. The chunk count travels in the
+/// header's RC nibble and the padding is re-derived on encode, so neither is a field here, and
+/// nothing else is left for one to be.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sdes {
     /// One chunk per source.

@@ -190,10 +190,9 @@ async fn a_receiver_report_emits_one_per_stream_quality_sample() {
         last_sender_report: now.wrapping_sub(32_768),
         delay_since_last_sender_report: 16_384,
     };
-    let report = Rtcp::Receiver(sipx_rtp::ReceiverReport {
-        ssrc: 0x5566_7788,
-        reports: vec![block],
-    });
+    let mut peer_report = sipx_rtp::ReceiverReport::new(0x5566_7788);
+    peer_report.reports = vec![block];
+    let report = Rtcp::Receiver(peer_report);
     let control: SocketAddr = SocketAddr::new(session_addr.ip(), session_addr.port() + 1);
     peer.send_to(&Rtcp::encode_compound(&[report]), control)
         .await
@@ -229,13 +228,12 @@ async fn a_panicking_quality_callback_does_not_stop_rtcp_processing() {
         panic!("application callback failure");
     })));
 
-    let report = Rtcp::Receiver(sipx_rtp::ReceiverReport {
-        ssrc: 0x5566_7788,
-        reports: vec![ReportBlock {
-            ssrc: local_ssrc,
-            ..ReportBlock::default()
-        }],
-    });
+    let mut receiver = sipx_rtp::ReceiverReport::new(0x5566_7788);
+    receiver.reports = vec![ReportBlock {
+        ssrc: local_ssrc,
+        ..ReportBlock::default()
+    }];
+    let report = Rtcp::Receiver(receiver);
     let control = SocketAddr::new(session_addr.ip(), session_addr.port() + 1);
     for _ in 0..2 {
         peer.send_to(
@@ -692,14 +690,7 @@ async fn our_reports_echo_the_peers_sender_report_and_our_own_delay() {
     // Our sender report, with a recognisable timestamp.
     let ntp = 0x0000_ABCD_1234_0000u64;
     let expected_echo = sipx_rtp::quality::middle_32(ntp);
-    let report = Rtcp::Sender(SenderReport {
-        ssrc: 0x1234_5678,
-        ntp_timestamp: ntp,
-        rtp_timestamp: 800,
-        packet_count: 5,
-        octet_count: 800,
-        reports: Vec::new(),
-    });
+    let report = Rtcp::Sender(SenderReport::new(0x1234_5678, ntp, 800, 5, 800));
     let control: SocketAddr = format!("127.0.0.1:{}", session_addr.port() + 1)
         .parse()
         .expect("valid");

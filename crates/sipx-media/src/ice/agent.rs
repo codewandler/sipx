@@ -168,7 +168,12 @@ pub enum Output {
 }
 
 /// Everything about the agent a deployment may change.
+///
+/// Non-exhaustive, which is what "everything" above commits this type to: a configuration is the
+/// list of decisions the agent has stopped making for itself, and that list grows. Start from
+/// [`Config::default`] and assign what a deployment means to change; the fields stay public.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Config {
     /// The timers of §14 and [spec] §9.
     ///
@@ -573,13 +578,12 @@ impl Agent {
 
     fn local_candidate(&mut self, gathered: Gathered) {
         let foundation = self.foundations.assign(&gathered, TRANSPORT);
-        self.local.push(LocalCandidate {
-            id: self.candidate_ids.local(),
+        self.local.push(LocalCandidate::new(
+            self.candidate_ids.local(),
             gathered,
             foundation,
-            local_preference: 0,
-            priority: Priority::MIN,
-        });
+            0,
+        ));
         // §5.1.2.1's local preference is a property of the set, so every candidate is repriced
         // whenever the set grows.
         assign_local_preferences(&mut self.local);
@@ -1122,23 +1126,21 @@ impl Agent {
     ) -> Option<CandidatePair> {
         let local_candidate = find_local(&self.local, local)?;
         let remote_candidate = find_remote(&self.remote, remote)?;
-        Some(CandidatePair {
-            id: self.ids.allocate(),
+        Some(CandidatePair::new(
+            self.ids.allocate(),
             local,
             remote,
             component,
-            foundation: PairFoundation {
+            PairFoundation {
                 local: local_candidate.foundation,
                 remote: remote_candidate.foundation.clone(),
             },
-            priority: ordered_pair_priority(
+            ordered_pair_priority(
                 self.role,
                 local_candidate.priority,
                 remote_candidate.priority,
             ),
-            state: PairState::Frozen,
-            nominated: false,
-        })
+        ))
     }
 
     fn base_candidate(&self, on: LocalBase) -> Option<LocalId> {
@@ -1225,14 +1227,13 @@ impl Agent {
                 .checklists_mut()
                 .get_mut(index)
                 .is_some_and(|list| {
-                    list.add_valid(ValidPair {
-                        component: pair.component,
+                    list.add_valid(ValidPair::new(
+                        pair.component,
                         local,
-                        remote: transaction.to,
+                        transaction.to,
                         priority,
-                        nominated: false,
-                        generated_by: pair.id,
-                    })
+                        pair.id,
+                    ))
                 })
         } else {
             false

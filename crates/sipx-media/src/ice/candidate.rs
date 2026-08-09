@@ -41,6 +41,11 @@ pub const SINGLE_ADDRESS_PREFERENCE: u16 = 65535;
 /// [spec] §2: "`LocalBase` is an index into the sockets the driver bound, not a socket. The agent
 /// never learns what a socket is; it says 'the one you called base 0' and the driver knows which."
 ///
+/// Complete by design: an index into the driver's socket vector is the whole of what this is, and
+/// a second field would be the agent learning something about a socket — which is the one thing
+/// the type exists to stop it doing. Everything a candidate knows *about* a base lives in
+/// [`Gathered`].
+///
 /// [spec]: https://github.com/codewandler/sipx/blob/main/docs/specs/ice.md
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LocalBase(pub u16);
@@ -56,10 +61,16 @@ pub struct LocalBase(pub u16);
 /// §6.1.2.5's limit discards pairs, and §7.3.1.3 learns candidates that may later be forgotten —
 /// after any of which a stored position names a candidate the pair was never formed for, which is
 /// a check sent to an address the peer never offered.
+///
+/// Complete by design: an allocated identity is a number that is not equal to any other, and
+/// nothing else. Whatever it identifies is in [`LocalCandidate`], which is the point of the
+/// handle being separate from it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LocalId(pub usize);
 
 /// A remote candidate's identity, allocated and stable — see [`LocalId`].
+///
+/// Complete by design: the same reason as [`LocalId`], which this is the other half of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RemoteId(pub usize);
 
@@ -107,6 +118,11 @@ pub fn find_remote(candidates: &[RemoteCandidate], id: RemoteId) -> Option<&Remo
 /// are gathered, because the value itself is arbitrary — RFC 8839 §5.1 wants `1*32ice-char` and
 /// RFC 8445 gives the value meaning only by equality. A hash would satisfy the same grammar and
 /// be longer on the wire for no gain.
+///
+/// Complete by design: RFC 8445 gives a foundation meaning only by equality, so the value is a
+/// counter and a counter has no second part. The tuple it was allocated for is `FoundationKey`,
+/// which is deliberately not this type — a foundation that carried its own key would compare
+/// unequal on a field §5.1.1.3 does not put in it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LocalFoundation(pub u32);
 
@@ -134,6 +150,10 @@ pub enum RemoteFoundation {
 /// It exists only to be compared. §6.1.2.6 unfreezes exactly one pair per foundation and
 /// §7.2.5.3.3 unfreezes every pair sharing the foundation of one that just succeeded, so a wrong
 /// answer here makes ICE either check far too much or check nothing at all.
+///
+/// Complete by design: §6.1.2.6 says a pair's foundation *is* the combination of the two
+/// candidates' foundations, and a pair has two candidates. A third member would make two pairs
+/// over the same candidates compare unequal, which is the failure this type is here to prevent.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PairFoundation {
     /// The local candidate's foundation.
@@ -148,7 +168,13 @@ pub struct PairFoundation {
 /// properties of the *set* of candidates: §5.1.1.3's foundation is a counter over distinct
 /// tuples, and §5.1.2.1's local preference "MUST be unique for each" candidate of a type, which
 /// is not a fact any single candidate knows about itself.
+///
+/// Non-exhaustive: what a driver reports about a candidate is bounded by what gathering can learn,
+/// and that grows with the mechanism. RFC 8839 §5.1's `raddr` and `rport` — the related address a
+/// reflexive or relayed candidate must signal — are already facts the driver holds and this type
+/// does not carry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Gathered {
     /// The socket this candidate was gathered on, and which a check would leave from.
     pub base: LocalBase,
@@ -166,8 +192,42 @@ pub struct Gathered {
     pub server: Option<IpAddr>,
 }
 
+impl Gathered {
+    /// What a driver reports about one candidate it has just obtained.
+    ///
+    /// Every argument, because every one of them is a fact the driver knows at the moment it
+    /// gathers and none is derivable from the others: a host candidate's `address` equals its
+    /// `base_address` but a reflexive one's does not, and `server` is `None` for a host candidate
+    /// and part of §5.1.1.3's foundation tuple for the others. A shorter form would have to guess
+    /// one of those, and a wrong guess merges two foundations that §5.1.1.3 keeps apart — which
+    /// unfreezes pairs that should have waited.
+    #[must_use]
+    pub const fn new(
+        base: LocalBase,
+        base_address: SocketAddr,
+        address: SocketAddr,
+        kind: CandidateType,
+        component: ComponentId,
+        server: Option<IpAddr>,
+    ) -> Self {
+        Self {
+            base,
+            base_address,
+            address,
+            kind,
+            component,
+            server,
+        }
+    }
+}
+
 /// A local candidate: what the driver gathered, plus what §5.1.1.3 and §5.1.2.1 make of it.
+///
+/// Non-exhaustive: the agent's view of a candidate is what §5 makes of it so far, and §5 is not
+/// finished with it — a candidate this stack learns to relay carries a TURN allocation the agent
+/// must refresh, which is a fact about the candidate and not about the pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LocalCandidate {
     /// Its identity, stable for the life of the agent.
     pub id: LocalId,
@@ -182,6 +242,42 @@ pub struct LocalCandidate {
 }
 
 impl LocalCandidate {
+    /// A priced candidate: what the driver gathered, with §5.1.2.1's priority computed here.
+    ///
+    /// [`LocalCandidate::priority`] is not an argument. §5.1.2.1's formula over the candidate's
+    /// type, its local preference and its component is the only thing that makes two independent
+    /// implementations agree on which pair wins, so a candidate whose stored priority disagrees
+    /// with its own three inputs is a value no gathering run can produce and a checklist ordering
+    /// the far end will not reproduce. The foundation stays an argument because it is a fact about
+    /// the *set* — [`Foundations::assign`] allocates it over the candidates gathered so far — and
+    /// nothing here can derive it.
+    ///
+    /// This is the constructor for a candidate that was **gathered**, which is the only provenance
+    /// anything outside this crate has. §7.2.5.3.1's peer-reflexive candidate is the other, and it
+    /// is priced differently on purpose: its priority is the `PRIORITY` the check that discovered
+    /// it carried, "so that both agents compute the same value", and deriving §5.1.2.1's formula
+    /// for it would make the two ends order their checklists differently. The agent builds that
+    /// one, from a response only it has.
+    #[must_use]
+    pub fn new(
+        id: LocalId,
+        gathered: Gathered,
+        foundation: LocalFoundation,
+        local_preference: u16,
+    ) -> Self {
+        Self {
+            id,
+            gathered,
+            foundation,
+            local_preference,
+            priority: priority(
+                type_preference(gathered.kind),
+                local_preference,
+                gathered.component,
+            ),
+        }
+    }
+
     /// The `PRIORITY` a connectivity check from this candidate carries (§7.1.1).
     ///
     /// Not [`LocalCandidate::priority`], and that is the whole point — see [`check_priority`].
@@ -192,7 +288,14 @@ impl LocalCandidate {
 }
 
 /// A remote candidate: one the peer signalled, or one §7.3.1.3 learned from a check.
+///
+/// Non-exhaustive for [`LocalCandidate`]'s reason, and built through
+/// [`RemoteCandidate::signalled`] — the only provenance anything outside this crate has. The other
+/// one is §7.3.1.3's, and a peer-reflexive candidate is learned from a check the agent sent and
+/// priced from the `PRIORITY` that check's response echoed, so there is nothing for a caller
+/// holding an SDP description to build it out of.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RemoteCandidate {
     /// Its identity, stable for the life of the agent.
     pub id: RemoteId,

@@ -148,13 +148,35 @@ pub(crate) struct Peer {
 
 /// What this side must put in its next offer or answer for the stream ([spec] §13.5).
 ///
+/// Non-exhaustive: this is the list of ICE attributes a description must carry, and RFC 8839 has
+/// more of them than the two that matter today — `a=ice-options` and `a=ice-lite` are attributes
+/// the agent knows about itself and does not yet report here.
+///
 /// [spec]: https://github.com/codewandler/sipx/blob/main/docs/specs/ice.md
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Local {
     /// `a=ice-ufrag` and `a=ice-pwd`, read back from the agent rather than from the caller's copy.
     pub credentials: Credentials,
     /// `a=candidate`, priced by the agent, in descending priority.
     pub candidates: Vec<Candidate>,
+}
+
+impl Local {
+    /// What one description must signal for this stream.
+    ///
+    /// Both arguments: a half with no credentials cannot be checked against and a half with no
+    /// candidates offers nowhere to check, so neither has a default that describes a usable
+    /// stream. An ICE restart legitimately signals new credentials with candidates still
+    /// gathering, and that case reaches a caller as an empty vector it passed in rather than as a
+    /// field this constructor left out.
+    #[must_use]
+    pub const fn new(credentials: Credentials, candidates: Vec<Candidate>) -> Self {
+        Self {
+            credentials,
+            candidates,
+        }
+    }
 }
 
 /// The handle the media path holds: where to send events, and whether it is worth sending them.
