@@ -203,7 +203,7 @@ pub struct Authenticator {
 /// Renders the realm and the algorithm, and **never the secret** (`M-110`, `M-117`).
 ///
 /// The derived form printed all thirty-two bytes of `secret`. That is the key every self-describing
-/// nonce is MACed with, so a record carrying it does not leak a credential — it lets the reader
+/// nonce is `MACed` with, so a record carrying it does not leak a credential — it lets the reader
 /// mint nonces this authenticator will accept as its own, which is the whole of the replay
 /// protection. No call site logs an `Authenticator` today; that is what made it latent rather than
 /// live, and exactly the state `PcmFrame` was in one release before somebody would have.
