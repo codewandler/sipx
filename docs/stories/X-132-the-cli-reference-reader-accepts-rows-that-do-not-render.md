@@ -2,7 +2,7 @@
 id: X-132
 title: The CLI reference reader accepts rows that do not render
 pillar: Quality
-status: backlog
+status: in-progress
 priority: 5
 design:
 epic:
@@ -50,13 +50,13 @@ different change from narrowing a checker and belongs in its own diff.
 
 ## Acceptance
 
-- [ ] A failing-first fixture: a command section whose rows resume after a paragraph, with no
+- [x] A failing-first fixture: a command section whose rows resume after a paragraph, with no
       delimiter row, reports those flags as absent from the page rather than counting them.
-- [ ] `document_command_flags` reads a command's flags from the rows of a delimited table, so a
+- [x] `document_command_flags` reads a command's flags from the rows of a delimited table, so a
       `|` line that is not part of one is not a documented flag.
-- [ ] `website/docs/reference/cli.md`'s `sipx load-responder` section carries all twelve of its
+- [x] `website/docs/reference/cli.md`'s `sipx load-responder` section carries all twelve of its
       flags in one table, with the sizing paragraph below it rather than through it.
-- [ ] The rest of the page is checked for the same shape, since nothing has been asking.
+- [x] The rest of the page is checked for the same shape, since nothing has been asking.
 - [ ] `./scripts/gate.py` green.
 
 ## Notes
@@ -74,4 +74,53 @@ needs after the ceiling.
   prose into a flag list gets the same silent pass. Same shape as `X-131`, on the other half of the
   same comparison — and this time the reader that could not see it let a real defect into the
   published page for the length of one release.
+
+## Progress
+
+- 2026-08-09: **the blind spot is closed.** `document_command_flags` now takes its flags from
+  `table_rows`, which reads a header row, a delimiter row of dashes directly beneath it, and the
+  body rows running to the first line that is not one. Both halves of that shape are enforced,
+  because a table can neither omit its delimiter row nor interrupt a paragraph.
+
+  *Failing-first, on the page itself.* Splicing a paragraph above `load-responder`'s
+  `--transport` row — the exact shape that shipped — left the checker at the merge base
+  (`2a91041`) reporting success:
+
+  ```
+  $ ./scripts/check-cli-reference.py --binary target/cli-reference/debug/sipx
+  cli reference: 8 command helps and 5 versioned JSON contracts agree
+  EXIT=0
+  ```
+
+  The same splice against the narrowed reader:
+
+  ```
+  cli reference: load-responder: executable option `--transport` is not documented
+  EXIT=1
+  ```
+
+  Three of the new `TheFlagTableReader` rows failed at the base for the same reason — the spliced
+  fixture produced zero problems, and `document_command_flags` returned `{'--transport',
+  '--max-active'}` where only `--max-active` renders.
+
+  *Over-narrowing is loud, and pinned.* `help_drift` compares both ways, so a page reader that
+  stopped seeing rows reports every executable option as undocumented rather than going quiet;
+  `test_a_reader_that_saw_no_rows_would_be_reported_not_silent` asserts both messages verbatim,
+  as `X-131` did for the executable half.
+
+  *The rest of the page.* All eight command sections were audited against the wide reader this
+  story replaced, and the two agree — so no section carries a row outside a table.
+  `test_no_command_section_of_the_public_page_carries_a_row_outside_a_table` keeps that true as the
+  page changes. A sweep of every tracked Markdown file found no other page with the shape; the only
+  loose `|` lines in the repository are the illustration inside this story's own fenced block.
+
+  *Left open.* The `sipx load-responder` table itself needed no work — the coordinator repaired it
+  on `main` in `18b4f38`, before this branch's base, and the twelve flags are one table at
+  `website/docs/reference/cli.md:371`. `X-133` is filed for the same blind spot in
+  `_document_json_contracts`, which reads the JSON-contract region of this same page and was
+  measured to still count a row spliced under prose.
+
+  CHANGELOG sentence owed at integration: *The CLI-reference checker now reads a command's
+  documented flags from the rows of a Markdown table, so a flag list broken by prose is reported
+  instead of silently accepted.*
 
