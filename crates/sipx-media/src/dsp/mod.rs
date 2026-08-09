@@ -44,8 +44,10 @@
 //!   returns.
 //!
 //! [`ProvenInline`] is admitted only for processors inside this workspace, so
-//! [`GraphPlan::with_processor`] — the door an application reaches — refuses it. The workspace
-//! registry is empty until `M-65` ships processors to put in it.
+//! [`GraphPlan::with_processor`] — the door an application reaches — refuses it. The registry that
+//! does admit it is [`BuiltIn`], a closed set of this workspace's own effects and filters reached
+//! through [`GraphPlan::with_built_in`]: what it grants is provenance and not access, so the same
+//! processor constructed by hand and offered at the public door is refused exactly as before.
 //!
 //! # What stays true on the live path
 //!
@@ -62,9 +64,11 @@
 
 use crate::processing::AudioDirection;
 
+mod builtin;
 mod graph;
 mod supervised;
 
+pub use builtin::BuiltIn;
 pub use graph::{
     BypassCause, GraphBarrier, GraphBounds, GraphError, GraphPlan, GraphTransition, MAX_PROCESSORS,
     MAX_WORKER_QUEUE, TeardownCause,

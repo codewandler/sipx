@@ -101,6 +101,7 @@
 
 pub mod conformance;
 mod contract;
+pub mod effects;
 
 pub use conformance::{
     CHECK_ALLOCATION, CHECK_CANCELLATION, CHECK_CAPABILITY, CHECK_CHUNK_BOUNDARY,
