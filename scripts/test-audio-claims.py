@@ -1126,5 +1126,78 @@ class TheConstructorObligation(unittest.TestCase):
         return demo_crate({"lib.rs": source}, guard.struct_problems)
 
 
+class ThePreambleReader(unittest.TestCase):
+    """`M-96`: what is written immediately above an item, including where the file begins.
+
+    `preamble` bounds the text at the blank line above the item and used to read `rfind`'s `-1` —
+    *no blank line at all* — as if it were a match, adding 2 to it and starting the slice at byte 1.
+    Every item in a file's first paragraph therefore lost the file's first character, so an opening
+    `/// Exhaustive by design:` arrived as `// Exhaustive by design:` and matched nothing, and an
+    opening `#[non_exhaustive]` arrived as `[non_exhaustive]`. The reader reported both types as
+    unguarded while their guard sat one byte out of view.
+
+    It cannot fire on this workspace, where every file opens with a `//!` module comment and no
+    guarded item sits in the first paragraph, which is why the shape is asserted here rather than
+    left for the next reader to notice. These are the blindness assertions of the two rules above,
+    narrowed to the one position the reader could not see.
+    """
+
+    #: The rationale as the file's opening line, which is the byte the reader dropped.
+    OPENING_ENUM = "/// Exhaustive by design: a stream flows one way or the other.\npub enum Flow { In, Out }\n"
+
+    #: The same shape for the struct rule, whose rationale is spelled with the other phrase.
+    OPENING_STRUCT = (
+        "/// Complete by design: the wire carries these and no more.\n"
+        "pub struct Encoded {\n"
+        "    /// What it is encoded in.\n"
+        "    pub payload_type: u8,\n"
+        "}\n"
+    )
+
+    def test_a_rationale_on_a_file_s_first_line_argues_an_enum_out(self):
+        self.assertEqual([], demo_crate({"lib.rs": self.OPENING_ENUM}))
+
+    def test_an_attribute_on_a_file_s_first_line_guards_an_enum(self):
+        """The mirror of the row above: the guard is an attribute rather than a sentence."""
+        self.assertEqual(
+            [],
+            demo_crate(
+                {"lib.rs": "#[non_exhaustive]\npub enum Flow { In, Out }\n"},
+            ),
+        )
+
+    def test_a_rationale_on_a_file_s_first_line_argues_a_struct_out(self):
+        self.assertEqual(
+            [], demo_crate({"lib.rs": self.OPENING_STRUCT}, guard.struct_problems)
+        )
+
+    def test_no_blank_line_above_keeps_the_whole_preamble(self):
+        self.assertEqual(
+            "/// Exhaustive by design: a stream flows one way or the other.\n",
+            guard.preamble(self.OPENING_ENUM, self.OPENING_ENUM.index("pub enum")),
+        )
+
+    def test_a_blank_line_at_the_very_top_still_bounds_the_preamble(self):
+        """The two facts the arithmetic has to tell apart: `rfind` at `-1` and `rfind` at `0`.
+
+        Here the blank line is a real match at index 0, so it still bounds the preamble and the
+        text above it stays out — a fix that merely clamped the start to zero would drag it in.
+        """
+        source = "\n\n/// A failure.\npub enum Flow { In, Out }\n"
+        self.assertEqual("/// A failure.\n", guard.preamble(source, source.index("pub enum")))
+
+    def test_a_distant_reason_still_does_not_classify_a_first_paragraph_item(self):
+        """Widening the slice must not reach past the blank line into another item's argument."""
+        problems = demo_crate(
+            {
+                "lib.rs": "/// Exhaustive by design: this explains another item.\n"
+                "pub const EARLIER: u8 = 1;\n\n"
+                "/// Which way a stream flows.\npub enum Flow { In, Out }\n"
+            }
+        )
+        self.assertEqual(1, len(problems))
+        self.assertIn("Flow", problems[0])
+
+
 if __name__ == "__main__":
     sys.exit(0 if unittest.main(exit=False, verbosity=2).result.wasSuccessful() else 1)

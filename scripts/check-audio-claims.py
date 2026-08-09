@@ -758,8 +758,17 @@ def preamble(source: str, offset: int) -> str:
 
     Bounded at the blank line above, so a rationale written over a different item does not classify
     this one.
+
+    `rfind` reports two different facts through one integer: a blank line found at some index, and
+    no blank line at all. Adding 2 to both read the second as a match just before the file, started
+    the slice at byte 1 and dropped the file's first character — enough to turn an opening
+    `/// Exhaustive by design:` into `// Exhaustive by design:`, and an opening `#[non_exhaustive]`
+    into `[non_exhaustive]`, so the item's guard was reported missing while it sat one byte above
+    the slice. `M-96`. The two facts are separated here rather than special-cased at offset 0: a
+    real match at index 0 is a blank line that still bounds the preamble.
     """
-    return source[source.rfind("\n\n", 0, offset) + 2 : offset]
+    above = source.rfind("\n\n", 0, offset)
+    return source[0 if above < 0 else above + 2 : offset]
 
 
 def declaration(source: str, offset: int) -> tuple[str, str]:

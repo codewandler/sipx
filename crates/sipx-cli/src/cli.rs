@@ -478,12 +478,13 @@ pub(crate) struct LoadOptions {
 /// `sipx load-responder`.
 #[derive(Debug, ClapArgs)]
 pub(crate) struct LoadResponderOptions {
-    /// Ceiling on simultaneously owned dialogs. Give it headroom over the generator's concurrency
-    /// setting: a slot is released only after this responder has answered that dialog's
-    /// BYE, while the generator frees its own slot on receiving that 200 and places the
-    /// replacement INVITE at once, so at an equal ceiling the two overlap and calls are refused
-    /// 503. Twice the generator's concurrency covers the worst case, where every slot hands over
-    /// at once. A refusal at the ceiling is admission control holding its contract, not a defect.
+    /// Ceiling on simultaneously owned dialogs. Give it headroom over the generator's
+    /// `--concurrency` rather than matching it: a slot is released only after this responder has
+    /// answered that dialog's BYE, while the generator frees its own slot on receiving that 200
+    /// and places the replacement INVITE at once, so at an equal ceiling the two overlap and calls
+    /// are refused 503. Twice the generator's concurrency covers the worst case, where every slot
+    /// hands over at once. A refusal at the ceiling is admission control holding its contract, not
+    /// a defect.
     #[arg(long)]
     pub(crate) max_active: usize,
     #[arg(long)]
