@@ -315,6 +315,11 @@ def workflow_problems(text: str) -> list[str]:
         ("publication bypasses exact tag confirmation", r"--publish.*?--confirm-publish [\"']\$RELEASE_TAG[\"']"),
         ("publication bypasses exact CI tag and commit authorization", r"--publish.*?--authorize-ci-publish [\"']\$RELEASE_TAG@\$RELEASE_SHA[\"']"),
         ("publication does not use a finite visibility bound", r"--registry-wait-seconds\s+[1-9][0-9]*"),
+        ("publication does not name a finite rate-limit budget", r"--registry-retry-budget-seconds\s+[1-9][0-9]*"),
+        (
+            "frontier loop does not carry one rate-limit budget across its invocations",
+            r"pacing_ledger=[\"']\$RUNNER_TEMP/[^\"'\s]+[\"'].*?for \(\(invocation = 1;.*?--registry-retry-ledger [\"']\$pacing_ledger[\"']",
+        ),
         ("frontier loop is not bounded by public package count", r"max_invocations=\$\(\(public_count \+ 1\)\).*?invocation <= max_invocations"),
         ("frontier loop does not require the all-visible observation", r"all public packages are already registry-visible"),
         ("exact registry consumer proof is absent", r"--verify-consumer"),
@@ -474,6 +479,11 @@ def resume_workflow_problems(text: str) -> list[str]:
         ),
         ("recovery authorization is not bound to tag, release SHA and failed run", r"--authorize-ci-recovery [\"']\$RELEASE_TAG@\$RELEASE_SHA@\$SIPX_FAILED_RELEASE_RUN_ID[\"']"),
         ("recovery publication does not use a finite visibility bound", r"--registry-wait-seconds\s+[1-9][0-9]*"),
+        ("recovery publication does not name a finite rate-limit budget", r"--registry-retry-budget-seconds\s+[1-9][0-9]*"),
+        (
+            "recovery frontier loop does not carry one rate-limit budget across its invocations",
+            r"pacing_ledger=[\"']\$RUNNER_TEMP/[^\"'\s]+[\"'].*?for \(\(invocation = 1;.*?--registry-retry-ledger [\"']\$pacing_ledger[\"']",
+        ),
         ("recovery frontier loop is not bounded by public package count", r"max_invocations=\$\(\(public_count \+ 1\)\).*?invocation <= max_invocations"),
         ("recovery frontier does not require the all-visible observation", r"all public packages are already registry-visible"),
         ("recovery exact consumer proof is absent", r"- name:\s*Verify the exact registry consumer and installed CLI.*?\./scripts/release\.py.*?--release-root [\"']\$SIPX_RELEASE_ROOT[\"'].*?--verify-consumer"),

@@ -208,12 +208,20 @@ the unavailable dependencies. It never guesses that a successful upload is alrea
 
 Uploads inside a frontier are spaced by the registry's own limit, never by a constant delay chosen
 to stand in for it. crates.io states two allowances, and they differ by an order of magnitude: a
-**new crate name** once every ten minutes after a burst of five, and a **new version of a name that
-already exists** once a minute after a burst of thirty. The helper models each as a token bucket and
-selects one per package by asking the registry whether that name exists under any version. Only
-Cargo's exact `could not find name` result means the name is new; any other diagnostic is a registry
-failure and refuses the invocation, exactly as the version probe does. Consequently an ordinary
-version update is not delayed merely because first-name creation once required pacing.
+**new crate name** has a burst of 5 and permits one further upload every 600 seconds, and a
+**new version of a name that already exists** has a burst of 30 and permits one further upload every
+60 seconds. Both figures are that published policy transcribed into `scripts/release.py`, and
+nothing here re-reads it; the comment above the two constants records what would make them stale
+and why a stale one costs pacing accuracy rather than correctness. The helper models each as a token
+bucket and selects one per package by asking the registry whether that name exists under any
+version. Only Cargo's exact `could not find name` result means the name is new; any other diagnostic
+leaves the name unread, which paces that upload under the stated new-crate limit and never refuses
+the invocation. That is deliberately unlike the exact-version probe, which does refuse: a version
+answer decides what is published, so misreading it skips or repeats an upload, while a name answer
+only selects which stated allowance paces one and is corrected by the registry's own `429` if it is
+wrong. Consequently an ordinary version update is not delayed merely because first-name creation
+once required pacing. The publication log reports how many names were read as new, as already
+existing, and as unread.
 
 When the registry answers `429`, it — and not the model — is the authority on its own limit. The
 refusal's retry hint is read from a `Retry-After` header, as delta-seconds or an HTTP-date, or from
@@ -223,12 +231,25 @@ states no deadline falls back to the class's stated refill interval rather than 
 delay. A failure that is not a `429` is not a rate limit and is never retried.
 
 Two finite bounds hold this closed. `--registry-retry-budget-seconds` is the **total** wall-clock a
-single invocation may spend waiting on rate limits, and a wait longer than the budget's remainder
-stops the invocation. A single package is retried at most three times, which covers a deadline read,
+publication may spend waiting on rate limits, and a wait longer than the budget's remainder stops
+the invocation. A single package is retried at most three times, which covers a deadline read,
 waited out and restated once. Either exhaustion reports the registry's own `429` line verbatim,
 names the packages this run did publish, and stops **before** dispatching any further upload — so a
 stopped run leaves a registry state that the ordinary frontier, visibility and checksum rules resume
 from, with nothing republished and no published bytes moved.
+
+The budget bounds a publication and not an invocation of the helper, and a publication is
+`public_count + 1` separate invocations of it. `--registry-retry-ledger` is where the seconds
+already spent live between them: a file holding that running total and nothing else. Each wait is
+charged to it **before** it is served, so a run killed inside a wait overstates the bound rather
+than losing it, and overstating it can only stop a later invocation earlier. The ledger never
+records what was published, so a ledger that is lost, copied or discarded can neither skip nor
+repeat an upload — every invocation still derives its frontier from registry visibility and the
+checksum rules of §4. An absent ledger is the first invocation of a publication; a ledger that
+exists and cannot be read refuses the invocation, because a bound nobody can read is not a bound.
+An invocation given no ledger is bounded on its own, which is all a local release has to reason
+about. Whoever drives the frontier loop states both the budget and the ledger, so the total cost of
+a publication is readable in the file that runs it rather than left at a helper default.
 
 ## 5. Test vectors
 
@@ -249,7 +270,7 @@ from, with nothing republished and no published bytes moved.
 | R13 | partial readiness line or descendant process | deadline fires; the complete process group is joined |
 | R14 | private default registry, source replacement, or lightweight tag | refuse or isolate it; crates.io and an annotated tag remain explicit |
 | R15 | first frontier, matching partial frontier, all-visible state, or moved-tag mismatch | first proceeds without prior evidence; matching bytes resume; all-visible and consumer proofs recheck; mismatch dispatches no upload or install |
-| R16 | registry probe times out or reports anything except exact not-found | refuse before treating the package as absent or dispatching an upload |
+| R16 | exact-version registry probe times out or reports anything except exact not-found | refuse before treating the package as absent or dispatching an upload |
 | R17 | GitHub tag push or tag-selected manual dispatch, exact annotated tag/HEAD/workflow SHA, both confirmations and token | retain the ordinary frontier/checksum rules and permit at most one ready frontier |
 | R18 | protected recovery names a failed same-tag release whose gate/rehearsal passed and publication failed, with matching visible bytes | fixed controller may advance one missing frontier; wrong run/workflow/step/commit/controller or byte mismatch dispatches no upload |
 | R19 | Cargo VCS record omits `git.dirty`, sets a boolean, or gives a non-boolean value | omitted/false is clean; true is dirty; malformed is refused |
@@ -257,3 +278,5 @@ from, with nothing republished and no published bytes moved.
 | R21 | a frontier of new crate names, and the same frontier of names that already exist | the burst and refill the registry states for that class alone decide the spacing; an existing name is not paced as a new one |
 | R22 | `429` with a `Retry-After` header, with a body deadline, and with neither | retry at the stated deadline and pace the rest of the class from it; without a hint use that class's stated refill; a non-`429` failure is never retried |
 | R23 | a `429` deadline beyond the remaining retry budget, or a fourth rate-limited attempt | report the registry's own `429` and the packages already published, and dispatch no further upload; a rerun resumes the remaining frontier without republishing |
+| R24 | name probe times out or reports anything except exact not-found | pace that name under the stated new-crate limit and report it as unread; never refuse the invocation |
+| R25 | successive invocations of one publication share a pacing ledger | the total wait is bounded across them; an absent ledger starts a publication and an unreadable one refuses it; exhaustion stops before an upload and no already-published crate is lost |

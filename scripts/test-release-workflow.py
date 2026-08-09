@@ -182,6 +182,35 @@ class DistributionMutations(unittest.TestCase):
             "frontier loop does not require the all-visible observation",
         )
 
+    def test_the_rate_limit_budget_is_named_and_spans_the_frontier_loop(self) -> None:
+        # X-127. Left at the helper's default the bound is invisible in the file that runs the
+        # release, and without a ledger shared by the loop each invocation restarts it — leaving
+        # `timeout-minutes` as the only bound on a whole publication.
+        self.assert_mutation(
+            "--registry-retry-budget-seconds 4800",
+            "--registry-wait-seconds 300",
+            "publication does not name a finite rate-limit budget",
+        )
+        self.assert_mutation(
+            '--registry-retry-ledger "$pacing_ledger"',
+            "--registry-wait-seconds 300",
+            "frontier loop does not carry one rate-limit budget across its invocations",
+        )
+        # The defect the ledger exists to prevent: one per invocation is one budget per
+        # invocation, which is the state this story found.
+        per_invocation = WORKFLOW.replace(
+            '          pacing_ledger="$RUNNER_TEMP/sipx-release-pacing.json"\n', "", 1
+        ).replace(
+            '            echo "release frontier invocation $invocation of $max_invocations"\n',
+            '            echo "release frontier invocation $invocation of $max_invocations"\n'
+            '            pacing_ledger="$RUNNER_TEMP/sipx-release-pacing-$invocation.json"\n',
+            1,
+        )
+        self.assertIn(
+            "frontier loop does not carry one rate-limit budget across its invocations",
+            checker.workflow_problems(per_invocation),
+        )
+
     def test_locked_rehearsal_must_precede_publication(self) -> None:
         rehearsal = (
             "      - name: Rehearse the locked registry packages\n"
@@ -561,6 +590,30 @@ class RecoveryMutations(unittest.TestCase):
             "--consumer-timeout-seconds 900",
             "--consumer-timeout-seconds 0",
             "recovery consumer command has no finite bound",
+        )
+
+    def test_the_recovery_rate_limit_budget_is_named_and_spans_its_frontier_loop(self) -> None:
+        self.assert_mutation(
+            "--registry-retry-budget-seconds 7200",
+            "--registry-wait-seconds 300",
+            "recovery publication does not name a finite rate-limit budget",
+        )
+        self.assert_mutation(
+            '--registry-retry-ledger "$pacing_ledger"',
+            "--registry-wait-seconds 300",
+            "recovery frontier loop does not carry one rate-limit budget across its invocations",
+        )
+        per_invocation = RESUME_WORKFLOW.replace(
+            '          pacing_ledger="$RUNNER_TEMP/sipx-recovery-pacing.json"\n', "", 1
+        ).replace(
+            '            echo "recovery frontier invocation $invocation of $max_invocations"\n',
+            '            echo "recovery frontier invocation $invocation of $max_invocations"\n'
+            '            pacing_ledger="$RUNNER_TEMP/sipx-recovery-pacing-$invocation.json"\n',
+            1,
+        )
+        self.assertIn(
+            "recovery frontier loop does not carry one rate-limit budget across its invocations",
+            checker.resume_workflow_problems(per_invocation),
         )
 
     def test_recovery_write_authority_is_dependent_and_posting_is_refused(self) -> None:

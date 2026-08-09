@@ -9,6 +9,7 @@ recording runner.
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import importlib.util
 import io
@@ -30,6 +31,13 @@ SPEC = importlib.util.spec_from_file_location("sipx_release", ROOT / "scripts" /
 assert SPEC is not None and SPEC.loader is not None
 release = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(release)
+#: The rehearsal specification's own text, with its line wrapping collapsed. Read here so the
+#: clauses that restate a helper decision — the transcribed registry allowances and the unreadable
+#: name answer — are held to the code that implements them instead of drifting away from it in
+#: prose (X-127). Flowed, because where a paragraph happens to break is not the claim.
+REHEARSAL_SPEC = " ".join(
+    (ROOT / "docs" / "specs" / "release-rehearsal.md").read_text(encoding="utf-8").split()
+)
 
 
 def package(
@@ -113,22 +121,34 @@ def github_recovery_environment(
     }
 
 
-def workspace_metadata(*, two_public: bool = False) -> dict[str, object]:
-    """Cargo metadata for one or two real public workspace crates at the workspace version."""
+def workspace_metadata(
+    *, two_public: bool = False, chained: bool = False
+) -> dict[str, object]:
+    """Cargo metadata for one or two real public workspace crates at the workspace version.
+
+    `chained` makes the second crate a normal dependency of the first, so the two names cannot be
+    published by one invocation: the frontier is `sipx-sdp`, and `sipx-sip` becomes ready only once
+    `sipx-sdp` is registry-visible. That is the shape a budget spanning invocations has to bound.
+    """
 
     workspace = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["workspace"]
     version = workspace["package"]["version"]
     crate = ROOT / "crates" / "sipx-sip"
+    second = ROOT / "crates" / "sipx-sdp"
     records = [
         package(
             "sipx-sip",
             version=version,
             manifest_path=str(crate / "Cargo.toml"),
             readme=str(crate / "README.md"),
+            dependencies=(
+                (dependency("sipx-sdp", req=f"={version}", path=str(second)),)
+                if chained
+                else ()
+            ),
         )
     ]
-    if two_public:
-        second = ROOT / "crates" / "sipx-sdp"
+    if two_public or chained:
         records.append(
             package(
                 "sipx-sdp",
@@ -1895,6 +1915,274 @@ class TheRegistryRateLimit(unittest.TestCase):
         # registry's checksums and then skipped, and only the missing name is dispatched.
         self.assertEqual(["sipx-sip"], uploads)
         self.assertIn("sipx-sdp", resumed[-1].args[1])
+
+    def test_the_rate_limit_budget_is_spent_across_the_invocations_of_one_publication(self) -> None:
+        # X-127. Every rerun of the frontier loop used to restart the budget, so a twelve-crate
+        # publication could spend `1800`s of pacing thirteen times over and the only bound on the
+        # whole thing was the job's own `timeout-minutes`. `spent_seconds` is what an earlier
+        # invocation of the same publication already waited.
+        clock, waits, injected = self.injected_clock()
+        attempts: list[tuple[str, float]] = []
+        spent: list[float] = []
+        frontier = tuple(f"sipx-{index}" for index in range(6))
+        published = release.publish_frontier(
+            frontier,
+            paced_dispatch(clock, attempts, {}),
+            new_crates=frontier,
+            budget_seconds=3600.0,
+            spent_seconds=0.0,
+            record_wait=spent.append,
+            **injected,
+        )
+        self.assertEqual(frontier, published)
+        # Five names fit the stated burst; the sixth waits one stated refill, and that wait is
+        # handed to the next invocation rather than forgotten when this process exits.
+        self.assertEqual([600.0], waits)
+        self.assertEqual([600.0], spent)
+
+        clock, waits, injected = self.injected_clock()
+        attempts = []
+        with self.assertRaises(release.ReleaseError) as refused:
+            release.publish_frontier(
+                frontier,
+                paced_dispatch(clock, attempts, {}),
+                new_crates=frontier,
+                budget_seconds=3600.0,
+                spent_seconds=3300.0,
+                record_wait=lambda _seconds: None,
+                **injected,
+            )
+        message = str(refused.exception)
+        self.assertIn("300s left in the rate-limit budget", message)
+        self.assertIn("3300s", message)
+        # The burst is dispatched, and then the run stops before the sixth upload rather than
+        # waiting past a budget earlier invocations had already spent.
+        self.assertEqual(5, len(attempts))
+        self.assertEqual([], waits)
+
+    def test_the_pacing_ledger_carries_a_publications_spend_between_invocations(self) -> None:
+        # The frontier loop is `public_count + 1` separate processes, so the only place a budget
+        # spanning them can live is a file. This drives three invocations of `main` over one
+        # ledger: the first spends, the second is refused by what the first spent, and the third
+        # proves the refusal cost no published crate.
+        version = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["workspace"][
+            "package"
+        ]["version"]
+        tag = f"v{version}"
+        visible = {"sipx-sdp": False, "sipx-sip": False}
+        uploads: list[str] = []
+        resumed: list[object] = []
+        refuse = [False]
+
+        def bounded(command: tuple[str, ...], *, cwd: pathlib.Path, timeout: float, env=None):
+            del cwd, timeout, env
+            if "publish" not in command:
+                return subprocess.CompletedProcess(command, 0, "", "")
+            package_name = command[command.index("-p") + 1]
+            uploads.append(package_name)
+            if refuse[0]:
+                return subprocess.CompletedProcess(command, 101, "", RATE_LIMITED_WITH_HEADER)
+            visible[package_name] = True
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        def paced_main(ledger: pathlib.Path, frontier=None) -> tuple[int, str]:
+            printed = io.StringIO()
+            with (
+                contextlib.redirect_stderr(printed),
+                mock.patch.dict(os.environ, {"CI": "", "GITHUB_ACTIONS": ""}),
+                mock.patch.object(release, "_install_cleanup_handlers"),
+                mock.patch.object(
+                    release, "_metadata", return_value=workspace_metadata(chained=True)
+                ),
+                mock.patch.object(release, "_checkout", return_value=(False, (tag,), (tag,))),
+                mock.patch.object(
+                    release, "_registry_available", side_effect=lambda name, *_rest: visible[name]
+                ),
+                mock.patch.object(release, "_registry_name_exists", return_value=False),
+                mock.patch.object(release, "verify_resume_bytes", return_value=[]) as resume,
+                mock.patch.object(release, "_bounded_run", side_effect=bounded),
+                contextlib.redirect_stdout(printed),
+            ):
+                stack = contextlib.ExitStack()
+                if frontier is not None:
+                    stack.enter_context(
+                        mock.patch.object(release, "publish_frontier", side_effect=frontier)
+                    )
+                with stack:
+                    status = release.main(
+                        (
+                            "--publish",
+                            "--confirm-publish",
+                            tag,
+                            "--registry-retry-budget-seconds",
+                            "1000",
+                            "--registry-retry-ledger",
+                            str(ledger),
+                        )
+                    )
+                resumed.append(resume.call_args)
+            return status, printed.getvalue()
+
+        def spends_700_seconds(
+            frontier, dispatch, *, new_crates, budget_seconds, spent_seconds, record_wait, **rest
+        ):
+            # A stand-in for the real pacing, because charging a wait to the ledger is the one
+            # thing this seam does that cannot be observed without letting a process sleep.
+            del rest
+            observed.append((tuple(frontier), tuple(new_crates), budget_seconds, spent_seconds))
+            record_wait(700.0)
+            return tuple(name for name in frontier if dispatch(name).returncode == 0)
+
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = pathlib.Path(directory) / "pacing.json"
+            observed: list[tuple[object, ...]] = []
+
+            status, _report = paced_main(ledger, frontier=spends_700_seconds)
+            self.assertEqual(0, status)
+            # `sipx-sip` depends on `sipx-sdp`, so one invocation cannot reach it.
+            self.assertEqual([(("sipx-sdp",), ("sipx-sdp",), 1000.0, 0.0)], observed)
+            self.assertEqual(["sipx-sdp"], uploads)
+            self.assertEqual(700.0, release.pacing_ledger_spent(ledger))
+
+            # The second invocation reads that spend, so the registry's 900s deadline no longer
+            # fits the 300s this publication has left, and it stops before waiting it out.
+            refuse[0] = True
+            uploads.clear()
+            status, report = paced_main(ledger)
+            self.assertEqual(1, status)
+            self.assertEqual(["sipx-sip"], uploads)
+            self.assertFalse(visible["sipx-sip"])
+            # No wait was taken, so the ledger is unchanged and the bound is still readable.
+            self.assertEqual(700.0, release.pacing_ledger_spent(ledger))
+
+            # A later job resumes with its own budget. The name the first invocation published is
+            # re-proved against the registry's checksums and skipped, never republished or moved.
+            refuse[0] = False
+            uploads.clear()
+            status, _report = paced_main(pathlib.Path(directory) / "resume.json")
+            self.assertEqual(0, status)
+            self.assertEqual(["sipx-sip"], uploads)
+            self.assertIn("sipx-sdp", resumed[-1].args[1])
+
+        self.assertIn("300s left in the rate-limit budget", report)
+        self.assertIn("700s", report)
+
+    def test_an_absent_ledger_starts_the_publication_and_an_unreadable_one_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            absent = pathlib.Path(directory) / "pacing.json"
+            # An absent ledger is the first invocation of a publication, not a lost bound.
+            self.assertEqual(0.0, release.pacing_ledger_spent(absent))
+
+            release.pacing_ledger_record(absent, 120.0)
+            release.pacing_ledger_record(absent, 30.5)
+            # Each wait is added to the running total the moment it is taken, so a run killed
+            # mid-wait leaves the bound overstated rather than lost.
+            self.assertEqual(150.5, release.pacing_ledger_spent(absent))
+
+            for damaged in ("", "not json", '{"spent_seconds": -1}', '{"spent_seconds": "600"}'):
+                absent.write_text(damaged, encoding="utf-8")
+                with self.assertRaises(release.ReleaseError) as refused:
+                    release.pacing_ledger_spent(absent)
+                self.assertIn(str(absent), str(refused.exception))
+
+    def test_main_derives_new_crate_pacing_from_the_registrys_name_answer(self) -> None:
+        # X-93 proved both buckets at `publish_frontier`'s boundary with a hand-supplied
+        # `new_crates`. Nothing exercised the loop in `main` that decides what goes in it.
+        version = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["workspace"][
+            "package"
+        ]["version"]
+        tag = f"v{version}"
+
+        def paced_main(name_answer: bool | None) -> tuple[int, tuple[str, ...], str]:
+            printed = io.StringIO()
+            observed: list[tuple[str, ...]] = []
+
+            def record(frontier, dispatch, *, new_crates, **rest):
+                del rest
+                observed.append(tuple(new_crates))
+                return tuple(name for name in frontier if dispatch(name).returncode == 0)
+
+            with (
+                mock.patch.dict(os.environ, {"CI": "", "GITHUB_ACTIONS": ""}),
+                mock.patch.object(release, "_install_cleanup_handlers"),
+                mock.patch.object(
+                    release, "_metadata", return_value=workspace_metadata(two_public=True)
+                ),
+                mock.patch.object(release, "_checkout", return_value=(False, (tag,), (tag,))),
+                mock.patch.object(release, "_registry_available", side_effect=(False, False, True, True)),
+                mock.patch.object(
+                    release, "_registry_name_exists", return_value=name_answer
+                ),
+                mock.patch.object(release, "verify_resume_bytes", return_value=[]),
+                mock.patch.object(release, "publish_frontier", side_effect=record),
+                mock.patch.object(
+                    release,
+                    "_bounded_run",
+                    return_value=subprocess.CompletedProcess((), 0, "", ""),
+                ),
+                contextlib.redirect_stdout(printed),
+            ):
+                status = release.main(("--publish", "--confirm-publish", tag))
+            return status, observed[0], printed.getvalue()
+
+        status, new_crates, report = paced_main(True)
+        self.assertEqual(0, status)
+        # A name the registry already carries is an ordinary version update and is paced as one.
+        self.assertEqual((), new_crates)
+        self.assertIn(
+            "registry pacing: 0 new crate name(s), 2 existing name(s), 0 unread name(s)", report
+        )
+
+        status, new_crates, report = paced_main(False)
+        self.assertEqual(0, status)
+        self.assertEqual(("sipx-sdp", "sipx-sip"), tuple(sorted(new_crates)))
+        self.assertIn(
+            "registry pacing: 2 new crate name(s), 0 existing name(s), 0 unread name(s)", report
+        )
+
+        status, new_crates, report = paced_main(None)
+        self.assertEqual(0, status)
+        # An unreadable answer paces the name conservatively; it never refuses the invocation. It
+        # is also counted apart from a name the registry actually said was new, because a budget
+        # bounding a whole publication is only readable if the log says what spent it.
+        self.assertEqual(("sipx-sdp", "sipx-sip"), tuple(sorted(new_crates)))
+        self.assertIn("the registry gave no readable name answer", report)
+        self.assertIn(
+            "registry pacing: 2 new crate name(s), 0 existing name(s), 2 unread name(s)", report
+        )
+
+    def test_the_specification_and_the_helper_agree_on_an_unreadable_name_answer(self) -> None:
+        # X-127's third row. The spec said an unreadable name answer "is a registry failure and
+        # refuses the invocation, exactly as the version probe does"; the helper paces it and
+        # continues. The helper is right — a name answer selects which stated allowance paces an
+        # upload and can neither skip nor repeat one, while the version answer decides what is
+        # published — so the specification is what changes.
+        self.assertNotIn("refuses the invocation, exactly as the version probe does", REHEARSAL_SPEC)
+        self.assertIn(
+            "any other diagnostic leaves the name unread, which paces that upload under the "
+            "stated new-crate limit and never refuses the invocation",
+            REHEARSAL_SPEC,
+        )
+        with mock.patch.object(
+            release,
+            "_bounded_run",
+            return_value=subprocess.CompletedProcess((), 1, "", "error: network unreachable\n"),
+        ):
+            self.assertIsNone(release._registry_name_exists("sipx-core"))
+
+    def test_the_specification_states_the_transcribed_registry_allowances(self) -> None:
+        # The two constants are crates.io's published policy typed into this repository, and
+        # nothing re-reads that policy. Holding the specification's numbers to the constants at
+        # least keeps the two transcriptions from drifting apart unnoticed.
+        for limit, subject in (
+            (release.NEW_CRATE_RATE_LIMIT, "new crate name"),
+            (release.NEW_VERSION_RATE_LIMIT, "new version of a name that already exists"),
+        ):
+            self.assertIn(
+                f"**{subject}** has a burst of {limit.burst} and permits one further upload "
+                f"every {limit.refill_seconds:g} seconds",
+                REHEARSAL_SPEC,
+            )
 
 
 if __name__ == "__main__":
