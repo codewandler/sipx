@@ -23,8 +23,8 @@
 use std::collections::BTreeSet;
 
 use sipx_app_protocol::{
-    AudioDirection, DialOutcome, EndCause, EventKind, Failure, GatherReason, OnFailure, Policy,
-    TransferState, Verb, VoiceEndCause,
+    AudioDirection, DialOutcome, DspBypassCause, DspRefusal, DspTeardownCause, EndCause, EventKind,
+    Failure, GatherReason, OnFailure, Policy, TransferState, Verb, VoiceEndCause,
 };
 
 const SPEC: &str = include_str!("../../../docs/specs/app-contract.md");
@@ -205,6 +205,13 @@ fn section_5_3_s_rows_are_reachable_through_the_bridge() {
     /// The interpreter, which composes the one §5.3 row that is neither a call's fact nor a host's.
     const INTERPRETER: &str = include_str!("../src/interpreter.rs");
 
+    /// The driver's DSP door (`M-67`), read for the same reason and in the same way as the bridge.
+    ///
+    /// A graph's transitions are `sipx-media`'s facts and not `sipx-call`'s, so no `CallEvent`
+    /// carries one and the bridge cannot have an arm. The file that turns a `GraphTransition` into
+    /// a §5.3 row is the producer, and this is that file.
+    const HOST_DSP: &str = include_str!("../../sipx-app/src/dsp.rs");
+
     /// §5.3 rows no `sipx-call` event carries, each named beside **the source that composes it**.
     ///
     /// - `call.incoming` — a call's event stream begins after the INVITE matched an app; the
@@ -220,7 +227,11 @@ fn section_5_3_s_rows_are_reachable_through_the_bridge() {
     /// missing name rather than a missing event, and this list is for rows no call event reports at
     /// all. Nothing composed them either, so the entry was a claim about a producer that did not
     /// exist; they now have an arm, and this test's other branch is what keeps it.
-    const COMPOSED_BY_THE_DRIVER: [(&str, &str, &str); 3] = [
+    ///
+    /// The five `call.dsp.*` rows join the list for the same reason as the first three and with the
+    /// same obligation: a graph's transitions belong to `sipx-media`, no `CallEvent` carries one,
+    /// and the file that composes them has to contain the construction (`M-67`).
+    const COMPOSED_BY_THE_DRIVER: [(&str, &str, &str); 8] = [
         ("call.incoming", "crates/sipx-app/src/host.rs", DRIVER),
         (
             "call.gather.finished",
@@ -228,6 +239,15 @@ fn section_5_3_s_rows_are_reachable_through_the_bridge() {
             INTERPRETER,
         ),
         ("call.dial.finished", "crates/sipx-app/src/host.rs", DRIVER),
+        ("call.dsp.activated", "crates/sipx-app/src/dsp.rs", HOST_DSP),
+        (
+            "call.dsp.configured",
+            "crates/sipx-app/src/dsp.rs",
+            HOST_DSP,
+        ),
+        ("call.dsp.bypassed", "crates/sipx-app/src/dsp.rs", HOST_DSP),
+        ("call.dsp.removed", "crates/sipx-app/src/dsp.rs", HOST_DSP),
+        ("call.dsp.refused", "crates/sipx-app/src/dsp.rs", HOST_DSP),
     ];
 
     let rows: BTreeSet<String> = table_after("5.3 Event types")
@@ -309,8 +329,8 @@ fn section_5_3_s_inline_enumerations_match_their_types() {
     }
     assert_eq!(
         lists.len(),
-        6,
-        "§5.3 should carry six inline lists: {lists:?}"
+        9,
+        "§5.3 should carry nine inline lists: {lists:?}"
     );
 
     for (field, values) in lists {
@@ -361,6 +381,18 @@ fn section_5_3_s_inline_enumerations_match_their_types() {
             .iter()
             .map(|c| tag_of(&c.to_json()))
             .collect(),
+            "call.dsp.bypassed" => DspBypassCause::all()
+                .iter()
+                .map(|c| c.as_str().to_owned())
+                .collect(),
+            "call.dsp.removed" => DspTeardownCause::all()
+                .iter()
+                .map(|c| c.as_str().to_owned())
+                .collect(),
+            "call.dsp.refused" => DspRefusal::all()
+                .iter()
+                .map(|r| r.as_str().to_owned())
+                .collect(),
             other => panic!("§5.3 grew an inline list on {other}, with no type behind it"),
         };
         assert_eq!(values, implemented, "the values of {field} differ");

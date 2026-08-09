@@ -324,14 +324,50 @@ pub enum GraphError {
     },
     /// A stage refused the parameter set it was named with.
     ///
-    /// Only a workspace processor selected through [`GraphPlan::with_built_in`] can reach this: an
-    /// application-supplied processor is configured by the application before it is boxed.
+    /// Reached from [`GraphPlan::with_built_in`], where a workspace processor is configured before
+    /// the plan is attached, and from [`DspGraph::configure`](super::DspGraph::configure), where a
+    /// live stage's parameters are moved. Both refuse the **whole** set and leave the previous
+    /// parameter state in force, which is `docs/specs/custom-call-dsp.md` §3.6's rule rather than a
+    /// second one.
     #[error("the processor `{processor}` refused the parameters it was given")]
     Parameter {
         /// The stage.
         processor: &'static str,
         /// What the processor contract's own `configure` said.
         source: ParameterError,
+    },
+    /// A parameter update named a generation that is not the one now live (§10.2).
+    ///
+    /// A generation is what makes an update unambiguous: an application that composed a set
+    /// against the chain it last saw must not have it land on the chain that replaced it, because
+    /// stage 2 of one generation is a different processor from stage 2 of the next. The update is
+    /// refused whole and the live graph is untouched.
+    #[error("this update names generation {expected}, and generation {live} is live")]
+    StaleGeneration {
+        /// What the caller named.
+        expected: u64,
+        /// What is live. `0` means this direction has no graph at all.
+        live: u64,
+    },
+    /// A parameter update named a stage index the live chain does not have (§10.2).
+    #[error("this chain has {processors} stages, so there is no stage {index}")]
+    UnknownProcessor {
+        /// What the caller named.
+        index: u32,
+        /// How many stages the live chain holds.
+        processors: u32,
+    },
+    /// A parameter update named a stage whose parameters cannot be moved while it runs (§10.2).
+    ///
+    /// A supervised stage runs behind §7.4's framed protocol, and that protocol carries `Hello`,
+    /// `Frame` and `Result` and nothing else. There is no message for a parameter set, so an
+    /// update to one is refused rather than accepted and dropped: an application that needs a
+    /// supervised worker configured differently replaces the graph, which is how a new worker
+    /// process is asked for (§7.2).
+    #[error("the supervised worker `{processor}` has no wire for a parameter set")]
+    NotConfigurable {
+        /// The stage.
+        processor: &'static str,
     },
     /// The session has stopped, so a graph attached to it could never see a frame.
     #[error("this session has stopped")]
@@ -420,6 +456,23 @@ pub enum GraphTransition {
         /// How many stages the new generation holds.
         processors: u32,
     },
+    /// One stage's parameters were moved, whole, at a position boundary (§5.3, `M-67`).
+    ///
+    /// The set was validated against the stage's declared schema before anything was assigned, so
+    /// this is reported only for a set that applied entire. A refused set produces no transition at
+    /// all, because nothing about what a frame will see changed.
+    ///
+    /// It carries the stage and the boundary rather than the values. The values are the
+    /// application's own — it wrote them — and putting them here would make a bounded queue's
+    /// entry size depend on how many parameters a processor declares.
+    Configured {
+        /// The generation the stage belongs to.
+        generation: u64,
+        /// The first position of the first frame the new values apply to.
+        at_position: u64,
+        /// The stage.
+        processor: &'static str,
+    },
     /// One stage stopped contributing; the frames that follow it carry a discontinuity.
     Bypassed {
         /// The generation the stage belongs to.
@@ -440,6 +493,43 @@ pub enum GraphTransition {
         /// Why.
         cause: TeardownCause,
     },
+}
+
+/// One parameter update that applied, and where (`docs/specs/call-dsp-graph.md` §10.2, `M-67`).
+///
+/// The **terminal outcome** of [`DspGraph::configure`](super::DspGraph::configure), and there is
+/// exactly one per update: either this, or a [`GraphError`] and nothing changed. It is returned
+/// rather than only journalled because the journal is a bounded queue whose superseded parameter
+/// entries coalesce (§5.3), and an outcome a caller is waiting on may not be something a later
+/// update can absorb.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ParameterUpdate {
+    generation: u64,
+    at_position: u64,
+    processor: &'static str,
+}
+
+impl ParameterUpdate {
+    /// The generation the update applied to — the one the caller named, checked and not assumed.
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// The first position of the first frame the new values apply to, in the graph's own epoch.
+    ///
+    /// A position and never a clock reading: the same update against the same call applies at the
+    /// same boundary on every host.
+    #[must_use]
+    pub const fn at_position(&self) -> u64 {
+        self.at_position
+    }
+
+    /// The stage the values were assigned to.
+    #[must_use]
+    pub const fn processor(&self) -> &'static str {
+        self.processor
+    }
 }
 
 /// What a graph is holding (`docs/specs/call-dsp-graph.md` §8).
@@ -1009,11 +1099,15 @@ fn run_stage(
 /// Drops its **oldest** entries at capacity, and counts them: a transition is a fact about the
 /// past, and the newest are the ones a caller can still act on. That is the seam's own drop-oldest
 /// end rather than a second policy.
+/// Superseded parameter state coalesces (§5.3, `M-67`); nothing else does. An application moving a
+/// stage's parameters faster than it reads its events must not be able to push an activation, a
+/// bypass or a teardown out of a bounded queue with facts about a value it has itself replaced.
 #[derive(Debug)]
 struct Journal {
     entries: VecDeque<GraphTransition>,
     capacity: usize,
     dropped: u64,
+    superseded: u64,
 }
 
 impl Journal {
@@ -1023,10 +1117,38 @@ impl Journal {
             entries: VecDeque::with_capacity(capacity),
             capacity,
             dropped: 0,
+            superseded: 0,
         }
     }
 
     fn push(&mut self, transition: GraphTransition) {
+        // §5.3: one stage of one generation has one current parameter state, so an earlier
+        // `Configured` for that same stage is a fact about a value the application has already
+        // replaced. It gives way to the newer one rather than to the queue's bound — which is what
+        // keeps the transitions a caller cannot reconstruct from anything else.
+        if let GraphTransition::Configured {
+            generation,
+            processor,
+            ..
+        } = transition
+        {
+            let superseded = |entry: &GraphTransition| {
+                matches!(
+                    entry,
+                    GraphTransition::Configured {
+                        generation: earlier,
+                        processor: stage,
+                        ..
+                    } if *earlier == generation && *stage == processor
+                )
+            };
+            if let Some(at) = self.entries.iter().position(superseded) {
+                // discard: coalesced into the entry replacing it, counted rather than silent.
+                if self.entries.remove(at).is_some() {
+                    self.superseded = self.superseded.saturating_add(1);
+                }
+            }
+        }
         while self.entries.len() >= self.capacity {
             // discard: §5.3's drop-oldest end, counted rather than silent.
             match self.entries.pop_front() {
@@ -1060,6 +1182,10 @@ struct Slot {
     failed_closed: bool,
     /// The session stopped: no new graph may attach.
     stopped: bool,
+    /// Tripped whenever a transition is recorded, so a reader waits for an event rather than
+    /// polling one (§10.3). Replaced by a fresh one whenever a reader finds the journal empty, so
+    /// a wait always waits on a signal that has not already fired.
+    recorded: Arc<Stop>,
 }
 
 impl Default for Slot {
@@ -1072,18 +1198,30 @@ impl Default for Slot {
             torn: Arc::new(Stop::default()),
             failed_closed: false,
             stopped: false,
+            recorded: Arc::new(Stop::default()),
         }
     }
 }
 
 impl Slot {
+    /// Record one transition and wake whatever is waiting for the next one.
+    ///
+    /// Every journal write goes through here so that "a reader never polls" is a property of the
+    /// type rather than of each call site remembering to signal. Tripping the signal is a flag
+    /// store and a waker wake: no allocation, no await and no block, so the media worker may do it
+    /// on the live path (§6.3).
+    fn record(&mut self, transition: GraphTransition) {
+        self.journal.push(transition);
+        self.recorded.stop();
+    }
+
     /// Retire the live generation: cancel every stage and trip the teardown signal.
     fn retire(&mut self, cause: TeardownCause) {
         let Some(mut outgoing) = self.live.take() else {
             return;
         };
         outgoing.cancel();
-        self.journal.push(GraphTransition::TornDown {
+        self.record(GraphTransition::TornDown {
             generation: outgoing.generation,
             at_position: outgoing.position,
             cause,
@@ -1188,7 +1326,7 @@ impl SlotRef {
                     processors,
                 },
             };
-            slot.journal.push(transition);
+            slot.record(transition);
             slot.failed_closed = false;
             slot.torn = Arc::new(Stop::default());
             Ok(generation)
@@ -1213,7 +1351,7 @@ impl SlotRef {
             };
             let report = generation.run(self.direction, samples);
             if let Some(bypassed) = report.bypassed {
-                slot.journal.push(bypassed);
+                slot.record(bypassed);
             }
             if let Some(processor) = report.failed_closed {
                 slot.retire(TeardownCause::FailedClosed { processor });
@@ -1245,6 +1383,97 @@ impl SlotRef {
     /// Drain this direction's typed transitions.
     pub(crate) fn transitions(&self) -> Vec<GraphTransition> {
         self.with(|slot| slot.journal.drain())
+    }
+
+    /// Drain this direction's typed transitions, waiting for one if there is none (§10.3).
+    ///
+    /// Never a poll and never a duration: the signal is installed and handed out **under the same
+    /// take** that found the journal empty, so a transition recorded between the two cannot be
+    /// missed. Returns empty only if the future is dropped, which it cannot report.
+    pub(crate) async fn next_transitions(&self) -> Vec<GraphTransition> {
+        loop {
+            let waiting = self.with(|slot| {
+                let drained = slot.journal.drain();
+                if drained.is_empty() {
+                    // A fresh signal, so this waits on a trip that is still to come rather than on
+                    // one an earlier drain already consumed.
+                    slot.recorded = Arc::new(Stop::default());
+                    return Err(Arc::clone(&slot.recorded));
+                }
+                Ok(drained)
+            });
+            match waiting {
+                Ok(drained) => return drained,
+                Err(signal) => signal.wait().await,
+            }
+        }
+    }
+
+    /// Move one live stage's parameters, whole, at a position boundary (§10.2).
+    ///
+    /// Validated against the stage's declared schema **before** anything is assigned, on the
+    /// caller's thread and never on the media worker. The take is the same one a frame needs, so
+    /// the new values are in force from the first position of the next frame and no frame ever sees
+    /// half a set.
+    pub(crate) fn configure(
+        &self,
+        generation: u64,
+        index: usize,
+        parameters: &[Parameter],
+    ) -> Result<ParameterUpdate, GraphError> {
+        self.with(|slot| {
+            let Some(live) = slot.live.as_mut() else {
+                // `0` is §5.1's "no graph": a direction with nothing attached refuses an update
+                // rather than inventing a generation for it.
+                return Err(GraphError::StaleGeneration {
+                    expected: generation,
+                    live: 0,
+                });
+            };
+            if live.generation != generation {
+                return Err(GraphError::StaleGeneration {
+                    expected: generation,
+                    live: live.generation,
+                });
+            }
+            let processors = u32::try_from(live.stages.len()).unwrap_or(u32::MAX);
+            let at_position = live.position;
+            let Some(stage) = live.stages.get_mut(index) else {
+                return Err(GraphError::UnknownProcessor {
+                    index: u32::try_from(index).unwrap_or(u32::MAX),
+                    processors,
+                });
+            };
+            let processor = stage.capability.id();
+
+            // The whole set against the declared schema first. A refusal here has provably assigned
+            // nothing, whatever the processor's own `configure` would have done with it.
+            stage
+                .capability
+                .validate_parameters(parameters)
+                .map_err(|source| GraphError::Parameter { processor, source })?;
+            match &mut stage.kind {
+                Running::Inline(inline) => inline
+                    .configure(parameters)
+                    .map_err(|source| GraphError::Parameter { processor, source })?,
+                // §7.4 frames `Hello`, `Frame` and `Result` and nothing else, so there is no
+                // message to carry this. Refused rather than accepted and dropped.
+                Running::Supervised(_) => {
+                    return Err(GraphError::NotConfigurable { processor });
+                }
+            }
+
+            slot.record(GraphTransition::Configured {
+                generation,
+                at_position,
+                processor,
+            });
+            Ok(ParameterUpdate {
+                generation,
+                at_position,
+                processor,
+            })
+        })
     }
 
     /// What this direction's graph is holding right now, live and retired generations together.

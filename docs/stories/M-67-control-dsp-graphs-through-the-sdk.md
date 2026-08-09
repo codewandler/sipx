@@ -2,7 +2,7 @@
 id: M-67
 title: Control call DSP graphs through the application SDK
 pillar: Media
-status: backlog
+status: in-progress
 priority: 40
 design: docs/designs/custom-call-dsp.md
 epic: custom-call-dsp
@@ -21,18 +21,78 @@ bounded, non-callback execution model.
 
 ## Acceptance
 
-- [ ] The SDK exposes processor discovery, graph generation, direction/order, closed parameter
+- [x] The SDK exposes processor discovery, graph generation, direction/order, closed parameter
       schemas and typed activation/bypass/failure/removal events.
-- [ ] Parameter updates are finite, validated off the media path and applied at a declared sample
+- [x] Parameter updates are finite, validated off the media path and applied at a declared sample
       boundary with generation/correlation identity and exactly one terminal outcome.
-- [ ] SDK/JavaScript callbacks never execute on the media worker; applications select registered
+- [x] SDK/JavaScript callbacks never execute on the media worker; applications select registered
       processor IDs and receive bounded events rather than borrowing audio-thread objects.
-- [ ] Unknown processors/parameters, stale generations, cross-call IDs and overlong graphs are
+- [x] Unknown processors/parameters, stale generations, cross-call IDs and overlong graphs are
       refused without changing the active graph.
-- [ ] Event queues coalesce safe intermediate parameter state but preserve activation, failure,
+- [x] Event queues coalesce safe intermediate parameter state but preserve activation, failure,
       bypass and terminal transitions without blocking media.
 - [ ] Generated bindings, sequence tests, public reference docs and the full gate are green.
 
 ## Progress
 
 - Backlog. Application surface after M-64.
+- **2026-08-09 — the door is built, on `impl/M-67`.** Five of six rows ticked; the `gate` row is
+  left for the coordinator's wave run.
+
+  **What was added, in three layers.**
+
+  *`sipx-media` (`dsp`)* — the registry is published: `BuiltIn::registered()`,
+  `BuiltIn::from_id(id, shape)` and `BuiltIn::parameters()`, which is the list `builtin.rs` had
+  said "`M-67` is where an SDK gets a reason to publish one" about. `GraphTransition::Configured`
+  joins §5.3, and `DspGraph::configure(generation, processor, parameters)` moves one live stage's
+  parameters — validated against the declared schema off the media path, applied under the same
+  take a frame needs, and returning a `ParameterUpdate` that is the update's **one** terminal
+  outcome. `DspGraph::next_transitions()` gives the queue a suspension point so a driver never
+  polls, and `Journal::push` now coalesces a superseded `Configured` for the same stage of the same
+  generation so a burst of parameter updates cannot push an activation out of a bounded queue.
+
+  *`sipx-app-protocol`* — §6.2's `dsp`, `dsp_param` and `dsp_remove`, §5.3's `call.dsp.activated`,
+  `.configured`, `.bypassed`, `.removed` and `.refused`, and the values they carry (`DspStage`,
+  `DspParameter`, `DspValue`, `DspBypassCause`, `DspTeardownCause`, `DspRefusal`) in a new private
+  `dsp` module. `docs/specs/app-contract.md` gains the §3, §5.3 and §6.2 rows plus a §6.6 stating
+  the limit.
+
+  *`sipx-app`* — `crates/sipx-app/src/dsp.rs` is the producer the §5.3 rule demands, and
+  `spec_tables.rs` names it in `COMPOSED_BY_THE_DRIVER` for all five rows. `host.rs` holds a
+  `CallGraphs` per call, performs the three effects and takes unsolicited transitions off a
+  `select!` arm.
+
+  **What an application can do to a graph:** name registered identifiers in order on one direction,
+  give each a shape and a finite parameter set, move one live stage's parameters against a named
+  generation, remove the chain, and read every transition.
+
+  **What it cannot do:** supply a processor, a program, a callback, an execution profile, a
+  deadline, a failure action or a graph bound — none of those has a shape in the vocabulary; claim
+  containment (`contains_overrun` is derived from the stages and only reported); reach another
+  call's graph (no verb carries a call identifier); or reach a supervised stage's parameters (§7.4
+  frames `Hello`, `Frame` and `Result` and nothing else, so it is refused rather than dropped).
+
+  **Provenance survives an app-assembled plan** because `crates/sipx-app/src/dsp.rs` reaches
+  `GraphPlan::with_built_in` **once per stage** and never reaches `with_processor` — it cannot, the
+  wire carries no processor. `dsp_sdk.rs`'s
+  `naming_a_built_in_lends_an_application_s_processor_no_provenance` holds the other half: a plan
+  mixing a registry stage with an application processor declaring `ProvenInline` is still refused
+  `ProfileNotAdmissible` naming *that stage*.
+
+  **Red before green** (`git merge-base main HEAD` = `413f19c`,
+  `cargo test -p sipx-media --all-features --test dsp_sdk`): 25 compile errors, among them
+  `no method named 'configure' found for struct 'DspGraph'`, `no variant named 'Configured' found
+  for enum 'GraphTransition'`, `no function or associated item named 'registered' found for enum
+  'BuiltIn'` and `no method named 'next_transitions'`. Green afterwards: 8 passed.
+
+  **Owed to `CHANGELOG.md`** (fenced, so the coordinator writes it): *"Applications can compose and
+  change a call's DSP chain over `sipx.app.v1`: three `dsp` verbs naming registered processors and
+  closed parameter values, five `call.dsp.*` events, and sample-boundary parameter updates with one
+  terminal outcome. An application can name a processor; it cannot supply one, declare a profile or
+  claim containment."*
+
+  **Left open.** `BypassCause::Requested` still has no producer — there is no verb that asks for a
+  stage to be bypassed, and an application undoes a stage by replacing the chain. Filed as `M-115`.
+  A supervised stage is unreachable from the wire at all (a program to spawn is host configuration,
+  not something a document may name), so an application-assembled chain is always proven-inline
+  today; that is stated in `call-dsp-graph.md` §10.1 rather than worked around.

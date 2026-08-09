@@ -1,6 +1,7 @@
 # The call-local DSP graph
 
-**Status:** normative · **Epic:** `custom-call-dsp` · **Stories:** `M-64`, `M-102` (§7's process) ·
+**Status:** normative · **Epic:** `custom-call-dsp` · **Stories:** `M-64`, `M-102` (§7's process),
+`M-67` (§10's door) ·
 **Design:** [custom-call-dsp](../designs/custom-call-dsp.md) · **Crate:** `sipx-media` (`dsp`)
 
 [custom-call-dsp.md](custom-call-dsp.md) defines what one processor is and says, in its §1, that it
@@ -14,8 +15,10 @@ deliberately. It **inherits and does not restate**: the processor interface, the
 declaration, the parameter vocabulary, the refusal taxonomy, the three execution profiles and the
 minimum failure policy are [custom-call-dsp.md](custom-call-dsp.md)'s, and the direction, frame
 metadata, discontinuity vocabulary and tap points are [call-audio-seam.md](call-audio-seam.md)'s.
-Nothing here weakens either. Where this document narrows one — and it narrows exactly two things,
-§4.3 and §5.4 — it says so and says why.
+Nothing here weakens either. Where this document narrows one — and it narrows exactly three things,
+§4.3, §5.3 and §5.4 — it says so and says why. §10 narrows this document itself: it is the door an
+**application** reaches a graph through, and everything an application may do is a subset of what a
+Rust caller of this crate may.
 
 ## 1. Normative references
 
@@ -186,19 +189,35 @@ the **position** at which it took effect — the first position of the first fra
 to, in the graph's current epoch:
 
 ```
-GraphTransition ::= Activated { generation, at_position, processors }
-                  | Replaced  { generation, previous, at_position, processors }
-                  | Bypassed  { generation, at_position, processor, cause }
-                  | TornDown  { generation, at_position, cause }
+GraphTransition ::= Activated  { generation, at_position, processors }
+                  | Replaced   { generation, previous, at_position, processors }
+                  | Configured { generation, at_position, processor }
+                  | Bypassed   { generation, at_position, processor, cause }
+                  | TornDown   { generation, at_position, cause }
 
 BypassCause     ::= Requested | Refused | DeadlineMissed | MalformedResult | WorkerLost
 TeardownCause   ::= Requested | Detached | SessionStopped | FailedClosed { processor }
 ```
 
+`Configured` is §10.2's parameter update and is reported only for a set that applied **entire**: a
+refused set changes nothing about what a frame will see, so there is nothing for it to report. It
+carries the stage and the boundary and not the values — the values are the application's own, and
+carrying them would make one entry's size depend on how many parameters a processor declares.
+
 A transition queue is bounded by `observation_capacity` and drops its **oldest** entries at
 capacity, counting them — a transition is a fact about the past, and the newest are the ones a
 caller can still act on. This is the seam's own drop-oldest end
 ([call-audio-seam.md](call-audio-seam.md) §6.1) rather than a second policy.
+
+**One narrowing of that policy, and only one: superseded parameter state coalesces.** When a
+`Configured` is recorded for a stage of a generation, an earlier `Configured` for that same stage of
+that same generation is removed and counted, because a stage has one current parameter state and the
+earlier entry describes a value the application has itself replaced. Nothing else coalesces:
+`Activated`, `Replaced`, `Bypassed` and `TornDown` are each a fact no later entry supersedes, and
+each is the kind a caller cannot reconstruct from anything it holds. Without this narrowing an
+application moving a parameter faster than it reads its events would push its own activation out of
+a bounded queue with facts it had already overwritten — the queue's bound would be spent on the one
+kind of entry that is safe to lose.
 
 ### 5.4 Replacement, bypass and removal
 
@@ -496,3 +515,109 @@ named in [custom-call-dsp.md](custom-call-dsp.md) §12.1 reachable through the p
 | GRAPH-18 | a worker process answering with one sample fewer than the frame carried | `MalformedResult`, not audio — well formed on the wire and wrong at the contract |
 | GRAPH-19 | a `Result` header declaring a length above `2 × max_samples` | refused `Oversized` from the header alone; no payload is read and nothing of that size is allocated |
 | GRAPH-14 | attach to a direction that already has a graph | refused `DirectionInUse` |
+
+## 10. The application door (`M-67`)
+
+§3.2 settled *which profiles may be selected, and by whom*. This section settles the door an
+**application** reaches them through: what it may name, what it may move while a call is running,
+and what it is structurally unable to say. Everything here is a narrowing of what a Rust caller of
+this crate can already do — an application gets strictly less, and the difference is the point.
+
+### 10.1 An application names identifiers, never code
+
+The registry of §3.2 is published: every entry's stable identifier and, per entry, the **closed
+parameter schema** the processor itself declares. Discovery is that list, and it is read out of the
+declarations rather than tabulated beside them, so what an application discovers and what validation
+refuses it against cannot disagree.
+
+An application composes a chain by naming those identifiers in order, on one direction, each with a
+finite parameter set from [custom-call-dsp.md](custom-call-dsp.md) §3.6's vocabulary. Normatively:
+
+| The application supplies | The stack derives |
+|---|---|
+| an ordered list of registered identifiers | each stage's processor, its capability and its profile |
+| a finite parameter set per stage | validation against that stage's declared schema |
+| a shape, where a processor declares one | the buffers the graph is sized by, at validation |
+| a direction | which of §2's two tap points the chain runs at |
+
+and nothing else. There is **no shape in this vocabulary** for supplying a processor, a program, a
+callback, an execution profile, a deadline, a failure action or a graph bound. That is not a rule an
+implementation applies; it is the absence of a way to say those things, in the same sense that
+[app-contract.md](app-contract.md) §6.5's `play.source` has no URL variant.
+
+Two consequences are normative and are why the vocabulary is this narrow.
+
+**Provenance stays a property of the stage.** An application naming a built-in reaches the registry
+door for *that stage*, and §3.2's asymmetry is untouched: a chain mixing a registry stage with a
+processor offered at the public door still refuses the second one's `ProvenInline`, and the refusal
+names the stage. A built-in beside another processor lends it nothing — through this door as through
+any other.
+
+**An application cannot assemble a claim.** §3.3's `contains_overrun()` is the conjunction over the
+stages' profiles, derived from what the stages *are*. It is reported to an application and never
+accepted from one: there is no field, parameter, bound or identifier through which an application
+states it, and no combination of registered processors makes an uncontained chain claim
+containment or the reverse. An application that requires the stack to contain a stall selects a
+supervised stage, which is a **host** capability behind the host's own configuration — a program to
+spawn is not something a wire vocabulary may name, for [app-contract.md](app-contract.md) §6.5's
+reason.
+
+### 10.2 Parameters move at a declared boundary, with one terminal outcome
+
+A live stage's parameters are moved by naming three things: the **generation** the set was composed
+against, the stage's **index** in that generation's plan order, and the set itself.
+
+- **Validated whole, off the media path.** The set is checked against the stage's declared schema on
+  the caller's own thread, before anything is assigned. The media worker validates nothing.
+- **Applied at a position boundary.** The assignment happens under the same take a frame needs, so
+  the values are in force from the first position of the next frame and §5.1 still holds: no frame
+  sees one stage's old parameters beside another's new ones, and no frame sees half a set.
+- **Exactly one terminal outcome.** Either a record of the update — its generation, its stage and
+  the position it took effect at — or a refusal, and **every refusal leaves the live graph exactly
+  as it was**: not one value, not the position expectation, not the generation. This is
+  [custom-call-dsp.md](custom-call-dsp.md) §3.6's "a set is applied at one position boundary or not
+  at all", read at the graph.
+
+Four refusals, and each of them changes nothing:
+
+| Refusal | When |
+|---|---|
+| `StaleGeneration { expected, live }` | the named generation is not the live one, `0` being a direction with no graph |
+| `UnknownProcessor { index, processors }` | the live chain has no stage at that index |
+| `Parameter { processor, source }` | an identifier outside the declared schema, a value of the wrong kind, or a value outside its declared range — the **whole** set refused, the previous one in force |
+| `NotConfigurable { processor }` | a supervised stage: §7.4 frames `Hello`, `Frame` and `Result` and nothing else, so there is no message to carry a parameter set |
+
+The generation is what makes an update unambiguous rather than merely correlated. Stage 2 of one
+generation is a different processor from stage 2 of the next, so an update composed against the
+chain an application last saw must not land on the chain that replaced it — and under §5.4 a
+replacement is exactly the operation that can have happened in between.
+
+**Adding, removing or reordering a stage is not a parameter update.** It is §5.4's replacement, it
+has a generation of its own, and it opens a new epoch. A door that let a parameter set change the
+shape of a chain would be a replacement without one.
+
+### 10.3 Transitions reach an application without polling and without reaching the worker
+
+§5.3's queue is what an application reads, and reading it must cost the call nothing. Normatively, a
+driver turning transitions into application events:
+
+- **never polls, and never times a look.** The drain has a suspension point: a waiting reader is
+  woken where a transition is recorded, and the signal is installed under the same take that found
+  the queue empty, so a transition recorded between the two cannot be missed. No fixed duration is
+  part of this.
+- **never runs on the media worker.** Recording a transition on the live path costs a flag store and
+  a waker wake, which is neither an await, a block nor an allocation (§6.3). Everything a reader
+  then does with it happens on the reader's own thread.
+- **never borrows an audio-thread object.** What crosses is §5.3's typed value: counts, positions,
+  a stage identifier and a cause. No sample, no buffer, no processor and no handle to one.
+
+### 10.4 Vectors
+
+| ID | Input | Expected |
+|---|---|---|
+| GRAPH-20 | the published registry | every entry's identifier resolves back to that entry, an unregistered name resolves to nothing, and each entry's schema is the one validation holds a set against |
+| GRAPH-21 | a live gain stage; a set inside its declared domain | applied at the next frame's first position; one `Configured` naming that generation, stage and position |
+| GRAPH-22 | the same stage: a stage index the chain lacks, an identifier outside the schema, a value outside its range, and a generation that is not live | `UnknownProcessor`, `Parameter`, `Parameter`, `StaleGeneration` — each changing nothing and producing no `Configured` |
+| GRAPH-23 | 32 parameter updates against a queue of 4 | the `Activated` survives and exactly one `Configured` remains — superseded parameter state gave way, not the activation |
+| GRAPH-24 | a chain of registry stages, and the same chain with one cooperative-native stage | `contains_overrun()` true, then false; no parameter, identifier or built-in beside it changes either answer |
+| GRAPH-25 | a plan mixing a registry stage with an application processor declaring `ProvenInline` | refused `ProfileNotAdmissible` naming *that stage*; the registry stage beside it lent it nothing |

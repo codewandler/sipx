@@ -17,7 +17,7 @@ use sipx_audio::dsp::effects::{
     BitCrush, Gain, HardClip, HighPass, LowPass, Peaking, Polarity, SoftClip, Stutter,
 };
 use sipx_audio::dsp::noise::SubbandSuppressor;
-use sipx_audio::dsp::{CapabilityError, FrameProcessor};
+use sipx_audio::dsp::{CapabilityError, FrameProcessor, ParameterSpec};
 
 /// One of this workspace's own processors, selected by name (`docs/specs/call-dsp-effects.md` §2).
 ///
@@ -120,18 +120,75 @@ impl BuiltIn {
         Ok(processor)
     }
 
+    /// The closed parameter schema this processor is held to
+    /// (`docs/specs/custom-call-dsp.md` §3.6, `docs/specs/call-dsp-graph.md` §10.1).
+    ///
+    /// Read out of the processor's own declaration rather than tabulated beside it, so discovery
+    /// and validation cannot disagree: what this returns is exactly what
+    /// [`GraphPlan::with_built_in`](super::GraphPlan::with_built_in) and
+    /// [`DspGraph::configure`](super::DspGraph::configure) refuse a set against.
+    ///
+    /// The schema is **closed and finite by construction**: there is no floating-point parameter to
+    /// declare, every domain has both ends, and a processor declares at most 32 of them. An empty
+    /// slice means the processor takes no parameters at all, which is a discoverable fact rather
+    /// than an unknown one.
+    ///
+    /// It does **not** describe the processor's *shape* — [`Self::Stutter`]'s line is a constructor
+    /// argument, because a graph sizes buffers from it before the first frame and a parameter is
+    /// applied after that. [`Self::from_id`] is where a caller supplies one.
+    #[must_use]
+    pub fn parameters(self) -> &'static [ParameterSpec] {
+        self.processor().map_or(
+            // A shape this registry refuses declares no schema, because there is no instance to
+            // read one off. The refusal itself belongs to `GraphPlan::with_built_in`, which names
+            // the field; this is the residue of it and never the place it is reported.
+            &[],
+            |processor| processor.capability().parameters(),
+        )
+    }
+
+    /// Resolve a wire identifier back to the registry entry that publishes it (`M-67`).
+    ///
+    /// This is the SDK's whole door onto provenance: an application names a **string**, and the
+    /// only strings that resolve are the ones this registry publishes. There is no shape here for
+    /// supplying code, a program, or an execution profile, which is why an application-assembled
+    /// chain cannot carry a profile it did not earn — see [`super`]'s module documentation.
+    ///
+    /// `shape` is the one property a parameter cannot express. Exactly one registered processor
+    /// reads it today — [`Self::Stutter`]'s delay line, in positions — and every other variant
+    /// ignores it. A line past the effect's own maximum is not refused here: it resolves, and
+    /// [`GraphPlan::with_built_in`](super::GraphPlan::with_built_in) refuses it with the
+    /// [`CapabilityError`] that names the field.
+    ///
+    /// Returns `None` for a name this workspace does not ship, and that refusal is the point: an
+    /// unknown identifier is never resolved into something plausible nearby.
+    #[must_use]
+    pub fn from_id(id: &str, shape: u32) -> Option<Self> {
+        Self::REGISTERED
+            .iter()
+            .find(|entry| entry.id() == id)
+            .map(|entry| match entry {
+                Self::Stutter { .. } => Self::Stutter {
+                    delay_positions: shape,
+                },
+                other => *other,
+            })
+    }
+
     /// Every registered processor: `BUILT_IN_IDS` order, then `NOISE_REDUCTION_IDS` order.
     ///
-    /// [`Self::Stutter`] appears with a one-position line, which is the shortest shape that still
-    /// holds audio; this names what exists rather than a configuration to use. It is test-only
-    /// because nothing in the crate needs to enumerate the registry — what a caller needs is to
-    /// name one variant — and a public list would be surface added for a check rather than for a
-    /// user. `M-67` is where an SDK gets a reason to publish one.
-    ///
+    /// This is the discovery list an SDK publishes (`M-67`). [`Self::Stutter`] appears with a
+    /// one-position line, which is the shortest shape that still holds audio: the list names what
+    /// **exists**, not a configuration to use, and [`Self::from_id`] is where a caller states the
+    /// shape it wants.
+    #[must_use]
+    pub const fn registered() -> &'static [Self] {
+        Self::REGISTERED
+    }
+
     /// The two source lists stay separate deliberately: `docs/specs/call-dsp-effects.md` §2.1
     /// declares nine effects normatively and a noise reducer is not one of them, so this registry
     /// concatenates rather than either list growing to hold the other's members.
-    #[cfg(test)]
     const REGISTERED: &'static [Self] = &[
         Self::Gain,
         Self::Polarity,
