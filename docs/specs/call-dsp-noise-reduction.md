@@ -507,10 +507,46 @@ Onset recovery is **42 positions** and is hand-derivable rather than observed: t
 slew moves `ceil(1000/64) = 16` per position, so `250 + 16·43 = 938` lands at the position 42 after
 the step. Onset recovery under this design *is* the gain slew's length, counted in positions.
 
-**CPU and memory are not measured here.** `X-109` owns the measurement corpus for this epic, and a
+**CPU and memory were not measured here.** `X-109` owns the measurement corpus for this epic, and a
 figure this story produced on the machine that happened to run it is not a measurement — §9's
 vectors therefore assert the bounded *shape* of the state (§7) and leave the cost to the story that
-owns it.
+owns it. §8.1 is what that story brought back.
+
+### 8.1 Memory, measured; cost, refused (`X-109`)
+
+**Memory.** `./scripts/check-dsp-heap.sh` — `X-128`'s counting allocator, outside the workspace
+because `unsafe_code` is forbidden inside it — now covers this reducer, and the run measures
+
+| Processor | Declared `state_bytes` | Inline | Peak live heap | Allocated after `prepare` |
+|---|---|---|---|---|
+| `sipx.subband_suppressor` | 256 | 256 | **0** | **0** |
+
+which is §7's bound turned from a construction argument into a figure: three bands of fixed-width
+followers and a recursive minimum, and not one byte of heap behind them, across construction,
+`prepare`, `process`, `flush`, `reset` and `cancel`. It went unmeasured for two stories because
+that probe's processor list was written by hand; the list is now held to `BUILT_IN_IDS` and
+`NOISE_REDUCTION_IDS`, so the next processor that ships without a measurement is a red run.
+
+**Cost is not recorded, and this is the row deliberately left empty.** `crates/sipx-audio/examples/dsp_cost.rs`
+takes it — per processor, per condition, over these four signals at their §8 lengths, reported as
+nanoseconds per thousand positions and as parts per million of one core at 8,000 Hz. It refuses to
+report when the one-minute load average is above a tenth of the machine's cores, and refuses again
+when its own control workload drifts by more than 10% between the start of the run and the end.
+**On the machine available to `X-109` both guards fired**, so there is no figure here rather than a
+figure with a caveat. The command is in that story's `## Progress`.
+
+The two generators of this corpus — the vectors' and the cost harness's — are held to one set of
+FNV-1a checksums by `the_corpus_is_the_same_corpus_the_cost_harness_measures`, so a cost figure and
+a quality figure are always about the same samples. That test found a real divergence the day it
+was written.
+
+**Response.** The reducer also runs through `sipx_audio::dsp::response`'s packaged sweep, which is
+integer arithmetic and needs no quiet box. What it shows is worth stating and easy to misread: after
+the 1,024-position warm-up a **settled tone is essentially untouched** — 4 thousandths off at worst
+after 2,048 positions, 17 after 8,192 — because a tone raises the envelope as fast as it raises the
+floor and §5.3's ratio barely moves. That is **not** a noise-reduction figure; this section's four
+conditions are. What it rules out is the opposite failure: a reducer that gated a steady talker would
+show there as a collapse toward `min_band_gain`, and this one does not.
 
 ## 9. Vectors
 
@@ -535,3 +571,4 @@ Unless a row says otherwise it runs on `D8` with the §5.3 defaults.
 | NR-V15 | the §8 corpus, all four conditions | §8's recorded integers exactly; every attenuation between 250 and 1,000 thousandths because `min_band_gain` bounds it below and unity bounds it above; and `overlapping` above `transient` above `stationary`, which is §5.6's ordering rather than one run's arithmetic |
 | NR-V16 | `stationary` cut at 1, 7, 13, 160 and 4,096 positions per frame against one frame | identical samples, whatever the framing |
 | NR-V17 | a step from amplitude 500 to amplitude 16,000 after the gain has settled | the output is within one sixteenth of the input 42 positions later — §8's derivation, and no other quantity in the design |
+| NR-V18 (`X-109`) | each §8 condition, hashed | the four FNV-1a checksums of §8.1, and §8's lengths — the cost harness's copy of the recurrences is the same corpus these vectors measure |

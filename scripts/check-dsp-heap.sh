@@ -2,14 +2,18 @@
 # Measure DSP processor heap growth against the `state_bytes` each processor declares:
 # `docs/specs/custom-call-dsp.md` §9.1, and the heap half of `DSP-K9` (`X-128`).
 #
-# Two claims, and the second is the one that needed a mechanism nobody had:
+# Three claims, and the second is the one that needed a mechanism nobody had:
 #
-#   1. Every built-in's peak live heap is within its declared `state_bytes` less its inline size.
-#      Eight of the nine own no heap and measure exactly zero; `sipx.stutter` owns a delay line and
+#   1. Every processor's peak live heap is within its declared `state_bytes` less its inline size.
+#      Nine of the ten own no heap and measure exactly zero; `sipx.stutter` owns a delay line and
 #      measures it to the byte, which is the first time that declaration has been checked rather
 #      than trusted.
 #   2. No processor allocates after `prepare` returned — §9.1's "not per frame, not per position,
 #      not per observation". Nothing checked this at all before.
+#   3. Every identifier in `BUILT_IN_IDS` and `NOISE_REDUCTION_IDS` appears in the run. `X-128`
+#      wrote the call list by hand, `M-66` then shipped `sipx.subband_suppressor`, and the one
+#      processor with adaptive state went unmeasured for two stories without the gate noticing.
+#      `X-109` added the reducer and this check, so the next omission is a red run.
 #
 # And the harness is shown failing, per §11.3: `HeapHog` allocates per frame and `HeapLiar` owns a
 # buffer it did not declare, and the run fails if either goes uncaught.
