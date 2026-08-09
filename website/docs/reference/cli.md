@@ -376,6 +376,12 @@ sipx load-responder --max-active 32 --calls 100 --cleanup 40 --seed 41 --json
 | `--cleanup <S>` | Positive deadline for dialog, task and transaction drain; required |
 | `--seed <N>` | Reproduce policy choices and generated media (default 0) |
 | `--provisional-percent <P>` | Percentage of admitted INVITEs receiving one `100 Trying` (default 0) |
+| `--answer-percent <P>` | Percentage answered with `200`; the remainder use `--reject-status` (default 100) |
+| `--reject-status <CODE>` | Policy rejection from 400 through 699 (default 486) |
+| `--dialog-duration <S>` | Positive maximum lifetime of an accepted dialog (default 40) |
+| `--mode <M>` | `signalling` (default) or the separately explicit `generated-media` workload |
+| `--local <ADDR>` | UDP address to bind (default `127.0.0.1:0`) |
+| `--transport <T>` | Must be `udp`; other transports are separate measurement profiles |
 
 **Sizing `--max-active` against a generator.** Give it headroom over the generator's
 `--concurrency` rather than matching it. A slot is released only after this responder has answered
@@ -387,12 +393,6 @@ over at once; smaller headroom is usually enough, but only twice is enough by ar
 by observation. A refusal at the ceiling is admission control holding its contract and is **not a
 defect**: `sipx load` reports it as `rejected`, distinct from `failed` and `timed_out`, precisely so
 the difference is readable.
-| `--answer-percent <P>` | Percentage answered with `200`; the remainder use `--reject-status` (default 100) |
-| `--reject-status <CODE>` | Policy rejection from 400 through 699 (default 486) |
-| `--dialog-duration <S>` | Positive maximum lifetime of an accepted dialog (default 40) |
-| `--mode <M>` | `signalling` (default) or the separately explicit `generated-media` workload |
-| `--local <ADDR>` | UDP address to bind (default `127.0.0.1:0`) |
-| `--transport <T>` | Must be `udp`; other transports are separate measurement profiles |
 
 At least one of `--calls` and `--duration` is required; the first reached closes admission. Before
 traffic is admitted, stdout receives one flushed `sipx.comparative-load.ready.v1` JSON record with

@@ -64,3 +64,14 @@ different change from narrowing a checker and belongs in its own diff.
 Worth doing on the page even before the checker: the six flags below the splice include
 `--transport`, `--local` and `--mode`, which is most of what a reader configuring a responder run
 needs after the ceiling.
+
+- 2026-08-09: **the instance is repaired; the blind spot is what remains.** The spliced table was
+  the coordinator's, introduced while finishing `X-129` — the sizing paragraph went in between two
+  rows, so six flags after it were documented to the checker and rendered as a wall of pipes to a
+  reader. The paragraph now follows the whole table and the rows are one table again.
+  That leaves this story exactly what it was filed for: `document_command_flags` takes a flag from
+  any `|`-leading line without asking whether those lines form a table, so the next person to write
+  prose into a flag list gets the same silent pass. Same shape as `X-131`, on the other half of the
+  same comparison — and this time the reader that could not see it let a real defect into the
+  published page for the length of one release.
+
