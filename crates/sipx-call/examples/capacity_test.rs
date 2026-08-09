@@ -268,9 +268,9 @@ async fn place_many(
                             // that played on regardless would be a busy loop rather than a paced
                             // one, because a stopped session has no send queue left to pace it
                             // (`M-93`).
-                            while running.load(Ordering::Relaxed)
-                                && media.play(&tone, FRAME).await
-                            {}
+                            while running.load(Ordering::Relaxed) && media.play(&tone, FRAME).await
+                            {
+                            }
                         }));
                     }
                     Ok((call, tone_task, elapsed))
@@ -616,9 +616,9 @@ async fn start_server(
                         // "the call ended" flag: the caller hangs up first, and `play` reports a
                         // stopped session by answering `false`.
                         tokio::spawn(async move {
-                            while running.load(Ordering::Relaxed)
-                                && media.play(&tone, FRAME).await
-                            {}
+                            while running.load(Ordering::Relaxed) && media.play(&tone, FRAME).await
+                            {
+                            }
                         })
                     });
                     tokio::spawn(async move {
