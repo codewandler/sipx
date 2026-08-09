@@ -83,3 +83,17 @@ accounting in `docs/specs/media-runtime.md` §4 — nothing is discarded here. S
   So the remaining work is exactly that rule, plus proof that the ordering test goes green with the
   cancellation tests still passing. Do not merge before both hold.
 
+- 2026-08-09: **the sharper rule is written, and both properties hold.** The hop now turns on the
+  *answer* rather than on whether the wait parked. `PlaybackEnd::SessionEnded` is the permanent
+  one — it answers at once and answers at once for ever, and `play` is `start` plus this wait, so
+  `loop { play().await }` after a call ends is a bare busy loop that no `abort()` can take back;
+  the hop is what returns the runtime worker, and by then there are no clip ends left to order.
+  Every other end happened once to one clip and takes no hop, which is what keeps two watchers
+  waking in the order their clips ended.
+  Verified on `main` rather than on the branch: `sipx-call`'s `playback` suite 7 of 7 including
+  `every_playback_reports_its_own_end_by_id`, `sipx-media`'s `play_cancellation` 3 of 3, and both
+  crates' full suites green with clippy clean. The branch's own worktree could not run the
+  `sipx-call` half — it failed to compile `sipx-media`'s lib against a `sipx-rtp` whose report
+  structs are non-exhaustive on `main` and not on that branch, which is a property of a scratch
+  checkout mid-wave and not of this change.
+
