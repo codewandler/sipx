@@ -71,6 +71,39 @@ pub struct VoiceActivity {
 }
 
 impl VoiceActivity {
+    /// One transition, stated from its parts rather than measured (`M-98`).
+    ///
+    /// Every transition a call reports is built by this module's watcher out of what the analyser
+    /// observed. Nothing outside this crate could build one at all, which is why
+    /// [`sipx_app_protocol::event_from_call`] — the one function that lifts these events into the
+    /// application contract — had no tests until `M-98`, and why the `call.signal.metrics` arm was
+    /// missing from it for two releases with nothing to notice.
+    ///
+    /// What it promises is narrow and worth stating. Every field is carried through verbatim, so a
+    /// value built here is indistinguishable from one the watcher emits — there is no second shape
+    /// and no field this does not set. What it does **not** promise is that anything measured the
+    /// audio: a position stated here is a position, not an observation, and only
+    /// [`Call::detect_voice_activity`](crate::Call::detect_voice_activity) produces transitions
+    /// from a call's own samples.
+    ///
+    /// [`sipx_app_protocol::event_from_call`]: https://docs.rs/sipx-app-protocol
+    #[must_use]
+    pub fn new(
+        call_id: &str,
+        direction: AudioDirection,
+        sequence: u64,
+        at_sample: u64,
+        sample_rate: u32,
+    ) -> Self {
+        Self {
+            call_id: Arc::from(call_id),
+            direction,
+            sequence,
+            at_sample,
+            sample_rate,
+        }
+    }
+
     /// The `Call-ID` of the call this transition belongs to (RFC 3261 §8.1.1.4).
     #[must_use]
     pub fn call_id(&self) -> &str {
@@ -153,6 +186,37 @@ pub struct VoiceThresholds {
 }
 
 impl VoiceThresholds {
+    /// What an analyser configured by `profile` measures against before it has seen any audio
+    /// (`M-98`).
+    ///
+    /// The record a call announces is the running analyser's own snapshot, and
+    /// [`EffectiveThresholds`] is `sipx-audio`'s to hand out — nothing outside that crate builds
+    /// one. So this takes the *profile* and derives exactly what an analyser built from it would
+    /// derive: every window, hangover, silence-timeout and calibration count §12.9 reports, and no
+    /// calibration history at all — no updates applied, no floor observed, no outcome and nothing
+    /// frozen, because nothing has been measured yet.
+    ///
+    /// That is the whole promise, and the limit is the point of stating it: this is not a way to
+    /// announce a threshold no analyser is using. It exists so that a consumer of
+    /// [`CallEvent::VoiceThresholds`] can be tested against the value a call really sends — the
+    /// application-contract bridge `M-98` closed is the caller it was added for.
+    ///
+    /// # Errors
+    ///
+    /// [`AnalysisError`] for a profile outside the domains the processing contract's §5.1 states.
+    /// Refused before anything is built, so a bad profile costs nothing.
+    pub fn new(
+        call_id: &str,
+        at_sample: u64,
+        profile: AnalysisProfile,
+    ) -> Result<Self, AnalysisError> {
+        Ok(Self {
+            call_id: Arc::from(call_id),
+            at_sample,
+            effective: AudioAnalyzer::new(profile)?.thresholds(),
+        })
+    }
+
     /// The `Call-ID` of the call these thresholds belong to (RFC 3261 §8.1.1.4).
     #[must_use]
     pub fn call_id(&self) -> &str {
@@ -580,6 +644,43 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// [`VoiceThresholds::new`] states exactly the record a call announces (`M-98`).
+    ///
+    /// That is the whole of what the constructor promises, and it is worth a test rather than a
+    /// sentence: it exists so a *consumer* of the announcement can be tested against the value a
+    /// call really sends — `sipx-app-protocol`'s bridge into the application contract had no tests
+    /// at all while nothing outside this crate could build one — and a stated record that differed
+    /// from the announced one would make every such test agree with the wrong thing.
+    #[test]
+    fn a_stated_threshold_record_is_the_one_a_call_announces() {
+        let (mut reporter, _sink, mut events) = reporter("call-a");
+        feed(&mut reporter, 0, &modulated());
+
+        let announced = announcements(&mut events);
+        assert_eq!(announced.len(), 1, "{announced:?}");
+        assert_eq!(
+            announced[0],
+            VoiceThresholds::new("call-a", announced[0].at_sample(), profile()).unwrap(),
+            "the same call, the same position, and the same thresholds the analyser derived"
+        );
+    }
+
+    /// [`VoiceActivity::new`] carries every field through and invents none.
+    #[test]
+    fn a_stated_transition_carries_exactly_what_it_was_given() {
+        let activity = VoiceActivity::new("call-a", AudioDirection::Outbound, 7, 3_200, 16_000);
+        assert_eq!(activity.call_id(), "call-a");
+        assert_eq!(activity.direction(), AudioDirection::Outbound);
+        assert_eq!(activity.sequence(), 7);
+        assert_eq!(activity.at_sample(), 3_200);
+        assert_eq!(activity.sample_rate(), 16_000);
+        assert_eq!(
+            activity.at(),
+            Duration::from_millis(200),
+            "the derived offset is the position over the rate, never a clock read"
+        );
     }
 
     /// The transition an application is told about is the one the analyser found, with this call's

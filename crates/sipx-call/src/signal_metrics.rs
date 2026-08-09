@@ -69,6 +69,27 @@ pub struct SignalMetrics {
 }
 
 impl SignalMetrics {
+    /// One observation, placed on a call's timeline from its parts (`M-98`).
+    ///
+    /// Everything a call reports goes through here; this is the same construction, reachable from
+    /// outside the crate. Nothing outside could build one at all, which is why
+    /// `sipx-app-protocol`'s bridge into the application contract had no tests until `M-98` and
+    /// shipped for two releases with no arm for this event at all — `call.signal.metrics` and
+    /// `call.signal.silence` were specified, typed, round-tripped, and unreachable.
+    ///
+    /// It states, it does not measure. `observation` is carried through verbatim, so a report
+    /// handed in here claims whatever coverage it was built with — see [`measure`] for the
+    /// constructor that runs the real reducer over real samples, which is the one to reach for
+    /// when the numbers themselves are the thing under test.
+    #[must_use]
+    pub fn new(call_id: &str, direction: AudioDirection, observation: SignalObservation) -> Self {
+        Self {
+            call_id: Arc::from(call_id),
+            direction,
+            observation,
+        }
+    }
+
     /// The `Call-ID` of the call this observation belongs to (RFC 3261 §8.1.1.4).
     #[must_use]
     pub fn call_id(&self) -> &str {
@@ -96,6 +117,68 @@ impl SignalMetrics {
             _ => None,
         }
     }
+}
+
+/// Measure one contiguous run of samples exactly as a call with
+/// [`Call::report_signal_metrics`](crate::Call::report_signal_metrics) running would (`M-98`).
+///
+/// The same analyser, the same reducer, the same cadence and the same feed that keeps a live
+/// attachment honest. Only the seam is absent, and with it the media session, the runtime and the
+/// call. The samples are offered a window at a time, contiguously and with no discontinuity —
+/// which is what a call's audio arriving on time looks like — and the direction and rate are the
+/// profile's.
+///
+/// Every observation the reducer completed comes back in the order it completed, as the values the
+/// call's [`CallEvent::SignalMetrics`] events would have carried. Nothing is flushed at the end,
+/// for the same reason a live attachment flushes nothing when the call's audio finishes: a
+/// reporting period cut short covers fewer windows than it claims, and a fact measured over less
+/// than it declares is a different measurement.
+///
+/// This is what makes a *consumer* of these events testable against numbers nobody typed.
+/// `sipx-app-protocol`'s bridge into the application contract is the caller it was added for
+/// (`M-98`), which had no tests at all while there was no way to build its input. It reads no clock
+/// and awaits nothing, so the same samples give the same reports on every machine.
+///
+/// # Errors
+///
+/// [`SignalProfileError`] for a profile outside the processing contract's domains or a cadence
+/// outside `1..=`[`MAX_WINDOWS_PER_REPORT`]. Refused before anything is measured.
+pub fn measure(
+    call_id: &str,
+    profile: SignalReportProfile,
+    samples: &[i16],
+) -> Result<Vec<SignalMetrics>, SignalProfileError> {
+    // Both are validated before a sample is looked at, so a refused configuration measures nothing.
+    let mut reducer = sipx_audio::signal::SignalReporter::new(profile)?;
+    let mut feed = AudioFeed::new(AudioAnalyzer::new(profile.analysis())?);
+
+    let call_id: Arc<str> = Arc::from(call_id);
+    let direction = profile.analysis().direction();
+    let frame_samples = usize::try_from(feed.window_samples())
+        .unwrap_or(usize::MAX)
+        .max(1);
+
+    let mut produced = Vec::new();
+    let mut sequence = 0u64;
+    for frame in samples.chunks(frame_samples) {
+        let offered = feed.offer_samples(direction, sequence, None, frame);
+        sequence = sequence.saturating_add(1);
+        if !offered {
+            continue;
+        }
+        // Read after the frame was processed, exactly as `SignalMetricsReporter::report` does.
+        let window = feed.window_samples();
+        for observation in feed.drain() {
+            if let Some(signal) = reducer.observe(&observation, window) {
+                produced.push(SignalMetrics {
+                    call_id: Arc::clone(&call_id),
+                    direction,
+                    observation: signal,
+                });
+            }
+        }
+    }
+    Ok(produced)
 }
 
 /// Turns one seam attachment's frames into this call's signal-metric events.
@@ -260,6 +343,55 @@ mod tests {
             }
         }
         seen
+    }
+
+    /// [`measure`] is this module's reporter with the call taken away, and its promise is that the
+    /// observations are the same ones (`M-98`).
+    ///
+    /// Worth a test rather than a sentence, for the reason the story that added it exists: a
+    /// consumer of these events — `sipx-app-protocol`'s bridge into the application contract — had
+    /// no tests at all while nothing outside this crate could build the input, and a fixture that
+    /// measured differently from a live call would make every such test agree with the wrong thing.
+    #[test]
+    fn measuring_samples_gives_what_a_running_call_would_have_reported() {
+        // Four windows: modulated, silent, clipping, and modulated again, so the run covers a
+        // report that is active, one that is silent and one that clips rather than four alike.
+        let mut samples = Vec::new();
+        samples.extend((0..160).map(|index| if index % 2 == 0 { 8_192i16 } else { -8_192 }));
+        samples.extend([0i16; 160]);
+        samples.extend([32_767i16; 160]);
+        samples.extend((0..160).map(|index| if index % 2 == 0 { 8_192i16 } else { -8_192 }));
+
+        let (mut live, _sink, mut events) = reporter("call-a", profile());
+        for (sequence, frame) in samples.chunks(160).enumerate() {
+            feed(&mut live, u64::try_from(sequence).unwrap(), frame);
+        }
+        let reported = drained(&mut events);
+        assert_eq!(reported.len(), 4, "one report per window: {reported:?}");
+
+        assert_eq!(
+            measure("call-a", profile(), &samples).unwrap(),
+            reported,
+            "the same samples, the same analyser and the same reducer"
+        );
+    }
+
+    /// [`SignalMetrics::new`] carries every part through and invents none.
+    #[test]
+    fn a_stated_observation_carries_exactly_what_it_was_given() {
+        let observation = SignalObservation::SilenceElapsed {
+            at_sample: 320,
+            rate: 8_000,
+            epoch: 2,
+        };
+        let metrics = SignalMetrics::new("call-a", AudioDirection::Outbound, observation);
+        assert_eq!(metrics.call_id(), "call-a");
+        assert_eq!(metrics.direction(), AudioDirection::Outbound);
+        assert_eq!(*metrics.observation(), observation);
+        assert!(
+            metrics.report().is_none(),
+            "a silence transition is not a completed report"
+        );
     }
 
     /// A report reaches the application with this call's identity, the direction it measured, and

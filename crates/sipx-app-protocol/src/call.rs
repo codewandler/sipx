@@ -8,6 +8,7 @@
 //! reports; [`crate::EventKind`] is what §5.3 of the contract puts on a wire; this module is the
 //! one mapping between them, so the two cannot drift into three.
 
+use sipx_call::signal_metrics::SignalObservation;
 use sipx_call::voice::{AudioDirection as CallAudioDirection, VoiceEndCause as CallVoiceEndCause};
 use sipx_call::{CallEvent, EndCause as CallEndCause, TransferState as CallTransferState};
 
@@ -23,12 +24,91 @@ fn audio_direction(direction: CallAudioDirection) -> AudioDirection {
     }
 }
 
+/// The `sipx-call` events this bridge does not deliver, named rather than reached by falling off
+/// the end of a match (`M-98`).
+///
+/// Each is here for a reason [`event_from_call`]'s own documentation states, and the point of the
+/// set having a name is that a wildcard cannot state one. Until `M-98` this answer *was* a
+/// wildcard, and it was swallowing `CallEvent::SignalMetrics` — an event §5.3 spells twice — while
+/// claiming beside itself that the contract had no spelling for what it caught.
+fn has_no_contract_event(event: &CallEvent) -> bool {
+    matches!(
+        event,
+        CallEvent::Muted
+            | CallEvent::Unmuted
+            | CallEvent::Bridged
+            | CallEvent::Unbridged { .. }
+            | CallEvent::ApplicationRequest(_)
+    )
+}
+
+/// `M-59`'s observation stream as §5.3's two signal rows (`M-98`).
+///
+/// One `CallEvent` carries both, because `sipx-call` reports one observation stream per direction
+/// and the contract splits it into the completed report and the silence transition. Which of the
+/// two an observation is, is its own tag rather than something restated on the event.
+fn signal_event(metrics: &sipx_call::SignalMetrics) -> Option<EventKind> {
+    let direction = audio_direction(metrics.direction());
+    Some(match metrics.observation() {
+        SignalObservation::Report(report) => EventKind::SignalMetrics {
+            direction,
+            epoch: report.epoch,
+            sequence: report.sequence,
+            sample_time: report.at_sample,
+            sample_rate: report.rate,
+            samples: report.samples,
+            windows: report.windows,
+            // §10's peak is a magnitude in 0..=32,768, held in an `i32` for the arithmetic that
+            // produces it. So this is exact rather than a saturating narrowing: there is no
+            // negative value to lose and none above the range to clamp.
+            peak: report.peak.unsigned_abs(),
+            rms: report.rms,
+            clipped_samples: report.clipped_samples,
+            clipping_windows: report.clipping_windows,
+            active_windows: report.active_windows,
+            silent_windows: report.silent_windows,
+        },
+        SignalObservation::SilenceElapsed {
+            at_sample,
+            rate,
+            epoch,
+        } => EventKind::SignalSilence {
+            direction,
+            epoch: *epoch,
+            sample_time: *at_sample,
+            sample_rate: *rate,
+        },
+        // A reset, and the marker for observations the analyser's bounded queue coalesced away,
+        // are its own bookkeeping and §5.3 has a row for neither. A reset is already visible to an
+        // application as the `epoch` the next report names, and observations the analyser absorbed
+        // are a different loss from the event stream's, which `CallEvents::dropped` counts for the
+        // consumer that suffered it. The vocabulary is `#[non_exhaustive]`, so this also covers an
+        // observation kind added after this arm was written.
+        _ => return None,
+    })
+}
+
 /// One `sipx-call` event as a contract event (§5.3).
 ///
-/// `None` for the events §5.3 has no type for, and that is not a gap: `M-18`'s
-/// [`CallEvent::Muted`] and [`CallEvent::Unmuted`] surface to a remote app as `media.muted` on the
-/// next snapshot (§5.2) rather than as an event of their own, so a driver feeds those to the
-/// interpreter as [`crate::Input::MediaGate`] instead.
+/// `None` means **this event is not delivered to the app**, and every case of it is named below
+/// rather than reached by falling off the end. That distinction is not pedantry: `M-59` shipped
+/// `call.signal.metrics` and `call.signal.silence` — the §5.3 rows, the [`EventKind`] variants and
+/// the wire round trip — and no arm here, so for two releases a wildcard documented as "the
+/// contract has no spelling for this" was swallowing two events the contract spelled, and no host
+/// could emit either. `M-98` closed that arm and made this function testable at all; the derived
+/// test in `tests/spec_tables.rs` is what keeps the next one from getting the same silence.
+///
+/// The three reasons an event yields `None`, none of which is "unfinished":
+///
+/// - **§5.2, not §5.3.** `M-18`'s [`CallEvent::Muted`] and [`CallEvent::Unmuted`] surface to a
+///   remote app as `media.muted` on the next snapshot rather than as an event of their own, so a
+///   driver feeds those to the interpreter as [`crate::Input::MediaGate`] instead.
+/// - **The contract's field is not on the call's event.** `C-6`'s bridge events name no other leg,
+///   deliberately, and §5.3's `call.bridged` and `call.unbridged` are about exactly that leg — so
+///   the driver, which made the coupling, is what can say which call it was made to.
+/// - **The contract has no row.** An in-dialog INFO or MESSAGE
+///   ([`CallEvent::ApplicationRequest`]) is an owned request somebody must answer or drop, and a
+///   `#[non_exhaustive]` vocabulary may add a variant this function was written before.
 ///
 /// The correlation ids §5.3 asks for are the caller's to supply. `sipx-call` names a playback by
 /// its own `PlaybackId` and a recording by nothing at all, whereas the contract names both by the
@@ -36,6 +116,9 @@ fn audio_direction(direction: CallAudioDirection) -> AudioDirection {
 /// knows which instruction a handle belongs to, passes it in.
 #[must_use]
 pub fn event_from_call(event: &CallEvent, instruction_id: &str) -> Option<EventKind> {
+    if has_no_contract_event(event) {
+        return None;
+    }
     Some(match event {
         CallEvent::Ringing { reliable } => EventKind::Ringing {
             reliable: *reliable,
@@ -94,6 +177,8 @@ pub fn event_from_call(event: &CallEvent, instruction_id: &str) -> Option<EventK
                 thresholds: wire,
             }
         }
+        // `M-59`'s two rows, reachable only since `M-98`.
+        CallEvent::SignalMetrics(metrics) => return signal_event(metrics),
         CallEvent::PlaybackFinished { completed, .. } => EventKind::PlaybackFinished {
             instruction_id: instruction_id.to_owned(),
             completed: *completed,
@@ -127,7 +212,13 @@ pub fn event_from_call(event: &CallEvent, instruction_id: &str) -> Option<EventK
         CallEvent::Ended(cause) => EventKind::Ended {
             cause: match cause {
                 CallEndCause::LocalHangup => EndCause::Hangup,
-                CallEndCause::RemoteBye => EndCause::Remote,
+                // Both far-end endings are §5.3's one `remote` cause, which is what `C-3`'s own
+                // documentation of `RemoteCancel` says they are. It is kept distinct in `sipx-call`
+                // because an in-process host matching on that enum has to tell "stop ringing" from
+                // "hang up"; the contract does not, and reporting a withdrawn invitation as `error`
+                // would tell an application the host could not go on when the far end simply
+                // changed its mind (`M-98`).
+                CallEndCause::RemoteBye | CallEndCause::RemoteCancel => EndCause::Remote,
                 CallEndCause::Rejected { status } => EndCause::Rejected { status: *status },
                 CallEndCause::Timeout => EndCause::Timeout,
                 // `C-3`'s enum is `#[non_exhaustive]`. A cause added there that §5.3 has no
@@ -136,9 +227,10 @@ pub fn event_from_call(event: &CallEvent, instruction_id: &str) -> Option<EventK
                 _ => EndCause::Error,
             },
         },
-        // `Muted`/`Unmuted` are §5.2, not §5.3, and `CallEvent` is `#[non_exhaustive]`, so an
-        // event C-3 adds that the contract has no spelling for is silently not an app event
-        // rather than a guess. Both cases are "nothing to deliver"; see this function's own docs.
+        // A variant `C-3` grew after this bridge was written, and nothing else: every event
+        // `sipx-call` spells today either has an arm above or is named in
+        // [`has_no_contract_event`]. Not delivered, rather than guessed at — and
+        // `tests/spec_tables.rs` is what makes the contract's half of that a red build.
         _ => return None,
     })
 }
