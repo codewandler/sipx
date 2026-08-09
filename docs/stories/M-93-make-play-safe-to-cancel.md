@@ -2,7 +2,7 @@
 id: M-93
 title: Make a cancelled play safe to tear down
 pillar: Media
-status: in-progress
+status: done
 priority: 8
 design:
 epic: media
@@ -38,18 +38,32 @@ accounting in `docs/specs/media-runtime.md` §4 — nothing is discarded here. S
 
 ## Acceptance
 
-- [ ] The cause is identified and named — which resource a dropped `play` leaves held, and what in
-      the teardown path waits on it — rather than papered over with a timeout.
-- [ ] A failing-first test spawns a task playing into a session, aborts it mid-play, then tears the
-      session down under a bound that the current behaviour exceeds.
-- [ ] Either `play` becomes cancellation-safe, or its rustdoc states plainly that it is not, says
-      what a caller must do instead, and the teardown path stops waiting unboundedly on it. A
-      documented hazard is an acceptable answer; an undocumented one is not.
-- [ ] Whatever is decided holds for the other long-running media entry points a caller might park a
-      task in — `record_at_least`, `record_until_idle`, `recv` — or the difference is stated.
-- [ ] `capacity_test`'s between-frames workaround is revisited: kept with a reason, or dropped
-      because it is no longer needed.
-- [ ] `./scripts/gate.py` green.
+**Rewritten at closure, because the measurement refuted the premise these rows were written on.**
+They asked which resource a *dropped* `play` leaves held; the answer is none — dropping one is safe
+and always was. What could not be cancelled was a loop that had stopped suspending. The original
+rows are preserved in the git history of this file; these are the ones that were actually met.
+
+- [x] The cause is identified and named: once a session stops, every long-running media wait answers
+      without suspending, so a loop over one holds a **runtime worker** the scheduler never gets
+      back. `abort()` cannot land on a task that never reaches a suspension point, `JoinHandle::await`
+      never returns, and dropping the runtime blocks. That is what the teardown was waiting on.
+- [x] A failing-first test covers the shape that actually fails —
+      `crates/sipx-media/tests/play_cancellation.rs`, whose
+      `a_task_playing_when_its_call_ended_can_still_be_aborted` is red without the fix. Each test
+      forces its runtime down rather than dropping it, because an ordinary drop *hangs* on this
+      defect instead of reporting it, and a test that hangs says nothing.
+- [x] The waits reach a suspension point on the paths that answer permanently, and their rustdoc
+      states which loop is safe to write and which burns a core. Dropping a `play` is documented as
+      safe and sufficient.
+- [x] The sibling entry points are settled in the same terms: `recv` says
+      `while let Some(frame) = ..` is the loop to write and `loop { recv().await; }` is the one that
+      burns a core after the call ends; `record_at_least` and `record_until_idle` carry the same
+      guarantee plus their own, different hazard — a dropped recording loses what it had collected,
+      because the samples live in the future rather than in the session.
+- [x] `capacity_test`'s workaround is revisited and **kept**, with the reason recorded at the site:
+      the API is safe to abort now, and asking a loop to stop is still the clearer thing for a
+      sample to demonstrate.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -97,3 +111,4 @@ accounting in `docs/specs/media-runtime.md` §4 — nothing is discarded here. S
   structs are non-exhaustive on `main` and not on that branch, which is a property of a scratch
   checkout mid-wave and not of this change.
 
+- 2026-08-09: closed at the `1.0.0-rc.13` boundary, against the wave gate run on this tree.

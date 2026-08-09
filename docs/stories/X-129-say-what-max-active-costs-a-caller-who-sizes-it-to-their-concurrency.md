@@ -2,7 +2,7 @@
 id: X-129
 title: Say what --max-active costs a caller who sizes it to their concurrency
 pillar: Quality
-status: in-progress
+status: done
 priority: 4
 design:
 epic:
@@ -28,7 +28,7 @@ machine — so the 503s they see are a number they chose rather than a defect th
 - [x] The guidance names the headroom that avoids it and what the headroom is *for*, rather than a
       number to copy.
 - [x] Whatever artifact is generated from the CLI help stays in sync.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Notes
 
@@ -125,3 +125,4 @@ question than this story; if that is ever wanted it should be filed on its own e
   says "the generator's concurrency setting" and the reference row keeps the literal flag, which is
   where a reader needs it. That is a workaround; `X-131` is the fix.
 
+- 2026-08-09: closed at the `1.0.0-rc.13` boundary, against the wave gate run on this tree.

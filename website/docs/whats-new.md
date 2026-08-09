@@ -1,13 +1,39 @@
 ---
 title: What's new
-description: Release highlights and adoption notes for the sipx 1.0.0-rc.12 release candidate.
+description: Release highlights and adoption notes for the sipx 1.0.0-rc.13 release candidate.
 ---
 
 # What's new
 
 <!-- BEGIN generated:release-heading -->
-## 1.0.0-rc.12 — 2026-08-08
+## 1.0.0-rc.13 — 2026-08-09
 <!-- END generated:release-heading -->
+
+RC.13 is four defects that only a measurement would have found, and one thing an operator had no way
+to know.
+
+```bash
+cargo install --locked --version =1.0.0-rc.13 sipx-cli
+```
+
+- **A task playing audio into a call that has ended can be stopped again.** Once a session stops,
+  the media waits answer immediately without suspending — so a play loop outliving its call became a
+  busy loop, and a task that never suspends cannot be cancelled at all. It held a runtime worker
+  that nothing could take back. Found by a capacity test that sat at sixteen cores for ten minutes
+  after it had already finished measuring.
+- **A load run reaches a target's second address again.** Every candidate now gets its own
+  `Call-ID` and `From` tag, instead of the second one arriving as a merged request and being
+  refused `482`.
+- **One implementation of the frame-is-one-message rule**, shared by the WebSocket transport and the
+  browser kernel, with the vectors read out of the spec by both so a copy that drifts fails.
+- **`load-responder --max-active` says what it costs to size it to a generator's concurrency** — the
+  responder frees a slot only after answering the BYE, the generator retires on the same 200, and at
+  an equal ceiling calls are refused by design.
+- **Breaking: the media surface's public-field structs are `#[non_exhaustive]` with constructors**,
+  or documented as complete. Use `T::new(..)` or `T::default()` and assign; `..Default::default()`
+  no longer reaches across a crate boundary.
+
+## 1.0.0-rc.12 — 2026-08-08
 
 RC.12 is about things that were quietly wrong rather than visibly broken: a frame the browser kernel
 truncated without saying so, a load run that under-counted every time, and dead code no Linux gate
@@ -689,5 +715,5 @@ answer calls, but application callback bindings are not implemented.
 This website is built from `main`, so a page or API link may describe work newer than the tagged
 release. Use the exact crates.io version when reproducibility matters, and consult the
 [complete changelog](https://github.com/codewandler/sipx/blob/main/CHANGELOG.md) before updating a
-Git revision. Unreleased behavior is not part of `1.0.0-rc.12` merely because it appears on this
+Git revision. Unreleased behavior is not part of `1.0.0-rc.13` merely because it appears on this
 site.

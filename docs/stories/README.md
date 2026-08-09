@@ -76,10 +76,7 @@ appeared twice before anyone named it.
 - [M-60 — Calibrate and adapt audio-activity thresholds deterministically](M-60-calibrate-audio-activity-thresholds.md) · Media · after M-58 and M-59 · bounded adaptation with observable reset and limits
 - [M-70 — Accept multiplexed browser offers with unused component candidates](M-70-accept-multiplexed-browser-offers-with-unused-component-candidates.md) · Media · external review finding 9 · a second browser engine reaches SDP then fails the multiplexed profile
 - [M-72 — Prove the AEAD SRTP key derivation against an independent peer](M-72-prove-the-aead-srtp-key-derivation-against-a-peer.md) · Media · RFC 7714 publishes no KDF vector · a wrong salt placement makes two sipx endpoints interoperate with each other and nobody else, and every round-trip test still passes
-- [M-92 — Give the remaining public-field structs a constructor, then mark them](M-92-give-the-remaining-public-field-structs-a-constructor.md) · Media · M-80's struct guard holds 6 types; 155 reachable public-field structs workspace-wide and 29 on the media surface are still literal-constructible
-- [S-54 — One framing rule for both WebSocket message parsers](S-54-one-framing-rule-for-both-websocket-parsers.md) · Session · S-53 left the RFC 7118 §5 rule implemented twice · ws.rs already warns about exactly this
 - [T-33 — Bind browser WebSocket signalling](T-33-bind-browser-websocket-signalling.md) · Transport · after A-16 and S-41 · browser owns I/O, WASM core consumes bytes
-- [T-45 — Give each load candidate its own call identity](T-45-give-each-load-candidate-its-own-call-identity.md) · Transport · load's signalling workload reuses one Call-ID and From tag across every address of a target, so a second candidate arrives at the same server as a merged request
 - [X-93 — Make protected release evidence faster without weakening it](X-93-make-protected-release-evidence-faster.md) · Build · measure cache and preflight changes against the 12m37 cold beta gate · follow-up
 
 ## Next (ready — take the top one unless the user named a story)
@@ -90,7 +87,6 @@ appeared twice before anyone named it.
 
 ### Media
 _Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
-- [M-93 — Make a cancelled play safe to tear down](M-93-make-play-safe-to-cancel.md) · Media · aborting a task parked in MediaSession::play wedges hang_up · ten calls took over 90 s to tear down, four without
 - [M-83 — Extend the extensibility guard past the media path](M-83-extend-the-reachability-guard-past-the-media-path.md) · Media · 98 reachable public enums outside the guarded five crates · the boundary names crates, so no enum is individually excused
 - [M-96 — Fix the preamble reader's off-by-one](M-96-fix-the-preamble-reader-off-by-one.md) · Media · an item at byte 0 with no blank line above it loses the first character of its preamble · cannot fire on this tree, which is why it needs a test rather than a reader
 
@@ -99,7 +95,8 @@ _Signalling that cannot carry audio is a curiosity. The media layer is also wher
 - [T-24 — Discover SIP endpoints on the local link](T-24-discover-on-the-local-link.md) · Transport · blocked on a scope decision — mDNS is a second protocol and a new parser eating unauthenticated multicast
 
 ## Backlog
-- [X-129 — Say what --max-active costs a caller who sizes it to their concurrency](X-129-say-what-max-active-costs-a-caller-who-sizes-it-to-their-concurrency.md) · Quality · load-responder sheds calls by design when --max-active equals the generator's concurrency, and nothing tells the operator sizing a run
+- [X-130 — The generated-media load pair test now sheds a call too](X-130-the-generated-media-load-pair-test-now-sheds-a-call-too.md) · Quality · generated_media_load_pair_retains_the_rtp_workload runs --concurrency 2 against --max-active 2 and was observed rejecting one of four calls in a full cli suite run
+- [X-131 — Help prose cannot name another command's flag](X-131-help-prose-cannot-name-another-commands-flag.md) · Quality · check-cli-reference reads --flag tokens out of a command's whole help text, so a cross-reference in prose reads as an undocumented option
 
 ### The application host
 _The [app-sdk](https://github.com/codewandler/sipx/blob/main/docs/designs/app-sdk.md) epic ends where a process has to exist: something must hold real_
@@ -278,6 +275,8 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [M-82 — Say what a forwarded extension means to a peer that negotiated none](M-82-say-what-a-forwarded-extension-means-to-a-peer.md) · Media · sipx negotiates no extmap and now forwards element identifiers verbatim across a bridge
 - [M-85 — Refuse a header extension that disagrees with itself, at the send boundary](M-85-refuse-a-self-inconsistent-header-extension.md) · Media · M-81 counted the packets SRTP refuses · the in-bounds case is refused by nothing, and sends media octets outside the encryption
 - [M-90 — Decide, before the freeze, whether a counter nothing can reach stays published](M-90-decide-the-fate-of-a-counter-nothing-can-reach.md) · Media · M-85 closed the only route to srtp_protect_failures · a published field that can no longer rise is the thing §4 argues against
+- [M-92 — Give the remaining public-field structs a constructor, then mark them](M-92-give-the-remaining-public-field-structs-a-constructor.md) · Media · M-80's struct guard holds 6 types; 155 reachable public-field structs workspace-wide and 29 on the media surface are still literal-constructible
+- [M-93 — Make a cancelled play safe to tear down](M-93-make-play-safe-to-cancel.md) · Media · aborting a task parked in MediaSession::play wedges hang_up · ten calls took over 90 s to tear down, four without
 - [P-1 — Build the CLI scaffold and machine-readable output](P-1-cli-scaffold-and-output.md) · Phone
 - [P-2 — Implement `sipx register`](P-2-cli-register.md) · Phone
 - [P-3 — Implement `sipx dial`](P-3-cli-dial.md) · Phone
@@ -360,6 +359,7 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [S-51 — Expose lossless Warning-agent editing](S-51-expose-lossless-warning-agent-editing.md) · Signalling · requested by sipx-clstr CX-17 — parser-owned warn-agent replacement retaining code and text
 - [S-52 — Document what an SDP round trip loses](S-52-document-what-an-sdp-round-trip-loses.md) · Signalling · parse plus to_string_sdp is lossy in ways nothing states · harmless for a description sipx authors, fatal for one it relays
 - [S-53 — Refuse coalesced SIP at the browser kernel's byte input](S-53-refuse-coalesced-sip-at-the-browser-kernel-byte-input.md) · Session · found by T-33 · sip-tls.md §4 says close, the kernel silently truncates
+- [S-54 — One framing rule for both WebSocket message parsers](S-54-one-framing-rule-for-both-websocket-parsers.md) · Session · S-53 left the RFC 7118 §5 rule implemented twice · ws.rs already warns about exactly this
 - [T-1 — Specify the transport layer and the sans-IO driver contract](T-1-transport-spec.md) · Signalling · gates every other transport story
 - [T-2 — Implement the UDP transport and the loopback harness](T-2-udp-transport.md) · Signalling
 - [T-3 — Implement the TCP transport with connection pooling and reuse](T-3-tcp-transport-and-pool.md) · Signalling
@@ -400,6 +400,7 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [T-41 — Report the candidates a connection failure attempted](T-41-report-the-candidates-a-connection-failure-attempted.md) · Transport · the spec's ConnectionFailed promises how many candidates were attempted; only the last error reaches the operator
 - [T-42 — Take the shared candidate pass in dial, load and scenario](T-42-take-the-shared-pass-in-dial-load-and-scenario.md) · Transport · five hand-rolled candidate loops remain across dial, load and scenario; three of them count no attempts, so their connection failures cannot say how far they got
 - [T-44 — Stop the last admitted load call racing its own cleanup](T-44-stop-the-last-admitted-load-call-racing-its-own-cleanup.md) · Transport · reaching the call bound requests cleanup immediately, so the call that reached it is cancelled mid-setup and `load --calls 1` can never report a connected call
+- [T-45 — Give each load candidate its own call identity](T-45-give-each-load-candidate-its-own-call-identity.md) · Transport · load's signalling workload reuses one Call-ID and From tag across every address of a target, so a second candidate arrives at the same server as a merged request
 - [X-1 — Scaffold the Cargo workspace, lint policy, licensing and CI](X-1-workspace-scaffold.md) · Core
 - [X-2 — Import the RFC 4475 torture corpus and its harness](X-2-rfc4475-torture-corpus.md) · Core
 - [X-3 — Enforce the provenance policy in CI and pre-commit](X-3-provenance-gate.md) · Core
@@ -504,6 +505,7 @@ _The delivered A-22 bridge lets one routed call exchange bounded G.711 audio wit
 - [X-124 — Stop the gate leaving a default-feature binary](X-124-stop-the-gate-leaving-a-default-feature-binary.md) · Build · check-cli-reference builds sipx-cli with default features after the all-features test step, so every gate run ends by leaving a binary the next run's tests will spawn
 - [X-125 — See what only the non-Linux jobs compile](X-125-see-what-only-the-non-linux-jobs-compile.md) · Build · two CI jobs were red for a day over a cfg that disagreed with its only caller · the Linux gate compiles the caller, so it cannot see it
 - [X-126 — The default load pair test rejects a call under suite contention](X-126-the-default-load-pair-test-rejects-a-call-under-suite-contention.md) · Quality · default_load_pair_completes_the_requested_signalling_workload fails intermittently in the full cli suite — the responder 503s one call at max_active, connecting 19 of 20
+- [X-129 — Say what --max-active costs a caller who sizes it to their concurrency](X-129-say-what-max-active-costs-a-caller-who-sizes-it-to-their-concurrency.md) · Quality · load-responder sheds calls by design when --max-active equals the generator's concurrency, and nothing tells the operator sizing a run
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

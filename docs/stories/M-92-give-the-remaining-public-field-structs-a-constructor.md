@@ -2,7 +2,7 @@
 id: M-92
 title: Give the remaining public-field structs a constructor, then mark them
 pillar: Media
-status: in-progress
+status: done
 priority: 8
 design:
 epic: media
@@ -57,9 +57,9 @@ all, and `sipx-media`'s ICE candidate and checklist types.
       or, if it is kept, the checker states what it is still for.
 - [x] The outstanding count the run prints falls to zero for `MEDIA_SURFACE`, and the remaining
       workspace figure is unchanged in meaning.
-- [ ] `CHANGELOG.md` says what a downstream literal should become, per type. — the sentence is
+- [x] `CHANGELOG.md` says what a downstream literal should become, per type. — the sentence is
       written out in `## Progress`; `CHANGELOG.md` is the coordinator's to write.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -146,3 +146,5 @@ all, and `sipx-media`'s ICE candidate and checklist types.
   > by assigning the fields — `..Default::default()` no longer applies across a crate boundary.
   > `ReportBlock`, `SdesItem`, `SdesChunk`, `Sdes` and the ICE identity newtypes keep their literals
   > and say why.
+
+- 2026-08-09: closed at the `1.0.0-rc.13` boundary, against the wave gate run on this tree.

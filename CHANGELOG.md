@@ -7,6 +7,49 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0-rc.13] — 2026-08-09
+
+Five stories, four of them defects found by measuring rather than by reading: a play loop that could
+not be cancelled after its call ended, a candidate pass refused as a merged request, a framing rule
+living in two places, and an admission ceiling nobody was warned about.
+
+### Fixed
+
+- **A task playing audio into a call that has ended can be stopped again.** Once a session stops,
+  every long-running media entry point answers immediately *without suspending*, so a
+  `loop { play().await }` outliving its call became a bare busy loop — and a task that never reaches
+  a suspension point cannot be cancelled at all: `abort()` never lands, `JoinHandle::await` never
+  returns, and even dropping the runtime blocks. The resource held was a runtime worker. The waits
+  now reach a suspension point on the paths that answer permanently, while a clip that genuinely
+  ended still reports in the order the clips ended.
+
+- **`sipx load --mode signalling` gives every address of a target its own `Call-ID` and `From` tag**,
+  so a name whose addresses lead to one server is reachable at the second when the first fails,
+  instead of being refused `482` as a merged request (RFC 3261 §8.2.2.2).
+
+### Added
+
+- **`sipx_sip::parse_frame`** parses the one SIP message a self-delimiting frame carries and refuses
+  a frame holding anything else, with the new `FramingError::NotExactlyOneMessage`. It is the single
+  implementation of RFC 7118 §5's framing rule, which the WebSocket transport and the browser kernel
+  each used to carry a copy of; seven vectors in `docs/specs/sip-tls.md` §6.1 are read by both
+  callers at compile time, so a copy that drifts fails the row it disagrees with.
+
+- **`load-responder --max-active` says what sizing it to a generator's concurrency costs.** A slot is
+  released only after the responder has answered that dialog's BYE, while the generator retires on
+  the same 200 — so at an equal ceiling the two overlap and calls are refused. The guidance names
+  twice the generator's concurrency as the worst case and says a refusal at the ceiling is admission
+  control holding its contract, not a defect.
+
+### Changed
+
+- **Breaking: every public-field struct on the media surface is `#[non_exhaustive]` with a
+  constructor, or documented as complete.** A downstream literal becomes `SenderReport::new(..)`,
+  `ReceiverReport::new(..)`, `Quality::new(..)` (which now computes `mos` rather than taking it),
+  `LocalCandidate::new(..)`, `SrtpKeys::new(..)` and their siblings, or `T::default()` with the
+  fields assigned — `..Default::default()` no longer applies across a crate boundary. `ReportBlock`,
+  the SDES types and the ICE identity newtypes keep their literals and say why.
+
 ## [1.0.0-rc.12] — 2026-08-08
 
 Six stories: a coalesced frame the browser kernel used to truncate silently, a bounded load run that
@@ -4154,7 +4197,8 @@ Stated so nobody has to discover it from a stack trace:
 - **Interop is verified against Kamailio only.** A second implementation with different
   opinions — Asterisk, as a B2BUA rather than a proxy — has not been tried.
 
-[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.12...HEAD
+[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.13...HEAD
+[1.0.0-rc.13]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.12...v1.0.0-rc.13
 [1.0.0-rc.12]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.11...v1.0.0-rc.12
 [1.0.0-rc.11]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.10...v1.0.0-rc.11
 [1.0.0-rc.10]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.9...v1.0.0-rc.10

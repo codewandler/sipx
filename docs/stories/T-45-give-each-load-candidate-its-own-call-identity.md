@@ -2,7 +2,7 @@
 id: T-45
 title: Give each load candidate its own call identity
 pillar: Transport
-status: in-progress
+status: done
 priority: 3
 design: docs/designs/endpoint-resolution.md
 epic: endpoint-resolution
@@ -27,7 +27,7 @@ first address is dead is reachable at the second even when both addresses lead t
       address refuses, is connected rather than answered `482 Loop Detected`.
 - [x] The run's reproducibility is unchanged — the identity stays derived from `--seed` and the
       call index, with the candidate position as the only new input.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -94,3 +94,4 @@ first address is dead is reachable at the second even when both addresses lead t
   name whose addresses lead to one server is reachable at the second when the first one fails
   instead of being refused `482 Loop Detected` as a merged request (RFC 3261 §8.2.2.2).*
 
+- 2026-08-09: closed at the `1.0.0-rc.13` boundary, against the wave gate run on this tree.

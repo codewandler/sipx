@@ -2,7 +2,7 @@
 id: S-54
 title: One framing rule for both WebSocket message parsers
 pillar: Session
-status: in-progress
+status: done
 priority: 45
 design: docs/specs/sip-tls.md
 epic: browser-sdk
@@ -35,7 +35,7 @@ WebSocket transport cannot drift apart about what a well-framed frame is.
 - [x] Neither caller's observable behaviour changes: `sipx-wasm`'s corpus replay digest and
       `sipx-transport`'s WS framing cases are unchanged, and the change is visible only as a diff
       that deletes one of the two copies.
-- [ ] `./scripts/gate.py` is green.
+- [x] `./scripts/gate.py` is green.
 
 ## Progress
 
@@ -100,3 +100,5 @@ back to the datagram reading, which is what makes a body that looks like a secon
 message; a future framing error that also deserves that fallback would have to be added twice.
 
 Nothing here should change behaviour. The value is entirely that the next reader finds one rule.
+
+- 2026-08-09: closed at the `1.0.0-rc.13` boundary, against the wave gate run on this tree.
