@@ -31,14 +31,16 @@ fn audio_direction(direction: CallAudioDirection) -> AudioDirection {
 /// set having a name is that a wildcard cannot state one. Until `M-98` this answer *was* a
 /// wildcard, and it was swallowing `CallEvent::SignalMetrics` — an event §5.3 spells twice — while
 /// claiming beside itself that the contract had no spelling for what it caught.
+///
+/// `M-99` took [`CallEvent::Bridged`] and [`CallEvent::Unbridged`] back out of this set. They were
+/// here because §5.3's rows name the other `leg` and `C-6`'s events do not carry it — but that is a
+/// missing *name*, not a missing event, and this function already had an answer for a name only the
+/// caller knows. Membership here means the contract says nothing about an event; it never meant the
+/// contract said something this function had not been given enough to say.
 fn has_no_contract_event(event: &CallEvent) -> bool {
     matches!(
         event,
-        CallEvent::Muted
-            | CallEvent::Unmuted
-            | CallEvent::Bridged
-            | CallEvent::Unbridged { .. }
-            | CallEvent::ApplicationRequest(_)
+        CallEvent::Muted | CallEvent::Unmuted | CallEvent::ApplicationRequest(_)
     )
 }
 
@@ -103,19 +105,37 @@ fn signal_event(metrics: &sipx_call::SignalMetrics) -> Option<EventKind> {
 /// - **§5.2, not §5.3.** `M-18`'s [`CallEvent::Muted`] and [`CallEvent::Unmuted`] surface to a
 ///   remote app as `media.muted` on the next snapshot rather than as an event of their own, so a
 ///   driver feeds those to the interpreter as [`crate::Input::MediaGate`] instead.
-/// - **The contract's field is not on the call's event.** `C-6`'s bridge events name no other leg,
-///   deliberately, and §5.3's `call.bridged` and `call.unbridged` are about exactly that leg — so
-///   the driver, which made the coupling, is what can say which call it was made to.
+/// - **The caller did not name the coupling.** `C-6`'s bridge events say the media started or
+///   stopped crossing and not what it crossed to; §5.3's rows require the other `leg`. A caller
+///   that passes no `bridged_leg` is a host that coupled media outside §6.2's `bridge` verb, and it
+///   has no contract name to put there — inventing one would be worse than saying nothing.
 /// - **The contract has no row.** An in-dialog INFO or MESSAGE
 ///   ([`CallEvent::ApplicationRequest`]) is an owned request somebody must answer or drop, and a
 ///   `#[non_exhaustive]` vocabulary may add a variant this function was written before.
 ///
-/// The correlation ids §5.3 asks for are the caller's to supply. `sipx-call` names a playback by
-/// its own `PlaybackId` and a recording by nothing at all, whereas the contract names both by the
-/// **app's** instruction id (§6.1) — so the driver, which is what issued the effect and therefore
-/// knows which instruction a handle belongs to, passes it in.
+/// # What the caller supplies, and why
+///
+/// The names §5.3 asks for that a call's own events do not carry are the caller's, because the
+/// caller is what issued the instruction they belong to:
+///
+/// - `instruction_id` — `sipx-call` names a playback by its own `PlaybackId` and a recording by
+///   nothing at all, whereas the contract names both by the **app's** instruction id (§6.1).
+/// - `bridged_leg` — the name the app gave the other leg in its `bridge` instruction (§6.2), which
+///   the interpreter carries on [`crate::Effect::Bridge`]. `None` when this call is not coupled.
+///   A driver must keep the name until the [`CallEvent::Unbridged`] it produces has been mapped:
+///   the contract reports the coupling *ending* with the same leg it reported it beginning with,
+///   and §6.2 ends a bridge on `unbridge` **or either leg ending**, so the last thing to hold the
+///   name is not always the thing that dropped the coupling.
+///
+/// `M-99` is why the bridge rows are here rather than left to a driver. The *fact* is the call's
+/// alone: [`sipx_call::UnbridgeCause::PeerEnded`] is §6.2's "either leg ending", and a driver
+/// watching only its own instructions could not tell that from the coupling it broke itself.
 #[must_use]
-pub fn event_from_call(event: &CallEvent, instruction_id: &str) -> Option<EventKind> {
+pub fn event_from_call(
+    event: &CallEvent,
+    instruction_id: &str,
+    bridged_leg: Option<&str>,
+) -> Option<EventKind> {
     if has_no_contract_event(event) {
         return None;
     }
@@ -206,6 +226,20 @@ pub fn event_from_call(event: &CallEvent, instruction_id: &str) -> Option<EventK
                 // `failed` would have the application act on an outcome that has not happened.
                 _ => TransferState::Trying,
             },
+        },
+        // `C-6`'s coupling, as §5.3's two rows (`M-99`). The leg is the caller's — see above — and
+        // an unnamed coupling is the one case here that yields `None` for a row the contract does
+        // spell, which is why `bridged_leg` is an `Option` a driver has to answer rather than a
+        // string it can leave empty.
+        CallEvent::Bridged => EventKind::Bridged {
+            leg: bridged_leg?.to_owned(),
+        },
+        // §5.3's `call.unbridged` carries the leg and nothing else. Why the coupling ended is
+        // `sipx-call`'s [`sipx_call::UnbridgeCause`], which the contract has no word for: an app
+        // learns that the far leg hung up from that leg's own `call.ended`, and a second spelling
+        // of it here is a second thing that can disagree.
+        CallEvent::Unbridged { .. } => EventKind::Unbridged {
+            leg: bridged_leg?.to_owned(),
         },
         CallEvent::Hold => EventKind::Hold,
         CallEvent::Resumed => EventKind::Resumed,

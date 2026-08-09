@@ -472,17 +472,25 @@ impl DocumentCall {
             }
             other => {
                 let id = self.interpreter.running().unwrap_or("");
-                sipx_app_protocol::event_from_call(&other, id).map_or_else(Vec::new, |event| {
-                    if matches!(event, EventKind::Ended { .. }) {
-                        self.terminal = true;
-                        // A pending INVITE's CANCEL transaction and 487 have already been
-                        // answered by the dispatcher. Release its route now; retaining it
-                        // would make `run` wait for a second event that can never exist.
-                        self.invitation_events = None;
-                        self.invitation = None;
-                    }
-                    self.interpreter.handle(timestamp(), Input::Event(event))
-                })
+                // No coupled leg to name: this driver refuses `Effect::Bridge` along with the rest
+                // of the operations phase 1 has no host facilities for (see `perform`), so it never
+                // makes a coupling and a `CallEvent::Bridged` cannot reach it. A driver that
+                // performs the effect passes the `leg` the interpreter put on it, and §5.3's
+                // `call.bridged` and `call.unbridged` come out here (`M-99`).
+                sipx_app_protocol::event_from_call(&other, id, None).map_or_else(
+                    Vec::new,
+                    |event| {
+                        if matches!(event, EventKind::Ended { .. }) {
+                            self.terminal = true;
+                            // A pending INVITE's CANCEL transaction and 487 have already been
+                            // answered by the dispatcher. Release its route now; retaining it
+                            // would make `run` wait for a second event that can never exist.
+                            self.invitation_events = None;
+                            self.invitation = None;
+                        }
+                        self.interpreter.handle(timestamp(), Input::Event(event))
+                    },
+                )
             }
         }
     }
