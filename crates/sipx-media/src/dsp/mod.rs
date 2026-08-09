@@ -1,0 +1,216 @@
+//! Bounded DSP graphs attached to live calls
+//! ([`docs/specs/call-dsp-graph.md`](../../../docs/specs/call-dsp-graph.md), `M-64`).
+//!
+//! [`sipx_audio::dsp`] defines what one processor is: a synchronous, sans-I/O frame transform that
+//! owns no socket, no clock, no thread and none of the memory it works in. This module is what
+//! attaches an ordered chain of them to a running call, and it inherits that contract rather than
+//! reinterpreting it.
+//!
+//! Three properties shape everything here.
+//!
+//! **A graph runs at `M-54`'s tap points and adds no second one.** Outbound, it runs in the send
+//! loop after the mute gate and before encoding; inbound, at the jitter buffer's output after
+//! decode. It runs *before* the seam offers the frame, so
+//! [`crate::processing`]'s own sentences stay true rather than becoming false: the outbound tap
+//! still reports the samples that actually become RTP and the inbound tap still reports what
+//! [`MediaSession::recv`](crate::MediaSession::recv) sees.
+//!
+//! **One frame sees one generation, entire.** The graph's state is taken once per frame and
+//! released once per frame, so a replacement, a bypass or a teardown is applied *between* frames.
+//! There is no frame that saw stage 1 of one generation and stage 2 of the next, and none that saw
+//! one stage's old parameters beside another's new ones. Every change is reported as a typed
+//! [`GraphTransition`] naming the generation and the position it took effect at.
+//!
+//! **Teardown is a barrier, not a wait.** Detach, a fail-closed failure, `stop()`, `shutdown()` and
+//! drop all reach [`GraphBarrier`], and it is clear only when the graph holds zero workers, zero
+//! frames in flight, zero retained positions and zero processors. Nothing here is observed by
+//! waiting a fixed duration.
+//!
+//! # What attaching a graph promises, per profile
+//!
+//! A graph is **only as contained as its least contained stage**, and
+//! [`DspGraph::contains_overrun`] is the conjunction over its stages. It is not configurable and no
+//! measurement changes it:
+//!
+//! - every stage [`ProvenInline`] or [`SupervisedIsolated`] — over-budget work in this graph cannot
+//!   stall RTP. For a supervised stage that is because the media worker never waits for it: it
+//!   offers a frame to a bounded channel and takes a result only if one is present by the declared
+//!   deadline, and a hang, a crash or a malformed result costs the declared action plus a
+//!   termination and a reap.
+//! - any stage [`TrustedCooperativeNative`] — **nothing about containment**. That stage is
+//!   application code on the media worker: sipx cannot preempt it, cancel it or reap it, and a
+//!   callback that does not return stalls RTP for that call. No deadline, failure action or
+//!   teardown barrier changes that, because every one of them is code that runs after the callback
+//!   returns.
+//!
+//! [`ProvenInline`] is admitted only for processors inside this workspace, so
+//! [`GraphPlan::with_processor`] — the door an application reaches — refuses it. The workspace
+//! registry is empty until `M-65` ships processors to put in it.
+//!
+//! # What stays true on the live path
+//!
+//! The processor contract's §4 obligations are the processor's, and this attachment keeps them
+//! reachable rather than quietly relaxing them. On the media worker a graph performs **no I/O, no
+//! clock read, no task spawn and no allocation**: every buffer, every channel slot and every
+//! supervised worker is created when the plan is validated, and a deadline is counted in frames
+//! rather than measured against a clock, because a processor that could read its own deadline would
+//! have one.
+//!
+//! [`ProvenInline`]: sipx_audio::dsp::ExecutionProfile::ProvenInline
+//! [`SupervisedIsolated`]: sipx_audio::dsp::ExecutionProfile::SupervisedIsolated
+//! [`TrustedCooperativeNative`]: sipx_audio::dsp::ExecutionProfile::TrustedCooperativeNative
+
+use crate::processing::AudioDirection;
+
+mod graph;
+mod supervised;
+
+pub use graph::{
+    BypassCause, GraphBarrier, GraphBounds, GraphError, GraphPlan, GraphTransition, MAX_PROCESSORS,
+    MAX_WORKER_QUEUE, TeardownCause,
+};
+pub use supervised::{SupervisedWorker, WorkerResult};
+
+/// The processor contract itself, re-exported unchanged from [`sipx_audio::dsp`].
+///
+/// Writing a processor for a call means implementing [`FrameProcessor`], and a caller of this crate
+/// should not have to name a second one to do it. These are that crate's own types, not a parallel
+/// set: `docs/specs/custom-call-dsp.md` is where they are defined and this module reuses them
+/// rather than minting anything beside them.
+pub use sipx_audio::dsp::{
+    Admitted, CapabilityError, DeadlineAction, DspCapability, DspFrame, DspObservation,
+    DspResetCause, ExecutionPolicy, ExecutionProfile, FailureAction, FormatError, FrameAdmission,
+    FrameProcessor, FrameSink, LengthPolicy, OverrunContainment, Parameter, ParameterDomain,
+    ParameterError, ParameterSpec, ParameterValue, ProcessError, RateSupport, ResetBehavior,
+    Scratch, StreamFormat,
+};
+
+pub(crate) use graph::{CallDsp, SlotRef};
+
+/// One call direction's live DSP graph
+/// ([`docs/specs/call-dsp-graph.md`](../../../docs/specs/call-dsp-graph.md) §3).
+///
+/// Returned by [`MediaSession::attach_dsp`](crate::MediaSession::attach_dsp). Holding it is what
+/// keeps the graph attached: dropping it cancels every stage, and
+/// [`detach`](Self::detach) is the same teardown with its barrier awaited.
+#[derive(Debug)]
+pub struct DspGraph {
+    slot: SlotRef,
+    format: StreamFormat,
+    frame_samples: usize,
+}
+
+impl DspGraph {
+    pub(crate) const fn new(slot: SlotRef, format: StreamFormat, frame_samples: usize) -> Self {
+        Self {
+            slot,
+            format,
+            frame_samples,
+        }
+    }
+
+    /// Which side of the call this graph transforms.
+    #[must_use]
+    pub fn direction(&self) -> AudioDirection {
+        self.slot.direction()
+    }
+
+    /// The generation every frame currently sees, or 0 once the graph has been torn down.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.slot.generation()
+    }
+
+    /// Whether this graph may claim that over-budget work in it cannot stall RTP (§3.3).
+    ///
+    /// The conjunction of its stages' profiles: one
+    /// [`TrustedCooperativeNative`](sipx_audio::dsp::ExecutionProfile::TrustedCooperativeNative)
+    /// stage makes the whole chain uncontained, because it runs on the media worker and a callback
+    /// that does not return stalls the media worker. Not configurable, and no conformance result or
+    /// measurement changes it.
+    #[must_use]
+    pub fn contains_overrun(&self) -> bool {
+        self.slot.contains_overrun()
+    }
+
+    /// The sum of the chain's stages' declared algorithmic latency, in positions.
+    ///
+    /// Summed from the declarations and never simulated. It does **not** include the lag a
+    /// supervised stage's pipeline adds, which is [`Self::pipeline_frames`] and is counted in
+    /// frames because that is the unit its deadline is stated in.
+    #[must_use]
+    pub fn latency_positions(&self) -> u64 {
+        self.slot.latency_positions()
+    }
+
+    /// The lag this graph's supervised stages add, in frame durations (§7.1).
+    ///
+    /// The sum of their `deadline_frames`: a supervised stage's output lags its input by exactly
+    /// the deadline it declared, which is what lets the media worker offer a frame and take a
+    /// result without ever waiting for one.
+    #[must_use]
+    pub fn pipeline_frames(&self) -> u32 {
+        self.slot.pipeline_frames()
+    }
+
+    /// Drain the typed transitions this direction has recorded (§5.3).
+    ///
+    /// The queue is bounded by the configured observation capacity and drops its oldest entries at
+    /// capacity: a transition is a fact about the past, and the newest are the ones a caller can
+    /// still act on.
+    #[must_use]
+    pub fn transitions(&self) -> Vec<GraphTransition> {
+        self.slot.transitions()
+    }
+
+    /// What this graph is holding right now (§8).
+    #[must_use]
+    pub fn barrier(&self) -> GraphBarrier {
+        self.slot.barrier()
+    }
+
+    /// Validate a new chain whole and publish it as the next generation (§5.4).
+    ///
+    /// The outgoing generation is cancelled and its retained audio discarded rather than flushed —
+    /// it belongs to an epoch that no longer exists — and the incoming one is prepared at position
+    /// 0. Both happen under the same take a frame needs, so no frame sees a mixture.
+    ///
+    /// # Errors
+    ///
+    /// A [`GraphError`] naming the first thing §3.1 refuses. **A refused replacement leaves the
+    /// graph in force untouched**: it is the caller's error, not the call's.
+    pub fn replace(&self, plan: GraphPlan) -> Result<u64, GraphError> {
+        self.slot
+            .install(plan, self.format, self.frame_samples, true)
+    }
+
+    /// Tear this graph down and wait for its barrier (§8).
+    ///
+    /// Cancels every stage, terminates and reaps every supervised worker, and resolves with the
+    /// barrier it reached. The wait is an event and never a duration, so a caller that saw a clear
+    /// barrier knows the graph holds nothing rather than believing it.
+    pub async fn detach(&self) -> GraphBarrier {
+        self.slot.cancel(TeardownCause::Detached);
+        self.slot.settle().await
+    }
+
+    /// Wait until this graph has been torn down by anything at all, then report its barrier (§8).
+    ///
+    /// Resolves when the graph ends for any reason: a fail-closed failure, a detach, a stopped
+    /// session, or a drop. This is how a caller observes a teardown it did not ask for without
+    /// polling.
+    pub async fn settled(&self) -> GraphBarrier {
+        self.slot.settled().await
+    }
+}
+
+impl Drop for DspGraph {
+    /// Cancels every stage and terminates every supervised worker, without waiting.
+    ///
+    /// A drop cannot await, so it does not join: it closes each worker's request channel, which is
+    /// what makes that worker's next receive return and its thread finish. [`Self::detach`] is the
+    /// same teardown with the join awaited, and it is the one that can report a clear barrier.
+    fn drop(&mut self) {
+        self.slot.cancel(TeardownCause::Detached);
+    }
+}

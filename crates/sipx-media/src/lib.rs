@@ -36,6 +36,12 @@
 //!
 //! **Experimental**:
 //!
+//! - [`dsp`] — call-local DSP graphs, `docs/specs/call-dsp-graph.md` (`M-64`). The graph, its
+//!   generation, its bounds, its failure policy and its teardown barrier are real and tested; what
+//!   is not yet here is a supervised worker in a separate operating-system process, so that profile
+//!   runs its worker in a thread this crate owns and its containment claim is bounded by that
+//!   (`M-102`). No effect, filter or noise reducer ships with it: those are `M-65` and `M-66`, and
+//!   the workspace registry a proven-inline stage would have to be in is empty until they do.
 //! - `dtls::openssl` — the optional OpenSSL implementation behind the off-by-default `dtls`
 //!   feature. No shipped application enables it by default; the feature never changes a session or
 //!   call without explicit DTLS-SRTP policy.
@@ -56,6 +62,7 @@ pub mod bridge;
 pub mod browser;
 pub mod conference;
 mod counters;
+pub mod dsp;
 pub mod dtls;
 pub mod ice;
 mod inbound;
@@ -66,6 +73,7 @@ pub mod speech;
 pub use bridge::Bridge;
 pub use conference::{Conference, ConferenceError};
 pub use counters::MediaDiscardCounts;
+pub use dsp::DspGraph;
 pub use dtls::{Arriving, Handshake, Profile, Role};
 pub use ice::IcePath;
 pub use processing::{

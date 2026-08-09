@@ -63,6 +63,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, mpsc, watch};
 
 use crate::counters::{DiscardMeters, MediaDiscardCounts};
+use crate::dsp::{CallDsp, DspGraph, GraphError, GraphPlan, TeardownCause};
 use crate::ice;
 use crate::processing::{AudioDirection, PcmProcessor, Processing, ProcessingError, Taps};
 
@@ -1014,6 +1015,12 @@ pub struct MediaSession {
     /// The registry, not the workers: the seam spawns nothing, so this adds no handle for
     /// shutdown to join. A renegotiation carries the attachments to the replacement generation.
     taps: Arc<Taps>,
+    /// Attached call-local DSP graphs (`M-64`, `docs/specs/call-dsp-graph.md`).
+    ///
+    /// One per direction at most, run in-path at the seam's own two tap points. Whatever a
+    /// supervised stage spawns is owned here and joined at the graph's teardown barrier, so
+    /// `media-runtime.md` §2.1's owner set gains a barrier rather than a worker of its own.
+    dsp: Arc<CallDsp>,
     #[cfg(all(test, feature = "dtls"))]
     browser_profile_tasks: Option<Arc<crate::browser::ProfileTasks>>,
     #[cfg(all(test, feature = "dtls"))]
@@ -1163,6 +1170,8 @@ struct Shared {
     quality_hook: QualityHookSlot,
     /// The application PCM processing seam both media loops offer their frames to (`M-54`).
     taps: Arc<Taps>,
+    /// The call-local DSP graphs both media loops run their frames through (`M-64`).
+    dsp: Arc<CallDsp>,
 }
 
 impl Shared {
@@ -1190,6 +1199,7 @@ impl Shared {
             keypresses: Arc::new(watch::Sender::new(0u64)),
             quality_hook: Arc::new(std::sync::RwLock::new(None)),
             taps,
+            dsp: Arc::new(CallDsp::default()),
         }
     }
 
@@ -1855,6 +1865,7 @@ impl MediaSession {
                 encoding: prepared.encoding,
                 discards: Arc::clone(&shared.discards),
                 taps: Arc::clone(&shared.taps),
+                dsp: Arc::clone(&shared.dsp),
             },
         ));
         let (clips_tx, playback_owner) = spawn_playback_queue(&outgoing_tx, &shared.stop);
@@ -1881,6 +1892,7 @@ impl MediaSession {
                 decoding: prepared.decoding,
                 discards: Arc::clone(&shared.discards),
                 taps: Arc::clone(&shared.taps),
+                dsp: Arc::clone(&shared.dsp),
             },
         ));
 
@@ -1946,6 +1958,7 @@ impl MediaSession {
             owners: Mutex::new(owners),
             retired: Mutex::new(Vec::new()),
             taps: shared.taps,
+            dsp: shared.dsp,
             #[cfg(all(test, feature = "dtls"))]
             browser_profile_tasks: None,
             #[cfg(all(test, feature = "dtls"))]
@@ -2019,6 +2032,7 @@ impl MediaSession {
                     encoding: prepared.encoding,
                     discards: Arc::clone(&shared.discards),
                     taps: Arc::clone(&shared.taps),
+                    dsp: Arc::clone(&shared.dsp),
                 },
             ),
         ));
@@ -2049,6 +2063,7 @@ impl MediaSession {
                     decoding: prepared.decoding,
                     discards: Arc::clone(&shared.discards),
                     taps: Arc::clone(&shared.taps),
+                    dsp: Arc::clone(&shared.dsp),
                 },
             ),
         ));
@@ -2082,6 +2097,7 @@ impl MediaSession {
             owners: Mutex::new(owners),
             retired: Mutex::new(Vec::new()),
             taps: shared.taps,
+            dsp: shared.dsp,
             #[cfg(all(test, feature = "dtls"))]
             browser_profile_tasks: Some(profile_tasks),
             #[cfg(all(test, feature = "dtls"))]
@@ -2240,6 +2256,10 @@ impl MediaSession {
         // an application re-attach. Carried before the swap: the retired generation's `Drop` closes
         // whatever its registry still holds, and it must find nothing.
         replacement.taps.adopt(&self.taps);
+        // Graphs belong to the call for the same reason attachments do, and the move re-anchors
+        // both directions: audio queued under a media generation that no longer exists would land
+        // in the new epoch as old audio at a new position.
+        replacement.dsp.adopt(&self.dsp);
         let previous = std::mem::replace(self, replacement);
         self.retired.get_mut().push(previous);
         self.reap_retired().await;
@@ -2964,10 +2984,63 @@ impl MediaSession {
         self.taps.attach(request, self.audio_rate())
     }
 
+    /// Attach a bounded, ordered DSP graph to one direction of this call.
+    ///
+    /// `M-64`, [`docs/specs/call-dsp-graph.md`](../../../docs/specs/call-dsp-graph.md). The chain
+    /// runs **in path**, at the seam's own two tap points and immediately before the seam offers
+    /// the frame: outbound after the mute gate and before encoding, inbound at the jitter buffer's
+    /// output after decode. That is why this adds no second call-media tap and why
+    /// [`Self::attach_processor`]'s own guarantees are unchanged — an attached seam consumer keeps
+    /// seeing the samples that actually become RTP, and the application keeps hearing what
+    /// [`Self::recv`] delivers.
+    ///
+    /// The plan is validated **whole** before anything is prepared, allocated or spawned: the
+    /// first refusal refuses all of it and the direction keeps running exactly as it was. One
+    /// frame then sees one generation, entire, and every later change — a replacement, a bypass, a
+    /// teardown — is applied between frames and reported as a typed
+    /// [`GraphTransition`](crate::dsp::GraphTransition).
+    ///
+    /// **What this promises about RTP depends on the profiles in the chain and on nothing else.**
+    /// [`DspGraph::contains_overrun`] is the conjunction over the stages: a chain of supervised
+    /// and proven-inline stages may claim that over-budget work in it cannot stall RTP, and one
+    /// trusted cooperative-native stage makes the whole chain unable to claim it, because that
+    /// stage is application code on the media worker that sipx cannot preempt, cancel or reap.
+    ///
+    /// Graphs survive a [`Self::reconfigure`]: the new generation re-anchors at position 0 with
+    /// every stage reset, exactly as a seam attachment is re-anchored by a
+    /// [`crate::processing::DiscontinuityKind::Realign`].
+    ///
+    /// # Errors
+    ///
+    /// A [`GraphError`] naming the first thing the plan is refused for — a bound outside its
+    /// domain, a chain longer than the configured ceiling, a stage declaring more frame, scratch
+    /// or retained audio than the bounds admit, a stage that may change a frame's length, a
+    /// profile this door does not admit, a direction that already has a graph, or a stopped
+    /// session. Every refusal leaves the call exactly as it was.
+    pub fn attach_dsp(&self, plan: GraphPlan) -> Result<DspGraph, GraphError> {
+        if self.is_stopped() {
+            return Err(GraphError::SessionStopped);
+        }
+        let format =
+            sipx_audio::dsp::StreamFormat::new(self.audio_rate(), 1).map_err(|source| {
+                GraphError::Format {
+                    processor: "graph",
+                    source,
+                }
+            })?;
+        let slot = self.dsp.slot(plan.direction());
+        slot.install(plan, format, self.samples_per_packet(), false)?;
+        Ok(DspGraph::new(slot, format, self.samples_per_packet()))
+    }
+
     /// Stop the session and release its socket.
     pub fn stop(&self) {
         self.stop.stop();
         self.taps.close();
+        // Synchronous half of the graph barrier: every stage is cancelled and every supervised
+        // worker is told to finish. The join is `shutdown`'s, because joining is an await
+        // (`docs/specs/call-dsp-graph.md` §8).
+        self.dsp.cancel_all(TeardownCause::SessionStopped);
         self.incoming.close();
     }
 
@@ -2978,6 +3051,12 @@ impl MediaSession {
     pub async fn shutdown(&self) {
         self.stop.stop();
         self.taps.close();
+        // Both halves of the graph barrier: cancel every stage, then reap every supervised worker.
+        // The reap awaits an event and never a duration, so a stopped session's teardown answers
+        // rather than holding a runtime worker nothing can reclaim
+        // (`docs/specs/call-dsp-graph.md` §8).
+        self.dsp.cancel_all(TeardownCause::SessionStopped);
+        self.dsp.settle_all().await;
         self.incoming.close();
         if let Some(ingress) = &self.browser_ingress {
             crate::browser::lock_ingress(ingress).close();
@@ -3022,6 +3101,10 @@ impl Drop for MediaSession {
         // over from the seam instead of from a timeout. A retired generation's registry is already
         // empty, because `reconfigure` moved it to the replacement.
         self.taps.close();
+        // A drop cannot await, so the graphs are cancelled and their workers told to finish; each
+        // one's next receive returns and its thread ends. `shutdown` is the same teardown with the
+        // join awaited, and it is the one that can report a clear barrier.
+        self.dsp.cancel_all(TeardownCause::SessionStopped);
         // The same completion for the inbound audio queue. Under the channel this replaced,
         // dropping the last sender made a parked `recv` return `None`; the queue outlives its
         // producers, so it has to be told.
@@ -3042,6 +3125,7 @@ fn delivery<'a>(
     relay: &'a AtomicBool,
     discards: &'a DiscardMeters,
     taps: &'a Taps,
+    dsp: &'a CallDsp,
 ) -> Delivery<'a> {
     Delivery {
         audio,
@@ -3049,6 +3133,7 @@ fn delivery<'a>(
         relay,
         discards,
         taps,
+        dsp,
     }
 }
 
@@ -3304,6 +3389,9 @@ struct Sending {
     discards: Arc<DiscardMeters>,
     /// Where transmitted audio is offered to attached processors (`M-54`).
     taps: Arc<Taps>,
+    /// The outbound DSP graph, run before the tap so the tap still reports what becomes RTP
+    /// (`M-64`, `docs/specs/call-dsp-graph.md` §2).
+    dsp: Arc<CallDsp>,
 }
 
 // This is the single owner of the RTP send sequence, codec, SRTP context, pacing and their discard
@@ -3322,6 +3410,7 @@ async fn send_loop(socket: Arc<UdpSocket>, mut outgoing: mpsc::Receiver<Frame>, 
         mut encoding,
         discards,
         taps,
+        dsp,
     } = sending;
     let audio_rate = config.audio_rate();
     let mut clock = SendClock::new();
@@ -3357,7 +3446,15 @@ async fn send_loop(socket: Arc<UdpSocket>, mut outgoing: mpsc::Receiver<Frame>, 
         // muted call is not reported as transmitting, and before encoding, so a processor sees the
         // samples rather than the codec's opinion of them. It never awaits, so no processor can
         // delay this packet.
-        if let Frame::Audio { samples, .. } = &frame {
+        //
+        // The DSP graph runs at this same point and immediately before the offer (`M-64`,
+        // `docs/specs/call-dsp-graph.md` §2), which is what makes it an in-path transform at the
+        // one tap rather than a second one: the tap goes on reporting the samples that actually
+        // become RTP, and a seam consumer does not have to know whether a graph is attached to be
+        // right about what it heard. It never awaits and never allocates either.
+        let mut frame = frame;
+        if let Frame::Audio { samples, .. } = &mut frame {
+            dsp.run(AudioDirection::Outbound, samples);
             taps.offer(AudioDirection::Outbound, audio_rate, samples);
         }
 
@@ -3746,6 +3843,9 @@ struct Inbound {
     discards: Arc<DiscardMeters>,
     /// Where received audio is offered to attached processors (`M-54`).
     taps: Arc<Taps>,
+    /// The inbound DSP graph, run before the tap so the tap still reports what the application
+    /// hears (`M-64`, `docs/specs/call-dsp-graph.md` §2).
+    dsp: Arc<CallDsp>,
 }
 
 /// Split a datagram arriving on a port that carries media three ways (RFC 5764 §5.1.2).
@@ -4082,6 +4182,7 @@ async fn receiving(mut input: ReceiveInput, inbound: Inbound) {
         mut decoding,
         discards,
         taps,
+        dsp,
     } = inbound;
     let mut buffer = match config.jitter_max_depth {
         Some(max) => JitterBuffer::adaptive(config.jitter_depth, max),
@@ -4135,7 +4236,7 @@ async fn receiving(mut input: ReceiveInput, inbound: Inbound) {
             ReceivedDatagram::Silence => {
                 // Silence. Release what is held rather than holding it against a packet that is
                 // not coming — otherwise the last `depth - 1` packets of every clip are lost.
-                let to = delivery(&incoming, &encoded, &relay, &discards, &taps);
+                let to = delivery(&incoming, &encoded, &relay, &discards, &taps, &dsp);
                 if !flush(
                     &mut buffer,
                     &to,
@@ -4227,7 +4328,7 @@ async fn receiving(mut input: ReceiveInput, inbound: Inbound) {
             }
         }
 
-        let to = delivery(&incoming, &encoded, &relay, &discards, &taps);
+        let to = delivery(&incoming, &encoded, &relay, &discards, &taps, &dsp);
         loop {
             // Taken around each release, because `pop` is where a gap is diagnosed: it counts
             // the slots between the last packet played and the one it is about to release.
@@ -4297,6 +4398,8 @@ fn conceal(to: &Delivery<'_>, config: &Config, stop: &Stop, missing: u64) -> boo
         // still reconstructs the timeline, and a speech provider is not handed invented quiet it
         // would read as the caller pausing.
         to.taps
+            .note_loss(AudioDirection::Inbound, config.samples_per_packet() as u64);
+        to.dsp
             .note_loss(AudioDirection::Inbound, config.samples_per_packet() as u64);
         to.discards.jitter_concealed.fetch_add(1, Ordering::Relaxed);
         // Concealment is audio on the timeline like any other, so it is subject to §4.3's bound
@@ -4691,6 +4794,7 @@ struct Delivery<'a> {
     relay: &'a AtomicBool,
     discards: &'a DiscardMeters,
     taps: &'a Taps,
+    dsp: &'a CallDsp,
 }
 
 async fn deliver(
@@ -4776,8 +4880,19 @@ async fn deliver(
         // all a refused payload can truthfully say about how much audio it was carrying.
         to.taps
             .note_loss(AudioDirection::Inbound, config.samples_per_packet() as u64);
+        // The graph's epoch advances over the same span and its next frame carries the break, so a
+        // delay line downstream discards a history that is no longer about the signal in front of
+        // it (`docs/specs/call-dsp-graph.md` §6.2).
+        to.dsp
+            .note_loss(AudioDirection::Inbound, config.samples_per_packet() as u64);
         return true;
     };
+
+    // The DSP graph runs at this same tap point and immediately before the offer (`M-64`,
+    // `docs/specs/call-dsp-graph.md` §2), so the tap and the application's receive queue both see
+    // the audio the call actually carries. It never awaits and never allocates.
+    let mut samples = samples;
+    to.dsp.run(AudioDirection::Inbound, &mut samples);
 
     // The inbound tap (`M-54`, `docs/specs/call-audio-seam.md` §3): the jitter buffer's output,
     // after decode, so a processor observes the played order rather than the arrival order. It
@@ -6243,12 +6358,14 @@ mod tests {
             Arc::clone(&discards),
         );
         let taps = Taps::new(Arc::clone(&discards));
+        let dsp = CallDsp::default();
         let delivery = Delivery {
             audio: &audio,
             encoded: &encoded,
             relay: &relay,
             discards: &discards,
             taps: &taps,
+            dsp: &dsp,
         };
         let (digits_tx, mut digits_rx) = mpsc::channel(32);
         let digits = Keypresses {
@@ -6392,12 +6509,14 @@ mod tests {
             Arc::clone(&discards),
         );
         let taps = Taps::new(Arc::clone(&discards));
+        let dsp = CallDsp::default();
         let delivery = Delivery {
             audio: &audio,
             encoded: &encoded,
             relay: &relay,
             discards: &discards,
             taps: &taps,
+            dsp: &dsp,
         };
         let (digits_tx, _digits_rx) = mpsc::channel(32);
         let arrivals = Arc::new(watch::Sender::new(0));
