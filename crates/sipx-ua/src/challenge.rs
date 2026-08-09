@@ -8,6 +8,7 @@
 //! So verification takes the password as an argument and returns a verdict, and the caller decides
 //! everything around it.
 
+use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sipx_sip::{HeaderName, Request};
@@ -186,7 +187,6 @@ pub enum Reason {
 /// Nonces are **self-describing**: each carries its issue time and a MAC over it, so this can
 /// recognise its own nonce and read its expiry without a table of every nonce ever issued. The only
 /// table is the replay window, which is bounded and holds nothing that has not been used.
-#[derive(Debug)]
 pub struct Authenticator {
     realm: String,
     secret: [u8; 32],
@@ -198,6 +198,29 @@ pub struct Authenticator {
     /// ordinary over UDP — can be told from a replay. Same count and same response is the same
     /// request; same count and a different response is somebody reusing a captured credential.
     seen: std::collections::VecDeque<(String, u32, String)>,
+}
+
+/// Renders the realm and the algorithm, and **never the secret** (`M-110`, `M-117`).
+///
+/// The derived form printed all thirty-two bytes of `secret`. That is the key every self-describing
+/// nonce is MACed with, so a record carrying it does not leak a credential — it lets the reader
+/// mint nonces this authenticator will accept as its own, which is the whole of the replay
+/// protection. No call site logs an `Authenticator` today; that is what made it latent rather than
+/// live, and exactly the state `PcmFrame` was in one release before somebody would have.
+///
+/// The replay window is rendered as a count. Its keys are nonces this authenticator issued, which
+/// are public in the sense that they were on the wire — but a window printed in full is an
+/// unbounded diagnostic, and the count is what a reader is actually asking about.
+impl fmt::Debug for Authenticator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Authenticator")
+            .field("realm", &self.realm)
+            .field("algorithm", &self.algorithm)
+            .field("lifetime", &self.lifetime)
+            .field("secret", &"<redacted>")
+            .field("replay_window", &self.seen.len())
+            .finish()
+    }
 }
 
 impl Authenticator {

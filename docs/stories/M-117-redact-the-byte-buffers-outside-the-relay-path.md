@@ -72,3 +72,22 @@ that must not happen is a fix without a decision, because that is how `M-107` le
 - Filed by `M-110` on 2026-08-09. The four were found by reading the fifty carriers its
   `outstanding_byte_buffers` counts; the count is printed on every run of
   `./scripts/check-audio-claims.py --check`.
+
+- 2026-08-09: **the first of the four is fixed, out of band, because it is a security defect rather
+  than a privacy one.** `sipx_ua::Authenticator` derived `Debug` over `secret: [u8; 32]` — the key
+  every self-describing nonce is MACed with. A record carrying it does not leak a credential; it
+  lets whoever reads it *mint nonces this authenticator accepts as its own*, which is the entire
+  replay protection. `M-110`'s implementor found it while counting byte buffers, named it as the
+  one it would do first, and correctly left it outside its own story.
+
+  Proved red by restoring the derive: `the nonce signing key survived as "167" in: Authenticator {
+  realm: "example.net", secret: [167, 167, 167, …] }`. The hand-written `Debug` renders realm,
+  algorithm and lifetime, `secret` as `<redacted>`, and the replay window as a count — its keys were
+  on the wire, but a window printed in full is an unbounded diagnostic.
+  `crates/sipx-ua/tests/authenticator_diagnostics.rs` checks all four spellings the key could
+  survive as: decimal, lower and upper hex, and the escaped printable run.
+
+  **Three carriers remain and this story keeps them**: `sipx_app_protocol::Source::Inline`,
+  `sipx_testkit::Record` and `ClientEvent`. So does the question the story was really filed for —
+  whether a second checker scope should exist, or whether these are a reviewer's to hold.
+
