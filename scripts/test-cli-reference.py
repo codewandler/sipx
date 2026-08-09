@@ -370,5 +370,133 @@ OPTIONS:
         return checker.help_drift(document, self.ROOT, {"load-responder": self.HELP})
 
 
+class TheContractTableReader(unittest.TestCase):
+    """`X-133`: the versioned-contract half reads rows, the way `X-132` made the flag half read them.
+
+    `_document_json_contracts` counted every line between the region markers that began with `|`,
+    held three cells and did not contain `---`, and never asked whether those lines formed a table.
+    Measured while implementing `X-132`: splicing a paragraph directly above the last row of the
+    repaired contract table left all five contracts documented to the checker, while a Markdown
+    reader met that row as pipes at the end of a paragraph. The failure that hides is the one the
+    region exists to catch — a versioned contract whose public row stopped rendering, with
+    `json_drift` reporting agreement.
+
+    The hand-rolled `---` skip went with the rewrite: it was doing the delimiter row's job by hand,
+    and it silently dropped any legitimate row whose cells happened to carry a triple dash.
+    """
+
+    ACTUAL = {
+        "sipx.test.v1": checker.JsonContract("dial", frozenset({"schema", "status"})),
+        "sipx.other.v1": checker.JsonContract("probe", frozenset({"schema"})),
+    }
+
+    #: The measured shape: a table opened, a paragraph written through it, and the last row
+    #: resumed beneath that paragraph with no delimiter row of its own.
+    SPLICED = """\
+# CLI reference
+
+## The JSON contract
+
+<!-- BEGIN cli-json-contracts -->
+| Contract | Producer | Required structural fields |
+|---|---|---|
+| `sipx.test.v1` | `dial` | `schema`, `status` |
+
+**Reading this table.** Every producer emits `schema` before anything else.
+| `sipx.other.v1` | `probe` | `schema` |
+<!-- END cli-json-contracts -->
+"""
+
+    #: The same contracts, repaired the way `X-132` repaired the flag table: one table, the
+    #: paragraph below it.
+    ONE_TABLE = """\
+# CLI reference
+
+## The JSON contract
+
+<!-- BEGIN cli-json-contracts -->
+| Contract | Producer | Required structural fields |
+|---|---|---|
+| `sipx.test.v1` | `dial` | `schema`, `status` |
+| `sipx.other.v1` | `probe` | `schema` |
+
+**Reading this table.** Every producer emits `schema` before anything else.
+<!-- END cli-json-contracts -->
+"""
+
+    def test_a_row_spliced_under_prose_is_not_a_documented_contract(self):
+        problems = checker.json_drift(self.SPLICED, self.ACTUAL)
+        self.assertEqual(["versioned CLI contract `sipx.other.v1` is not documented"], problems)
+
+    def test_the_same_rows_gathered_into_one_table_are_documented(self):
+        self.assertEqual([], checker.json_drift(self.ONE_TABLE, self.ACTUAL))
+
+    def test_a_header_and_delimiter_under_prose_do_not_open_a_table_either(self):
+        """A table cannot interrupt a paragraph, so a whole one written into it still renders flat."""
+        interrupting = self.SPLICED.replace(
+            "| `sipx.other.v1` | `probe` | `schema` |",
+            "| Contract | Producer | Required structural fields |\n|---|---|---|\n"
+            "| `sipx.other.v1` | `probe` | `schema` |",
+        )
+        problems = checker.json_drift(interrupting, self.ACTUAL)
+        self.assertEqual(["versioned CLI contract `sipx.other.v1` is not documented"], problems)
+
+    def test_a_row_whose_cells_carry_a_triple_dash_is_still_a_row(self):
+        """What the hand-rolled skip cost: the delimiter row is recognised, not guessed at."""
+        dashed = self.ONE_TABLE.replace(
+            "| `sipx.other.v1` | `probe` | `schema` |",
+            "| `sipx.other.v1` | `probe` | `schema` --- and nothing else |",
+        )
+        self.assertEqual([], checker.json_drift(dashed, self.ACTUAL))
+
+    def test_a_reader_that_saw_no_rows_would_be_reported_not_silent(self):
+        """Why narrowing is safe to attempt: `json_drift` compares both ways."""
+        self.assertEqual(
+            [
+                "versioned CLI contract `sipx.other.v1` is not documented",
+                "versioned CLI contract `sipx.test.v1` is not documented",
+            ],
+            checker.json_drift(
+                "# CLI reference\n\n<!-- BEGIN cli-json-contracts -->\n\nNo table here.\n"
+                "<!-- END cli-json-contracts -->\n",
+                self.ACTUAL,
+            ),
+        )
+
+    def test_no_contract_row_of_the_public_page_sits_outside_a_table(self):
+        """The live region, held against the wide reader this narrowing replaced.
+
+        Where the two agree, every `|` line between the markers is a row of a real table. Where
+        they differ, some line counts as documented here and renders as literal pipes to a reader.
+        """
+        document = checker.DOCUMENT.read_text(encoding="utf-8")
+        self.assertEqual(
+            self.wide_contracts(document), checker._document_json_contracts(document)
+        )
+
+    @staticmethod
+    def wide_contracts(document: str) -> dict[str, object]:
+        """The reader this story replaced: any three-celled `|` line between the markers."""
+        try:
+            body = document.split(checker.BEGIN_JSON, 1)[1].split(checker.END_JSON, 1)[0]
+        except IndexError:
+            return {}
+        contracts: dict[str, object] = {}
+        for line in body.splitlines():
+            if not line.startswith("|") or "---" in line:
+                continue
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            if len(cells) != 3:
+                continue
+            contract = re.fullmatch(r"`(sipx\.[a-z0-9.-]+\.v[0-9]+)`", cells[0])
+            producer = re.fullmatch(r"`([a-z][a-z0-9_-]*)`", cells[1])
+            if contract is None or producer is None:
+                continue
+            contracts[contract.group(1)] = checker.JsonContract(
+                producer.group(1), frozenset(re.findall(r"`([a-z][a-z0-9_]*)`", cells[2]))
+            )
+        return contracts
+
+
 if __name__ == "__main__":
     unittest.main()

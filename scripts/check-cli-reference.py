@@ -210,14 +210,29 @@ def help_drift(document: str, root_help: str, command_help: Mapping[str, str]) -
 
 
 def _document_json_contracts(document: str) -> dict[str, JsonContract]:
+    """Read the versioned contracts documented between the region markers.
+
+    The contracts are taken from table *rows*, through the same helper the flag half reads
+    (`X-133`). This counted every line of the region that began with `|`, held three cells and did
+    not contain `---`, and never asked whether those lines formed a table — the shape `X-132` was
+    filed for, in the same file and against the same page. Measured on the repaired page while
+    implementing `X-132`: a paragraph spliced directly above the last row left all five contracts
+    documented here while a Markdown reader met that row as pipes at the end of a paragraph, which
+    is exactly the failure the region exists to catch.
+
+    The hand-rolled `---` skip goes with it: `table_rows` recognises the delimiter row rather than
+    guessing at it, and the old test also dropped any legitimate row whose cells carried a triple
+    dash. Narrowing is safe for the reason it was in `document_command_flags`: `json_drift` compares
+    both ways, so a reader that stopped seeing rows reports every discovered contract as
+    undocumented instead of going quiet.
+    """
+
     try:
         body = document.split(BEGIN_JSON, 1)[1].split(END_JSON, 1)[0]
     except IndexError:
         return {}
     contracts: dict[str, JsonContract] = {}
-    for line in body.splitlines():
-        if not line.startswith("|") or "---" in line:
-            continue
+    for line in table_rows(body):
         cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
         if len(cells) != 3:
             continue

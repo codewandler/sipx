@@ -89,6 +89,13 @@ type in that position states which it is — it publishes a constructor, or it s
 that it is a value this crate hands out and nothing outside builds. Both are answers; being
 outside the rule was not one.
 
+Both extensibility rules read the attribute as an attribute and each rationale as the opening of a
+doc line (`M-97`). `preamble` hands them a type's attributes and its documentation as one string,
+and a substring test over that string let a sentence *about* `#[non_exhaustive]` stand in for
+carrying it: `M-83` wrote three such sentences in one diff, and `sipx-media`'s `ProviderKind` had
+passed on a sentence saying it is deliberately **not** marked since `M-74`. A form of the exception
+nobody chose is the one thing a check built on two greppable forms cannot afford. See `marked`.
+
 Three things this deliberately does not do.
 
 **It reads each crate documentation and package README's summary paragraph, not the whole file.**
@@ -261,6 +268,13 @@ _PUBLIC_ENUM = re.compile(r"(?m)^[ \t]*pub enum (?P<name>\w+)")
 #: `pub`. `M-75` added `Packet::extension` and `M-79` added `Encoded::extension`, and each
 #: additive change broke every struct literal that named the type. See `struct_problems`.
 _PUBLIC_STRUCT = re.compile(r"(?m)^[ \t]*pub struct (?P<name>\w+)")
+
+#: The guard itself, read as an attribute rather than as a substring of the preamble: its own line,
+#: at whatever indentation the item sits at. `preamble` hands the rules a type's attributes and its
+#: doc comment as one string, so a substring test cannot tell `#[non_exhaustive]` from a sentence
+#: naming it — and a type that argued its way past the rule in prose is a type nobody reviewed under
+#: the rule. `M-97`; see `marked`.
+_MARKED = re.compile(r"(?m)^[ \t]*#\[non_exhaustive\][ \t]*$")
 
 #: A public field of a braced struct, line anchored inside the struct's own body. `pub(crate)` and
 #: `pub(super)` are deliberately not matched: a caller outside the crate cannot name those fields,
@@ -766,6 +780,37 @@ def preamble(source: str, offset: int) -> str:
     return source[0 if above < 0 else above + 2 : offset]
 
 
+def marked(above: str) -> bool:
+    """Whether a preamble *carries* `#[non_exhaustive]`, as against naming it.
+
+    An attribute is syntax and a doc comment about one is prose, and `preamble` returns both as a
+    single string, so the substring test this replaces read the second as the first. `M-83` wrote
+    three arguments that explained a decision by naming the attribute — "`OverloadAlgorithm` is
+    `#[non_exhaustive]` because its token set is a registry" among them — and every one of them was
+    reclassified from *argued* to *marked* by a rule that could not tell the difference. It counted
+    `sipx-media`'s `ProviderKind` as marked from `M-74` until `M-97`, on a sentence saying the type
+    is deliberately **not** marked.
+
+    The failure was quiet in the direction that matters. This whole check is built on the exception
+    being written in one of two forms a reader can grep for; a third form nobody chose is the one
+    thing it cannot afford. Over-narrowing here is loud instead: a reader that stopped recognising
+    the attribute reports every marked type in the workspace, which is a red gate.
+    """
+    return _MARKED.search(above) is not None
+
+
+def argued(above: str, phrase: str) -> bool:
+    """Whether a preamble opens one of its doc lines with a rationale phrase.
+
+    The phrases are `///` phrases and so genuinely prose, unlike the attribute — but the line
+    anchor closes the same hole one step down: a doc comment that *quotes* a phrase mid-sentence
+    while explaining a different type used to classify this one. What no rule can close is a phrase
+    written at the start of a line about somebody else's type, which stays a reviewer's question
+    (`M-97`).
+    """
+    return re.search(rf"(?m)^[ \t]*{re.escape(phrase)}", above) is not None
+
+
 def declaration(source: str, offset: int) -> tuple[str, str]:
     """A struct's shape and its field list, read from the `pub struct` at `offset`.
 
@@ -936,15 +981,15 @@ def struct_problems(crates: list[str]) -> list[str]:
                 where = path.relative_to(ROOT)
             except ValueError:
                 where = path
-            if "#[non_exhaustive]" not in above:
-                if COMPLETE_REASON not in above:
+            if not marked(above):
+                if not argued(above, COMPLETE_REASON):
                     problems.append(
                         f"{where}:{line} `{name}` is reachable from the crate root and has public "
                         f"fields; add `#[non_exhaustive]` or an adjacent `{COMPLETE_REASON}` "
                         f"rationale"
                     )
                 continue
-            if publishes_a_constructor(source, name, above) or UNBUILT_REASON in above:
+            if publishes_a_constructor(source, name, above) or argued(above, UNBUILT_REASON):
                 continue
             problems.append(
                 f"{where}:{line} `{name}` is `#[non_exhaustive]` and publishes no constructor, so "
@@ -966,7 +1011,7 @@ def enum_problems(crates: list[str]) -> list[str]:
         for path, _module, name, offset in reachable_enums(crate):
             source = code(path.read_text(encoding="utf-8"))
             above = preamble(source, offset)
-            if "#[non_exhaustive]" in above or EXHAUSTIVE_REASON in above:
+            if marked(above) or argued(above, EXHAUSTIVE_REASON):
                 continue
             line = source.count("\n", 0, offset) + 1
             try:
@@ -1031,7 +1076,7 @@ def outstanding_structs(crates: list[str]) -> list[str]:
         for path, _module, name, offset in breakable_structs(crate):
             source = code(path.read_text(encoding="utf-8"))
             above = preamble(source, offset)
-            if "#[non_exhaustive]" in above or COMPLETE_REASON in above:
+            if marked(above) or argued(above, COMPLETE_REASON):
                 continue
             outstanding.append(f"{path}:{name}")
     return outstanding
