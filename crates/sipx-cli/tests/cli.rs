@@ -6670,6 +6670,73 @@ async fn load_responder_enforces_the_concurrent_dialog_ceiling() {
     peer.shutdown().await;
 }
 
+/// `X-129`: the ceiling above is admission working, and an operator who sized it to their
+/// generator's concurrency has to be able to read that somewhere before they file it as a defect.
+/// `X-126` measured the cost of leaving it unsaid — with the two equal, 4 of 10 runs shed a call
+/// under CPU contention while the responder was answering exactly to contract.
+///
+/// Guidance that is not held to anything drifts away from the code it describes, so both carriers
+/// are asserted together: the flag's own help, which is what a caller sizing a run reads first,
+/// and the public page, which `check-cli-reference.py` already holds to that same surface. Each
+/// phrase is one claim — the mechanism, the peer behaviour that exposes it, the remedy named as
+/// headroom rather than as a number, what the headroom is for, and that a refusal at the ceiling
+/// is not a defect.
+#[tokio::test]
+async fn the_max_active_sizing_guidance_is_documented_where_a_run_is_sized() {
+    let _scenario = process_scenario().await;
+    let output = sipx()
+        .args(["load-responder", "--help"])
+        .output()
+        .await
+        .expect("load-responder help runs");
+    assert_eq!(output.status.code(), Some(0), "load-responder help exits 0");
+    // Both carriers wrap their prose — clap to the terminal, the page to its column limit — so a
+    // phrase is matched against one flat lowercase line. Otherwise this asserts where the text
+    // happens to break rather than what it says.
+    let flatten = |text: &str| {
+        text.to_lowercase()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let help = flatten(&String::from_utf8_lossy(&output.stdout));
+    let reference_source = include_str!("../../../website/docs/reference/cli.md");
+    let reference = flatten(reference_source);
+
+    for stated in [
+        // The mechanism: the slot outlives the response that retires the dialog.
+        "answered that dialog's bye",
+        // Why the peer is already sending again: it retires the call on the same 200.
+        "receiving that 200",
+        // The remedy, named for what it is rather than as a value to copy.
+        "headroom",
+        // What the headroom has to cover, worst case.
+        "twice the generator's concurrency",
+        // And that the 503 an equal ceiling produces is the responder holding its contract.
+        "not a defect",
+    ] {
+        assert!(
+            help.contains(stated),
+            "`sipx load-responder --help` does not state {stated:?}:\n{help}"
+        );
+        assert!(
+            reference.contains(stated),
+            "the CLI reference does not state {stated:?} about sizing `--max-active`"
+        );
+    }
+
+    // A reader who scans only the flag table still has to be sent to it, so the row itself names
+    // the generator flag the ceiling has to clear.
+    let row = reference_source
+        .lines()
+        .find(|line| line.starts_with("| `--max-active <N>`"))
+        .expect("the reference publishes a `--max-active` row");
+    assert!(
+        row.contains("--concurrency"),
+        "the `--max-active` row does not relate the ceiling to the generator's concurrency: {row}"
+    );
+}
+
 /// DPH-11 and DPH-17 through the process boundary: signal only after the peer has observed the
 /// first INVITE, then require the one final summary to follow cleanup. Concurrency one is
 /// load-bearing: no second invitation can be admitted while the owned first call is cleaning up.
