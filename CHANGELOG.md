@@ -7,6 +7,44 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Applications on the `sipx.app.v1` contract can read what a call's voice-activity detection is
+  measuring against**, as the call snapshot's `voice` member, and are told when calibration moves it
+  by the new `call.voice.thresholds` event. Every field is a sample count or an amplitude; the wire
+  carries no audio, and the record has no field that could hold a sample sequence.
+
+- **`capacity_test` and `load_test` gain `--media none`**, a mode that negotiates no session on
+  either end. The caller half it needs — `dial_signalling` and friends — is now public in
+  `sipx-call` and shared with `sipx load --mode signalling`, which was rewritten onto it.
+
+### Changed
+
+- **Breaking: every reachable public enum in `sipx-sip`, `sipx-transport`, `sipx-ua`, `sipx-app` and
+  `sipx-testkit` is `#[non_exhaustive]` or carries a written argument for being exhaustive**,
+  completing the rollout `M-74` began on the media path and retiring the checker's crate boundary.
+  A downstream `match` on one of the 61 marked types — `Method`, `Scheme`, `UriTransport`,
+  `TransportKind`, the transaction `Output` and `TuEvent` among them — needs a `_` arm it did not
+  need before. What it buys is that sipx can add a method, a transport or a driver instruction in a
+  minor release instead of a major one, which after `1.0.0` is a choice that can no longer be made.
+
+### Fixed
+
+- **One command's `--help` may name another command's flag.** The CLI-reference check reads a
+  command's options from its help's option entries rather than from every `--token` in the text, and
+  reads its documented flags from the rows of a real Markdown table rather than from any line
+  starting with a pipe — so a flag list broken by prose is reported instead of silently accepted.
+  Both readers report loudly when they see nothing, which is the direction that would otherwise go
+  quiet.
+
+- **The audio-claims guard reads the whole preamble of an item in a file's first paragraph.** It
+  previously dropped the file's first character, and could report a type whose `#[non_exhaustive]`
+  or rationale was present.
+
+- **The generated-media load-pair test gives its responder twice the generator's concurrency**, so
+  `connected == calls` is a claim about the workload rather than about whether the responder's
+  accept loop was scheduled before the replacement INVITE arrived.
+
 ## [1.0.0-rc.13] — 2026-08-09
 
 Five stories, four of them defects found by measuring rather than by reading: a play loop that could

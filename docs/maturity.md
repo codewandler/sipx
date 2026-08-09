@@ -73,7 +73,7 @@ No aggregate percentage is given. `media` and `core` differ in size and in how m
 
 ## Discovery versus closure
 
-<!-- maturity-event-days: {"basis":"sha256:d7f9001c500c8f3890e182ad86c0cf8ccfc6d2c330df34d5316e297f348aae80","closed":{"2026-07-28":58,"2026-07-29":48,"2026-07-30":40,"2026-07-31":5,"2026-08-01":1,"2026-08-03":12,"2026-08-04":39,"2026-08-05":35,"2026-08-08":89,"2026-08-09":5},"filed":{"2026-07-28":95,"2026-07-29":42,"2026-07-30":44,"2026-07-31":3,"2026-08-03":1,"2026-08-04":51,"2026-08-05":73,"2026-08-06":17,"2026-08-08":56,"2026-08-09":9}} -->
+<!-- maturity-event-days: {"basis":"sha256:1ada8c44b522401f7f4bfe5d880ce0384bbd9f35e4c3da2443d9c0f8e8e3b255","closed":{"2026-07-28":58,"2026-07-29":48,"2026-07-30":40,"2026-07-31":5,"2026-08-01":1,"2026-08-03":12,"2026-08-04":39,"2026-08-05":35,"2026-08-08":89,"2026-08-09":5},"filed":{"2026-07-28":95,"2026-07-29":42,"2026-07-30":44,"2026-07-31":3,"2026-08-03":1,"2026-08-04":51,"2026-08-05":73,"2026-08-06":17,"2026-08-08":56,"2026-08-09":10}} -->
 
 Burn-down is not a maturity signal while discovery outpaces closure. The marker to watch is not a single day where closure wins but the date that crossover becomes **durable** — that is when the codebase stops surprising its authors.
 
@@ -88,7 +88,7 @@ Burn-down is not a maturity signal while discovery outpaces closure. The marker 
 | 2026-08-05 | 73 | 35 | -38 |
 | 2026-08-06 | 17 | 0 | -17 |
 | 2026-08-08 | 56 | 89 | +33 |
-| 2026-08-09 | 9 | 5 | -4 |
+| 2026-08-09 | 10 | 5 | -5 |
 
 Filed is a story file being added; closed is a `status: done` line appearing, so a story reopened and closed again counts twice — which is the honest reading of *closed that day*.
 

@@ -77,6 +77,7 @@ appeared twice before anyone named it.
 - [M-70 — Accept multiplexed browser offers with unused component candidates](M-70-accept-multiplexed-browser-offers-with-unused-component-candidates.md) · Media · external review finding 9 · a second browser engine reaches SDP then fails the multiplexed profile
 - [M-72 — Prove the AEAD SRTP key derivation against an independent peer](M-72-prove-the-aead-srtp-key-derivation-against-a-peer.md) · Media · RFC 7714 publishes no KDF vector · a wrong salt placement makes two sipx endpoints interoperate with each other and nobody else, and every round-trip test still passes
 - [M-83 — Extend the extensibility guard past the media path](M-83-extend-the-reachability-guard-past-the-media-path.md) · Media · 98 reachable public enums outside the guarded five crates · the boundary names crates, so no enum is individually excused
+- [M-84 — Carry calibrated thresholds onto the application wire](M-84-carry-calibrated-thresholds-to-applications.md) · Media · after M-60 · the effective thresholds are Rust-only; an app-protocol client cannot see them
 - [M-96 — Fix the preamble reader's off-by-one](M-96-fix-the-preamble-reader-off-by-one.md) · Media · an item at byte 0 with no blank line above it loses the first character of its preamble · cannot fire on this tree, which is why it needs a test rather than a reader
 - [T-33 — Bind browser WebSocket signalling](T-33-bind-browser-websocket-signalling.md) · Transport · after A-16 and S-41 · browser owns I/O, WASM core consumes bytes
 - [T-46 — Measure plain SIP throughput without media](T-46-measure-plain-sip-throughput-without-media.md) · Transport · audio doubles memory and costs 8x on burst setup at 1000 calls · neither example can isolate signalling from the media stack
@@ -107,6 +108,7 @@ _The [app-sdk](https://github.com/codewandler/sipx/blob/main/docs/designs/app-sd
 ### Application SDK
 _The measure of this stack's reach is what can be built on it **without writing Rust**. Today the_
 - [C-9 — Carry a bridge and a conference across a renegotiation](C-9-carry-a-bridge-across-a-renegotiation.md) · Signalling · filed from C-6 · a re-INVITE, a hold/resume or an ICE restart replaces a call's MediaSession and the bridge keeps forwarding the stopped one · size S/M
+- [M-98 — Close and test the call-to-contract event bridge](M-98-close-the-call-to-contract-event-bridge.md) · Media · filed by M-84 · `call.signal.metrics` is specified and typed but unreachable, and `event_from_call` has no tests at all
 
 ### browser audio SDK
 _Beta.4 proves that sipx can interoperate with a browser audio endpoint, but it does not let a web_
@@ -120,7 +122,6 @@ _Beta.4 proves that sipx can interoperate with a browser audio endpoint, but it 
 _Applications need small, predictable facts about live audio even when no speech model is enabled:_
 - [A-29 — Publish a runnable live call-audio analysis example](A-29-publish-call-audio-analysis-example.md) · Application · M16 analysis exit after X-106 · no model or special hardware required
 - [M-61 — Harden call-audio analysis against adversarial input](M-61-harden-call-audio-analysis.md) · Media · after M-57 · hostile audio, bounded resources, cross-call isolation and no retention
-- [M-84 — Carry calibrated thresholds onto the application wire](M-84-carry-calibrated-thresholds-to-applications.md) · Media · after M-60 · the effective thresholds are Rust-only; an app-protocol client cannot see them
 - [X-106 — Measure call-audio analysis accuracy and resource cost](X-106-measure-call-audio-analysis.md) · Build · after M-58 through M-61 · versioned corpus, error rates, event latency, CPU and memory
 
 ### Conformance

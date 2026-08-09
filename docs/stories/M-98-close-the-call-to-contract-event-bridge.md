@@ -1,5 +1,5 @@
 ---
-id: M-97
+id: M-98
 title: Close and test the call-to-contract event bridge
 pillar: Media
 status: backlog
@@ -51,3 +51,9 @@ make the one function that maps between the two vocabularies testable.
   (`Call::detect_voice_activity` and `Call::report_signal_metrics` have no caller in
   `crates/sipx-app`). That is a separate question — nothing in the contract's §6.2 turns analysis on
   — and is worth its own story rather than being smuggled into this one.
+
+- 2026-08-09: renumbered from `M-97` to `M-98`. The coordinator reserved the same `M-97`/`M-98` pair
+  to two implementors running at once, so the scheme meant to stop id collisions produced one — the
+  second time that has happened. Only the id moved. A reservation has to be disjoint per agent, not
+  merely stated.
+
