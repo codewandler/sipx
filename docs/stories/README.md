@@ -85,6 +85,10 @@ appeared twice before anyone named it.
 ### Reliable diagnostic automation
 - [P-30 — Bound the first NOTIFY in a registrar subscription](P-30-bound-the-first-notify-in-a-registrar-subscription.md) · Phone · peers --registrar waits Timer N — 64*T1, 32 seconds — with no operator control · the dominant unbounded wait once resolution is bounded
 
+### supported test surfaces
+_The workspace has seeded links, virtual time and call fixtures, but downstream applications have no_
+- [X-136 — The load candidate count goes null under suite load](X-136-the-load-candidate-count-goes-null-under-suite-load.md) · Quality · a_load_run_that_reaches_no_address_reports_what_it_attempted reported candidates_attempted null in a full workspace run and 3 alone
+
 ## Blocked
 - [M-16 — Implement ICE](M-16-ice.md) · Media · epic tracker · split into M-19 … M-24 · spec is docs/specs/ice.md, written first
 - [T-24 — Discover SIP endpoints on the local link](T-24-discover-on-the-local-link.md) · Transport · blocked on a scope decision — mDNS is a second protocol and a new parser eating unauthenticated multicast

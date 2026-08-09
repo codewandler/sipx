@@ -530,7 +530,10 @@ impl Actor {
 
     async fn next_runtime(&mut self, deadline: tokio::time::Instant) -> Result<String, String> {
         enum Arrived {
-            Event(Option<CallEvent>),
+            // Boxed for the same reason `Incoming` is: `CallEvent` grew when `M-84` added the
+            // calibrated-threshold announcement, and an enum whose variants differ by two hundred
+            // bytes costs every arm the size of its largest. The select! arms move a pointer.
+            Event(Box<Option<CallEvent>>),
             Media,
             Incoming(Box<Option<Incoming>>),
             Timeout,
@@ -538,14 +541,14 @@ impl Actor {
         let arrived = if let (Some(events), Some(call)) = (self.events.as_mut(), self.call.as_ref())
         {
             tokio::select! {
-                event = events.recv() => Arrived::Event(event),
+                event = events.recv() => Arrived::Event(Box::new(event)),
                 () = call.drive_media_event() => Arrived::Media,
                 incoming = self.incoming.recv() => Arrived::Incoming(Box::new(incoming)),
                 () = tokio::time::sleep_until(deadline) => Arrived::Timeout,
             }
         } else if let Some(events) = self.events.as_mut() {
             tokio::select! {
-                event = events.recv() => Arrived::Event(event),
+                event = events.recv() => Arrived::Event(Box::new(event)),
                 incoming = self.incoming.recv() => Arrived::Incoming(Box::new(incoming)),
                 () = tokio::time::sleep_until(deadline) => Arrived::Timeout,
             }
@@ -556,8 +559,10 @@ impl Actor {
             }
         };
         match arrived {
-            Arrived::Event(Some(event)) => Ok(self.emit_call_event(event)),
-            Arrived::Event(None) => Err("the call event stream ended".to_owned()),
+            Arrived::Event(event) => match *event {
+                Some(event) => Ok(self.emit_call_event(event)),
+                None => Err("the call event stream ended".to_owned()),
+            },
             // `drive_media_event` has offered exactly one item to the bounded call-event queue.
             // Reading it on the next loop preserves that queue as the public handoff; if a slow
             // consumer filled it, its existing drop counter and recovery policy remain decisive.
