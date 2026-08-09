@@ -7,7 +7,14 @@
 //! ```text
 //! cargo run --example load_test
 //! cargo run --example load_test -- --calls 200 --rate 50 --in-flight 40
+//! cargo run --example load_test -- --calls 200 --rate 50 --media none
 //! ```
+//!
+//! `--media none` places and answers calls that negotiate no session at all — no SDP offer, no RTP
+//! socket, on both ends — so the setup latency it reports is the signalling round trip without the
+//! media stack underneath it. `full`, the default, is a negotiated session as before. There is no
+//! `idle` here: this example holds a call for [`HOLD`] and measures setup, and a session that is
+//! negotiated but silent costs the same to set up as one that is not.
 //!
 //! To point the same client at somebody else's SIP server instead of the one this example starts,
 //! give it an address and no server is started:
@@ -45,10 +52,28 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
 use sipx_call::load::{Cause, Plan, run};
-use sipx_call::{DialOptions, Dispatched, Dispatcher, dial, serve};
+use sipx_call::{
+    DialOptions, Dispatched, Dispatcher, SignallingDialOptions, SignallingIdentity, dial,
+    dial_signalling, serve,
+};
 use sipx_sip::{Host, HostName, Uri};
 use sipx_transport::{Config, Target, bind};
+
+/// Whether a call negotiates a media session at all.
+///
+/// `None` is not "a session that sends nothing": there is no SDP offer, so no port is named, so no
+/// RTP socket is bound and no jitter buffer exists on either end. It is the shape a deployment that
+/// runs its media elsewhere actually has, and it reaches it through
+/// [`sipx_call::dial_signalling`] — the same path `sipx load --mode signalling` uses (`T-46`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Media {
+    /// A negotiated session, as every call here had before `T-46`.
+    Full,
+    /// No session: no SDP, no RTP socket.
+    None,
+}
 
 /// How long a placed call stays up before the client hangs it up, unless `--hold` says otherwise.
 ///
@@ -76,7 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("client only: placing calls against {address}");
         address
     } else {
-        let address = start_server().await?;
+        let address = start_server(options.media).await?;
         println!("server listening on {address}");
         address
     };
@@ -97,9 +122,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let hold = options.hold;
+    let media = options.media;
     let outcome = run(plan, move |_index| {
         let endpoint = Arc::clone(&endpoint);
-        async move { place_one(&endpoint, server, hold).await }
+        async move { place_one(&endpoint, server, hold, media).await }
     })
     .await;
 
@@ -125,10 +151,27 @@ async fn place_one(
     endpoint: &sipx_transport::Handle,
     server: SocketAddr,
     hold: Duration,
+    media: Media,
 ) -> Result<(), Cause> {
     let to = Uri::sip(Host::Name(
         HostName::new("callee.example").map_err(|error| Cause::Other(error.to_string()))?,
     ));
+    if media == Media::None {
+        let from = Uri::parse(Bytes::from_static(b"sip:load@example.net"))
+            .map_err(|error| Cause::Other(error.to_string()))?;
+        let options = SignallingDialOptions::new(SignallingIdentity::fresh(endpoint, &to, &from))
+            .with_timeout(SETUP_BOUND);
+        let mut call = dial_signalling(endpoint, Target::udp(server), &to, &options)
+            .await
+            .map_err(|error| classify(&error))?;
+        tokio::time::sleep(hold).await;
+        // The same failure bound the media half's `hang_up` carries, stated here because the
+        // signalling one takes it as an argument.
+        call.hang_up(SETUP_BOUND)
+            .await
+            .map_err(|error| classify(&error))?;
+        return Ok(());
+    }
     let dial_options =
         DialOptions::new("<sip:load@example.net>", LOOPBACK).with_timeout(SETUP_BOUND);
 
@@ -149,8 +192,11 @@ fn classify(error: &sipx_call::Error) -> Cause {
     match error {
         sipx_call::Error::Rejected { status, .. } => Cause::Rejected(*status),
         // The far end said nothing at all, which is a different fact about a server than a
-        // refusal: one of them is the server working.
-        sipx_call::Error::NoResponse => Cause::Timeout,
+        // refusal: one of them is the server working. A BYE nobody answered inside its bound is
+        // the same fact about the same server, one request later.
+        sipx_call::Error::NoResponse | sipx_call::Error::SignallingTeardownTimeout(_) => {
+            Cause::Timeout
+        }
         sipx_call::Error::Transport(_) | sipx_call::Error::Io(_) => Cause::Transport,
         other => Cause::Other(other.to_string()),
     }
@@ -160,21 +206,37 @@ fn classify(error: &sipx_call::Error) -> Cause {
 ///
 /// Returns the address it bound. Each call is served on its own task so a slow one cannot hold up
 /// the next INVITE — a server that answered serially would make this example measure a queue.
-async fn start_server() -> Result<SocketAddr, Box<dyn std::error::Error>> {
+async fn start_server(media: Media) -> Result<SocketAddr, Box<dyn std::error::Error>> {
     let (endpoint, incoming) = bind(Config::new("127.0.0.1:0".parse()?)).await?;
     let address = endpoint.local_addr();
-    let media = LOOPBACK;
 
     tokio::spawn(async move {
         // The dispatcher routes each dialog's own requests to that dialog. Without it a server
         // reads one queue for every call at once, and answering them serially would make this
         // example measure a queue rather than a server.
         let mut dispatcher = Dispatcher::new(endpoint.clone(), incoming);
+        let calls = dispatcher.calls();
         while let Some(event) = dispatcher.next().await {
             let Dispatched::Invitation(invitation) = event else {
                 continue;
             };
-            let answered = invitation.answer(&endpoint, media).await;
+            if media == Media::None {
+                // Answers the caller's shape: a 2xx with no SDP and no media session behind it, so
+                // the run has no media stack at *either* end rather than only at the client's.
+                let contact = format!("<sip:load@{}>", endpoint.advertised());
+                match invitation.answer_signalling(&endpoint, contact).await {
+                    Ok(mut call) => {
+                        let calls = calls.clone();
+                        tokio::spawn(async move {
+                            while call.next().await.is_some() {}
+                            calls.forget(call.dialog());
+                        });
+                    }
+                    Err(error) => eprintln!("server could not answer: {error}"),
+                }
+                continue;
+            }
+            let answered = invitation.answer(&endpoint, LOOPBACK).await;
             match answered {
                 Ok(mut call) => {
                     let (_, mut requests) = invitation.into_parts();
@@ -198,6 +260,7 @@ struct Options {
     hold: Duration,
     rate: f64,
     in_flight: usize,
+    media: Media,
     server: Option<SocketAddr>,
 }
 
@@ -210,6 +273,7 @@ impl Options {
             hold: HOLD,
             rate: 25.0,
             in_flight: 16,
+            media: Media::Full,
             server: None,
         };
         let mut args = args.peekable();
@@ -222,12 +286,21 @@ impl Options {
                 "--rate" => options.rate = value()?.parse()?,
                 "--in-flight" => options.in_flight = value()?.parse()?,
                 "--hold" => options.hold = Duration::from_millis(value()?.parse()?),
+                "--media" => {
+                    options.media = match value()?.as_str() {
+                        "full" => Media::Full,
+                        "none" => Media::None,
+                        other => {
+                            return Err(format!("--media takes full or none, not {other}").into());
+                        }
+                    };
+                }
                 "--server" => options.server = Some(value()?.parse()?),
                 "--help" | "-h" => {
                     println!(
                         "usage: cargo run --example load_test -- \
                          [--calls N] [--rate PER_SECOND] [--in-flight N] \
-                         [--hold MILLISECONDS] [--server ADDR]"
+                         [--hold MILLISECONDS] [--media full|none] [--server ADDR]"
                     );
                     std::process::exit(0);
                 }

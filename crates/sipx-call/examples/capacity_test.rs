@@ -8,6 +8,7 @@
 //! ```text
 //! cargo run --release --example capacity_test
 //! cargo run --release --example capacity_test -- --ramp 50,500,500,500 --dwell 10
+//! cargo run --release --example capacity_test -- --media none --ramp 100,100,100
 //! cargo run --release --example capacity_test -- --ramp 100,100,100 --record docs/measurements/capacity.json
 //! ```
 //!
@@ -19,6 +20,12 @@
 //!
 //! Each step places its calls, waits `--dwell` for them to settle, then samples every call that is
 //! still up. Nothing is torn down between steps, so step three is running step one's calls too.
+//!
+//! `--media` selects one of three shapes, and they are three different questions. `full` and `idle`
+//! both negotiate a session — so both bind an RTP socket and carry a jitter buffer — and differ only
+//! in whether audio flows, which makes their difference the cost of *carrying* audio. `none`
+//! negotiates nothing at all on either end, so its difference from `idle` is the cost of having a
+//! media stack. A deployment that runs its media elsewhere should read `none`; see [`Media`].
 //!
 //! # The ceiling shows up in the clock before it shows up in the failures
 //!
@@ -71,7 +78,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use sipx_call::{Call, DialOptions, Dispatched, Dispatcher, dial, serve};
+use bytes::Bytes;
+use sipx_call::{
+    Call, DialOptions, Dispatched, Dispatcher, SignallingDial, SignallingDialOptions,
+    SignallingIdentity, dial, dial_signalling, serve,
+};
 use sipx_sip::{Host, HostName, Uri};
 use sipx_transport::{Config, Target, bind};
 
@@ -79,23 +90,77 @@ use sipx_transport::{Config, Target, bind};
 ///
 /// **`idle` is not "no media".** The session is still negotiated, the RTP socket is still bound and
 /// the jitter buffer still exists — what stops is audio being encoded and sent. So the difference
-/// between the two rows is the cost of *carrying* audio, not the cost of having a media stack.
+/// between `full` and `idle` is the cost of *carrying* audio, not the cost of having a media stack.
 ///
-/// A genuinely media-free run — no SDP offer, no RTP socket — needs a raw transaction path on both
-/// ends, which this example does not have and the CLI does:
+/// `none` is the third shape and the one a deployment that runs its media elsewhere should read: no
+/// SDP offer, no RTP socket, on **both** ends. It places its calls through
+/// [`sipx_call::dial_signalling`] and answers them with
+/// [`Invitation::answer_signalling`](sipx_call::Invitation::answer_signalling) — the same pair
+/// `sipx load --mode signalling` and `sipx load-responder` use, rather than a copy of it living
+/// here (`T-46`).
 ///
-/// ```text
-/// sipx load-responder --max-active 4000 &
-/// sipx load sip:capacity@127.0.0.1:5060 --mode signalling --calls 2000 --rate 200
-/// ```
-///
-/// `T-46` is filed for giving this example the same third mode.
+/// A run in `none` reports no audio figures at all. They are withheld and not zeroed: `loss`,
+/// `jitter` and `mos` are computed from a receive stream, and over an empty one they read as a
+/// perfect score for a call that carried nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Media {
     /// A negotiated session with audio flowing for the whole run.
     Full,
     /// A negotiated session that sends nothing.
     Idle,
+    /// No session at all: no SDP, no RTP socket, no jitter buffer.
+    None,
+}
+
+impl Media {
+    /// What the recorded run calls this mode.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Idle => "idle",
+            Self::None => "none",
+        }
+    }
+}
+
+/// One call held for the rest of the run.
+///
+/// The media-free mode holds a different thing, and that difference is the measurement: a
+/// [`SignallingDial`] owns no media session, so there are no counters to read off it and the audio
+/// columns are absent rather than zero.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "boxing the media half would add an allocation per held call and move its bytes off \
+              the vector, which is a change to the very thing this harness measures; the committed \
+              full and idle runs were taken against the unboxed layout"
+)]
+enum Held {
+    /// A call with a negotiated media session, flowing or idle.
+    Media(Call),
+    /// A confirmed dialog with no session.
+    Signalling(SignallingDial),
+}
+
+impl Held {
+    /// The media session, when this call has one.
+    fn media(&self) -> Option<&sipx_media::MediaSession> {
+        match self {
+            Self::Media(call) => Some(call.media()),
+            Self::Signalling(_) => None,
+        }
+    }
+
+    /// End the dialog, whichever shape it is.
+    async fn hang_up(&mut self) {
+        match self {
+            Self::Media(call) => {
+                let _ = call.hang_up().await;
+            }
+            Self::Signalling(call) => {
+                let _ = call.hang_up(TEARDOWN_BOUND).await;
+            }
+        }
+    }
 }
 
 /// Both ends. Written once so the client and the server cannot disagree about it.
@@ -103,6 +168,12 @@ const LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
 /// How long one call may take to set up before it counts as a failure rather than a slow success.
 const SETUP_BOUND: Duration = Duration::from_secs(10);
+
+/// How long a media-free BYE may go unanswered before the teardown is called failed.
+///
+/// A bound on a failure and not a wait: the far end is in this process and answers immediately.
+/// `Call::hang_up` carries its own, which is why only the signalling half names one here.
+const TEARDOWN_BOUND: Duration = Duration::from_secs(10);
 
 /// The media clock G.711 runs at, and one 20 ms packet's worth of samples at it.
 const CLOCK: usize = 8_000;
@@ -135,7 +206,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Every call placed so far, held for the whole run. Dropping one would end it, which is the
     // difference between this and `load_test`.
-    let mut held: Vec<Call> = Vec::new();
+    let mut held: Vec<Held> = Vec::new();
     let mut playing: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     let mut steps: Vec<Step> = Vec::new();
     let mut stopped_early = None;
@@ -220,7 +291,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Hanging up is not required for the measurement, but leaving a thousand dialogs for the
     // process teardown to reap makes the next run measure the last one's leftovers.
     for mut call in held {
-        let _ = call.hang_up().await;
+        call.hang_up().await;
     }
     Ok(())
 }
@@ -238,7 +309,7 @@ async fn place_many(
     media: Media,
     running: &Arc<AtomicBool>,
 ) -> (
-    Vec<Call>,
+    Vec<Held>,
     Vec<tokio::task::JoinHandle<()>>,
     Vec<Duration>,
     Vec<String>,
@@ -251,12 +322,14 @@ async fn place_many(
         let media_mode = media;
         placing.spawn(async move {
             let started = Instant::now();
-            let result = place_one(&endpoint, server).await;
+            let result = place_one(&endpoint, server, media_mode).await;
             match result {
                 Ok(call) => {
                     let elapsed = started.elapsed();
                     let mut tone_task = None;
-                    if media_mode == Media::Full {
+                    if let Held::Media(call) = &call
+                        && media_mode == Media::Full
+                    {
                         // Keep audio flowing for the rest of the run, so loss and jitter are
                         // measurements rather than a report about an idle stream.
                         let media = call.media_handle();
@@ -301,14 +374,31 @@ async fn place_many(
     (calls, tone_tasks, setup, failures)
 }
 
-async fn place_one(endpoint: &sipx_transport::Handle, server: SocketAddr) -> Result<Call, String> {
+async fn place_one(
+    endpoint: &sipx_transport::Handle,
+    server: SocketAddr,
+    media: Media,
+) -> Result<Held, String> {
     let to = Uri::sip(Host::Name(
         HostName::new("callee.example").map_err(|error| error.to_string())?,
     ));
+    if media == Media::None {
+        // The library's own media-free path, not a copy of it living in an example: `dial_signalling`
+        // is what `sipx load --mode signalling` places its calls through too (`T-46`).
+        let from = Uri::parse(Bytes::from_static(b"sip:capacity@example.net"))
+            .map_err(|error| error.to_string())?;
+        let options = SignallingDialOptions::new(SignallingIdentity::fresh(endpoint, &to, &from))
+            .with_timeout(SETUP_BOUND);
+        return dial_signalling(endpoint, Target::udp(server), &to, &options)
+            .await
+            .map(Held::Signalling)
+            .map_err(|error| error.to_string());
+    }
     let options =
         DialOptions::new("<sip:capacity@example.net>", LOOPBACK).with_timeout(SETUP_BOUND);
     dial(endpoint, Target::udp(server), &to, &options)
         .await
+        .map(Held::Media)
         .map_err(|error| error.to_string())
 }
 
@@ -353,15 +443,16 @@ async fn sample(
     established: usize,
     setup: Vec<Duration>,
     failures: Vec<String>,
-    held: &[Call],
+    held: &[Held],
 ) -> (Step, Duration) {
     let sampling_started = Instant::now();
     let mut round_trips = Vec::new();
     let (mut loss, mut mos, mut jitter_total) = (0.0_f64, 0.0_f64, Duration::ZERO);
     let (mut packets, mut discards, mut sampled) = (0_u64, 0_u64, 0_usize);
 
-    for call in held {
-        let media = call.media();
+    // A media-free call contributes nothing here — not a zero. It has no session to read counters
+    // off, so it is not in the denominator either, and `audio_observed` below stays false.
+    for media in held.iter().filter_map(Held::media) {
         let quality = media.quality().await;
         if let Some(round_trip) = quality.round_trip {
             round_trips.push(round_trip);
@@ -520,10 +611,7 @@ fn record(steps: &[Step], options: &Options, stopped_early: Option<&str>) -> Str
         "  \"ramp\": {:?},\n  \"dwell_seconds\": {},\n  \"media\": \"{}\",\n",
         options.ramp,
         options.dwell.as_secs(),
-        match options.media {
-            Media::Full => "full",
-            Media::Idle => "idle",
-        }
+        options.media.as_str()
     ));
     out.push_str(&format!(
         "  \"stopped_early\": {},\n",
@@ -598,10 +686,29 @@ async fn start_server(
 
     tokio::spawn(async move {
         let mut dispatcher = Dispatcher::new(endpoint.clone(), incoming);
+        let calls = dispatcher.calls();
         while let Some(event) = dispatcher.next().await {
             let Dispatched::Invitation(invitation) = event else {
                 continue;
             };
+            if media_mode == Media::None {
+                // The answering half of the same media-free shape the client places: no SDP in the
+                // 2xx and no media session behind it, so *both* ends of this run are without one.
+                let contact = format!("<sip:capacity@{}>", endpoint.advertised());
+                match invitation.answer_signalling(&endpoint, contact).await {
+                    Ok(mut call) => {
+                        let calls = calls.clone();
+                        tokio::spawn(async move {
+                            // Drives the 2xx retransmission until the ACK, validates in-dialog
+                            // requests, and answers the caller's BYE. It ends when the dialog does.
+                            while call.next().await.is_some() {}
+                            calls.forget(call.dialog());
+                        });
+                    }
+                    Err(error) => eprintln!("server could not answer: {error}"),
+                }
+                continue;
+            }
             match invitation.answer(&endpoint, LOOPBACK).await {
                 Ok(mut call) => {
                     let (_, mut requests) = invitation.into_parts();
@@ -672,8 +779,11 @@ impl Options {
                     options.media = match value()?.as_str() {
                         "full" => Media::Full,
                         "idle" => Media::Idle,
+                        "none" => Media::None,
                         other => {
-                            return Err(format!("--media takes full or idle, not {other}").into());
+                            return Err(
+                                format!("--media takes full, idle or none, not {other}").into()
+                            );
                         }
                     };
                 }
@@ -682,7 +792,7 @@ impl Options {
                 "--help" | "-h" => {
                     println!(
                         "usage: cargo run --release --example capacity_test -- \\\n  \
-                         [--ramp 50,500,500] [--dwell SECONDS] [--media full|idle] \\\n  \
+                         [--ramp 50,500,500] [--dwell SECONDS] [--media full|idle|none] \\\n  \
                          [--server ADDR] [--record PATH]"
                     );
                     std::process::exit(0);

@@ -2643,7 +2643,7 @@ pub async fn dial_once(
     dial_retrying(endpoint, target, to, options, false, None).await
 }
 
-type Cancelled<'a> = Pin<&'a mut (dyn Future<Output = ()> + Send)>;
+pub(crate) type Cancelled<'a> = Pin<&'a mut (dyn Future<Output = ()> + Send)>;
 
 /// Drive the two bounded retry reasons an initial INVITE has: authentication and session interval.
 async fn dial_retrying(
@@ -3028,7 +3028,7 @@ async fn dial_with(
     let (response, ringing) = match await_final(
         &mut responses,
         options.timeout,
-        &mut acknowledging,
+        Some(&mut acknowledging),
         cancelled,
     )
     .await
@@ -5872,7 +5872,7 @@ async fn retransmit_until_acked(
 }
 
 /// What waiting for a final response ended in.
-enum Waited {
+pub(crate) enum Waited {
     /// A final response arrived.
     Final {
         /// The response itself.
@@ -5898,7 +5898,12 @@ enum Waited {
 /// The transport response stream retains the provisional observation that RFC 3261 §9.1 needs
 /// if this wait ends in local cancellation.
 /// What a UAC needs in order to acknowledge a reliable provisional while it waits.
-struct Acknowledging<'a> {
+///
+/// Optional at the wait, because an SDP-free INVITE has none of it: RFC 3262 acknowledges a
+/// provisional with a PRACK carrying the offer/answer state of a session, and a call that
+/// negotiates no session has no such state to carry (`T-46`). Absent it, a reliable provisional is
+/// simply left unacknowledged — which is the same thing this does when building the PRACK fails.
+pub(crate) struct Acknowledging<'a> {
     endpoint: &'a Handle,
     invite: &'a Request,
     target: &'a Target,
@@ -5906,10 +5911,10 @@ struct Acknowledging<'a> {
     seen: sipx_sip::rel::Sequence,
 }
 
-async fn await_final(
+pub(crate) async fn await_final(
     responses: &mut sipx_transport::Responses,
     limit: Option<Duration>,
-    acknowledging: &mut Acknowledging<'_>,
+    mut acknowledging: Option<&mut Acknowledging<'_>>,
     cancelled: &mut Option<Cancelled<'_>>,
 ) -> Waited {
     let deadline = limit.map(|limit| tokio::time::Instant::now() + limit);
@@ -5954,7 +5959,9 @@ async fn await_final(
                 // RFC 3262 §4. A failure here is logged rather than fatal: the invitation is
                 // still running, and abandoning a ringing call because one PRACK did not get
                 // through would be a worse outcome than the unreliability it was fixing.
-                if let Err(error) = acknowledge(&response, acknowledging).await {
+                if let Some(acknowledging) = acknowledging.as_deref_mut()
+                    && let Err(error) = acknowledge(&response, acknowledging).await
+                {
                     tracing::debug!(%error, "could not acknowledge a reliable provisional");
                 }
             }
@@ -6010,7 +6017,7 @@ pub(crate) fn normal_clearing_reason() -> ReasonValue {
     ReasonValue::q850(16, Some(b"Normal call clearing".to_vec()))
 }
 
-fn request_timeout_reason() -> ReasonValue {
+pub(crate) fn request_timeout_reason() -> ReasonValue {
     // A constant defined by the SIP status-code space; construction cannot fail.
     StatusCode::new(408).map_or_else(
         || ReasonValue::q850(102, Some(b"Recovery on timer expiry".to_vec())),

@@ -7,10 +7,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use sipx_call::load::{AdmissionEnd, BoundedPlan, Cause, Stop, run_bounded};
-use sipx_call::{Credentials, DialOptions};
-use sipx_sip::build::RequestBuilder;
-use sipx_sip::headers::CSeq;
-use sipx_sip::{Address, HeaderName, Method, Request, Response, Uri};
+use sipx_call::{Credentials, DialOptions, SignallingDialOptions, SignallingIdentity};
+use sipx_sip::{Address, HeaderName, Request, Uri};
 use sipx_transport::{Config as TransportConfig, bind};
 
 use crate::cli::{LoadOptions, WorkloadMode};
@@ -459,6 +457,15 @@ async fn run_attempt(
     }
 }
 
+/// The workload-mode field every request of this run carries.
+fn mode_header(mode: WorkloadMode) -> Result<sipx_sip::Header, Cause> {
+    sipx_sip::Header::build(
+        workload_mode_name(),
+        Bytes::from_static(mode.as_str().as_bytes()),
+    )
+    .map_err(|error| Cause::Other(format!("could not build the workload mode field: {error}")))
+}
+
 async fn run_generated_media_attempt(
     handle: &sipx_transport::Handle,
     candidates: &[sipx_transport::Target],
@@ -481,9 +488,15 @@ async fn run_generated_media_attempt(
                 match sipx_call::dial_until(handle, target, to, &funded, stop.requested()).await {
                     Ok(call) => crate::destination::Attempted::Reached(call),
                     Err(error @ sipx_call::Error::Transport(_)) => {
-                        crate::destination::Attempted::Unreachable(classify(error))
+                        crate::destination::Attempted::Unreachable(classify(
+                            error,
+                            WorkloadMode::GeneratedMedia,
+                        ))
                     }
-                    Err(error) => crate::destination::Attempted::Answered(classify(error)),
+                    Err(error) => crate::destination::Attempted::Answered(classify(
+                        error,
+                        WorkloadMode::GeneratedMedia,
+                    )),
                 }
             }
         },
@@ -565,36 +578,33 @@ impl CallIdentity {
     fn at(&self, position: usize) -> SignallingIdentity {
         let (seed, index) = (self.seed, self.index);
         let position = u64::try_from(position).unwrap_or(u64::MAX);
-        SignallingIdentity {
-            to: self.to.clone(),
-            from: Bytes::from(format!(
+        SignallingIdentity::new(
+            self.to.clone(),
+            Bytes::from(format!(
                 "<{}>;tag=f-{seed:016x}-{index:x}-{position:x}",
                 self.from_uri
             )),
-            call_id: Bytes::from(format!(
+            Bytes::from(format!(
                 "cl-{}-{index}-{position}@driver.invalid",
                 self.run_id
             )),
-            contact: self.contact.clone(),
-        }
+            self.contact.clone(),
+        )
     }
-}
-
-/// What one candidate of one admitted call is presented to the far end as.
-#[derive(Debug)]
-struct SignallingIdentity {
-    to: Bytes,
-    from: Bytes,
-    call_id: Bytes,
-    contact: Bytes,
 }
 
 #[allow(clippy::too_many_arguments)]
 /// One candidate's bodyless INVITE/ACK/BYE exchange, bounded by what the pass has left for it.
 ///
-/// `within` is that share and not `--timeout` itself: the pass funds every address of the target
-/// together, so an address reached after two dead ones is answered inside what those two left
-/// (`P-29`). `None` is a run that stated no setup deadline at all.
+/// The exchange is [`sipx_call::dial_signalling_until`], which is also what the capacity and load
+/// examples place a media-free call with (`T-46`). It used to be written out here, and a second
+/// copy in an example would have been the third place a bodyless INVITE was assembled. What stays
+/// this command's is the accounting: the workload-mode field, the [`Cause`] each outcome is counted
+/// as, and how long the dialog is held.
+///
+/// `within` is this candidate's share and not `--timeout` itself: the pass funds every address of
+/// the target together, so an address reached after two dead ones is answered inside what those two
+/// left (`P-29`). `None` is a run that stated no setup deadline at all.
 async fn run_signalling_attempt(
     handle: &sipx_transport::Handle,
     target: sipx_transport::Target,
@@ -605,225 +615,32 @@ async fn run_signalling_attempt(
     limits: Limits,
     stop: &Stop,
 ) -> Result<Measurement, Cause> {
-    let started = tokio::time::Instant::now();
-    let mut authorization = None;
-    let mut invite_cseq = 1_u32;
-    let (invite, accepted) = loop {
-        let invite = signalling_invite(
-            handle,
-            &target,
-            to,
-            identity,
-            invite_cseq,
-            authorization.take(),
-        )?;
-        let mut responses = handle
-            .send(invite.clone(), target.clone())
-            .await
-            .map_err(|_| Cause::Transport)?;
-        let response = wait_for_invite(handle, &mut responses, within, stop).await?;
-        if matches!(response.status.code(), 401 | 407)
-            && let Some(credentials) = credentials
-            && invite_cseq == 1
-            && let Some(header) = authorization_for(&invite, &response, credentials)
-        {
-            invite_cseq = invite_cseq.saturating_add(1);
-            authorization = Some(header);
-            continue;
-        }
-        if !response.status.is_success() {
-            return Err(rejection_cause(&response));
-        }
-        break (invite, response);
-    };
-
-    let mut dialog = sipx_call::Dialog::from_response(&invite, &accepted)
-        .ok_or_else(|| Cause::Other("signalling answer created no dialog".to_owned()))?;
-    let ack = signalling_dialog_request(handle, &target, &dialog, &Method::Ack, invite_cseq)?;
-    handle
-        .send_directly(ack, target.clone())
-        .await
-        .map_err(|_| Cause::Transport)?;
-    let setup = started.elapsed();
-    wait_for_call_end(limits.call_duration, stop).await;
-
-    let bye_cseq = dialog.next_cseq();
-    let bye = signalling_dialog_request(handle, &target, &dialog, &Method::Bye, bye_cseq)?;
-    let mut responses = handle
-        .send(bye, target)
-        .await
-        .map_err(|_| Cause::Transport)?;
-    let response = responses.final_response().await.ok_or(Cause::Timeout)?;
-    if !signalling_response_matches(&response, &dialog, bye_cseq) {
-        return Err(Cause::Other(
-            "signalling BYE received an invalid response".to_owned(),
-        ));
+    let mut options = SignallingDialOptions::new(identity.clone())
+        .with_header(mode_header(WorkloadMode::Signalling)?);
+    if let Some(within) = within.filter(|within| !within.is_zero()) {
+        options = options.with_timeout(within);
     }
-    if !response.status.is_success() {
-        return Err(Cause::Other(format!(
-            "hang up failed: rejected {} {}",
-            response.status.code(),
-            String::from_utf8_lossy(&response.reason)
-        )));
+    if let Some(credentials) = credentials {
+        options = options.with_credentials(credentials.clone());
     }
-    Ok(Measurement {
-        setup,
-        status: accepted.status.code(),
+    let mut call = sipx_call::dial_signalling_until(handle, target, to, &options, stop.requested())
+        .await
+        .map_err(|error| classify(error, WorkloadMode::Signalling))?;
+    let measurement = Measurement {
+        setup: call.setup(),
+        status: call.status(),
         quality: None,
-    })
-}
-
-fn signalling_invite(
-    handle: &sipx_transport::Handle,
-    target: &sipx_transport::Target,
-    to: &Uri,
-    identity: &SignallingIdentity,
-    cseq: u32,
-    authorization: Option<sipx_sip::Header>,
-) -> Result<Request, Cause> {
-    let builder = RequestBuilder::new(Method::Invite, to.clone())
-        .header(
-            HeaderName::Via,
-            Bytes::from(format!(
-                "SIP/2.0/{} {};rport;branch={}",
-                target.transport.as_str(),
-                handle.sent_by_for(target.transport),
-                sipx_transport::new_branch()
-            )),
-        )
-        .map_err(build_cause)?
-        .header(HeaderName::To, identity.to.clone())
-        .map_err(build_cause)?
-        .header(HeaderName::From, identity.from.clone())
-        .map_err(build_cause)?
-        .header(HeaderName::CallId, identity.call_id.clone())
-        .map_err(build_cause)?
-        .cseq(cseq, &Method::Invite)
-        .map_err(build_cause)?
-        .header(HeaderName::Contact, identity.contact.clone())
-        .map_err(build_cause)?
-        .header(
-            workload_mode_name(),
-            Bytes::from_static(WorkloadMode::Signalling.as_str().as_bytes()),
-        )
-        .map_err(build_cause)?
-        .max_forwards(70);
-    let mut request = builder.build();
-    if let Some(header) = authorization {
-        request.headers.push(header);
-    }
-    Ok(request)
-}
-
-fn signalling_dialog_request(
-    handle: &sipx_transport::Handle,
-    target: &sipx_transport::Target,
-    dialog: &sipx_call::Dialog,
-    method: &Method,
-    cseq: u32,
-) -> Result<Request, Cause> {
-    let (local, remote) = dialog.local_and_remote();
-    let (uri, routes) = dialog.request_target();
-    let mut builder = RequestBuilder::new(method.clone(), uri)
-        .header(
-            HeaderName::Via,
-            Bytes::from(format!(
-                "SIP/2.0/{} {};rport;branch={}",
-                target.transport.as_str(),
-                handle.sent_by_for(target.transport),
-                sipx_transport::new_branch()
-            )),
-        )
-        .map_err(build_cause)?
-        .header(HeaderName::To, Bytes::from(remote))
-        .map_err(build_cause)?
-        .header(HeaderName::From, Bytes::from(local))
-        .map_err(build_cause)?
-        .header(HeaderName::CallId, Bytes::from(dialog.id.call_id.clone()))
-        .map_err(build_cause)?
-        .cseq(cseq, method)
-        .map_err(build_cause)?
-        .max_forwards(70);
-    for route in routes {
-        builder = builder
-            .header(HeaderName::Route, Bytes::from(route))
-            .map_err(build_cause)?;
-    }
-    Ok(builder.build())
-}
-
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "the function is passed directly to Result::map_err at each builder step"
-)]
-fn build_cause(error: sipx_sip::BuildError) -> Cause {
-    Cause::Other(format!(
-        "could not build signalling workload request: {error}"
-    ))
-}
-
-async fn wait_for_invite(
-    handle: &sipx_transport::Handle,
-    responses: &mut sipx_transport::Responses,
-    within: Option<Duration>,
-    stop: &Stop,
-) -> Result<Response, Cause> {
-    let deadline = within
-        .filter(|within| !within.is_zero())
-        .map(|within| tokio::time::Instant::now() + within);
-    loop {
-        tokio::select! {
-            biased;
-            () = stop.requested() => {
-                return cancel_signalling_invite(handle, responses)
-                    .await
-                    .ok_or(Cause::Timeout);
-            }
-            () = wait_until(deadline), if deadline.is_some() => {
-                return cancel_signalling_invite(handle, responses)
-                    .await
-                    .ok_or(Cause::Timeout);
-            }
-            event = responses.next() => match event {
-                Some(sipx_sip::transaction::TuEvent::Response(response)) if response.status.is_final() => {
-                    return Ok(*response);
-                }
-                Some(sipx_sip::transaction::TuEvent::Timeout) => return Err(Cause::Timeout),
-                Some(sipx_sip::transaction::TuEvent::TransportError) | None => {
-                    return Err(Cause::Transport);
-                }
-                Some(_) => {}
-            }
-        }
-    }
-}
-
-async fn cancel_signalling_invite(
-    handle: &sipx_transport::Handle,
-    responses: &mut sipx_transport::Responses,
-) -> Option<Response> {
-    // The load runner's 40-second cleanup cap is the bound on failure. The transport helper waits
-    // for the RFC 3261 provisional-response precondition and preserves a crossing final response.
-    match handle.cancel_invite(responses, None).await.ok()? {
-        sipx_transport::CancelInviteOutcome::FinalResponse { response, .. } => Some(response),
-        sipx_transport::CancelInviteOutcome::Sent(mut cancellation) => {
-            let _ = cancellation.outcome().await;
-            // A successful final response can cross a correctly created CANCEL. It still creates
-            // a dialog and therefore must be returned to the ACK/BYE path above.
-            responses
-                .final_response()
-                .await
-                .filter(|response| response.status.is_success())
-        }
-        _ => None,
-    }
-}
-
-async fn wait_until(deadline: Option<tokio::time::Instant>) {
-    match deadline {
-        Some(deadline) => tokio::time::sleep_until(deadline).await,
-        None => std::future::pending().await,
-    }
+    };
+    wait_for_call_end(limits.call_duration, stop).await;
+    // The run's own cleanup cap bounds a teardown nobody answers. A BYE that gets no response is
+    // still a timeout rather than an internal failure, which is the distinction `--mode signalling`
+    // has always drawn and the one that decides this command's exit status.
+    call.hang_up(CLEANUP).await.map_err(|error| match error {
+        sipx_call::Error::SignallingTeardownTimeout(_) => Cause::Timeout,
+        sipx_call::Error::Transport(_) | sipx_call::Error::Io(_) => Cause::Transport,
+        error => Cause::Other(format!("hang up failed: {error}")),
+    })?;
+    Ok(measurement)
 }
 
 async fn wait_for_call_end(duration: Duration, stop: &Stop) {
@@ -834,55 +651,6 @@ async fn wait_for_call_end(duration: Duration, stop: &Stop) {
         () = stop.requested() => {}
         () = tokio::time::sleep(duration) => {}
     }
-}
-
-fn authorization_for(
-    request: &Request,
-    response: &Response,
-    credentials: &Credentials,
-) -> Option<sipx_sip::Header> {
-    let from_proxy = response.status.code() == 407;
-    let name = if from_proxy {
-        HeaderName::ProxyAuthenticate
-    } else {
-        HeaderName::WwwAuthenticate
-    };
-    let challenges = response
-        .headers
-        .get_all(&name)
-        .filter_map(|header| sipx_sip::auth::Challenge::parse(&header.value(), from_proxy))
-        .collect();
-    let challenge = sipx_sip::auth::strongest(challenges)?;
-    let uri_bytes = request.uri.to_bytes();
-    let uri = String::from_utf8_lossy(&uri_bytes);
-    let cnonce = sipx_transport::new_branch();
-    let value = sipx_sip::auth::respond(&challenge, credentials, "INVITE", &uri, 1, &cnonce);
-    sipx_sip::Header::build(challenge.response_header(), Bytes::from(value)).ok()
-}
-
-fn rejection_cause(response: &Response) -> Cause {
-    let reason = String::from_utf8_lossy(&response.reason);
-    if response.status.code() == 488 && reason == MODE_MISMATCH_REASON {
-        Cause::Other(format!(
-            "workload mode mismatch: peer refused {}",
-            WorkloadMode::Signalling.as_str()
-        ))
-    } else {
-        Cause::Rejected(response.status.code())
-    }
-}
-
-fn signalling_response_matches(response: &Response, dialog: &sipx_call::Dialog, cseq: u32) -> bool {
-    response.headers.count(&HeaderName::CallId) == 1
-        && response
-            .headers
-            .value(&HeaderName::CallId)
-            .is_some_and(|value| value.as_ref() == dialog.id.call_id.as_slice())
-        && response
-            .headers
-            .typed::<CSeq>()
-            .and_then(Result::ok)
-            .is_some_and(|value| value.sequence == cseq && value.method == Method::Bye)
 }
 
 fn deterministic_frame(seed: u64, index: usize) -> [i16; 160] {
@@ -932,14 +700,18 @@ fn record_pass(
     }
 }
 
-fn classify(error: sipx_call::Error) -> Cause {
+/// What this run counts one failed call as.
+///
+/// `mode` names the workload the peer refused, and is a parameter rather than a constant because
+/// both modes reach here now that they place their calls through the same crate (`T-46`).
+fn classify(error: sipx_call::Error, mode: WorkloadMode) -> Cause {
     match error {
         sipx_call::Error::Rejected {
             status: 488,
             reason,
         } if reason == MODE_MISMATCH_REASON => Cause::Other(format!(
             "workload mode mismatch: peer refused {}",
-            WorkloadMode::GeneratedMedia.as_str()
+            mode.as_str()
         )),
         sipx_call::Error::Rejected { status, .. } => Cause::Rejected(status),
         sipx_call::Error::Cancelled(_) | sipx_call::Error::NoResponse => Cause::Timeout,
@@ -1371,8 +1143,8 @@ mod tests {
         };
 
         let replayed = (call(41, 2).at(1), call(41, 2).at(1));
-        assert_eq!(replayed.0.call_id, replayed.1.call_id);
-        assert_eq!(replayed.0.from, replayed.1.from);
+        assert_eq!(replayed.0.call_id(), replayed.1.call_id());
+        assert_eq!(replayed.0.from(), replayed.1.from());
 
         let call_41_2 = call(41, 2);
         for (left, right) in [
@@ -1380,13 +1152,18 @@ mod tests {
             (call(41, 2).at(0), call(41, 3).at(0)),
             (call(41, 2).at(0), call(42, 2).at(0)),
         ] {
-            assert_ne!(left.call_id, right.call_id);
-            assert_ne!(left.from, right.from);
+            assert_ne!(left.call_id(), right.call_id());
+            assert_ne!(left.from(), right.from());
             assert_eq!(
-                left.to, right.to,
+                left.to(),
+                right.to(),
                 "the callee is the call's, not the address's"
             );
-            assert_eq!(left.contact, right.contact, "one endpoint places them all");
+            assert_eq!(
+                left.contact(),
+                right.contact(),
+                "one endpoint places them all"
+            );
         }
 
         handle.shutdown().await;

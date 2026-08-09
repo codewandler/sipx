@@ -422,3 +422,94 @@ async fn bye_response_must_match_the_confirmed_dialog() {
     callee.shutdown().await;
     peer.shutdown().await;
 }
+
+/// `T-46`: the caller's half of an SDP-free dialog, so a deployment that runs media elsewhere can
+/// be measured.
+///
+/// The responder half has existed since `P-15` — [`sipx_call::Invitation::answer_signalling`] —
+/// but nothing in this crate could *place* such a call, so the capacity and load examples had only
+/// `--media idle` to compare against, and idle is not "no media": the SDP is still negotiated and
+/// the RTP socket is still bound, so it isolates the cost of *carrying* audio rather than the cost
+/// of the stack that carries it.
+///
+/// What is asserted is the offer, at the wire, from the end that receives it. An INVITE with no
+/// session description names no port, and a port that is never named is never bound — which is why
+/// the absent body is the observable and the socket count is not. The exchange is then driven to
+/// its end from both sides so the assertion is about a call that worked, not about a message that
+/// was merely well-formed.
+#[tokio::test]
+async fn a_media_free_call_is_placed_with_no_session_offer_and_confirmed_from_both_ends() {
+    let (callee, incoming) = endpoint().await;
+    let callee_addr = callee.local_addr();
+    let mut dispatcher = Dispatcher::new(callee.clone(), incoming);
+    let (surfaced, mut invitations) = mpsc::channel(1);
+    let pump = tokio::spawn(async move {
+        while let Some(item) = dispatcher.next().await {
+            if surfaced.send(item).await.is_err() {
+                return;
+            }
+        }
+    });
+
+    let (driver, _driver_incoming) = endpoint().await;
+    let to = Uri::parse(Bytes::from(format!("sip:load@{callee_addr}"))).expect("request URI");
+    let from = Uri::parse(Bytes::from_static(b"sip:probe@driver.invalid")).expect("From URI");
+    let options = sipx_call::SignallingDialOptions::new(sipx_call::SignallingIdentity::fresh(
+        &driver, &to, &from,
+    ));
+    let placing = {
+        let driver = driver.clone();
+        let to = to.clone();
+        tokio::spawn(async move {
+            sipx_call::dial_signalling(&driver, Target::udp(callee_addr), &to, &options).await
+        })
+    };
+
+    let invitation = match invitations.recv().await.expect("surfaced invitation") {
+        Dispatched::Invitation(invitation) => invitation,
+        other => panic!("expected invitation, got {other:?}"),
+    };
+    let offered = invitation.request().request.clone();
+    assert!(
+        offered.body().is_empty(),
+        "a media-free INVITE carries no session description"
+    );
+    assert_eq!(
+        offered.headers.count(&HeaderName::ContentType),
+        0,
+        "a media-free INVITE describes no body type either"
+    );
+    let mut answered = invitation
+        .answer_signalling(&callee, format!("<sip:load@{}>", callee.advertised()))
+        .await
+        .expect("answers without SDP");
+
+    let mut placed = placing
+        .await
+        .expect("dial task joins")
+        .expect("the media-free call is confirmed");
+    assert_eq!(placed.status(), 200);
+    assert_eq!(
+        answered.next().await.expect("ACK event"),
+        SignallingEvent::Acknowledged
+    );
+
+    let hanging_up =
+        tokio::spawn(async move { placed.hang_up(std::time::Duration::from_secs(5)).await });
+    assert_eq!(
+        answered.next().await.expect("BYE event"),
+        SignallingEvent::RemoteBye
+    );
+    assert_eq!(
+        hanging_up
+            .await
+            .expect("BYE task joins")
+            .expect("BYE is answered"),
+        200
+    );
+
+    pump.abort();
+    let _ = pump.await;
+    callee.shutdown().await;
+    driver.shutdown().await;
+}
