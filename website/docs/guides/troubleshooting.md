@@ -71,6 +71,36 @@ When ICE is enabled, the nominated candidate pair owns the destination; ordinary
 learning cannot override it.
 WebSocket signalling does not solve media reachability; RTP uses its own network path.
 
+## Signalling and media took different routes
+
+A call that answers and then carries no audio is not a half-broken call. Answering proves signalling
+arrived; media travels independently, to whatever address the far end put in its SDP answer, and
+that address can be on a different network than the one you dialled.
+
+The common shape is a far end reached over a tunnel or private route that answers with the public
+address it is configured to advertise. Ask the routing table about both:
+
+```bash
+ip route get 198.51.100.20   # the far end's SDP address → dev eth0,  src 192.168.1.50
+ip route get 10.20.30.40     # the endpoint you dialled  → dev tun0,  src 10.99.0.3
+```
+
+Two interfaces and two source addresses mean a media socket bound for one cannot reach the other, and
+no firewall rule changes that. **A retransmitted `200 OK` is the tell**: the far end is not receiving
+your `ACK`, which took the same path media is about to take. Dial the far end at the address its
+media already uses so both legs share one route, or set `--advertise` to an address it can reach
+while the socket stays bound locally.
+
+A related failure has no error at all: the address in your `c=` line falls inside a private range the
+far end also uses, so it sends media to its own network in good faith. Private ranges come from a
+small pool and two networks choose independently. Check that what you advertise is not inside a range
+the far end could plausibly own.
+
+Finally, a container platform's virtual service address is generally not an address — it is a rule in
+each node's packet filter, held by no interface. Nothing outside the platform reaches one, including
+a VPN carrying the platform's real networks. Dial a backing instance directly. See
+[Hear a call](/docs/guides/hear-a-call) for working through this by ear.
+
 ## WAV input is rejected or sounds wrong
 
 The default CLI uses files rather than a microphone or headset. `--play` accepts **16-bit mono PCM**

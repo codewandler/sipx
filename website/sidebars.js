@@ -36,6 +36,7 @@ const sidebars = {
         'guides/hold-and-resume',
         'guides/send-and-collect-dtmf',
         'guides/play-audio',
+        'guides/hear-a-call',
         'guides/record-a-call',
         'guides/blind-transfer',
         'guides/attended-transfer',
