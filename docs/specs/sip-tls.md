@@ -180,6 +180,14 @@ messages in one frame likewise. **[sipx]** Both close the connection rather than
 up: a peer that frames wrongly has revealed it disagrees about where messages end, so nothing
 further from it can be trusted to be what it claims.
 
+**[sipx] That rule has one implementation and more than one caller.** It is
+`sipx_sip::parse_frame`, in the sans-I/O core rather than in a transport, because the native
+WebSocket transport is not its only enforcer: the browser session kernel applies the same rule to
+the same frames and cannot reach `sipx-transport`, which carries an async runtime and a socket
+into a build that has neither. Two implementations of one framing rule is how a body becomes a
+request in one of them and not the other, so there is one, and §6.1 is the table both are measured
+against.
+
 **[sipx] `Content-Length` is optional here**, unlike on TCP and TLS. RFC 3261 §20.14 makes it
 mandatory on a stream because nothing else says where a message ends; a WebSocket message says,
 so a body simply runs to the end of it. Requiring it anyway would reject messages this transport
@@ -283,7 +291,116 @@ DNS deciding which certificate is acceptable.
 | W13 | Server serving SIP only at `/ws` | Reached when the target names it; `404` when it does not |
 | W14 | Frame or fragmented message above the configured SIP message limit | Refused by the WebSocket decoder before assembly |
 | W15 | Existing WSS connection sends again after rotation, then a new connection arrives | Existing connection continues; the new handshake presents the replacement identity |
+| W16 | One complete message followed by any octets at all | Rejected as malformed — the frame *is* the message, it does not merely start with one |
+| W17 | Leading CRLF keep-alive before the message | Ignored (RFC 3261 §7.5); one message, not two |
+| W18 | Message with no `Content-Length` whose body looks like a second message | One message; those octets are its body |
 | I1 | Register over TLS against a third-party server | Accepted |
 | I2 | …presenting a certificate for another name | Refused, immediately |
 | I3 | …signed by an issuer we do not know | Refused, immediately |
 | I4 | Register over WebSocket against a third-party server | Accepted |
+
+### 6.1 WebSocket framing vectors
+
+The rows above say what each shape means; these say it in octets. §4's framing rule has one
+implementation — `sipx_sip::parse_frame` — and more than one caller, so this table is what every
+caller is measured against rather than each keeping a corpus of its own. A caller that grew a
+second copy of the rule fails the row it disagrees with instead of agreeing today and drifting
+later.
+
+Each case begins with a verdict — `one` for a frame carrying exactly one whole message, `refused`
+for one that does not — and a name. The frame's lines follow, indented four spaces; each
+contributes its own text **and a CRLF**, and `<CRLF>` alone is an empty line. The frame is those
+octets and nothing else, because there is no trailing newline to discount when the frame boundary
+is the message boundary.
+
+Limits are the caller's policy and not part of the rule: the transport frames under
+`Limits::stream()` and the browser kernel under `Limits::datagram()`, and every frame here is far
+inside both. `half-a-message` is W3's first frame on its own — the half that arrives, with the
+rest still in flight, which a stream transport would hold and this one refuses.
+
+```text
+# BEGIN ws-framing-vectors
+one exactly-one-message
+    OPTIONS sip:alice@example.net SIP/2.0
+    Via: SIP/2.0/WSS df7jal23ls0d.invalid;branch=z9hG4bKone
+    To: <sip:alice@example.net>
+    From: <sip:peer@example.org>;tag=one
+    Call-ID: one@example.org
+    CSeq: 1 OPTIONS
+    Content-Length: 0
+    <CRLF>
+
+refused two-complete-messages
+    OPTIONS sip:alice@example.net SIP/2.0
+    Via: SIP/2.0/WSS df7jal23ls0d.invalid;branch=z9hG4bKfirst
+    To: <sip:alice@example.net>
+    From: <sip:peer@example.org>;tag=first
+    Call-ID: first@example.org
+    CSeq: 1 OPTIONS
+    Content-Length: 0
+    <CRLF>
+    OPTIONS sip:alice@example.net SIP/2.0
+    Via: SIP/2.0/WSS df7jal23ls0d.invalid;branch=z9hG4bKsecond
+    To: <sip:alice@example.net>
+    From: <sip:peer@example.org>;tag=second
+    Call-ID: second@example.org
+    CSeq: 1 OPTIONS
+    Content-Length: 0
+    <CRLF>
+
+refused one-message-then-octets
+    OPTIONS sip:alice@example.net SIP/2.0
+    Via: SIP/2.0/WSS df7jal23ls0d.invalid;branch=z9hG4bKtrailing
+    To: <sip:alice@example.net>
+    From: <sip:peer@example.org>;tag=trailing
+    Call-ID: trailing@example.org
+    CSeq: 1 OPTIONS
+    Content-Length: 0
+    <CRLF>
+    garbage
+
+refused half-a-message
+    OPTIONS sip:alice@example.net SIP/2.0
+    Via: SIP/2.0/WSS df7jal23ls0d.invalid;branch=z9hG4bKhalf
+    To: <sip:alice@example.net>
+    From: <sip:peer@example.org>;tag=half
+    Call-ID: half@example.org
+
+one no-content-length
+    OPTIONS sip:alice@example.net SIP/2.0
+    Via: SIP/2.0/WSS df7jal23ls0d.invalid;branch=z9hG4bKnolength
+    To: <sip:alice@example.net>
+    From: <sip:peer@example.org>;tag=nolength
+    Call-ID: nolength@example.org
+    CSeq: 1 OPTIONS
+    <CRLF>
+
+one leading-keepalive
+    <CRLF>
+    OPTIONS sip:alice@example.net SIP/2.0
+    Via: SIP/2.0/WSS df7jal23ls0d.invalid;branch=z9hG4bKkeepalive
+    To: <sip:alice@example.net>
+    From: <sip:peer@example.org>;tag=keepalive
+    Call-ID: keepalive@example.org
+    CSeq: 1 OPTIONS
+    Content-Length: 0
+    <CRLF>
+
+one body-that-looks-like-a-second-message
+    OPTIONS sip:alice@example.net SIP/2.0
+    Via: SIP/2.0/WSS df7jal23ls0d.invalid;branch=z9hG4bKouter
+    To: <sip:alice@example.net>
+    From: <sip:peer@example.org>;tag=outer
+    Call-ID: outer@example.org
+    CSeq: 1 OPTIONS
+    <CRLF>
+    OPTIONS sip:alice@example.net SIP/2.0
+    Via: SIP/2.0/WSS df7jal23ls0d.invalid;branch=z9hG4bKinner
+    To: <sip:alice@example.net>
+    From: <sip:peer@example.org>;tag=inner
+    Call-ID: inner@example.org
+    CSeq: 1 OPTIONS
+    Content-Length: 0
+    <CRLF>
+# END ws-framing-vectors
+```

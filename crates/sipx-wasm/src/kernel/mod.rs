@@ -15,11 +15,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use bytes::Bytes;
-use sipx_sip::error::{FramingError, ParseError};
 use sipx_sip::transaction::{Dispatch, TuEvent};
 use sipx_sip::{
-    Limits, Message, Output, Reliability, StreamParser, Timer, Timers, TransactionKey,
-    TransactionLayer,
+    Limits, Message, Output, Reliability, Timer, Timers, TransactionKey, TransactionLayer,
 };
 
 use crate::bounds;
@@ -447,32 +445,16 @@ impl Kernel {
 /// no socket to close, and `docs/specs/browser-signalling.md` §5 makes a raised count the host's
 /// signal to close the connection.
 ///
-/// What this deliberately does **not** do is decide *why* a frame was refused. A host that could
-/// act differently on "unparseable" than on "wrongly framed" would have to be trusted to do so,
-/// and §4 gives both the same answer, so the distinction would be a counter nobody may branch on.
+/// The rule itself is [`sipx_sip::parse_frame`] and is not restated here, because this kernel is
+/// not its only enforcer: the native WebSocket transport applies the same rule to the same frames,
+/// and until `S-54` each had its own copy of it. `sipx-sip` is where the shared copy can live — it
+/// carries no runtime, no socket and no clock, so it is reachable from a build that has none of
+/// them. §6.1's vectors are what both are held to.
 ///
-/// The stream framer is reused rather than reimplemented: it already knows every rule about where
-/// a message ends, and a second copy of those rules is a second place for them to drift. Only what
-/// is done with the answer differs — here anything other than exactly one whole message is a
-/// fault. `Content-Length` is the single rule that does not carry over. It is mandatory on a
-/// stream because nothing else says where a message ends; a frame says, so §4 makes it optional
-/// here and RFC 3261 §20.14 runs the body to the end of the frame. Its absence therefore falls
-/// back to the datagram reading rather than being refused — which is also why a frame whose body
-/// happens to look like a second message is one message: those octets were already spent.
+/// What is decided *here* is only what a refusal means to a browser: nothing about **why** the
+/// frame was refused survives. A host that could act differently on "unparseable" than on "wrongly
+/// framed" would have to be trusted to do so, and §4 gives both the same answer, so the
+/// distinction would be a counter nobody may branch on.
 fn parse_frame(bytes: &[u8]) -> Option<Message> {
-    let limits = Limits::datagram();
-    let mut parser = StreamParser::new(limits);
-    match parser.push(bytes) {
-        Ok(mut messages) => {
-            if parser.pending() == 0 && messages.len() == 1 {
-                messages.pop()
-            } else {
-                None
-            }
-        }
-        Err(ParseError::Framing(FramingError::ContentLengthRequired)) => {
-            sipx_sip::parse_datagram(Bytes::copy_from_slice(bytes), &limits).ok()
-        }
-        Err(_) => None,
-    }
+    sipx_sip::parse_frame(Bytes::copy_from_slice(bytes), &Limits::datagram()).ok()
 }

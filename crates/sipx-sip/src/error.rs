@@ -151,6 +151,21 @@ pub enum FramingError {
     /// messages (RFC 3261 §20.14).
     #[error("Content-Length is required on stream transports")]
     ContentLengthRequired,
+    /// A frame that delimits its own message held something other than exactly one
+    /// ([`crate::parse_frame`]).
+    ///
+    /// Only that reading produces this: a datagram is entitled to trailing noise (RFC 3261
+    /// §18.3) and a stream holds an incomplete message for the next chunk.
+    #[error(
+        "a frame carries exactly one SIP message (RFC 7118 §5); \
+         this one held {complete} complete and {trailing} octets of another"
+    )]
+    NotExactlyOneMessage {
+        /// Whole messages the frame contained.
+        complete: usize,
+        /// Octets left over: an unfinished message, or bytes after a finished one.
+        trailing: usize,
+    },
 }
 
 /// Which limit was exceeded.

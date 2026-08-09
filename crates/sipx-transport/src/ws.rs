@@ -23,8 +23,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::{SinkExt as _, StreamExt as _};
-use sipx_sip::error::{FramingError, ParseError};
-use sipx_sip::{Limits, Message, StreamParser, parse_datagram};
+use sipx_sip::{Limits, parse_frame};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as Frame;
@@ -330,7 +329,9 @@ pub(crate) async fn pump<S>(
                         break;
                     }
                 };
-                match parse_one(payload, &limits) {
+                // RFC 7118 §5's framing rule, and not a copy of it: `sipx-sip` owns it because
+                // this transport is not its only enforcer (`docs/specs/sip-tls.md` §4).
+                match parse_frame(payload, &limits) {
                     Ok(message) => {
                         if events
                             .send(Event::Message {
@@ -380,54 +381,6 @@ pub(crate) async fn pump<S>(
     let _ = sink.close().await;
 }
 
-/// Parse exactly one SIP message out of one WebSocket message.
-///
-/// Strict, and deliberately stricter than the datagram parser it borrows from. RFC 3261 §18.3
-/// says octets after a message in a *datagram* are noise to be ignored; RFC 7118 §5 says a
-/// WebSocket message carries one SIP message and no more, so the same octets here mean the peer
-/// is framing wrongly.
-#[derive(Debug, thiserror::Error)]
-enum WsFramingError {
-    #[error(transparent)]
-    Sip(#[from] ParseError),
-    #[error(
-        "a WebSocket message carries exactly one SIP message (RFC 7118 §5); \
-         this one held {complete} complete and {trailing} octets of another"
-    )]
-    Shape { complete: usize, trailing: usize },
-}
-
-fn parse_one(frame: Bytes, limits: &Limits) -> Result<Message, WsFramingError> {
-    // The stream parser is reused rather than reimplemented: it already knows every rule about
-    // where a message ends, and a second copy of those rules is a second place for them to
-    // drift. What differs is only what is done with the answer — here, anything other than
-    // exactly one whole message is a fault.
-    let mut parser = StreamParser::new(*limits);
-    match parser.push(&frame) {
-        Ok(mut messages) => {
-            let trailing = parser.pending();
-            if trailing == 0
-                && messages.len() == 1
-                && let Some(message) = messages.pop()
-            {
-                return Ok(message);
-            }
-            Err(WsFramingError::Shape {
-                complete: messages.len(),
-                trailing,
-            })
-        }
-        // The one framing rule that does not carry over. `Content-Length` is mandatory on a
-        // stream because nothing else says where a message ends. Here the frame says, so a
-        // message without one is legal and its body runs to the end of the frame — which is
-        // what RFC 3261 §20.14 already prescribes wherever the transport delimits.
-        Err(ParseError::Framing(FramingError::ContentLengthRequired)) => {
-            parse_datagram(frame, limits).map_err(WsFramingError::from)
-        }
-        Err(error) => Err(error.into()),
-    }
-}
-
 /// Put a message in a frame.
 ///
 /// Text where the bytes allow it. RFC 7118 §5 permits either, and text is what a browser's
@@ -449,6 +402,9 @@ fn frame_for(bytes: Bytes) -> Frame {
     clippy::indexing_slicing
 )]
 mod tests {
+    use sipx_sip::error::{FramingError, ParseError};
+    use sipx_sip::{Message, StreamParser, parse_datagram};
+
     use super::*;
 
     const OPTIONS: &str = "OPTIONS sip:a@b.com SIP/2.0\r\n\
@@ -459,8 +415,8 @@ mod tests {
          CSeq: 1 OPTIONS\r\n\
          Content-Length: 0\r\n\r\n";
 
-    fn parse(text: &str) -> Result<Message, WsFramingError> {
-        parse_one(Bytes::copy_from_slice(text.as_bytes()), &Limits::stream())
+    fn parse(text: &str) -> Result<Message, ParseError> {
+        parse_frame(Bytes::copy_from_slice(text.as_bytes()), &Limits::stream())
     }
 
     #[test]
@@ -506,6 +462,91 @@ mod tests {
         parse("hello").expect_err("not a SIP message");
     }
 
+    /// The four shapes that make §4's rule a rule of its own rather than one of its neighbours:
+    /// two separate it from RFC 3261 §18.3's datagram tolerance, and two from the stream framer.
+    ///
+    /// Named rather than counted, because a table that quietly lost one of them would still be a
+    /// table and this test would still pass over whatever was left.
+    const SEPARATING_SHAPES: [&str; 4] = [
+        "two-complete-messages",
+        "one-message-then-octets",
+        "no-content-length",
+        "leading-keepalive",
+    ];
+
+    /// `docs/specs/sip-tls.md` §6.1's framing vectors, read out of the spec rather than
+    /// transcribed.
+    ///
+    /// A verdict (`one` or `refused`) and a name begin a case; the frame's lines follow, indented
+    /// four spaces, each contributing its own text and a CRLF, with `<CRLF>` alone meaning an
+    /// empty line. The frame is those octets and nothing else.
+    ///
+    /// `sipx-wasm`'s `tests/framing.rs` carries the same reader over the same table. That is
+    /// deliberate: the duplication that matters is of the *rule*, which now has one
+    /// implementation, and this is what stops a caller quietly acquiring a second one — a corpus
+    /// neither caller owns and both answer.
+    fn spec_framing_vectors() -> Vec<(String, bool, Vec<u8>)> {
+        const SPEC: &str = include_str!("../../../docs/specs/sip-tls.md");
+        const BEGIN: &str = "# BEGIN ws-framing-vectors";
+        const END: &str = "# END ws-framing-vectors";
+
+        let table = SPEC
+            .split_once(BEGIN)
+            .and_then(|(_, rest)| rest.split_once(END))
+            .map(|(table, _)| table)
+            .unwrap_or_default();
+
+        let mut vectors: Vec<(String, bool, Vec<u8>)> = Vec::new();
+        for line in table.lines() {
+            if let Some(text) = line.strip_prefix("    ") {
+                let (name, _, frame) = vectors.last_mut().expect("a frame line inside a case");
+                assert!(!text.is_empty(), "{name}: an empty line is written <CRLF>");
+                if text != "<CRLF>" {
+                    frame.extend_from_slice(text.as_bytes());
+                }
+                frame.extend_from_slice(b"\r\n");
+            } else if !line.trim().is_empty() {
+                let mut fields = line.split_whitespace();
+                let verdict = fields.next().expect("a verdict");
+                let name = fields.next().expect("a case name").to_owned();
+                assert!(
+                    matches!(verdict, "one" | "refused"),
+                    "{name}: unknown verdict {verdict}"
+                );
+                vectors.push((name, verdict == "one", Vec::new()));
+            }
+        }
+        vectors
+    }
+
+    /// Every §6.1 vector, through the enforcer this transport uses.
+    ///
+    /// `sipx-wasm`'s kernel runs the same table through `sipx_input_bytes`. Two callers, one rule,
+    /// one corpus: after `S-54` the rule has a single implementation in `sipx_sip::parse_frame`,
+    /// and this is the check that says so out loud — a caller that reimplements it fails the row
+    /// it disagrees with rather than agreeing today and drifting later.
+    #[test]
+    fn every_spec_framing_vector_holds_for_the_websocket_transport() {
+        let vectors = spec_framing_vectors();
+        for shape in SEPARATING_SHAPES {
+            assert!(
+                vectors.iter().any(|(name, ..)| name == shape),
+                "docs/specs/sip-tls.md §6.1 has no `{shape}` vector; found {:?}",
+                vectors.iter().map(|(name, ..)| name).collect::<Vec<_>>()
+            );
+        }
+
+        for (name, one, frame) in &vectors {
+            let outcome = parse_frame(Bytes::copy_from_slice(frame), &Limits::stream());
+            assert_eq!(
+                outcome.is_ok(),
+                *one,
+                "{name}: §6.1 calls this {}; got {outcome:?}",
+                if *one { "one whole message" } else { "refused" }
+            );
+        }
+    }
+
     // Production's enum is deliberate: its exhaustive matches stop compiling when a transport is
     // added until X-64's framing expectations classify it. QUIC has its own one-stream/one-message
     // tests; this table is the five paths named by X-64.
@@ -528,13 +569,13 @@ mod tests {
                     .expect_err("the stream body limit must refuse")
             }
             TransportKind::Ws | TransportKind::Wss => {
-                match parse_one(Bytes::copy_from_slice(frame), limits)
+                match parse_frame(Bytes::copy_from_slice(frame), limits)
                     .expect_err("the WebSocket body limit must refuse")
                 {
-                    WsFramingError::Sip(error) => error,
-                    error @ WsFramingError::Shape { .. } => {
+                    error @ ParseError::Framing(FramingError::NotExactlyOneMessage { .. }) => {
                         panic!("the SIP limit must run before frame-shape handling: {error}")
                     }
+                    error => error,
                 }
             }
             TransportKind::Quic => {
@@ -748,21 +789,21 @@ mod tests {
                 TransportKind::Ws | TransportKind::Wss => {
                     assert!(
                         matches!(
-                            parse_one(Bytes::copy_from_slice(&short), &limits),
-                            Err(WsFramingError::Shape {
+                            parse_frame(Bytes::copy_from_slice(&short), &limits),
+                            Err(ParseError::Framing(FramingError::NotExactlyOneMessage {
                                 complete: 0,
                                 trailing: 3
-                            })
+                            }))
                         ),
                         "{path:?} did not type the short-frame refusal"
                     );
                     assert!(
                         matches!(
-                            parse_one(Bytes::copy_from_slice(&long), &limits),
-                            Err(WsFramingError::Shape {
+                            parse_frame(Bytes::copy_from_slice(&long), &limits),
+                            Err(ParseError::Framing(FramingError::NotExactlyOneMessage {
                                 complete: 1,
                                 trailing: 1
-                            })
+                            }))
                         ),
                         "{path:?} accepted bytes beyond the declared body"
                     );
