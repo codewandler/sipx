@@ -207,6 +207,12 @@ const fn split_type(raw: u16) -> (Class, u16) {
 /// not reachable from the wire — [`Message::decode`] matches both types before it ever builds an
 /// `Unknown` — but it is reachable from a caller assembling a message by hand, and a second
 /// `MESSAGE-INTEGRITY` in a message is a message that authenticates as nothing.
+///
+/// Not the call: [`Self::Unknown`] holds the only octets here, and they are whatever a peer sent
+/// under an attribute type this profile has no meaning for — control data in a datagram
+/// [`crate::dtls::classify`] separated from the media before either reached a codec. An attribute
+/// a caller cannot read is exactly the one whose bytes it needs to see, so its `Debug` is the
+/// derived one (`M-110`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Attribute {
