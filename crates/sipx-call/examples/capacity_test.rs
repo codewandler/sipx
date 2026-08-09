@@ -206,9 +206,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("recorded to {path}");
     }
 
-    // Stop the tones **before** hanging up, and stop them by asking rather than by aborting. A
-    // thousand play loops competing with a thousand teardowns is what made the first version of
-    // this example sit at sixteen cores for ten minutes after it had already written its results.
+    // Stop the tones **before** hanging up, and stop them by asking. `abort()` works too now
+    // (`M-93` made every wait in the media API a suspension point, so an aborted play task is
+    // reaped and the clip it was feeding is discarded), and it is measurably the quicker of the
+    // two — 5.3 s against 6.2 s for this ramp, because it does not wait out the clip in flight.
+    // Asking is still what this example does: the second of those numbers is the honest one, since
+    // a tone aborted mid-frame leaves a call that stopped talking a fifth of a second before it
+    // was hung up, and the point here is to time a teardown rather than to shorten it.
     running.store(false, Ordering::Relaxed);
     for task in playing {
         let _ = task.await;
@@ -257,13 +261,16 @@ async fn place_many(
                         // measurements rather than a report about an idle stream.
                         let media = call.media_handle();
                         tone_task = Some(tokio::spawn(async move {
-                            // The flag is read *between* plays, never inside one. Aborting a task
-                            // parked in `play` leaves the session's playback path holding
-                            // something `hang_up` then waits on: with abort, ten calls took over
-                            // ninety seconds to tear down; stopping between frames, four.
-                            while running.load(Ordering::Relaxed) {
-                                media.play(&tone, FRAME).await;
-                            }
+                            // Two ways out, and this needs both. `running` is how the harness
+                            // stops the tones before it hangs up, so the teardown it times is not
+                            // also draining a clip. `play`'s own answer is how a tone stops when
+                            // its call ends first: `false` means the session has gone, and a loop
+                            // that played on regardless would be a busy loop rather than a paced
+                            // one, because a stopped session has no send queue left to pace it
+                            // (`M-93`).
+                            while running.load(Ordering::Relaxed)
+                                && media.play(&tone, FRAME).await
+                            {}
                         }));
                     }
                     Ok((call, tone_task, elapsed))
@@ -601,24 +608,21 @@ async fn start_server(
                     // The server talks back. Without this the client's receive stream is empty and
                     // every audio-quality figure is computed from nothing — which is how the first
                     // run of this example reported a perfect MOS over zero packets.
-                    let ringing = Arc::new(AtomicBool::new(true));
                     let playing = (media_mode == Media::Full).then(|| {
                         let media = call.media_handle();
                         let tone = Arc::clone(&tone);
                         let running = Arc::clone(&running);
-                        let ringing = Arc::clone(&ringing);
+                        // The same two ways out as the client's. This side needs no separate
+                        // "the call ended" flag: the caller hangs up first, and `play` reports a
+                        // stopped session by answering `false`.
                         tokio::spawn(async move {
-                            while running.load(Ordering::Relaxed) && ringing.load(Ordering::Relaxed)
-                            {
-                                media.play(&tone, FRAME).await;
-                            }
+                            while running.load(Ordering::Relaxed)
+                                && media.play(&tone, FRAME).await
+                            {}
                         })
                     });
                     tokio::spawn(async move {
                         let _ = serve(&mut call, &mut requests).await;
-                        // The call is over; the tone stops with it, between frames rather than
-                        // mid-frame for the same reason the client's does.
-                        ringing.store(false, Ordering::Relaxed);
                         if let Some(playing) = playing {
                             let _ = playing.await;
                         }

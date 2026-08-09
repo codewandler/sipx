@@ -134,6 +134,11 @@ impl InboundQueue {
     ///
     /// `None` only once the queue is closed *and* drained, so stopping a session still delivers
     /// the audio it had already accepted rather than dropping it on the floor.
+    ///
+    /// That `None` is the one answer this can give for ever, and it suspends before giving it
+    /// (`M-93`): a reader looping over a closed queue would otherwise never reach a point the
+    /// runtime can cancel it at. A frame is not the same case — there are only ever as many of
+    /// them as arrived — so the path that has audio to hand over keeps its scheduler hop.
     pub(crate) async fn recv(&self) -> Option<Vec<i16>> {
         let _reader = self.reading.lock().await;
         loop {
@@ -143,15 +148,17 @@ impl InboundQueue {
             let ready = self.ready.notified();
             tokio::pin!(ready);
             ready.as_mut().enable();
-            {
+            let closed = {
                 let mut state = hold(&self.state);
                 if let Some(frame) = state.frames.pop_front() {
                     state.queued = state.queued.saturating_sub(frame.len());
                     return Some(frame);
                 }
-                if state.closed {
-                    return None;
-                }
+                state.closed
+            };
+            if closed {
+                tokio::task::yield_now().await;
+                return None;
             }
             ready.await;
         }
