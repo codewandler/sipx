@@ -2,7 +2,7 @@
 id: M-119
 title: Wire the activity hint through the DSP control surface
 pillar: Media
-status: backlog
+status: in-progress
 priority: 42
 design: docs/designs/custom-call-dsp.md
 epic: custom-call-dsp
@@ -45,13 +45,13 @@ the same claim has to hold end to end on a call.
 
 ## Acceptance
 
-- [ ] Activity observations from one call's analyser reach that call's reducer as a declared
+- [x] Activity observations from one call's analyser reach that call's reducer as a declared
       parameter set at a stated position, through `M-67`'s control surface and no other door.
-- [ ] The wiring is opt-in, per direction, and a call without it behaves exactly as it does today —
+- [x] The wiring is opt-in, per direction, and a call without it behaves exactly as it does today —
       proved by identical samples on a live session, not by inspection.
-- [ ] A call whose analyser is bound to the other direction cannot be wired to the graph, and the
+- [x] A call whose analyser is bound to the other direction cannot be wired to the graph, and the
       refusal is typed rather than a hint that is quietly about the wrong audio.
-- [ ] The per-frame parameter set does not put work, allocation or a callback on the media worker,
+- [x] The per-frame parameter set does not put work, allocation or a callback on the media worker,
       and the bound is asserted rather than argued.
 - [ ] `docs/specs/call-dsp-noise-reduction.md` §10.2's placement is what the call layer actually
       does, and a vector proves the hint lands on the frame boundary the spec names.
@@ -89,4 +89,38 @@ the same claim has to hold end to end on a call.
   **Not started because it needs a full implementation session**, not a boundary slot: a new public
   surface in `sipx-media`, failing-first tests on a live session proving sample-identical audio when
   unwired, a vector for §10.2's frame boundary, and a gate run.
+
+- **2026-08-10 — the join is built; §10.2's vector is not yet written.**
+
+  *Failing-first.* `crates/sipx-media/tests/dsp_activity_wiring.rs` stated the defect the way `M-114`
+  did, as the compiler states it:
+
+  ```
+  error[E0432]: unresolved imports `sipx_media::dsp::ActivityWiring`, `sipx_media::dsp::WiringError`
+    --> crates/sipx-media/tests/dsp_activity_wiring.rs:21:23
+  ```
+
+  *What shipped.* `sipx_media::dsp::ActivityWiring` joins the four pieces that already existed —
+  the seam's frames, `AudioAnalyzer`, `M-114`'s `ActivityHint` and `M-67`'s `configure` door — and
+  `WiringError::DirectionMismatch` refuses a hint and a graph that follow different directions **at
+  construction**, so a wiring that cannot be right is not a thing that exists.
+
+  *Rows 1–4 are ticked against four tests.* Updates reach the reducer through `configure` and no
+  other door; an inbound hint on an outbound graph is refused by name; a call whose detector never
+  calls voice carries **sample-identical** audio wired and unwired; and the graph's own counters show
+  no deadline miss and no bypass, which is row 4's bound asserted rather than argued. Nothing runs on
+  the media worker by construction: `run_until_idle` is synchronous, drains what the seam already
+  holds and owns neither a task nor a clock, so the caller decides when the hint is driven.
+
+  *Two things the tests found, both worth keeping.* A constant sample level is not speech however
+  loud it is — a detector measures deviation within a window and a flat line has none — so the
+  fixture had to carry a signal with energy in it. And a `NoiseReduction` assembled by hand declares
+  **no activity input**, and a reducer that consumes nothing is wired to nothing: the hint would have
+  been correct, silent, and indistinguishable from a broken join. The fixture now takes the
+  declaration from `SubbandSuppressor` itself.
+
+  *What is left.* Row 5 — `docs/specs/call-dsp-noise-reduction.md` §10.2's placement asserted as a
+  vector proving the hint lands on the frame boundary the spec names — is not written, and row 6 is
+  the gate. Until row 5 lands this story stays open, and so does `M-114`, whose first two rows are
+  this story's first two.
 

@@ -80,12 +80,14 @@
 
 use crate::processing::AudioDirection;
 
+mod activity;
 mod builtin;
 mod graph;
 mod supervised;
 mod wire;
 mod worker;
 
+pub use activity::{ActivityWiring, WiringError, WiringOutcome};
 pub use builtin::BuiltIn;
 pub use graph::{
     BypassCause, GraphBarrier, GraphBounds, GraphCounters, GraphError, GraphPlan, GraphTransition,
