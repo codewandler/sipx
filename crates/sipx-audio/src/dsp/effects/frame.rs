@@ -6,6 +6,11 @@
 //! the sentence that is easy to get subtly wrong once per implementation. So each built-in supplies
 //! its own transfer function and nothing else: [`open`] runs the prologue and [`transform`] runs the
 //! loop, and neither is reachable from outside the crate.
+//!
+//! `M-66`'s noise reduction ([`crate::dsp::noise`]) shares them too, which is why they are visible
+//! across `crate::dsp` rather than only within this module. A suppressor that admitted frames
+//! through a second implementation of §8.3 would be a second reading of "typed refusal with no
+//! partial state mutation", and the point of the sentence is that there is one.
 
 use crate::dsp::contract::{
     Admitted, DspCapability, DspFrame, DspObservation, DspResetCause, FrameAdmission, FrameSink,
@@ -14,16 +19,16 @@ use crate::dsp::contract::{
 
 use super::arithmetic::clamp_sample;
 
-/// The channel counts every built-in accepts: mono and stereo.
+/// The channel counts every processor this workspace ships accepts: mono and stereo.
 ///
 /// The contract admits eight, and this module claims two. Those are the call paths this epic
 /// serves; eight is the contract's headroom, and a declaration is a promise a caller sizes buffers
 /// from rather than a place to be generous. Nothing here measures a third channel, so nothing here
-/// declares one.
-pub(super) const CHANNELS: &[u8] = &[1, 2];
+/// declares one. `M-66`'s suppressor declares the same two for the same reason.
+pub(in crate::dsp) const CHANNELS: &[u8] = &[1, 2];
 
 /// The widest interleaved position [`CHANNELS`] admits.
-pub(super) const MAX_CHANNELS: usize = 2;
+pub(in crate::dsp) const MAX_CHANNELS: usize = 2;
 
 /// Which declared parameters an accepted set assigned, waiting for the position they take effect at.
 ///
@@ -82,19 +87,19 @@ impl Pending {
 
 /// The admission state and the parameter accounting every built-in owns.
 #[derive(Debug, Default, Clone, Copy)]
-pub(super) struct Body {
+pub(in crate::dsp) struct Body {
     admission: FrameAdmission,
     pending: Pending,
 }
 
 impl Body {
     /// The shared admission state machine, for a processor's own `prepare` and `flush`.
-    pub(super) fn admission(&mut self) -> &mut FrameAdmission {
+    pub(in crate::dsp) fn admission(&mut self) -> &mut FrameAdmission {
         &mut self.admission
     }
 
     /// Record an accepted parameter set (see [`Pending`]).
-    pub(super) fn mark(&mut self, capability: &DspCapability, parameters: &[Parameter]) {
+    pub(in crate::dsp) fn mark(&mut self, capability: &DspCapability, parameters: &[Parameter]) {
         self.pending.mark(capability, parameters);
     }
 }
@@ -111,7 +116,7 @@ impl Body {
 ///
 /// Every refusal in §8.3 that admission owns. A refusal writes nothing and mutates nothing, so a
 /// caller that fixes its input and retries continues exactly where the stream stood.
-pub(super) fn open(
+pub(in crate::dsp) fn open(
     body: &mut Body,
     capability: &DspCapability,
     frame: &DspFrame<'_>,
@@ -143,7 +148,7 @@ pub(super) fn open(
 ///
 /// [`ProcessError::OutputOverflow`] if the sink is smaller than the frame's own position count,
 /// which is a caller that did not size it with `max_output_positions`.
-pub(super) fn transform<F>(
+pub(in crate::dsp) fn transform<F>(
     frame: &DspFrame<'_>,
     sink: &mut FrameSink<'_>,
     mut step: F,
@@ -201,7 +206,7 @@ where
 /// `heap-probe/`, which sits outside the workspace and can install one (`X-128`). So the `heap`
 /// argument is a claim that gets checked: `./scripts/check-dsp-heap.sh` holds the delay line's
 /// stated size against the bytes it actually takes, and they agree exactly.
-pub(super) fn state_bytes<T>(heap: u64) -> u64 {
+pub(in crate::dsp) fn state_bytes<T>(heap: u64) -> u64 {
     u64::try_from(size_of::<T>())
         .unwrap_or(u64::MAX)
         .saturating_add(heap)

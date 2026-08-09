@@ -14,7 +14,7 @@
 /// negation produce exactly negated output, which is the property [`super::level::Polarity`] and
 /// every gain vector are written against. `denominator` is a positive constant at every call site;
 /// a zero one yields zero rather than dividing.
-pub(super) fn scaled(value: i64, numerator: i64, denominator: i64) -> i64 {
+pub(in crate::dsp) fn scaled(value: i64, numerator: i64, denominator: i64) -> i64 {
     if denominator <= 0 {
         return 0;
     }
@@ -31,7 +31,7 @@ pub(super) fn scaled(value: i64, numerator: i64, denominator: i64) -> i64 {
 ///
 /// The intermediate width every effect works in is `i64`; this is where it comes back down, and it
 /// comes down by clamping because §4.5 admits saturation as a declared behaviour and never a wrap.
-pub(super) fn narrow(value: i64) -> i32 {
+pub(in crate::dsp) fn narrow(value: i64) -> i32 {
     i32::try_from(value).unwrap_or(if value > 0 { i32::MAX } else { i32::MIN })
 }
 
@@ -41,7 +41,7 @@ pub(super) fn narrow(value: i64) -> i32 {
 /// narrow on purpose: output clamped to **full scale**. An effect that limits to a threshold of its
 /// own — hard clipping to a declared ceiling, say — is applying its transfer function and is not
 /// saturating, so it never reaches this.
-pub(super) fn clamp_sample(value: i64) -> (i16, bool) {
+pub(in crate::dsp) fn clamp_sample(value: i64) -> (i16, bool) {
     match i16::try_from(value) {
         Ok(sample) => (sample, false),
         Err(_) => {

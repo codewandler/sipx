@@ -7,10 +7,16 @@
 //! closed set of this workspace's own processors. Handing the very same processor to
 //! [`GraphPlan::with_processor`](super::GraphPlan::with_processor) still refuses it, because what
 //! is admitted is the door and not the type.
+//!
+//! It is `M-65`'s nine effects and filters plus `M-66`'s one noise reducer. That the reducer is
+//! here and an application's is not is the intended asymmetry, and it is about evidence rather than
+//! about quality: `ProvenInline` names this repository's gate, and implementing
+//! [`NoiseReducer`](sipx_audio::dsp::noise::NoiseReducer) adds nothing to it.
 
 use sipx_audio::dsp::effects::{
     BitCrush, Gain, HardClip, HighPass, LowPass, Peaking, Polarity, SoftClip, Stutter,
 };
+use sipx_audio::dsp::noise::SubbandSuppressor;
 use sipx_audio::dsp::{CapabilityError, FrameProcessor};
 
 /// One of this workspace's own processors, selected by name (`docs/specs/call-dsp-effects.md` §2).
@@ -52,6 +58,20 @@ pub enum BuiltIn {
     HighPass,
     /// A peaking band lift or cut ([`Peaking`]).
     Peaking,
+    /// The workspace's noise-reduction baseline ([`SubbandSuppressor`], `M-66`).
+    ///
+    /// It reaches a graph through this door for the same reason every other variant does — the
+    /// profile is granted by the registry and not by the type — and it is the only one of them that
+    /// is *adaptive*. Read [`SubbandSuppressor`]'s own documentation before attaching it: it states
+    /// what it removes, what it damages while removing it, and the five conditions under which it
+    /// makes speech worse than leaving it alone.
+    ///
+    /// A different noise reducer is substituted by implementing
+    /// [`NoiseReducer`](sipx_audio::dsp::noise::NoiseReducer) and offering it at
+    /// [`GraphPlan::with_processor`](super::GraphPlan::with_processor). Nothing in the graph, the
+    /// seam or the session can tell the two apart; what this door grants is provenance, and an
+    /// application-supplied reducer does not get it.
+    SubbandSuppressor,
 }
 
 impl BuiltIn {
@@ -72,6 +92,7 @@ impl BuiltIn {
             Self::LowPass => sipx_audio::dsp::effects::LOW_PASS,
             Self::HighPass => sipx_audio::dsp::effects::HIGH_PASS,
             Self::Peaking => sipx_audio::dsp::effects::PEAKING,
+            Self::SubbandSuppressor => sipx_audio::dsp::noise::SUBBAND_SUPPRESSOR,
         }
     }
 
@@ -94,17 +115,22 @@ impl BuiltIn {
             Self::LowPass => Box::new(LowPass::new()),
             Self::HighPass => Box::new(HighPass::new()),
             Self::Peaking => Box::new(Peaking::new()),
+            Self::SubbandSuppressor => Box::new(SubbandSuppressor::new()),
         };
         Ok(processor)
     }
 
-    /// Every registered processor, in `BUILT_IN_IDS` order.
+    /// Every registered processor: `BUILT_IN_IDS` order, then `NOISE_REDUCTION_IDS` order.
     ///
     /// [`Self::Stutter`] appears with a one-position line, which is the shortest shape that still
     /// holds audio; this names what exists rather than a configuration to use. It is test-only
     /// because nothing in the crate needs to enumerate the registry — what a caller needs is to
     /// name one variant — and a public list would be surface added for a check rather than for a
     /// user. `M-67` is where an SDK gets a reason to publish one.
+    ///
+    /// The two source lists stay separate deliberately: `docs/specs/call-dsp-effects.md` §2.1
+    /// declares nine effects normatively and a noise reducer is not one of them, so this registry
+    /// concatenates rather than either list growing to hold the other's members.
     #[cfg(test)]
     const REGISTERED: &'static [Self] = &[
         Self::Gain,
@@ -116,6 +142,7 @@ impl BuiltIn {
         Self::LowPass,
         Self::HighPass,
         Self::Peaking,
+        Self::SubbandSuppressor,
     ];
 }
 
@@ -131,6 +158,7 @@ mod tests {
     use super::*;
     use sipx_audio::dsp::ExecutionProfile;
     use sipx_audio::dsp::effects::{BUILT_IN_IDS, MAX_STUTTER_POSITIONS};
+    use sipx_audio::dsp::noise::NOISE_REDUCTION_IDS;
 
     /// §3.2: the registry names exactly the processors this workspace ships, and each name is the
     /// one the processor itself declares. A registry that drifted from the effects would grant
@@ -138,7 +166,12 @@ mod tests {
     #[test]
     fn the_registry_is_exactly_what_the_workspace_ships() {
         let registered: Vec<&str> = BuiltIn::REGISTERED.iter().map(|entry| entry.id()).collect();
-        assert_eq!(registered, BUILT_IN_IDS);
+        let shipped: Vec<&str> = BUILT_IN_IDS
+            .iter()
+            .chain(NOISE_REDUCTION_IDS)
+            .copied()
+            .collect();
+        assert_eq!(registered, shipped);
 
         for entry in BuiltIn::REGISTERED {
             let processor = entry.processor().expect("a registered shape is admissible");

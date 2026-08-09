@@ -67,7 +67,7 @@ const PEAKING_PARAMETERS: &[ParameterSpec] = &[
 ];
 
 /// The Q15 coefficient for a cutoff at a rate, read out of [`COEFFICIENTS`].
-fn coefficient(cutoff_hz: i64, rate: u32) -> i32 {
+pub(in crate::dsp) fn coefficient(cutoff_hz: i64, rate: u32) -> i32 {
     let rate = i64::from(rate).max(1);
     let ceiling = rate.saturating_mul(NYQUIST_GUARD) / 100;
     let cutoff = cutoff_hz.clamp(0, ceiling);
@@ -106,13 +106,13 @@ fn coefficient(cutoff_hz: i64, rate: u32) -> i32 {
 /// LSB of permanent DC offset in a filter whose job is removing DC. Carrying the state at Q15 puts
 /// that dead band 32,768 times lower, where it is below the resolution of the output.
 #[derive(Debug, Default, Clone, Copy)]
-struct OnePole {
+pub(in crate::dsp) struct OnePole {
     /// The section's state, at Q15: the sample value times 32,768.
     state: i64,
 }
 
 impl OnePole {
-    fn step(&mut self, input: i32, coefficient: i32) -> i32 {
+    pub(in crate::dsp) fn step(&mut self, input: i32, coefficient: i32) -> i32 {
         let difference = (i64::from(input) << 15) - self.state;
         let step = scaled(difference, i64::from(coefficient), 32_768);
         let output = self.state + step;

@@ -89,6 +89,21 @@ pub use sipx_audio::dsp::{
     Scratch, StreamFormat,
 };
 
+/// The noise-reduction interface, re-exported unchanged from [`sipx_audio::dsp::noise`]
+/// ([`docs/specs/call-dsp-noise-reduction.md`](../../../docs/specs/call-dsp-noise-reduction.md),
+/// `M-66`).
+///
+/// Writing a noise reducer for a call means implementing [`NoiseReducer`] and declaring a
+/// [`NoiseReduction`], and a caller of this crate should not have to name a second one to do it.
+/// A reducer reaches a graph as an ordinary [`FrameProcessor`], so nothing here — not the plan, not
+/// the graph, not the seam, not the session — can tell which implementation is installed. That is
+/// the substitution the interface exists for; [`BuiltIn::SubbandSuppressor`] is the workspace's own
+/// implementation of it, and its documentation states what it damages as well as what it removes.
+pub use sipx_audio::dsp::noise::{
+    ActivityInput, HostRequirement, MAX_WARM_UP_POSITIONS, NOISE_REDUCTION_IDS, NoiseReducer,
+    NoiseReduction, NoiseReductionError, SUBBAND_SUPPRESSOR, SubbandSuppressor,
+};
+
 pub(crate) use graph::{CallDsp, SlotRef};
 
 /// One call direction's live DSP graph

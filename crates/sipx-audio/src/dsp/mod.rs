@@ -26,6 +26,16 @@
 //! seam and `M-64`'s call-local graph, and `docs/specs/custom-call-dsp.md` §10 forbids a second
 //! call-media tap by name.
 //!
+//! # What implements it here
+//!
+//! [`effects`] is `M-65`'s nine deterministic effects and filters, and [`noise`] is `M-66`'s
+//! interchangeable noise reduction: a declaration and a trait with one shipped implementation
+//! behind them, plus a second written from outside this crate so that "a different one can be
+//! substituted" is a fact rather than a shape. Both reach the contract through this module's public
+//! surface and nothing else. Noise reduction is **not** voice activity detection, echo
+//! cancellation, recognition or automatic gain control, and [`noise`] says so at length and says
+//! what its baseline damages while it works.
+//!
 //! # Execution profiles
 //!
 //! [`ExecutionProfile`] is the part of this contract that is a promise to an application about its
@@ -110,6 +120,7 @@
 pub mod conformance;
 mod contract;
 pub mod effects;
+pub mod noise;
 
 pub use conformance::{
     CHECK_ALLOCATION, CHECK_CANCELLATION, CHECK_CAPABILITY, CHECK_CHUNK_BOUNDARY,

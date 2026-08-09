@@ -40,8 +40,13 @@
 //!   generation, its bounds, its failure policy and its teardown barrier are real and tested; what
 //!   is not yet here is a supervised worker in a separate operating-system process, so that profile
 //!   runs its worker in a thread this crate owns and its containment claim is bounded by that
-//!   (`M-102`). No effect, filter or noise reducer ships with it: those are `M-65` and `M-66`, and
-//!   the workspace registry a proven-inline stage would have to be in is empty until they do.
+//!   (`M-102`). The workspace registry a proven-inline stage has to be named through carries
+//!   `M-65`'s nine effects and filters and `M-66`'s one noise reducer. **Noise reduction is not
+//!   voice activity detection, echo cancellation, recognition or automatic gain control**: it
+//!   attenuates part of a signal on an estimate it derives from that signal, and
+//!   [`dsp::SubbandSuppressor`] states what it damages while doing so and when it makes speech
+//!   worse than leaving it alone. What is not here is an SDK surface for controlling a graph
+//!   (`M-67`) or the measured CPU, memory and quality thresholds (`M-68`, `X-109`).
 //! - `dtls::openssl` — the optional OpenSSL implementation behind the off-by-default `dtls`
 //!   feature. No shipped application enables it by default; the feature never changes a session or
 //!   call without explicit DTLS-SRTP policy.
