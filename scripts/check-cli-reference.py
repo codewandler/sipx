@@ -55,6 +55,17 @@ _OPTION_ENTRY = re.compile(
     re.VERBOSE,
 )
 
+#: The delimiter row that turns a run of `|` lines into a table. GFM requires it directly under the
+#: header row; its cells are runs of dashes, optionally colon-aligned, and the closing pipe of the
+#: last one is optional. Without it the lines are paragraph text, pipes and all.
+_DELIMITER_ROW = re.compile(
+    r"""\A\|                        # the row opens with a pipe, as its header row did
+        (?:\s*:?-+:?\s*\|)*         # each cell is dashes, optionally colon-aligned
+        \s*:?-+:?\s*\|?\s*\Z        # the last cell may close the row without a pipe
+    """,
+    re.VERBOSE,
+)
+
 #: The deepest indent at which an entry opens. Entries sit at column two, or at six where an absent
 #: short flag is padded past; everything belonging to one — description, default, possible values —
 #: is indented further, at ten. The bound is what keeps a wrapped description line that happens to
@@ -121,8 +132,47 @@ def help_options(text: str) -> set[str]:
     return options - GLOBAL_OPTIONS
 
 
+def table_rows(section: str) -> list[str]:
+    """The body rows of the Markdown tables in one section, in order.
+
+    A table is a header row, a delimiter row of dashes directly beneath it, and body rows running
+    to the first line that is not one. Both halves of that shape matter, because a table can
+    neither omit its delimiter row nor interrupt a paragraph: a `|` line outside such a run is
+    paragraph text, and a reader meets it as literal pipes rather than as a row.
+    """
+
+    lines = section.splitlines()
+    rows: list[str] = []
+    index = 0
+    while index < len(lines):
+        opens_a_table = (
+            lines[index].startswith("|")
+            and index + 1 < len(lines)
+            and _DELIMITER_ROW.match(lines[index + 1]) is not None
+            and (index == 0 or not lines[index - 1].strip())
+        )
+        if not opens_a_table:
+            index += 1
+            continue
+        index += 2
+        while index < len(lines) and lines[index].startswith("|"):
+            rows.append(lines[index])
+            index += 1
+    return rows
+
+
 def document_command_flags(document: str) -> dict[str, set[str]]:
-    """Read command sections and their option-table first cells from the public page."""
+    """Read command sections and their option-table first cells from the public page.
+
+    The flags are taken from table *rows*, not from every `|` line of the section. `X-132`: the
+    wide reader never asked what such a line belonged to, so prose written through
+    `load-responder`'s table left the six rows below it documented to this checker and rendered as
+    a wall of pipes on the published page for the length of a release.
+
+    Narrowing here is safe for the same reason it was safe in `help_options`: `help_drift` compares
+    both ways, so a reader that stopped seeing rows does not go quiet — it reports every executable
+    option as undocumented.
+    """
 
     headings = list(
         re.finditer(r"^## `sipx ([a-z][a-z0-9-]*)(?:\s+[^`]*)?`\s*$", document, re.MULTILINE)
@@ -130,12 +180,9 @@ def document_command_flags(document: str) -> dict[str, set[str]]:
     commands: dict[str, set[str]] = {}
     for index, heading in enumerate(headings):
         end = headings[index + 1].start() if index + 1 < len(headings) else len(document)
-        section = document[heading.end() : end]
         flags: set[str] = set()
-        for line in section.splitlines():
-            if not line.startswith("|"):
-                continue
-            first_cell = line.strip().strip("|").split("|", 1)[0]
+        for row in table_rows(document[heading.end() : end]):
+            first_cell = row.strip().strip("|").split("|", 1)[0]
             flags.update(re.findall(r"`(--[a-z][a-z0-9-]*)", first_cell))
         commands[heading.group(1)] = flags - GLOBAL_OPTIONS
     return commands

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import pathlib
+import re
 import sys
 import unittest
 
@@ -238,6 +239,135 @@ OPTIONS:
 
     def drift(self, help_text: str) -> list[str]:
         return checker.help_drift(self.DOCUMENT, self.ROOT, {"load-responder": help_text})
+
+
+class TheFlagTableReader(unittest.TestCase):
+    """`X-132`: a command's documented flags are the rows of a table, not every `|` line.
+
+    The reader used to take a `` `--flag` `` out of the first cell of any line in the section that
+    began with `|`, and never asked what those lines belonged to. A GFM table needs a delimiter row
+    and cannot interrupt a paragraph, so `|` lines written under prose are paragraph text: pipes
+    and all, on the rendered page. Finishing `X-129` put the sizing paragraph between two rows of
+    `load-responder`'s table, and the six flags below it — `--transport`, `--local` and `--mode`
+    among them — were documented to this checker and a wall of pipes to an operator for the length
+    of one release.
+
+    Narrowing a reader is how one goes quiet, so the last two rows are the property that makes it
+    safe to attempt: `help_drift` compares both ways, so a page reader that stopped seeing rows is
+    reported by the executable half of the same comparison rather than passing silently. The live
+    page is held against the wide reader it replaced, because agreement between the two is exactly
+    the statement that no command section carries a row outside a table.
+    """
+
+    #: A root help naming the one command these fixtures describe.
+    ROOT = "Commands:\n  load-responder  Answer a load\n  help  Show this message\n"
+
+    HELP = """\
+OPTIONS:
+    --max-active <N>  Ceiling on dialogs
+    --transport <T>   Must be `udp`
+    -h, --help        Help
+"""
+
+    #: The shape that reached the published page: a table opened, prose written through it, and the
+    #: remaining rows resumed beneath that prose with no delimiter row of their own.
+    SPLICED = """\
+# CLI reference
+
+## `sipx load-responder`
+
+| Flag | Meaning |
+|---|---|
+| `--max-active <N>` | Ceiling on dialogs |
+
+**Sizing `--max-active` against a generator.** Give it headroom over the generator's
+`--concurrency` rather than matching it.
+| `--transport <T>` | Must be `udp` |
+"""
+
+    #: The same flags, repaired the way the page was: one table, the paragraph below it.
+    ONE_TABLE = """\
+# CLI reference
+
+## `sipx load-responder`
+
+| Flag | Meaning |
+|---|---|
+| `--max-active <N>` | Ceiling on dialogs |
+| `--transport <T>` | Must be `udp` |
+
+**Sizing `--max-active` against a generator.** Give it headroom over the generator's
+`--concurrency` rather than matching it.
+"""
+
+    def test_rows_resuming_after_a_paragraph_are_not_documented_flags(self):
+        problems = self.drift(self.SPLICED)
+        self.assertEqual(1, len(problems))
+        self.assertIn("--transport", problems[0])
+        self.assertIn("is not documented", problems[0])
+
+    def test_the_same_rows_gathered_into_one_table_are_documented(self):
+        self.assertEqual([], self.drift(self.ONE_TABLE))
+
+    def test_a_header_and_delimiter_under_prose_do_not_open_a_table_either(self):
+        """A table cannot interrupt a paragraph, so a whole one written into it still renders flat."""
+        interrupting = self.SPLICED.replace(
+            "| `--transport <T>` | Must be `udp` |",
+            "| Flag | Meaning |\n|---|---|\n| `--transport <T>` | Must be `udp` |",
+        )
+        problems = self.drift(interrupting)
+        self.assertEqual(1, len(problems))
+        self.assertIn("--transport", problems[0])
+
+    def test_the_reader_takes_flags_from_the_body_rows_of_a_delimited_table(self):
+        self.assertEqual(
+            {"load-responder": {"--max-active"}}, checker.document_command_flags(self.SPLICED)
+        )
+
+    def test_an_alignment_colon_delimiter_still_opens_a_table(self):
+        """The narrowing is a delimiter row, not one spelling of one: `|:---|---:|` is legal GFM."""
+        aligned = self.ONE_TABLE.replace("|---|---|", "| :--- | ---: |")
+        self.assertEqual([], self.drift(aligned))
+
+    def test_a_reader_that_saw_no_rows_would_be_reported_not_silent(self):
+        """Why narrowing is safe to attempt: the executable half catches a blind page reader."""
+        self.assertEqual(
+            [
+                "load-responder: executable option `--max-active` is not documented",
+                "load-responder: executable option `--transport` is not documented",
+            ],
+            self.drift("# CLI reference\n\n## `sipx load-responder`\n\nNo table here.\n"),
+        )
+
+    def test_no_command_section_of_the_public_page_carries_a_row_outside_a_table(self):
+        """The rest of the page, since until now nothing had been asking.
+
+        Where the narrowed reader and the wide one it replaced agree, every `|` line in a command
+        section is a row of a real table. Where they differ, some line counts as documented here
+        and renders as literal pipes to a reader.
+        """
+        document = checker.DOCUMENT.read_text(encoding="utf-8")
+        self.assertEqual(self.wide_command_flags(document), checker.document_command_flags(document))
+
+    @staticmethod
+    def wide_command_flags(document: str) -> dict[str, set[str]]:
+        """The reader this story replaced: a flag from the first cell of any `|`-leading line."""
+        headings = list(
+            re.finditer(r"^## `sipx ([a-z][a-z0-9-]*)(?:\s+[^`]*)?`\s*$", document, re.MULTILINE)
+        )
+        commands: dict[str, set[str]] = {}
+        for index, heading in enumerate(headings):
+            end = headings[index + 1].start() if index + 1 < len(headings) else len(document)
+            flags: set[str] = set()
+            for line in document[heading.end() : end].splitlines():
+                if line.startswith("|"):
+                    first_cell = line.strip().strip("|").split("|", 1)[0]
+                    flags.update(re.findall(r"`(--[a-z][a-z0-9-]*)", first_cell))
+            commands[heading.group(1)] = flags - checker.GLOBAL_OPTIONS
+        return commands
+
+    def drift(self, document: str) -> list[str]:
+        return checker.help_drift(document, self.ROOT, {"load-responder": self.HELP})
 
 
 if __name__ == "__main__":
