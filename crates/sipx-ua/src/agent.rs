@@ -601,7 +601,7 @@ impl UserAgent {
             Err(destination::Unreached::Expired { .. }) => Err(Error::AttemptTimeout {
                 limit: budget.unwrap_or_default(),
             }),
-            Err(destination::Unreached::Answered(error)) => Err(error),
+            Err(destination::Unreached::Answered { last, .. }) => Err(last),
             // The pass classifies; the variant it hands back is the one this crate promises, and
             // only a transport failure ever reaches here as unreachable.
             Err(destination::Unreached::Unreachable { attempts, last }) => Err(match last {

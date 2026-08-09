@@ -71,8 +71,11 @@ impl Resolver {
 /// starts by looking at the wrong system. Every command that walks the list says it with these two
 /// field names, because a script that learned them from `register` reads them from `dial`.
 ///
-/// Absent, rather than zero, for a failure that never attempted a candidate: a resolution that
-/// produced nothing, or a refusal from the far end. Zero would be a pass that ran and got nowhere.
+/// Absent, rather than zero, for a failure that never attempted a candidate — a resolution that
+/// produced nothing. Zero would be a pass that ran and got nowhere. `X-136`: a refusal from the far
+/// end is *not* one of those, and used to be treated as one; the refusal came from a candidate the
+/// pass attempted, so the pair says how far it got there too, and absent now means only that no
+/// pass ran.
 pub(crate) fn with_attempts(report: Report, attempts: Option<Attempts>) -> Report {
     let Some(attempts) = attempts else {
         return report;

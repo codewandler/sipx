@@ -3868,6 +3868,89 @@ async fn a_load_run_that_reaches_no_address_reports_what_it_attempted() {
     }
 }
 
+/// `X-136`: a pass an answer ended still says how far down the list it got.
+///
+/// The counting test above is the case where every address refuses, and a refusal is prompt on any
+/// machine. The other ending is not: `load` treats a response deadline as the far end answering for
+/// the name — a busy host is exactly where a candidate stops refusing promptly and starts running
+/// out of the pass's budget instead — and the depth that pass reached was thrown away with it. The
+/// summary then printed `candidates_attempted: null`, which is the report a run that walked *no*
+/// pass produces, so the one number saying how far the run got said nothing on the machine where
+/// an operator most needs it.
+///
+/// The fixture magnifies that ending rather than waiting for a loaded box to produce it: the first
+/// address accepts the connection and answers nothing, so the pass's own `--timeout` ends it there
+/// while two further addresses remain untried. `1 of 3` is the whole finding — the pass was cut
+/// short at the head of the list, which is a different fact from `3 of 3`, and both are different
+/// from a pass that never ran.
+#[tokio::test]
+async fn a_load_pass_an_answer_ended_still_reports_what_it_attempted() {
+    let _scenario = process_scenario().await;
+    let dns = fixture_nameserver().await;
+
+    // Bound on the *first* `SPREAD` address, so the same port refuses on the second and third: the
+    // pass could have walked on, and what stops it is the answer rather than the end of the list.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("the silent fixture binds the first address");
+    let port = listener.local_addr().expect("reserved address").port();
+    let silent = tokio::spawn(silent_peer(listener));
+
+    let run = through_nameserver(
+        &dns,
+        &[
+            "load",
+            &format!("sip:load@{SPREAD}:{port}"),
+            "--transport",
+            "tcp",
+            "--mode",
+            "signalling",
+            "--rate",
+            "1",
+            "--concurrency",
+            "1",
+            "--calls",
+            "1",
+            // The pass's whole budget. It funds the first candidate, which never answers, so this
+            // is what ends the call — and the number is the failure's bound rather than a wait.
+            "--timeout",
+            "1",
+        ],
+        true,
+    )
+    .await;
+    silent.abort();
+
+    let summary = load_summary(&run);
+    assert_eq!(
+        summary["candidates_resolved"],
+        serde_json::json!(3),
+        "the pass ran over the whole resolved list, and a summary that says nothing about it is \
+         indistinguishable from a run that walked no pass at all: {summary}"
+    );
+    assert_eq!(
+        summary["candidates_attempted"],
+        serde_json::json!(1),
+        "the answer ended the pass at the head of the list, and how far it got is exactly what \
+         separates that from every address behind the name refusing: {summary}"
+    );
+}
+
+/// A peer that accepts a connection and answers nothing on it, for the pass ending above.
+///
+/// It keeps reading, so the request is delivered and the far end is demonstrably reachable: what
+/// the caller runs out of is its response deadline and not its connection. A fixture that closed
+/// the stream instead would produce a transport failure, which is the ending the pass walks *past*.
+async fn silent_peer(listener: tokio::net::TcpListener) {
+    use tokio::io::AsyncReadExt as _;
+
+    let Ok((mut stream, _)) = listener.accept().await else {
+        return;
+    };
+    let mut chunk = [0_u8; 2048];
+    while stream.read(&mut chunk).await.is_ok_and(|read| read > 0) {}
+}
+
 /// A peer that answers a bodyless INVITE over TCP and hangs up when asked, for `load --mode
 /// signalling`.
 ///
