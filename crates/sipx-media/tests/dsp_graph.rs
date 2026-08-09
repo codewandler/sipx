@@ -21,10 +21,10 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use sipx_media::dsp::{
-    BypassCause, DspCapability, DspFrame, DspResetCause, ExecutionPolicy, ExecutionProfile,
-    FailureAction, FormatError, FrameAdmission, FrameProcessor, FrameSink, GraphBounds, GraphError,
-    GraphPlan, GraphTransition, Parameter, ParameterError, ProcessError, Scratch, StreamFormat,
-    SupervisedWorker, TeardownCause, WorkerResult,
+    BuiltIn, BypassCause, DspCapability, DspFrame, DspResetCause, ExecutionPolicy,
+    ExecutionProfile, FailureAction, FormatError, FrameAdmission, FrameProcessor, FrameSink,
+    GraphBounds, GraphError, GraphPlan, GraphTransition, Parameter, ParameterError, ParameterValue,
+    ProcessError, Scratch, StreamFormat, SupervisedWorker, TeardownCause, WorkerResult,
 };
 use sipx_media::{
     AudioDirection, Codec, Config, MediaPort, MediaSession, PcmEncoding, PcmFormat, PcmSamples,
@@ -1055,4 +1055,135 @@ impl FrameProcessor for TailHog {
     fn retained(&self) -> u32 {
         0
     }
+}
+
+/// `M-65`: a graph can now be built from a real stage, and the registry is the only door that
+/// grants the proven-inline profile.
+///
+/// Two claims in one test, because they are the same claim seen from either side. A workspace
+/// processor named through [`BuiltIn`] attaches and transforms the audio the call carries; the very
+/// same processor constructed by hand and offered at the public door is refused, because what the
+/// door admits is provenance and not a type.
+#[tokio::test]
+async fn the_workspace_registry_admits_a_proven_stage_and_the_public_door_still_does_not() {
+    let (session, _peer, _addr) = session_and_peer().await;
+
+    let doubled = GraphPlan::new(AudioDirection::Outbound, GraphBounds::new())
+        .with_built_in(
+            BuiltIn::Gain,
+            &[Parameter::new("gain", ParameterValue::Ratio(2_000))],
+        )
+        .expect("a registered processor with a valid parameter set");
+    let graph = session
+        .attach_dsp(doubled)
+        .expect("a proven stage attaches");
+    assert!(
+        graph.contains_overrun(),
+        "a chain of proven stages may claim that over-budget work cannot stall RTP"
+    );
+
+    let mut transmitted = session
+        .attach_processor(Processing::new(AudioDirection::Outbound, narrowband()))
+        .expect("attaches to transmitted audio");
+    assert!(session.send(tone()).await, "queues outbound audio");
+    let sent = tokio::time::timeout(ARRIVAL_BOUND, transmitted.recv())
+        .await
+        .expect("transmitted audio reaches the seam")
+        .expect("a frame");
+    let expected: Vec<i16> = tone().iter().map(|n| n.saturating_mul(2)).collect();
+    assert_eq!(signed(sent.pcm().samples()), expected.as_slice());
+
+    // The same processor, built by hand and offered where an application offers one. It is a
+    // workspace processor and it still declares `ProvenInline`; the refusal is about the door.
+    let (plain, _peer_b, _addr_b) = session_and_peer().await;
+    let refused = plain.attach_dsp(
+        GraphPlan::new(AudioDirection::Outbound, GraphBounds::new())
+            .with_processor(Box::new(sipx_audio::dsp::effects::Gain::new())),
+    );
+    assert_eq!(
+        refused.map(|_| ()),
+        Err(GraphError::ProfileNotAdmissible {
+            processor: "sipx.gain",
+            profile: ExecutionProfile::ProvenInline,
+        })
+    );
+
+    plain.shutdown().await;
+    session.shutdown().await;
+}
+
+/// `M-65`: provenance is per stage, so a built-in beside an application's processor does not lend
+/// it the proven profile — and the registry refuses a bad shape or a bad parameter set where the
+/// caller wrote it.
+#[tokio::test]
+async fn registry_provenance_does_not_spread_along_a_chain() {
+    let (session, _peer, _addr) = session_and_peer().await;
+
+    let mixed = GraphPlan::new(AudioDirection::Outbound, GraphBounds::new())
+        .with_built_in(BuiltIn::HighPass, &[])
+        .expect("a registered processor")
+        .with_processor(Box::new(Gain2::new(
+            "claims-proven",
+            ExecutionProfile::ProvenInline,
+        )));
+    assert_eq!(
+        session.attach_dsp(mixed).map(|_| ()),
+        Err(GraphError::ProfileNotAdmissible {
+            processor: "claims-proven",
+            profile: ExecutionProfile::ProvenInline,
+        }),
+        "a built-in's provenance is its own and does not travel along the chain"
+    );
+
+    // A shape the effect does not admit, refused at the call that wrote it.
+    let too_long = GraphPlan::new(AudioDirection::Outbound, GraphBounds::new()).with_built_in(
+        BuiltIn::Stutter {
+            delay_positions: sipx_audio::dsp::effects::MAX_STUTTER_POSITIONS + 1,
+        },
+        &[],
+    );
+    assert!(matches!(
+        too_long.map(|_| ()),
+        Err(GraphError::Capability {
+            processor: "sipx.stutter",
+            ..
+        })
+    ));
+
+    // A parameter outside the declared schema, likewise.
+    let bad_parameter = GraphPlan::new(AudioDirection::Outbound, GraphBounds::new()).with_built_in(
+        BuiltIn::Gain,
+        &[Parameter::new("gain", ParameterValue::Ratio(9_999))],
+    );
+    assert!(matches!(
+        bad_parameter.map(|_| ()),
+        Err(GraphError::Parameter {
+            processor: "sipx.gain",
+            ..
+        })
+    ));
+
+    // And a delay line longer than the graph's own retained-tail bound is still the graph's
+    // refusal, not the registry's: the registry admits the shape and the bounds reject it.
+    let long_line = GraphPlan::new(
+        AudioDirection::Outbound,
+        GraphBounds::new().with_retained_tail_positions(4),
+    )
+    .with_built_in(
+        BuiltIn::Stutter {
+            delay_positions: 64,
+        },
+        &[],
+    )
+    .expect("64 positions is an admissible shape");
+    assert_eq!(
+        session.attach_dsp(long_line).map(|_| ()),
+        Err(GraphError::TailExceedsBound {
+            processor: "sipx.stutter",
+            declared: 64,
+            bound: 4,
+        })
+    );
+
+    session.shutdown().await;
 }

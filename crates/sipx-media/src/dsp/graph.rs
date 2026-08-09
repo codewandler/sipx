@@ -8,9 +8,11 @@ use std::sync::Mutex;
 use sipx_audio::dsp::{
     CapabilityError, DspCapability, DspFrame, DspObservation, DspResetCause, ExecutionPolicy,
     ExecutionProfile, FailureAction, FormatError, FrameProcessor, FrameSink, LengthPolicy,
-    MAX_FRAME_SAMPLES, MAX_LATENCY_POSITIONS, MAX_SCRATCH_SAMPLES, Scratch, StreamFormat,
+    MAX_FRAME_SAMPLES, MAX_LATENCY_POSITIONS, MAX_SCRATCH_SAMPLES, Parameter, ParameterError,
+    Scratch, StreamFormat,
 };
 
+use super::builtin::BuiltIn;
 use super::supervised::{Exchange, Supervised, SupervisedWorker};
 use crate::processing::{AudioDirection, DiscontinuityKind, Processing, hold};
 use crate::session::Stop;
@@ -320,6 +322,17 @@ pub enum GraphError {
         /// The direction already in use.
         direction: AudioDirection,
     },
+    /// A stage refused the parameter set it was named with.
+    ///
+    /// Only a workspace processor selected through [`GraphPlan::with_built_in`] can reach this: an
+    /// application-supplied processor is configured by the application before it is boxed.
+    #[error("the processor `{processor}` refused the parameters it was given")]
+    Parameter {
+        /// The stage.
+        processor: &'static str,
+        /// What the processor contract's own `configure` said.
+        source: ParameterError,
+    },
     /// The session has stopped, so a graph attached to it could never see a frame.
     #[error("this session has stopped")]
     SessionStopped,
@@ -479,14 +492,22 @@ impl GraphBarrier {
 
 /// One stage of a plan, before it has been validated or prepared.
 enum Planned {
-    Inline(Box<dyn FrameProcessor + Send>),
+    Inline {
+        processor: Box<dyn FrameProcessor + Send>,
+        /// Whether this stage came through the workspace registry (§3.2).
+        ///
+        /// Provenance is per stage rather than per plan, deliberately: a chain that mixes a
+        /// built-in with an application-supplied processor must not let the built-in's provenance
+        /// admit the application's `ProvenInline` declaration beside it.
+        workspace: bool,
+    },
     Supervised(Box<dyn SupervisedWorker>),
 }
 
 impl Planned {
     fn capability(&self) -> DspCapability {
         match self {
-            Self::Inline(processor) => processor.capability(),
+            Self::Inline { processor, .. } => processor.capability(),
             Self::Supervised(worker) => worker.capability(),
         }
     }
@@ -546,8 +567,52 @@ impl GraphPlan {
     /// (§3.2).
     #[must_use]
     pub fn with_processor(mut self, processor: Box<dyn FrameProcessor + Send>) -> Self {
-        self.stages.push(Planned::Inline(processor));
+        self.stages.push(Planned::Inline {
+            processor,
+            workspace: false,
+        });
         self
+    }
+
+    /// Append one of this workspace's own processors, configured with a parameter set (§3.2).
+    ///
+    /// This is the registry door, and the only one that admits
+    /// [`ExecutionProfile::ProvenInline`]: what it grants is provenance, not access. The same
+    /// processor constructed by hand and handed to [`Self::with_processor`] is still refused
+    /// `ProfileNotAdmissible`, because "proven" names evidence in this repository's gate and the
+    /// door is what carries that claim rather than the type.
+    ///
+    /// The parameter set is the processor contract's own vocabulary and is applied here, before the
+    /// plan is attached, so a stage is configured by the time any buffer is sized from it.
+    ///
+    /// # Errors
+    ///
+    /// [`GraphError::Capability`] for a shape the processor does not admit — a
+    /// [`BuiltIn::Stutter`] line past the effect's own maximum — and [`GraphError::Parameter`] for
+    /// a set outside the declared schema. Both refuse at the call that wrote them; nothing is
+    /// attached, and there is no plan to leave half-built.
+    pub fn with_built_in(
+        mut self,
+        built_in: BuiltIn,
+        parameters: &[Parameter],
+    ) -> Result<Self, GraphError> {
+        let mut processor = built_in
+            .processor()
+            .map_err(|source| GraphError::Capability {
+                processor: built_in.id(),
+                source,
+            })?;
+        processor
+            .configure(parameters)
+            .map_err(|source| GraphError::Parameter {
+                processor: built_in.id(),
+                source,
+            })?;
+        self.stages.push(Planned::Inline {
+            processor,
+            workspace: true,
+        });
+        Ok(self)
     }
 
     /// Append one supervised worker, to run off the media worker behind bounded channels.
@@ -1399,9 +1464,12 @@ fn admit(
             // §3.2: the public door admits neither the proven profile — an application cannot add
             // to this repository's gate — nor the supervised one, which is not run on the media
             // worker and therefore does not arrive through an inline stage.
-            Planned::Inline(_)
-                if matches!(profile, ExecutionProfile::SupervisedIsolated)
-                    || (matches!(profile, ExecutionProfile::ProvenInline) && !workspace) =>
+            Planned::Inline {
+                workspace: provenance,
+                ..
+            } if matches!(profile, ExecutionProfile::SupervisedIsolated)
+                || (matches!(profile, ExecutionProfile::ProvenInline)
+                    && !(workspace || *provenance)) =>
             {
                 return Err(GraphError::ProfileNotAdmissible {
                     processor: id,
@@ -1418,7 +1486,7 @@ fn admit(
                 pipeline_frames =
                     pipeline_frames.saturating_add(capability.execution().deadline_frames());
             }
-            Planned::Inline(_) => {}
+            Planned::Inline { .. } => {}
         }
         if !matches!(capability.length(), LengthPolicy::Preserving) {
             return Err(GraphError::LengthNotPreserving { processor: id });
@@ -1471,7 +1539,10 @@ fn prepare(
         let capability = planned.capability();
         let policy = capability.execution();
         let kind = match planned {
-            Planned::Inline(mut processor) => {
+            Planned::Inline {
+                mut processor,
+                workspace: _,
+            } => {
                 processor
                     .prepare(direction, format)
                     .map_err(|source| GraphError::Format {

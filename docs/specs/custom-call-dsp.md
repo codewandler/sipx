@@ -38,7 +38,9 @@ parameter vocabulary, the workspace and its bounds, the reset/flush/cancel/refus
 three execution profiles and the minimum failure policy, and the conformance harness with its
 sample vectors.
 
-It deliberately does not define: any effect, filter or noise-reduction algorithm (`M-65`, `M-66`);
+It deliberately does not define: any effect, filter or noise-reduction algorithm — the processors
+this workspace ships under this contract are [call-dsp-effects.md](call-dsp-effects.md) (`M-65`) and
+noise reduction is `M-66`;
 the call-local graph, its ordering, its atomic replacement or its teardown barrier (`M-64`); the
 SDK surface that controls a graph (`M-67`); measured CPU and quality thresholds (`M-68`, `X-109`);
 or any new PCM representation or media tap — the boundary is

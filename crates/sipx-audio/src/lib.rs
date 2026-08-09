@@ -31,6 +31,22 @@
 //! the three profiles what it does and does not promise about stalling RTP.
 //! `docs/specs/custom-call-dsp.md` is the contract it implements.
 //!
+//! **The processors that run under that contract live in [`dsp::effects`]** (`M-65`): a gain, a
+//! polarity inversion, a hard and a soft clipper, a bit crusher, a bounded delay/stutter line, and
+//! one-pole low-pass, high-pass and peaking filters. Every one of them is integer arithmetic that
+//! saturates rather than wrapping, with no floating point and no transcendental function even in
+//! coefficient derivation — the filters ship a table instead — so their vectors are exact on every
+//! machine. `docs/specs/call-dsp-effects.md` states each one's arithmetic to the last bit.
+//!
+//! What that module deliberately is **not** is as load-bearing as what it is. Nothing there is
+//! adaptive: there is no detector, no envelope follower, no automatic level and no noise estimate,
+//! and noise reduction is a separate contract (`M-66`) rather than a setting here. Nothing there
+//! resamples, changes a frame's length or reads a clock — every duration is counted in sample
+//! positions. And the stutter is an *effect*: a requested repeat is reported as a parameter that was
+//! applied, a break in the call's timeline as a restart, and a late stage as a graph transition no
+//! processor can emit — three facts in three types, so that an overload defect is never presented
+//! as an effect anywhere in this stack.
+//!
 //! RFC 4733 DTMF is not here either, and never was: telephone-events are an RTP payload format
 //! rather than audio samples, and they live in `sipx-rtp`.
 //!
