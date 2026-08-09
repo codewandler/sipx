@@ -52,7 +52,7 @@ in this workspace measures. This narrows nothing about the contract: an applicat
 processor may still declare up to eight, and the harness still runs it there.
 
 `latency_positions`, `tail_positions` and `reset` are per processor and are stated in §5 through §8.
-Only [`Stutter`](#7-stutter) declares a non-zero latency or tail.
+Only [`Stutter`](#7-sipxstutter) declares a non-zero latency or tail.
 
 ### 2.1 Identifiers
 
