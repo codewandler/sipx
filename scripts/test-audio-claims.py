@@ -343,6 +343,19 @@ class TheModuleReader(unittest.TestCase):
                 "dsp",
                 "dsp::conformance",
                 "dsp::contract",
+                # `M-65`'s nine built-in processors, grouped by what they do to a frame rather than
+                # by which one they are: level (gain, polarity), shape (hard and soft clipping),
+                # glitch (bit crushing, the stutter line), filter (the one-pole pair and the
+                # peaking band), plus the arithmetic and frame plumbing they share. Deterministic
+                # sample transforms — they load no model and claim no codec, which is why they
+                # carry no entry in the codec table this file is otherwise about.
+                "dsp::effects",
+                "dsp::effects::arithmetic",
+                "dsp::effects::filter",
+                "dsp::effects::frame",
+                "dsp::effects::glitch",
+                "dsp::effects::level",
+                "dsp::effects::shape",
                 "g711",
                 "g722",
                 "l16",
