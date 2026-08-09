@@ -76,27 +76,27 @@ appeared twice before anyone named it.
 - [M-60 — Calibrate and adapt audio-activity thresholds deterministically](M-60-calibrate-audio-activity-thresholds.md) · Media · after M-58 and M-59 · bounded adaptation with observable reset and limits
 - [M-70 — Accept multiplexed browser offers with unused component candidates](M-70-accept-multiplexed-browser-offers-with-unused-component-candidates.md) · Media · external review finding 9 · a second browser engine reaches SDP then fails the multiplexed profile
 - [M-72 — Prove the AEAD SRTP key derivation against an independent peer](M-72-prove-the-aead-srtp-key-derivation-against-a-peer.md) · Media · RFC 7714 publishes no KDF vector · a wrong salt placement makes two sipx endpoints interoperate with each other and nobody else, and every round-trip test still passes
+- [M-83 — Extend the extensibility guard past the media path](M-83-extend-the-reachability-guard-past-the-media-path.md) · Media · 98 reachable public enums outside the guarded five crates · the boundary names crates, so no enum is individually excused
+- [M-96 — Fix the preamble reader's off-by-one](M-96-fix-the-preamble-reader-off-by-one.md) · Media · an item at byte 0 with no blank line above it loses the first character of its preamble · cannot fire on this tree, which is why it needs a test rather than a reader
 - [T-33 — Bind browser WebSocket signalling](T-33-bind-browser-websocket-signalling.md) · Transport · after A-16 and S-41 · browser owns I/O, WASM core consumes bytes
+- [T-46 — Measure plain SIP throughput without media](T-46-measure-plain-sip-throughput-without-media.md) · Transport · audio doubles memory and costs 8x on burst setup at 1000 calls · neither example can isolate signalling from the media stack
 - [X-93 — Make protected release evidence faster without weakening it](X-93-make-protected-release-evidence-faster.md) · Build · measure cache and preflight changes against the 12m37 cold beta gate · follow-up
+- [X-130 — The generated-media load pair test now sheds a call too](X-130-the-generated-media-load-pair-test-now-sheds-a-call-too.md) · Quality · generated_media_load_pair_retains_the_rtp_workload runs --concurrency 2 against --max-active 2 and was observed rejecting one of four calls in a full cli suite run
+- [X-131 — Help prose cannot name another command's flag](X-131-help-prose-cannot-name-another-commands-flag.md) · Quality · check-cli-reference reads --flag tokens out of a command's whole help text, so a cross-reference in prose reads as an undocumented option
+- [X-132 — The CLI reference reader accepts rows that do not render](X-132-the-cli-reference-reader-accepts-rows-that-do-not-render.md) · Quality · check-cli-reference counts any `|`-leading line in a section as a documented flag, and load-responder's last six flags sit below a paragraph with no delimiter row — documented to the checker, prose to a reader
 
 ## Next (ready — take the top one unless the user named a story)
 
 ### Reliable diagnostic automation
-- [T-46 — Measure plain SIP throughput without media](T-46-measure-plain-sip-throughput-without-media.md) · Transport · audio doubles memory and costs 8x on burst setup at 1000 calls · neither example can isolate signalling from the media stack
 - [P-30 — Bound the first NOTIFY in a registrar subscription](P-30-bound-the-first-notify-in-a-registrar-subscription.md) · Phone · peers --registrar waits Timer N — 64*T1, 32 seconds — with no operator control · the dominant unbounded wait once resolution is bounded
-
-### Media
-_Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
-- [M-83 — Extend the extensibility guard past the media path](M-83-extend-the-reachability-guard-past-the-media-path.md) · Media · 98 reachable public enums outside the guarded five crates · the boundary names crates, so no enum is individually excused
-- [M-96 — Fix the preamble reader's off-by-one](M-96-fix-the-preamble-reader-off-by-one.md) · Media · an item at byte 0 with no blank line above it loses the first character of its preamble · cannot fire on this tree, which is why it needs a test rather than a reader
 
 ## Blocked
 - [M-16 — Implement ICE](M-16-ice.md) · Media · epic tracker · split into M-19 … M-24 · spec is docs/specs/ice.md, written first
 - [T-24 — Discover SIP endpoints on the local link](T-24-discover-on-the-local-link.md) · Transport · blocked on a scope decision — mDNS is a second protocol and a new parser eating unauthenticated multicast
 
 ## Backlog
-- [X-130 — The generated-media load pair test now sheds a call too](X-130-the-generated-media-load-pair-test-now-sheds-a-call-too.md) · Quality · generated_media_load_pair_retains_the_rtp_workload runs --concurrency 2 against --max-active 2 and was observed rejecting one of four calls in a full cli suite run
-- [X-131 — Help prose cannot name another command's flag](X-131-help-prose-cannot-name-another-commands-flag.md) · Quality · check-cli-reference reads --flag tokens out of a command's whole help text, so a cross-reference in prose reads as an undocumented option
+- [X-133 — The JSON contract reader accepts rows that do not render](X-133-the-json-contract-reader-accepts-rows-that-do-not-render.md) · Quality · X-132 narrowed the flag half of check-cli-reference to real tables; `_document_json_contracts` in the same file still counts any three-celled `|` line between the region markers
+- [X-135 — A contention subject that can tell the load-pair headroom from its absence](X-135-a-contention-subject-that-can-tell-the-load-pair-headroom-from-its-absence.md) · Quality · the generated-media load pair rolls its handover race twice per run, so contention-proof.py cannot make it red and adding it to SUBJECTS would cost minutes to prove nothing
 
 ### The application host
 _The [app-sdk](https://github.com/codewandler/sipx/blob/main/docs/designs/app-sdk.md) epic ends where a process has to exist: something must hold real_
@@ -156,6 +156,10 @@ _A live call on a machine with a local accelerator should be able to transcribe 
 - [M-56 — Ship a practical local offline speech-synthesis provider](M-56-ship-local-offline-speech-synthesis.md) · Media · after A-25, A-28 and M-54 · accelerator path plus defined CPU behavior
 - [X-104 — Publish a runnable local live-call speech example and measurements](X-104-publish-local-call-speech-example.md) · Build · M16 exit after X-105 · accelerator when available and bounded CPU fixture everywhere
 - [X-105 — Prove speech-provider substitution with one conformance suite](X-105-prove-speech-provider-substitution.md) · Build · after M-55, M-56, A-26, A-27 and A-28 · same suite for bundled and downstream providers
+
+### Media
+_Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
+- [M-97 — Make the extensibility guard tell the attribute from prose about it](M-97-tell-the-attribute-from-prose-about-it.md) · Media · `preamble` is searched as one string, so a doc comment containing `#[non_exhaustive]` satisfies the rule; `sipx-media`'s `ProviderKind` passes on prose alone today
 
 ### Bridge a call to an OpenAI realtime agent
 _Every capability sipx claims — TLS held to [sip-tls.md](../specs/sip-tls.md) §3, SRTP held to_

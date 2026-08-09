@@ -60,20 +60,20 @@ No aggregate percentage is given. `media` and `core` differ in size and in how m
 
 | Pillar | Open stories |
 |---|---|
-| Media | 17 |
+| Media | 18 |
 | Application | 16 |
 | Build | 10 |
+| Quality | 5 |
 | Transport | 4 |
 | Signalling | 3 |
 | Phone | 2 |
-| Quality | 2 |
-| **total** | **54** |
+| **total** | **58** |
 
 332 stories done. `blocked` counts as open: a story parked on a dependency is distance, not progress.
 
 ## Discovery versus closure
 
-<!-- maturity-event-days: {"basis":"sha256:96b33817bd1198b641d2d10e2e1f9a666a079c143558f29af8c9b1fb5fc47ed6","closed":{"2026-07-28":58,"2026-07-29":48,"2026-07-30":40,"2026-07-31":5,"2026-08-01":1,"2026-08-03":12,"2026-08-04":39,"2026-08-05":35,"2026-08-08":89,"2026-08-09":5},"filed":{"2026-07-28":95,"2026-07-29":42,"2026-07-30":44,"2026-07-31":3,"2026-08-03":1,"2026-08-04":51,"2026-08-05":73,"2026-08-06":17,"2026-08-08":56,"2026-08-09":5}} -->
+<!-- maturity-event-days: {"basis":"sha256:d7f9001c500c8f3890e182ad86c0cf8ccfc6d2c330df34d5316e297f348aae80","closed":{"2026-07-28":58,"2026-07-29":48,"2026-07-30":40,"2026-07-31":5,"2026-08-01":1,"2026-08-03":12,"2026-08-04":39,"2026-08-05":35,"2026-08-08":89,"2026-08-09":5},"filed":{"2026-07-28":95,"2026-07-29":42,"2026-07-30":44,"2026-07-31":3,"2026-08-03":1,"2026-08-04":51,"2026-08-05":73,"2026-08-06":17,"2026-08-08":56,"2026-08-09":9}} -->
 
 Burn-down is not a maturity signal while discovery outpaces closure. The marker to watch is not a single day where closure wins but the date that crossover becomes **durable** — that is when the codebase stops surprising its authors.
 
@@ -88,7 +88,7 @@ Burn-down is not a maturity signal while discovery outpaces closure. The marker 
 | 2026-08-05 | 73 | 35 | -38 |
 | 2026-08-06 | 17 | 0 | -17 |
 | 2026-08-08 | 56 | 89 | +33 |
-| 2026-08-09 | 5 | 5 | +0 |
+| 2026-08-09 | 9 | 5 | -4 |
 
 Filed is a story file being added; closed is a `status: done` line appearing, so a story reopened and closed again counts twice — which is the honest reading of *closed that day*.
 
