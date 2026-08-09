@@ -40,6 +40,11 @@
 //! [`Invitation::answer_with`], [`Invitation::answer_with_policy`], [`ring_early_with`],
 //! [`ring_early_with_policy`], [`ring_offer_early`], [`ring_offer_early_with_policy`] and
 //! [`dial_early_without_offer`]). These choices are pre-1.0 and their shape may still move.
+//! The caller's half of an SDP-free dialog is Experimental and new (`T-46`): [`dial_signalling`],
+//! [`dial_signalling_until`], [`SignallingDial`], [`SignallingDialOptions`] and
+//! [`SignallingIdentity`] place and end a call that offers no session, so no RTP socket is bound
+//! and the cost of signalling can be measured apart from the cost of having a media stack at all.
+//! [`Invitation::answer_signalling`] has been the answering half of the same shape since `P-15`.
 //! Confirmed-dialog persistence is Experimental too: [`Call::dialog_snapshot`],
 //! [`Call::restore_dialog`], [`DialogSnapshot`] and [`DialogRestoreContext`] expose a versioned
 //! boundary whose schema remains deliberately narrower than a serialized `Call`.
@@ -137,7 +142,10 @@ pub use rel::{
     ring_offer_early, ring_offer_early_with_policy, ring_offer_early_with_policy_at,
 };
 pub use signal_metrics::SignalMetrics;
-pub use signalling::{SignallingCall, SignallingEvent};
+pub use signalling::{
+    SignallingCall, SignallingDial, SignallingDialOptions, SignallingEvent, SignallingIdentity,
+    dial_signalling, dial_signalling_until,
+};
 pub use snapshot::{
     DialogNotQuiescent, DialogPersistenceError, DialogRestoreContext, DialogSessionAction,
     DialogSnapshot, MAX_FIELD_BYTES, MAX_ID_BYTES, MAX_ROUTES, MAX_SNAPSHOT_BYTES,

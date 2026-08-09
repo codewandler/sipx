@@ -2,7 +2,7 @@
 id: T-46
 title: Measure plain SIP throughput without media
 pillar: Transport
-status: ready
+status: in-progress
 priority: 12
 design:
 epic: diagnostic-automation
@@ -38,13 +38,13 @@ always creates a session.
 
 ## Acceptance
 
-- [ ] `capacity_test` and `load_test` gain a mode that negotiates no media: no SDP offer, no RTP
+- [x] `capacity_test` and `load_test` gain a mode that negotiates no media: no SDP offer, no RTP
       socket bound, on **both** ends. Reusing the CLI's path or lifting it into the library are both
       acceptable; duplicating it in an example is not.
 - [ ] A run in that mode records memory and setup latency beside the existing two, so the three
       shapes — no media, idle media, flowing media — are one comparison rather than three runs a
       reader has to align by hand.
-- [ ] The `audio_observed` guard keeps holding: a media-free run must report no audio figures at
+- [x] The `audio_observed` guard keeps holding: a media-free run must report no audio figures at
       all, not zeros.
 - [ ] `docs/measurements/README.md` gains the third column and says which of the three a deployment
       running external media should read.
@@ -55,3 +55,60 @@ always creates a session.
 - 2026-08-09: filed. The `capacity_test` doc comment already pointed at this story before it
   existed — a reference to a filing that had not happened, which is the same defect class as a
   ticked acceptance row nobody satisfied. The pointer is now true.
+- 2026-08-09: the mode exists, and the **measurement has not been taken**. Two of the five rows are
+  deliberately left open, and which two matters more than which three are ticked.
+
+  **What was built.** The caller's half of an SDP-free dialog now lives in `sipx-call` beside the
+  answering half `P-15` already had: `dial_signalling`, `dial_signalling_until`, `SignallingDial`,
+  `SignallingDialOptions` and `SignallingIdentity` in `crates/sipx-call/src/signalling.rs`. It was
+  *lifted*, not copied — `sipx-cli`'s `run_signalling_attempt` was rewritten onto it and its
+  `signalling_invite`, `signalling_dialog_request`, `wait_for_invite`, `cancel_signalling_invite`,
+  `authorization_for`, `signalling_response_matches` and `rejection_cause` are gone, so
+  `sipx load --mode signalling` and the two examples now put the same bytes on the wire from one
+  implementation. `T-45`'s per-candidate `Call-ID` and `From` tag survive intact: the identity is
+  still derived from `--seed`, the call index and the candidate position in `CallIdentity::at`, and
+  is now handed to the library rather than rendered into a request there.
+
+  `capacity_test` gains `--media none` beside `full` and `idle`; `load_test` gains `--media none`
+  beside `full`. Both ends are media-free in that mode — the client through `dial_signalling`, the
+  in-process server through `Invitation::answer_signalling`.
+
+  Two behaviours changed as a consequence, both deliberate. A media-free caller now spawns
+  `reack_retransmitted_2xx` like `dial` does, so a lost ACK no longer leaves the far end
+  retransmitting its 2xx for 64*T1 — it costs one task and one response stream per call for the
+  ~32 s the transaction stays in RFC 6026's `Accepted` state, which is a real and previously absent
+  cost that the media path was already paying. And `--mode signalling`'s BYE is now bounded by the
+  run's own 40 s cleanup cap rather than by Timer F.
+
+  **What was not done, and why.** The three-way comparison in row 2 needs a quiet box and this one
+  was not: several implementors were building concurrently and the same example has saturated this
+  machine once already. A ramp taken under that load would report the machine's ceiling as sipx's,
+  which the example's own doc comment warns about — a wrong number is worse than a missing one. So
+  nothing was written to `docs/measurements/` and row 4, the README's third column, is left with it:
+  the column has nothing truthful to hold until the run exists. **Take the three runs on an idle
+  machine** — `--ramp 50,200,250,500 --dwell 10 --media none|idle|full`, recording each — then tick
+  both rows together.
+
+  What was proved instead is that the mode works, at two levels. The library contract has a test:
+  `a_media_free_call_is_placed_with_no_session_offer_and_confirmed_from_both_ends` in
+  `crates/sipx-call/tests/signalling.rs` asserts, from the receiving end, that the INVITE carries no
+  body and no `Content-Type` — an offer that names no port is what makes there be no port to bind —
+  and then drives the exchange through ACK and BYE from both sides. Above that, three tiny debug
+  runs at `--ramp 10 --dwell 4`, which are functional evidence and explicitly not measurements:
+
+  | `--media` | audio columns | rss |
+  |---|---|---|
+  | `none` | `—` `—` `—` | 16 MB |
+  | `idle` | `—` `—` `—` | 19 MB |
+  | `full` | 0.00% · 0.26 ms · 4.40 | 19 MB |
+
+  That third row is the `audio_observed` guard holding in the direction that is easy to lose: `none`
+  and `idle` withhold loss, jitter and MOS rather than reporting a perfect score over zero packets,
+  and `full` still prints them.
+
+  **Owed CHANGELOG sentence** (fenced from this branch, for the coordinator to place): *`capacity_test`
+  and `load_test` gain `--media none`, a mode that negotiates no session on either end, and the
+  caller half it needs — `dial_signalling` and friends — is now public in `sipx-call` and shared with
+  `sipx load --mode signalling`.*
+
+  `./scripts/gate.py` was not run here by dispatch; one gate runs per wave.
