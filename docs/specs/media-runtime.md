@@ -109,6 +109,41 @@ greatest duration in that segment. A marker starts a new application event. Sequ
 serial-number arithmetic, so wrap is forward progress; accepted non-event RTP packets advance the
 ordering reference too, preventing a long pause between digits from looking like reordering.
 
+### 2.3 Cancelling an application task that is using a session
+
+§2.1 governs the workers a session owns. This governs the tasks an *application* parks in a
+session's long-running entry points — `play`, `play_pcm`, `Playback::finished`, `Playback::play_out`,
+`recv`, `record_at_least` and `record_until_idle` — and it exists because `JoinHandle::abort()` is
+the ordinary way to stop background work in this runtime.
+
+Two requirements, both normative.
+
+**Dropping the future releases everything it held.** A `play` dropped mid-clip stops that playback,
+its unsent packets are discarded rather than paced onto the wire, and the outstanding-clip count a
+`flush` reads is decremented. No teardown path waits on anything a dropped wait leaves behind.
+
+**Every one of those futures MUST reach a suspension point before it answers.** This is the
+requirement `M-93` added, and the one that is easy to satisfy accidentally and easy to lose. Each of
+these calls answers immediately once the session has stopped — `play` returns `false`, `recv`
+returns `None`, the recorders return what they have — so a caller that loops without acting on the
+answer stops being paced by the media path and becomes a bare busy loop. An `async fn` that can
+complete without suspending is a task the scheduler never gets back: its `abort()` never lands, its
+`JoinHandle` never resolves, and dropping the runtime blocks in its own destructor. **The resource
+such a loop holds is a runtime worker**, and holding one is unbounded, so §2.1's joins are performed
+on a runtime that has lost a thread to it.
+
+A caller is still expected to act on the answer, and the entry points' documentation states what the
+answer means. The suspension requirement is what makes ignoring it a cost rather than a deadlock.
+
+The requirement is discharged by a scheduler hop on the paths that can otherwise complete without
+one: unconditionally in `Playback::finished`, which every playback wait resolves through, and on the
+closed-and-drained `None` of the application's receive queue, which is the only answer that queue can
+give for ever. It is not needed on the path that hands over a frame — a queue holds only as many
+frames as arrived — nor for `recv_digit` and `recv_encoded`, which resolve through channels that are
+cancellation points already.
+
+Test vectors: `crates/sipx-media/tests/play_cancellation.rs`.
+
 ## 3. Conference construction and shutdown
 
 A conference mix interval MUST be at least 1 millisecond. `Conference::new` returns
@@ -534,6 +569,9 @@ exists for.
 | S4 | cancel `reconfigure()` while the old generation is joining, then retry | the replacement retains the old generation; retry drains it and no old socket worker remains |
 | S5 | stop a successful-response retransmitter before its first poll and during a pending handoff | both stops are observed and joined without waiting for T1 or another response |
 | S6 | media setup fails after a successful final response was sent | the latched stop is set and the retransmitter is joined before setup returns the typed error |
+| S7 | abort a task parked inside `play`, then flush, stop and `shutdown()` the session | the task is reaped and the whole teardown completes within a bound far below one clip |
+| S8 | stop a session under a task looping over `play`, then abort that task | the task is reaped; a task that could not suspend would hold a runtime worker for ever |
+| S9 | S8 for a task looping over `recv` | the task is reaped |
 | C1 | drop a conference whose collector is blocked in `recv()` | collector is cancelled and its session `Arc` is released within a bounded deadline |
 | C2 | leave, close twice, then drop | no retained participant and no panic |
 | C3 | race `join` against `close` while the participant is quiet | either join is refused or its registered collector is drained; no retained session |

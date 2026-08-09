@@ -2,7 +2,7 @@
 id: M-93
 title: Make a cancelled play safe to tear down
 pillar: Media
-status: ready
+status: in-progress
 priority: 8
 design:
 epic: media

@@ -1305,18 +1305,40 @@ impl Playback {
     /// keypress. The stopped clip's remaining audio is already guaranteed not to be sent by then.
     ///
     /// Takes `&self`, so several parties may await the same playback.
+    ///
+    /// **Always reaches a suspension point before it answers**, including for a playback that had
+    /// already ended before this was called — see [`MediaSession::play`] for what that guarantee is
+    /// for (`M-93`).
     pub async fn finished(&self) -> PlaybackEnd {
         let mut end = self.end.clone();
+        // Whether this wait has actually parked yet. A playback that has already ended answers on
+        // the first poll, and an `async fn` that can complete without suspending is a task the
+        // scheduler never gets back — so a caller looping over one holds a runtime worker that
+        // `abort()` cannot take back (`M-93`). The hop below is what returns it.
+        //
+        // Only on that path, and that is not tidiness: two watchers that both park before their
+        // clips end are woken in the order the clips ended, and a hop taken before parking would
+        // put them back in the run queue in an order that no longer follows the audio. `C-3`'s
+        // per-playback reporting depends on it.
+        let mut parked = false;
         loop {
             let settled = *end.borrow_and_update();
             if let Some(settled) = settled {
+                if !parked {
+                    tokio::task::yield_now().await;
+                }
                 return settled;
             }
             if end.changed().await.is_err() {
                 // The queue task is gone without having recorded an end, which only happens when
-                // the session went away underneath this clip.
+                // the session went away underneath this clip. A dropped sender is reported without
+                // waiting, so this exit needs the hop too.
+                if !parked {
+                    tokio::task::yield_now().await;
+                }
                 return PlaybackEnd::SessionEnded;
             }
+            parked = true;
         }
     }
 }
@@ -2473,6 +2495,12 @@ impl MediaSession {
     /// than the far end talks therefore settles that far behind live audio and stays there; the
     /// audio it is not keeping up with is shed, oldest first, and counted as
     /// [`MediaDiscardCounts::inbound_frames_shed`] (`docs/specs/media-runtime.md` §4.3).
+    ///
+    /// `None` once the session has stopped, and then `None` for ever, so
+    /// `while let Some(frame) = media.recv().await` is the loop to write and
+    /// `loop { media.recv().await; }` is the one that burns a core after the call ends. This wait
+    /// carries [`Self::play`]'s suspension guarantee, so even the second one stays abortable
+    /// (`M-93`).
     pub async fn recv(&self) -> Option<Vec<i16>> {
         self.incoming.recv().await
     }
@@ -2505,6 +2533,12 @@ impl MediaSession {
     /// wall clock. A caller that already knows how many samples it expects is asking a different
     /// question and wants [`Self::record_at_least`]; see there for what goes wrong when the two
     /// are confused (`X-28`).
+    ///
+    /// Dropping this wait loses whatever it had accumulated, because the samples live in the
+    /// future rather than in the session — which is a different hazard from [`Self::play`]'s and
+    /// the reason a caller that must be able to stop mid-recording moves the recording into a task
+    /// of its own rather than cancelling one. On a stopped session it returns empty at once; it
+    /// carries `play`'s suspension guarantee, so a loop over it stays abortable (`M-93`).
     pub async fn record_until_idle(&self, idle: Duration) -> Vec<i16> {
         let mut samples = Vec::new();
         // `idle` is a definition of silence, and on the first pass it is also the deadline for the
@@ -2539,6 +2573,12 @@ impl MediaSession {
     /// degraded one — because once the first frame lands the rest follow at the packet rate.
     ///
     /// Widening the window would not have fixed that; it would have moved the cliff.
+    ///
+    /// # Cancellation
+    ///
+    /// Same as [`Self::record_until_idle`]: dropping the wait loses what it had collected, and on
+    /// a stopped session it returns short at once while still reaching a suspension point, so a
+    /// task looping over it can always be aborted (`M-93`).
     pub async fn record_at_least(&self, samples: usize, within: Duration) -> Vec<i16> {
         let deadline = tokio::time::Instant::now() + within;
         let mut recorded = Vec::with_capacity(samples);
@@ -2575,6 +2615,34 @@ impl MediaSession {
     /// through [`Playback::play_out`], so it stays cancel-on-drop: a caller that wraps it in a
     /// `timeout` still stops the audio when the timeout fires. A caller that wants to stop the
     /// clip explicitly, or to have a keypress stop it, needs the handle.
+    ///
+    /// # Stopping a task that is playing (`M-93`)
+    ///
+    /// **Dropping this future is safe and it is enough.** Aborting the task, losing a `select!`,
+    /// or timing the wait out all stop the clip and discard whatever of it the send queue is
+    /// holding; nothing is left behind for a hangup to wait on.
+    ///
+    /// **The `false` answer must end the loop.** Holding audio up for the life of a call is
+    /// written `while media.play(&clip, packet).await {}`, and the reason it is written that way
+    /// is that a stopped session answers `false` *at once*: there is no send queue left to pace
+    /// against, so a loop that plays regardless of the answer stops being a paced loop the moment
+    /// the call ends and becomes a bare busy loop, burning a core for as long as the process
+    /// lives. That is the whole failure `M-93` measured — ten calls whose tone tasks ignored the
+    /// answer took over ninety seconds to tear down, against four for the same run carrying no
+    /// audio.
+    ///
+    /// **What this promises, so that ignoring the answer is recoverable rather than fatal:** this
+    /// future always reaches a suspension point, including on the immediate `false`. A task
+    /// looping over it can therefore always be stopped with `JoinHandle::abort()`, and a runtime
+    /// carrying one can always be shut down. Without that guarantee neither is true — a task that
+    /// never suspends is a task the scheduler never gets back, so its `abort()` never lands, its
+    /// `JoinHandle` never resolves, and `Runtime::drop` blocks in its own destructor. The resource
+    /// such a loop holds is a runtime worker, and this is what gives it back.
+    ///
+    /// The same guarantee covers [`Self::play_pcm`], [`Playback::finished`],
+    /// [`Playback::play_out`], [`Self::recv`], [`Self::record_at_least`] and
+    /// [`Self::record_until_idle`]. It is not needed for [`Self::recv_digit`] or
+    /// [`Self::recv_encoded`], which resolve through channels that are cancellation points already.
     pub async fn play(&self, samples: &[i16], samples_per_packet: usize) -> bool {
         self.start_clip(samples.to_vec(), samples_per_packet, Interrupt::Never)
             .play_out()
@@ -2583,6 +2651,9 @@ impl MediaSession {
     }
 
     /// Convert and play an explicit linear-PCM buffer.
+    ///
+    /// [`Self::play`]'s cancellation contract in full: dropping the future stops the clip, the
+    /// `false` answer must end a loop, and the wait always reaches a suspension point (`M-93`).
     ///
     /// # Errors
     ///
