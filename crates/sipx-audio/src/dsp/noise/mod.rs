@@ -26,6 +26,10 @@
 //! - **Voice activity detection** is [`crate::analysis`]'s and stays there. A reducer never emits,
 //!   redefines, delays or suppresses a VAD observation. It may *consume* activity as a declared
 //!   parameter the caller sets ([`ActivityInput::Optional`]) and never as a call into an analyser.
+//!   [`ActivityHint`] is that caller's side of the arrangement (`M-114`, §10): it turns drained
+//!   observations into the declared flag, holds no reducer and no analyser, and is a *policy* —
+//!   §5.6's fifth row makes a wrong hint worse than no hint in both directions, so what decides
+//!   when the flag is set is measured before it is recommended.
 //! - **Echo cancellation** is not here and is not implied: an echo canceller needs the far-end
 //!   reference signal, which is the other direction of the call, and a processor is bound to one
 //!   direction at `prepare`.
@@ -60,8 +64,10 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+mod hint;
 mod subband;
 
+pub use hint::{ActivityHint, DEFAULT_HOLD_POSITIONS, HintCause, HintChange, HintPolicy};
 pub use subband::SubbandSuppressor;
 
 use super::contract::{CapabilityError, DspCapability, FrameProcessor, ParameterDomain};

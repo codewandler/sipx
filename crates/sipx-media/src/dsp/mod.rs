@@ -106,8 +106,9 @@ pub use sipx_audio::dsp::{
 /// the substitution the interface exists for; [`BuiltIn::SubbandSuppressor`] is the workspace's own
 /// implementation of it, and its documentation states what it damages as well as what it removes.
 pub use sipx_audio::dsp::noise::{
-    ActivityInput, HostRequirement, MAX_WARM_UP_POSITIONS, NOISE_REDUCTION_IDS, NoiseReducer,
-    NoiseReduction, NoiseReductionError, SUBBAND_SUPPRESSOR, SubbandSuppressor,
+    ActivityHint, ActivityInput, DEFAULT_HOLD_POSITIONS, HintCause, HintChange, HintPolicy,
+    HostRequirement, MAX_WARM_UP_POSITIONS, NOISE_REDUCTION_IDS, NoiseReducer, NoiseReduction,
+    NoiseReductionError, SUBBAND_SUPPRESSOR, SubbandSuppressor,
 };
 
 pub(crate) use graph::{CallDsp, SlotRef};
