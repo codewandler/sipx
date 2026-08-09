@@ -95,9 +95,11 @@ implemented and not merely repeated:
 | the crate-internal builder, reached only from a workspace processor registry | all three |
 
 A stage reaching the public door with `ExecutionProfile::ProvenInline` is refused
-`ProfileNotAdmissible` naming the processor and the profile. The registry is empty until `M-65`
-ships processors to put in it, so today the refusal is total, which is the correct state of a
-workspace that has proven nothing yet.
+`ProfileNotAdmissible` naming the processor and the profile. `M-65` filled the registry: the
+built-ins reach the crate-internal builder through `GraphPlan::with_built_in`, and the same
+processor handed to `with_processor` is still refused, because **provenance is a property of the
+stage rather than of the plan**. A built-in beside an application's processor lends that processor
+nothing.
 
 ### 3.3 What attaching a graph promises, per profile
 
