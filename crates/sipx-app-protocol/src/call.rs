@@ -11,7 +11,9 @@
 use sipx_call::voice::{AudioDirection as CallAudioDirection, VoiceEndCause as CallVoiceEndCause};
 use sipx_call::{CallEvent, EndCause as CallEndCause, TransferState as CallTransferState};
 
-use crate::event::{AudioDirection, EndCause, EventKind, TransferState, VoiceEndCause};
+use crate::event::{
+    AudioDirection, EndCause, EventKind, TransferState, VoiceEndCause, VoiceThresholds,
+};
 
 /// The seam's audio-direction vocabulary as the contract's (§5.3).
 fn audio_direction(direction: CallAudioDirection) -> AudioDirection {
@@ -65,6 +67,33 @@ pub fn event_from_call(event: &CallEvent, instruction_id: &str) -> Option<EventK
                 _ => VoiceEndCause::Cut,
             },
         },
+        // `M-84`. The analyser's own snapshot, narrowed to the counts and amplitudes §5.2 puts on
+        // the wire: the update count, the last observed floor and the last period's outcome stay in
+        // process, and §4's field rule is what lets any of them be added later without a new line.
+        // Nothing here can carry audio — every value read below is a scalar, and the processing
+        // contract's §3.3 and §8.1 mean there is no retained audio upstream to read.
+        CallEvent::VoiceThresholds(thresholds) => {
+            let effective = thresholds.effective();
+            let mut wire = VoiceThresholds::new(
+                audio_direction(thresholds.direction()),
+                thresholds.sample_rate(),
+                effective.activation_amplitude(),
+                effective.window_samples(),
+                effective.hangover_samples(),
+            )
+            .with_silence_timeout(effective.silence_timeout_samples());
+            // §12.3 derives all three together or not at all, so one of them being present is the
+            // whole of "this threshold moves".
+            if let (Some(calibration), Some(update)) =
+                (effective.calibration_samples(), effective.update_samples())
+            {
+                wire = wire.with_calibration(calibration, update, effective.freeze_limit_samples());
+            }
+            EventKind::VoiceThresholds {
+                sample_time: thresholds.at_sample(),
+                thresholds: wire,
+            }
+        }
         CallEvent::PlaybackFinished { completed, .. } => EventKind::PlaybackFinished {
             instruction_id: instruction_id.to_owned(),
             completed: *completed,

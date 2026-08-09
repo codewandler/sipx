@@ -102,6 +102,9 @@ change that would break any of the vectors in §11 requires `sipx.app.v2`.
   "from": "sip:alice@example.com", "to": "sip:support@example.net",
   "headers": { "p-asserted-identity": "\"Alice\" <sip:alice@example.com>" },
   "media": { "encrypted": true, "on_hold": false, "muted": false },
+  "voice": { "direction": "inbound", "sample_rate": 8000, "activation_amplitude": 1536,
+             "window_samples": 160, "hangover_samples": 1600, "silence_timeout_samples": null,
+             "calibration_samples": 1600, "update_samples": 800, "freeze_limit_samples": 240000 },
   "legs": [ { "leg": "b", "state": "ringing", "to": "sip:bob@example.net" } ],
   "bridged": false,
   "tags": { "campaign": "renewal" }
@@ -112,6 +115,60 @@ change that would break any of the vectors in §11 requires `sipx.app.v2`.
 `P-Asserted-Identity`, `Diversion`), lowercased keys, decoded values. It is not the raw message
 and never carries fields the host uses to route (`Via`, `Route`, `CSeq`, …). `state` is one of
 `incoming · ringing · answered · ended`.
+
+#### 5.2.1 `voice`: what the call's detection is measuring against (`M-84`)
+
+**[sipx]** `voice` is present exactly when voice-activity detection is running on the call, and
+**absent — not `null` — when it is not**. §5.3 makes a host that emits no voice analysis
+conformant, so "this call is not measuring anything" has to be sayable, and a call nobody asked for
+detection on serializes exactly as it did before this member existed.
+
+This is the contract's **read** of a calibrated threshold, and there is no query verb for one.
+§2 makes every event carry a full snapshot, so *"what is it measuring against now?"* is answered by
+the last envelope the app received rather than by asking; document mode's alternation (§6.3) has no
+shape for an unsolicited question, and a verb would additionally have to be a call-framework
+operation §3 could name, which a read is not. The **announcement** that the value moved is the
+`call.voice.thresholds` event of §5.3, which carries this same object — one spelling, so the two
+cannot disagree.
+
+Every member is a **sample count or an amplitude**, and every count is in samples at `sample_rate`
+rather than in wall-clock milliseconds, which is what makes a recorded call reproduce the same
+numbers on every host:
+
+| Member | Meaning |
+|---|---|
+| `direction` | which side of the audio these measure (`inbound · outbound`); each side has its own |
+| `sample_rate` | the rate every count here is expressed in |
+| `activation_amplitude` | what [call-audio-processing.md](call-audio-processing.md) §5.3's `active` predicate is comparing against right now — the configured value until §12.5 moves it, and always inside the configured floor..=ceiling interval |
+| `window_samples` | `W`: how many samples one measurement window covers |
+| `hangover_samples` | how many inactive samples end voice |
+| `silence_timeout_samples` | how many silent samples report elapsed silence, or `null` when that timer is off |
+| `calibration_samples` | `C`: how many samples of an epoch pass before the threshold may first move, or `null` when it is fixed |
+| `update_samples` | `U`: how many samples one calibration update period covers, or `null` when it is fixed |
+| `freeze_limit_samples` | `F`: how many samples open voice may hold an update back, or `null` when that is unbounded or the threshold is fixed |
+
+An optional count is written as `null` rather than omitted. `calibration_samples: null` is the
+load-bearing one: it says this call will never send a `call.voice.thresholds` again, so an
+application is not left inferring "the threshold is fixed" from silence, which is the same thing an
+old host would look like.
+
+**No audio, and nothing to reconstruct audio from.** Every member above is one integer.
+[call-audio-processing.md](call-audio-processing.md) §3.3 forbids retaining samples past the frame
+that carried them and its §8.1 enumerates the whole of an analyser's state without an audio buffer
+in it, so there is no retained audio upstream of this for a member to be derived from — which is
+why this is structural rather than a promise. The check that would catch a regression is
+`the_voice_member_carries_only_counts_and_amplitudes` in `sipx-app-protocol`'s
+`tests/spec_tables.rs`: it serializes the crate's own record and refuses any member that is not a
+number, a `null`, or one of the two direction words, so a field carrying samples — as an array, or
+base64 in a string — fails the build. A second derived test in the same file holds the member set
+against the example above, so widening the record is a reviewable diff against this section rather
+than a quiet one.
+
+**Deliberately not carried**, each recoverable later as a §4 *field* addition rather than a new
+wire line: the count of updates applied, the last period's observed floor, and what the last update
+period did (§12.9 lets a Rust caller read all three). None is a fact an application acts on, and
+each is invalidated by a reset while every member above survives one unchanged (§12.8) — so what is
+here cannot go stale except by moving, and moving announces itself.
 
 ### 5.3 Event types
 
@@ -124,6 +181,7 @@ and never carries fields the host uses to route (`Via`, `Route`, `CSeq`, …). `
 | `call.dtmf` | `digit`, `duration_ms` | an RFC 4733 event ended |
 | `call.voice.started` | `direction` (`inbound · outbound`), `sequence`, `sample_time`, `sample_rate` | deterministic signal analysis found voice on one side of the call's audio |
 | `call.voice.ended` | `sequence`, `sample_time`, `sample_rate`, `direction`, `cause` (`hangover · cut`) | that voice stopped, at the end of the last active window |
+| `call.voice.thresholds` | `sample_time`, `thresholds` (§5.2.1's object) | detection first had audio, or calibration moved what it measures against |
 | `call.signal.metrics` | `direction`, `epoch`, `sequence`, `sample_time`, `sample_rate`, `samples`, `windows`, `peak`, `rms`, `clipped_samples`, `clipping_windows`, `active_windows`, `silent_windows` | a reporting period of the call's audio completed |
 | `call.signal.silence` | `direction`, `epoch`, `sample_time`, `sample_rate` | unbroken silence in the call's audio reached the configured timeout |
 | `call.playback.finished` | `instruction_id`, `completed` | a `play` ran out or was cut |
@@ -148,6 +206,25 @@ did. Which call an observation belongs to is the envelope's own §5.2 `call.id`,
 repeated here. The normative analysis behind them is
 [call-audio-processing.md](call-audio-processing.md) §5.3 and §6; a host that emits neither is
 conformant, because both are reported only where an application asked for detection.
+
+**[sipx]** `call.voice.thresholds` is what those two decisions were made *against*. A host that has
+voice detection running on a call sends it **once** when the detection first has audio — so a call
+with detection always says what it is measuring against, whether or not the value ever moves — and
+thereafter only when [call-audio-processing.md](call-audio-processing.md) §12.5 moved the effective
+activation amplitude. §12.7's rule that a settled threshold is silent is carried onto the wire
+unchanged: an analyser with no calibration profile costs exactly one of these for the life of the
+call, and a calibrated one that has converged costs none. `sample_time` is the first sample of the
+current epoch from which the reported `activation_amplitude` has been in force, `0` when that is the
+whole epoch — the same sample-count position as the voice events, and never a clock reading. A reset
+preserves the threshold and re-anchors the epoch (§12.8), so it changes that position without
+sending anything.
+
+It carries **no delta**. §2's rule is that the contract never sends one, so the value this replaced
+is not on the event: an app that missed a delivery is corrected by the snapshot on this very
+envelope rather than left to reassemble a history from events it does not have. For the same reason
+the side of the audio and the sample rate appear only inside `thresholds` — this event and §5.2's
+`voice` member are the same object, and a `direction` repeated at the event level would be a second
+one that can disagree with it.
 
 **[sipx]** The two signal events report **what the audio contained, never how it was delivered**.
 Packet loss, jitter, round-trip time and the MOS estimate are the media stack's RTP/RTCP surface and
