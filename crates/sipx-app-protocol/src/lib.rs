@@ -90,4 +90,4 @@ pub use crate::session::{
 pub use crate::time::Timestamp;
 
 #[cfg(feature = "call")]
-pub use crate::call::event_from_call;
+pub use crate::call::{dial_outcome, event_from_call};

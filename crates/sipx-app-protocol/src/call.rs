@@ -13,8 +13,14 @@ use sipx_call::voice::{AudioDirection as CallAudioDirection, VoiceEndCause as Ca
 use sipx_call::{CallEvent, EndCause as CallEndCause, TransferState as CallTransferState};
 
 use crate::event::{
-    AudioDirection, EndCause, EventKind, TransferState, VoiceEndCause, VoiceThresholds,
+    AudioDirection, DialOutcome, EndCause, EventKind, TransferState, VoiceEndCause, VoiceThresholds,
 };
+
+/// RFC 3261 §21.4.7: the one refusal §5.3 spells with a word of its own rather than a status.
+const BUSY_HERE: u16 = 486;
+
+/// RFC 4028 §6: the status a `422` is, which is the whole of what [`sipx_call::Error`] keeps of it.
+const SESSION_INTERVAL_TOO_SMALL: u16 = 422;
 
 /// The seam's audio-direction vocabulary as the contract's (§5.3).
 fn audio_direction(direction: CallAudioDirection) -> AudioDirection {
@@ -88,6 +94,66 @@ fn signal_event(metrics: &sipx_call::SignalMetrics) -> Option<EventKind> {
         // observation kind added after this arm was written.
         _ => return None,
     })
+}
+
+/// How an outbound leg resolved, in §5.3's closed `outcome` vocabulary (`M-103`).
+///
+/// `None` is the answered case: an attempt that produced a [`sipx_call::Call`] refused nothing, so
+/// the caller passes the `Err` half of its dial and nothing else. Written as
+/// `dial_outcome(result.as_ref().err())`.
+///
+/// # Why this is not an arm of [`event_from_call`]
+///
+/// Because there is no event to map. §5.3's `call.dial.finished` is the one row whose fact never
+/// reaches a [`CallEvent`] at all: `sipx-call` reports a refused invitation as the `Err` of
+/// [`sipx_call::dial`] — [`sipx_call::Dialing`] drops its event sink without an ending — so the
+/// status a `486` carried exists only in [`sipx_call::Error::Rejected`]. A driver that watched the
+/// outbound leg's event stream would see it close and never learn why. That is also why the row is
+/// the driver's to compose rather than this bridge's: the composing needs the app's
+/// `instruction_id` and `leg` *and* the dial's own result, and only the thing that issued the
+/// effect holds all three.
+///
+/// # What it promises, and what it does not
+///
+/// It answers one question — which of §5.3's four words describes this attempt — and no others.
+/// It does not say whether the leg is still up, does not read a clock, and deliberately keeps no
+/// reason phrase: §5.3's `rejected{status}` carries a status and nothing else, and a second
+/// spelling of the far end's prose is a second thing that can disagree with the status.
+///
+/// The mapping, and the judgement in each row:
+///
+/// - **`486`** is `busy`. It is the only status §5.3 gives a word to, so every other refusal keeps
+///   its number rather than being sorted into a category the section does not have.
+/// - **Any other refusal** is `rejected{status}`, including a `401`/`407` that
+///   [`sipx_call::Error::AuthenticationChallenge`] carries: the far end did refuse, with that
+///   status, and an app reading the number is reading what arrived.
+/// - **`422`** ([`sipx_call::Error::IntervalTooBrief`]) is `rejected{422}`. The variant keeps a
+///   duration instead of the status because a Rust caller retries with it; an app cannot, and
+///   reporting a refusal that did arrive as `timeout` would be a false statement about the far end.
+/// - **Everything else** is `timeout` — [`DialOutcome::Timeout`]'s own documented meaning is *it
+///   never resolved*, which is exactly true of a deadline, of a local cancellation, of a
+///   transaction that got no final response, and of a setup this side could not complete. It is the
+///   value that concludes nothing about the far end, which is the right answer where nothing about
+///   the far end is known. [`sipx_call::Error`] is `#[non_exhaustive]`, so this also covers a
+///   variant added after this function was written.
+#[must_use]
+pub fn dial_outcome(refusal: Option<&sipx_call::Error>) -> DialOutcome {
+    let Some(refusal) = refusal else {
+        return DialOutcome::Answered;
+    };
+    match refusal {
+        sipx_call::Error::Rejected {
+            status: BUSY_HERE, ..
+        } => DialOutcome::Busy,
+        sipx_call::Error::Rejected { status, .. }
+        | sipx_call::Error::AuthenticationChallenge { status, .. } => {
+            DialOutcome::Rejected { status: *status }
+        }
+        sipx_call::Error::IntervalTooBrief(_) => DialOutcome::Rejected {
+            status: SESSION_INTERVAL_TOO_SMALL,
+        },
+        _ => DialOutcome::Timeout,
+    }
 }
 
 /// One `sipx-call` event as a contract event (§5.3).

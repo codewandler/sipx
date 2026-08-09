@@ -22,12 +22,13 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use sipx_app::host::Host;
-use sipx_call::{DialOptions, dial};
+use sipx_call::{DialOptions, Dispatched, Dispatcher, dial};
 use sipx_sip::{HeaderName, Host as UriHost, HostName, Method, Uri, build::RequestBuilder};
 use sipx_transport::{Config, Handle, Incoming, Target, bind};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::Receiver;
+use tokio::sync::oneshot;
 
 fn loopback() -> IpAddr {
     "127.0.0.1".parse().expect("valid")
@@ -303,6 +304,142 @@ async fn real_5xx_retries_apply_the_declared_server_error_action_after_the_cap()
     ))
     .await;
     peer.await.expect("three attempts, then the peer ends");
+}
+
+/// A SIP endpoint that refuses every invitation it is sent with `486 Busy Here`.
+///
+/// The far end of the `dial` under test, and deliberately the smallest one there is: a 486 is a
+/// final response to the INVITE transaction, so nothing here ever holds a call or a dialog.
+async fn busy_peer() -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    let (handle, incoming) = endpoint().await;
+    let address = handle.local_addr();
+    let answering = handle.clone();
+    let task = tokio::spawn(async move {
+        let mut dispatcher = Dispatcher::new(answering.clone(), incoming);
+        while let Some(event) = dispatcher.next().await {
+            if let Dispatched::Invitation(invitation) = event {
+                let _ = invitation.refuse(&answering, 486, "Busy Here").await;
+            }
+        }
+    });
+    (address, task)
+}
+
+/// A document app that answers the call, dials `target`, and hands back what it is told next.
+///
+/// Three callbacks: `call.incoming` gets the program, the event that completes `answer` gets an
+/// empty document ("keep going"), and the third — whatever it turns out to be — is reported to the
+/// test verbatim. Reported rather than asserted here so that the failure names the event the host
+/// actually sent.
+async fn dialing_app(
+    target: &str,
+) -> (
+    String,
+    oneshot::Receiver<String>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("binds");
+    let url = format!("http://{}/hook", listener.local_addr().expect("address"));
+    let program = format!(
+        r#"{{"contract":"sipx.app.v1","instructions":[{{"id":"a1","do":"answer"}},{{"id":"d1","do":"dial","target":"{target}"}}]}}"#
+    );
+    let (third, third_rx) = oneshot::channel();
+    let task = tokio::spawn(async move {
+        let mut third = Some(third);
+        for turn in 0..3_u8 {
+            let (mut socket, _) = listener.accept().await.expect("accepts a callback");
+            let mut buffer = [0_u8; 4096];
+            let mut body = Vec::new();
+            loop {
+                let read = socket.read(&mut buffer).await.expect("reads the envelope");
+                assert_ne!(read, 0, "the callback request is complete");
+                body.extend_from_slice(&buffer[..read]);
+                // Every envelope carries exactly one event type, and the two the host can send
+                // third are the outcome under test and the ending that stands in for it when the
+                // effect was refused. Either one means the request has arrived whole.
+                if turn < 2
+                    || body
+                        .windows(b"\"type\":".len())
+                        .any(|window| window == b"\"type\":")
+                {
+                    break;
+                }
+                assert!(body.len() <= 64 * 1024, "the request stays bounded");
+            }
+            let reply = if turn == 0 {
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{program}",
+                    program.len()
+                )
+            } else {
+                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned()
+            };
+            socket
+                .write_all(reply.as_bytes())
+                .await
+                .expect("answers the callback");
+            if turn == 2
+                && let Some(third) = third.take()
+            {
+                let _ = third.send(String::from_utf8_lossy(&body).into_owned());
+            }
+        }
+    });
+    (url, third_rx, task)
+}
+
+/// **`M-103`** — an app is told how its `dial` resolved.
+///
+/// The whole of the story, end to end and through the shipped host: §6.2's `dial` reaches a far end
+/// over a real socket, that end refuses with `486 Busy Here`, and §5.3's `call.dial.finished`
+/// arrives at the app naming the instruction, the leg the interpreter minted for it, and `busy`.
+///
+/// Before `M-103` every part of this existed except the middle: the row, the type, the wire round
+/// trip and the interpreter's handling of the event were all shipped and tested, and no host could
+/// emit one — `Effect::Dial` fell into the driver's `_ => fail_effect()` arm, so what an app got
+/// here was `call.ended`. That is what this asserts against, which is why the app reports the third
+/// envelope rather than matching on it: the failure says which event arrived.
+///
+/// This is vector AC-7's claim against the product. §11's AC-7 drives the interpreter with a
+/// `call.dial.finished` supplied as input, which is exactly the half that was never in doubt.
+#[tokio::test]
+async fn a_dial_refused_by_the_far_end_tells_the_app_its_leg_is_busy() {
+    let (busy, peer) = busy_peer().await;
+    let (url, third, app) = dialing_app(&format!("sip:bob@{busy}")).await;
+    let address = webhook_host_on(&webhook_document(&url, "on_5xx", 500, 5_000)).await;
+    let (caller, _incoming) = endpoint().await;
+
+    let _call = Box::pin(within(dial(
+        &caller,
+        Target::udp(address),
+        &callee_uri(),
+        &DialOptions::new("<sip:caller@test.example>", loopback()),
+    )))
+    .await
+    .expect("the app answers the inbound call");
+
+    let envelope = within(third)
+        .await
+        .expect("the app receives a third event after the dial");
+    assert!(
+        envelope.contains("call.dial.finished"),
+        "the app is told how its `dial` resolved; it was told this instead: {envelope}"
+    );
+    assert!(
+        envelope.contains(r#""instruction_id":"d1""#),
+        "the outcome names the instruction that asked for it: {envelope}"
+    );
+    assert!(
+        envelope.contains(r#""leg":"b""#),
+        "the outcome names the leg §5.2 put in the snapshot: {envelope}"
+    );
+    assert!(
+        envelope.contains(r#""outcome":"busy""#),
+        "486 is §5.3's `busy`, not a `rejected{{486}}`: {envelope}"
+    );
+
+    peer.abort();
+    app.abort();
 }
 
 #[tokio::test]
