@@ -91,6 +91,48 @@ class TheControlStaysAControl(unittest.TestCase):
         self.assertIn("pending", body[:600], "the control must have no way to pass")
 
 
+class AnIgnoredSubjectIsRunAndCheckedAsOne(unittest.TestCase):
+    """`X-135`: a subject too long for the ordinary suite is `#[ignore]`d, and that cuts both ways.
+
+    An `#[ignore]`d test that cargo is not told to run is not skipped loudly — `--exact` matches no
+    test, cargo exits 0, and the subject reads as passed. It is the same silent green as a renamed
+    test, reached from the other direction, so whether a subject is ignored is a property of the
+    subject rather than an argument a caller may forget.
+    """
+
+    def test_the_tree_has_a_subject_that_only_runs_with_ignored(self):
+        ignored = [subject for subject in proof.SUBJECTS if subject.ignored]
+        self.assertTrue(ignored, "no subject carries the load a short fixture cannot")
+        for subject in ignored:
+            self.assertEqual(subject.command()[-1], "--ignored")
+
+    def test_an_ignored_subject_that_lost_its_attribute_is_reported(self):
+        """Losing `#[ignore]` makes `--ignored --exact` match nothing, and cargo exits 0."""
+        stray = proof.Subject(
+            "--test",
+            "cli",
+            "default_load_pair_completes_the_requested_signalling_workload",
+            "crates/sipx-cli/tests/cli.rs",
+            ignored=True,
+        )
+        with _subjects((stray,)):
+            problems = proof.check_problems()
+        self.assertTrue(any(stray.name in problem for problem in problems), problems)
+        self.assertTrue(any("--ignored" in problem for problem in problems), problems)
+
+    def test_an_ordinary_subject_that_gained_the_attribute_is_reported(self):
+        """And the mirror image: cargo skips it, reports zero tests run, and exits 0."""
+        muted = proof.Subject(
+            "--test",
+            "cli",
+            "contention_control_an_unbounded_wait_is_still_reported",
+            "crates/sipx-cli/tests/cli.rs",
+        )
+        with _subjects((muted,)):
+            problems = proof.check_problems()
+        self.assertTrue(any(muted.name in problem for problem in problems), problems)
+
+
 class TheCargoInvocationRunsExactlyOneTest(unittest.TestCase):
     def test_exact_is_passed_so_a_prefix_cannot_widen_the_run(self):
         command = proof.SUBJECTS[0].command()
@@ -99,7 +141,7 @@ class TheCargoInvocationRunsExactlyOneTest(unittest.TestCase):
         self.assertNotIn("--ignored", command)
 
     def test_the_control_is_run_with_ignored(self):
-        self.assertEqual(proof.CONTROL.command(ignored=True)[-1], "--ignored")
+        self.assertEqual(proof.CONTROL.command()[-1], "--ignored")
 
 
 class _subjects:
