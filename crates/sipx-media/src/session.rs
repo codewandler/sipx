@@ -1311,34 +1311,41 @@ impl Playback {
     /// for (`M-93`).
     pub async fn finished(&self) -> PlaybackEnd {
         let mut end = self.end.clone();
-        // Whether this wait has actually parked yet. A playback that has already ended answers on
-        // the first poll, and an `async fn` that can complete without suspending is a task the
-        // scheduler never gets back — so a caller looping over one holds a runtime worker that
-        // `abort()` cannot take back (`M-93`). The hop below is what returns it.
-        //
-        // Only on that path, and that is not tidiness: two watchers that both park before their
-        // clips end are woken in the order the clips ended, and a hop taken before parking would
-        // put them back in the run queue in an order that no longer follows the audio. `C-3`'s
-        // per-playback reporting depends on it.
-        let mut parked = false;
         loop {
             let settled = *end.borrow_and_update();
             if let Some(settled) = settled {
-                if !parked {
+                // **The hop turns on the answer, not on whether this wait parked (`M-93`).**
+                //
+                // `SessionEnded` is the permanent one: the session does not come back, so this
+                // answers at once and answers at once for ever, and `play` is `start` plus this
+                // wait — which makes `loop { play().await }` after a call ends a bare busy loop.
+                // A task that never reaches a suspension point is one `abort()` can never take
+                // back, so the hop is what returns the runtime worker. Nothing is left to order by
+                // then, so it disturbs nothing.
+                //
+                // Every other end is a thing that happened once to *this* clip, and takes no hop.
+                // Two watchers that both parked before their clips ended are woken in the order
+                // the clips ended; a hop here would put them back in the run queue in an order
+                // that no longer follows the audio, which is `C-3`'s per-playback reporting and is
+                // asserted by `sipx-call`'s `every_playback_reports_its_own_end_by_id`.
+                if settled == PlaybackEnd::SessionEnded {
                     tokio::task::yield_now().await;
                 }
                 return settled;
             }
             if end.changed().await.is_err() {
                 // The queue task is gone without having recorded an end, which only happens when
-                // the session went away underneath this clip. A dropped sender is reported without
-                // waiting, so this exit needs the hop too.
-                if !parked {
-                    tokio::task::yield_now().await;
-                }
+                // the session went away underneath this clip.
+                //
+                // **This exit takes a hop, and it is the one that needs it.** It answers
+                // immediately and then answers immediately for ever, because the session does not
+                // come back — so unlike the branch above it is a state a loop can spin on, and a
+                // task that never reaches a suspension point is one `abort()` can never take back
+                // (`M-93`). The hop is what returns the worker. It disturbs no ordering, because
+                // by then there are no more clip ends to order.
+                tokio::task::yield_now().await;
                 return PlaybackEnd::SessionEnded;
             }
-            parked = true;
         }
     }
 }
