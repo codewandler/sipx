@@ -79,6 +79,10 @@ appeared twice before anyone named it.
 - [M-68 — Harden DSP real-time and failure isolation](M-68-harden-dsp-realtime-failure-isolation.md) · Media · after M-63/M-64 · measured budgets and explicit fail-open/fail-closed policy
 - [M-70 — Accept multiplexed browser offers with unused component candidates](M-70-accept-multiplexed-browser-offers-with-unused-component-candidates.md) · Media · external review finding 9 · a second browser engine reaches SDP then fails the multiplexed profile
 - [M-72 — Prove the AEAD SRTP key derivation against an independent peer](M-72-prove-the-aead-srtp-key-derivation-against-a-peer.md) · Media · RFC 7714 publishes no KDF vector · a wrong salt placement makes two sipx endpoints interoperate with each other and nobody else, and every round-trip test still passes
+- [M-125 — Carry a requested bypass over the application contract](M-125-carry-a-requested-bypass-over-the-application-contract.md) · Media · after M-115 · the graph door exists and an application driving it over the wire sees half of it
+- [M-126 — Decide whether the call comes to rest in sipx-app](M-126-decide-whether-the-call-comes-to-rest-in-sipx-app.md) · Media · after M-117 · WssMessage::Binary derives its Debug and sipx-app is in neither redaction scope
+- [M-128 — Name the event families the SDK page omits](M-128-name-the-event-families-the-sdk-page-omits.md) · Application · after M-108 · the page lists event families in prose and has not tracked the last several rows
+- [M-129 — Move the worker-protocol harness into the test crate](M-129-move-the-worker-protocol-harness-into-the-test-crate.md) · Media · after M-122 · a fuzzing harness is public API of a published crate, against the convention this repo already wrote down
 - [P-30 — Bound the first NOTIFY in a registrar subscription](P-30-bound-the-first-notify-in-a-registrar-subscription.md) · Phone · peers --registrar waits Timer N — 64*T1, 32 seconds — with no operator control · the dominant unbounded wait once resolution is bounded
 - [T-33 — Bind browser WebSocket signalling](T-33-bind-browser-websocket-signalling.md) · Transport · after A-16 and S-41 · browser owns I/O, WASM core consumes bytes
 - [X-93 — Make protected release evidence faster without weakening it](X-93-make-protected-release-evidence-faster.md) · Build · measure cache and preflight changes against the 12m37 cold beta gate · follow-up
@@ -94,7 +98,6 @@ _The [app-sdk](https://github.com/codewandler/sipx/blob/main/docs/designs/app-sd
 
 ### Application SDK
 _The measure of this stack's reach is what can be built on it **without writing Rust**. Today the_
-- [M-128 — Name the event families the SDK page omits](M-128-name-the-event-families-the-sdk-page-omits.md) · Application · after M-108 · the page lists event families in prose and has not tracked the last several rows
 - [C-9 — Carry a bridge and a conference across a renegotiation](C-9-carry-a-bridge-across-a-renegotiation.md) · Signalling · filed from C-6 · a re-INVITE, a hold/resume or an ICE restart replaces a call's MediaSession and the bridge keeps forwarding the stopped one · size S/M
 
 ### browser audio SDK
@@ -115,8 +118,6 @@ _Applications need small, predictable facts about live audio even when no speech
 
 ### custom call-audio DSP
 _Applications need to shape live call audio without forking the media runtime: ordinary gain and_
-- [M-125 — Carry a requested bypass over the application contract](M-125-carry-a-requested-bypass-over-the-application-contract.md) · Media · after M-115 · the graph door exists and an application driving it over the wire sees half of it
-- [M-129 — Move the worker-protocol harness into the test crate](M-129-move-the-worker-protocol-harness-into-the-test-crate.md) · Media · after M-122 · a fuzzing harness is public API of a published crate, against the convention this repo already wrote down
 - [A-34 — Publish a runnable custom call-DSP example](A-34-publish-custom-call-dsp-example.md) · Application · M18 exit after M-67 and X-109 · live graph, custom fixture, effects/noise reduction, bypass
 - [X-143 — Record the DSP cost run on a quiet box](X-143-record-the-dsp-cost-run-on-a-quiet-box.md) · Build · after X-109 · the harness exists and refuses to report under load; the figure is untaken
 
@@ -142,7 +143,6 @@ _A live call on a machine with a local accelerator should be able to transcribe 
 
 ### Media
 _Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
-- [M-126 — Decide whether the call comes to rest in sipx-app](M-126-decide-whether-the-call-comes-to-rest-in-sipx-app.md) · Media · after M-117 · WssMessage::Binary derives its Debug and sipx-app is in neither redaction scope
 - [M-123 — Refuse an advertised media address the far end will read as its own](M-123-refuse-an-advertised-address-the-far-end-owns.md) · Media · found while dialling a real endpoint · answered, and no audio, with no error anywhere
 - [M-124 — Resolve cluster-internal SIP names after ordinary DNS declines](M-124-resolve-cluster-internal-sip-names.md) · Core · after M-123 · RFC 3263 runs first and unchanged; this is only what happens when it returns nothing
 

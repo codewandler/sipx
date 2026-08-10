@@ -2,7 +2,7 @@
 id: M-125
 title: Carry a requested bypass over the application contract
 pillar: Media
-status: ready
+status: in-progress
 priority: 2
 design: docs/designs/custom-call-dsp.md
 epic: custom-call-dsp
@@ -55,6 +55,8 @@ forever by restoring it after every failure.
 - [ ] The gate is green.
 
 ## Progress
+
+- 2026-08-10: selected in the five-story rc.22 wave.
 
 - Filed 2026-08-10 by the `M-115` implementor, who named the gap rather than widening the contract
   inside another story's fence.

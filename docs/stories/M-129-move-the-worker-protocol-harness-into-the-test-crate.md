@@ -2,7 +2,7 @@
 id: M-129
 title: Move the worker-protocol harness into the test crate
 pillar: Media
-status: ready
+status: in-progress
 priority: 6
 design: docs/designs/custom-call-dsp.md
 epic: custom-call-dsp
@@ -76,6 +76,8 @@ property above.
 - [ ] The gate is green.
 
 ## Progress
+
+- 2026-08-10: selected in the five-story rc.22 wave.
 
 - Filed 2026-08-10, after `M-122` landed and its arrangement was reviewed at the release boundary.
   Recorded in `docs/releases/1.0.0-rc.19.md` under "Known and not fixed" rather than rushed into the

@@ -2,7 +2,7 @@
 id: M-126
 title: Decide whether the call comes to rest in sipx-app
 pillar: Media
-status: ready
+status: in-progress
 priority: 3
 design:
 epic: media
@@ -50,6 +50,8 @@ record their own boundaries. What it must not do is stay unexamined, because "no
 - [ ] The gate is green.
 
 ## Progress
+
+- 2026-08-10: selected in the five-story rc.22 wave.
 
 - Filed 2026-08-10 by the `M-117` implementor, who found the carrier and declined to widen a scope
   constant from inside another story.

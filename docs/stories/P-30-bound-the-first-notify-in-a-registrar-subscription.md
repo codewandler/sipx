@@ -34,6 +34,10 @@ which is now the longest thing it can do without saying so.
 
 ## Progress
 
+- 2026-08-10: selected as the highest-priority carry-over in the five-story rc.22 wave. The open
+  contract is the cancellation proof and its joined teardown; the already delivered operator
+  deadline remains unchanged.
+
 - 2026-08-08: filed from `P-26`'s adjacent findings. Having bounded resolution across every command,
   the dominant unbounded wait in `peers --registrar` is the first NOTIFY: it inherits Timer N from
   `event_client` with no operator control.
@@ -78,4 +82,3 @@ which is now the longest thing it can do without saying so.
 
   **Row 3 stays open.** Cancellation dropping and joining the subscription without leaving a binding
   the registrar still believes in is not written, so this story does not close here.
-

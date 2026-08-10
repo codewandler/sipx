@@ -2,7 +2,7 @@
 id: M-128
 title: Name the event families the SDK page omits
 pillar: Application
-status: ready
+status: in-progress
 priority: 5
 design:
 epic: app-sdk
@@ -47,6 +47,8 @@ reintroduce, because the next event family will land the same way this one did.
 - [ ] The gate is green.
 
 ## Progress
+
+- 2026-08-10: selected in the five-story rc.22 wave.
 
 - Filed 2026-08-10 by the `M-108` implementor, who found the omission and judged a docs sweep to be
   outside a behavioural story's fence.
