@@ -157,12 +157,14 @@ impl GraphBounds {
         self.worker_queue_capacity
     }
 
-    /// Whether every bound is inside its domain.
+    /// Whether every bound and this session's actual frame sizing are inside their domains.
     ///
     /// # Errors
     ///
-    /// [`GraphError::Bound`] naming the first field outside §4's domain for it.
-    pub fn validate(&self) -> Result<(), GraphError> {
+    /// [`GraphError::Bound`] naming the first configured field outside §4's domain for it, or
+    /// [`GraphError::FrameSamplesOutOfRange`] naming a session frame outside
+    /// `1..=max_frame_samples`.
+    pub fn validate(&self, frame_samples: usize) -> Result<(), GraphError> {
         bound("max_processors", self.max_processors, 1, MAX_PROCESSORS)?;
         bound(
             "max_frame_samples",
@@ -193,7 +195,15 @@ impl GraphBounds {
             self.worker_queue_capacity,
             1,
             MAX_WORKER_QUEUE,
-        )
+        )?;
+        let value = u64::try_from(frame_samples).unwrap_or(u64::MAX);
+        if frame_samples == 0 || value > u64::from(self.max_frame_samples) {
+            return Err(GraphError::FrameSamplesOutOfRange {
+                value,
+                bound: self.max_frame_samples,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -224,6 +234,14 @@ pub enum GraphError {
         field: &'static str,
         /// What was configured.
         value: u64,
+    },
+    /// The session's actual interleaved frame sizing is outside the configured frame bound.
+    #[error("graph frame sizing is {value} samples, outside 1..={bound}")]
+    FrameSamplesOutOfRange {
+        /// The sizing derived from the session's packetisation.
+        value: u64,
+        /// The configured largest frame, itself bounded by the processor contract.
+        bound: u32,
     },
     /// The chain is longer than the configured ceiling.
     #[error("this chain holds more than the configured {limit} processors")]
@@ -2369,7 +2387,7 @@ fn build(plan: GraphPlan, format: StreamFormat, frame_samples: usize) -> Result<
     // Every declaration is checked before one processor is prepared, so a refusal in the middle of
     // a chain never leaves the front of it half-attached, and no worker is spawned on the way to
     // being rejected.
-    let admitted = admit(&stages, &bounds, format, workspace)?;
+    let admitted = admit(&stages, &bounds, format, frame_samples, workspace)?;
 
     // Only now, with the whole plan admitted, is anything prepared, allocated or spawned.
     let running = prepare(stages, &bounds, direction, format, frame_samples)?;
@@ -2407,9 +2425,10 @@ fn admit(
     stages: &[Planned],
     bounds: &GraphBounds,
     format: StreamFormat,
+    frame_samples: usize,
     workspace: bool,
 ) -> Result<Admitted, GraphError> {
-    bounds.validate()?;
+    bounds.validate(frame_samples)?;
     let count = u32::try_from(stages.len()).unwrap_or(u32::MAX);
     if count > bounds.max_processors() {
         return Err(GraphError::TooManyProcessors {

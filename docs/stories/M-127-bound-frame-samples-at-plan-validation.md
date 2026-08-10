@@ -2,7 +2,7 @@
 id: M-127
 title: Bound frame_samples where the plan is validated
 pillar: Media
-status: ready
+status: in-progress
 priority: 4
 design: docs/designs/custom-call-dsp.md
 epic: custom-call-dsp
@@ -41,17 +41,35 @@ a hole in it.
 
 ## Acceptance
 
-- [ ] `GraphBounds::validate` refuses a `frame_samples` outside the contract's range, naming the
+- [x] `GraphBounds::validate` refuses a `frame_samples` outside the contract's range, naming the
       value and the bound, and the refusal is typed like its neighbours.
-- [ ] A failing-first test shows the current tree admitting a plan whose sizing is out of contract
+- [x] A failing-first test shows the current tree admitting a plan whose sizing is out of contract
       and failing later as a lost worker; after, it is refused at validation with nothing spawned.
-- [ ] The supervised path keeps its own refusal — defence in depth, since the two doors admit values
+- [x] The supervised path keeps its own refusal — defence in depth, since the two doors admit values
       from different places — and a test pins that removing the plan-side check does not silently
       restore the old behaviour.
-- [ ] No live-path behaviour changes for a plan that was already admissible.
+- [x] No live-path behaviour changes for a plan that was already admissible.
 - [ ] The gate is green.
 
 ## Progress
 
 - Filed 2026-08-10 by the `M-122` implementor, from an adjacent finding while bounding the peer's
   declared ceiling.
+
+- **Done bar the gate row** (2026-08-10, `impl/M-127`). `GraphBounds::validate` now takes the
+  session's actual `frame_samples` and refuses a value outside `1..=max_frame_samples` as
+  `FrameSamplesOutOfRange { value, bound }`. Admission passes that sizing through before prepare,
+  allocation or worker spawn; the supervised worker's independent oversized-`Hello` refusal is
+  unchanged.
+
+  Failing-first, the new GRAPH-28 live-session test on the old path spawned the reference worker,
+  which refused `max_samples = 66,048`; after three bounded frames the graph reported
+  `WorkerLost`, and the test failed with `an out-of-contract graph was admitted and failed later as
+  WorkerLost`. With the plan-side check present the same test returns the typed sizing refusal
+  before it can obtain a worker pid. The portable bound test also pins both ends, `0` and `65,537`,
+  and the existing worker-protocol test continues to pin the second door.
+
+  Focused evidence: `cargo test -p sipx-media --all-features` passes; the crate itself is clean
+  under `cargo clippy -p sipx-media --all-features --all-targets --no-deps -- -D warnings`;
+  provenance, story-closure and whitespace checks pass. The integration coordinator owns the one
+  complete wave gate and the final row.
