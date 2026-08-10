@@ -957,37 +957,57 @@ mod tests {
     ///
     /// One admitted call against a black hole is enough: the plan is bounded, the summary is
     /// printed, and the probe asks what is left. `crate::join_probe` explains the timing.
+    ///
+    /// `X-144` separated two superficially identical failures. Silence through `--timeout` is the
+    /// measured outcome and exits successfully; scheduling pressure cannot turn that classification
+    /// into an internal failure. A sibling test claiming the just-released local port can: `run`
+    /// then exits `Failed` before admitting anything, while the old assertion says an admitted call
+    /// went unanswered. The first attempt below manufactures that exact contention. The bounded
+    /// retry must get past it and still assert both the outcome and the endpoint join.
     #[tokio::test]
     async fn the_summary_joins_the_endpoint_before_it_is_printed() {
-        let black_hole = tokio::net::UdpSocket::bind("127.0.0.1:0")
-            .await
-            .expect("binds");
-        let peer = black_hole.local_addr().expect("has an address");
-        let local = crate::join_probe::free_local();
-        let arguments = raw(&[
-            "load",
-            &format!("sip:load@{peer}"),
-            "--rate",
-            "1",
-            "--concurrency",
-            "1",
-            "--calls",
-            "1",
-            "--timeout",
-            "1",
-            "--local",
-            &local.to_string(),
-        ]);
-
-        let exit = run(command(&arguments), Format::Json).await;
-
-        crate::join_probe::assert_released(local, "load summary");
-        assert_eq!(
-            exit.code(),
+        let mut attempts = 0_usize;
+        crate::join_probe::until_bound(
+            "load summary after an unanswered call; repeated Failed exits mean local-port \
+             contention or an internal error, not that measured outcome",
             Exit::Success.code(),
-            "an admitted call that nothing answered is a measured outcome, not an internal failure"
-        );
-        drop(black_hole);
+            || {
+                let contend = attempts == 0;
+                attempts = attempts.saturating_add(1);
+                async move {
+                    let black_hole = tokio::net::UdpSocket::bind("127.0.0.1:0")
+                        .await
+                        .expect("binds");
+                    let peer = black_hole.local_addr().expect("has an address");
+                    let local = crate::join_probe::free_local();
+                    let arguments = raw(&[
+                        "load",
+                        &format!("sip:load@{peer}"),
+                        "--rate",
+                        "1",
+                        "--concurrency",
+                        "1",
+                        "--calls",
+                        "1",
+                        "--timeout",
+                        "1",
+                        "--local",
+                        &local.to_string(),
+                    ]);
+
+                    let contender = contend.then(|| {
+                        std::net::UdpSocket::bind(local).expect("claims the released port")
+                    });
+                    let exit = run(command(&arguments), Format::Json).await;
+                    drop(contender);
+
+                    crate::join_probe::assert_released(local, "load summary");
+                    drop(black_hole);
+                    exit.code()
+                }
+            },
+        )
+        .await;
     }
 
     #[test]

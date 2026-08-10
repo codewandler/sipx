@@ -67,6 +67,12 @@ class TheNamesResolveAgainstTheRealSource(unittest.TestCase):
     def test_the_tree_as_it_stands_resolves(self):
         self.assertEqual(proof.check_problems(), [])
 
+    def test_the_load_summary_join_barrier_is_a_subject(self):
+        name = "load::tests::the_summary_joins_the_endpoint_before_it_is_printed"
+        matches = [subject for subject in proof.SUBJECTS if subject.name == name]
+        self.assertEqual(len(matches), 1, "the contention-sensitive join barrier must run once")
+        self.assertEqual(matches[0].command()[-1], name)
+
     def test_a_missing_test_is_reported(self):
         renamed = proof.Subject(
             "--test", "cli", "a_test_nobody_wrote", "crates/sipx-cli/tests/cli.rs"
