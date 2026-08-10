@@ -537,7 +537,9 @@ async fn bounds_are_explicit_non_zero_and_enforced() {
     assert!(bounds.observation_capacity() > 0);
 
     assert_eq!(
-        GraphBounds::new().with_max_processors(0).validate(),
+        GraphBounds::new()
+            .with_max_processors(0)
+            .validate(SAMPLES_PER_PACKET),
         Err(GraphError::Bound {
             field: "max_processors",
             value: 0,
@@ -546,10 +548,24 @@ async fn bounds_are_explicit_non_zero_and_enforced() {
     assert_eq!(
         GraphBounds::new()
             .with_retained_tail_positions(0)
-            .validate(),
+            .validate(SAMPLES_PER_PACKET),
         Err(GraphError::Bound {
             field: "retained_tail_positions",
             value: 0,
+        })
+    );
+    assert_eq!(
+        GraphBounds::new().validate(0),
+        Err(GraphError::FrameSamplesOutOfRange {
+            value: 0,
+            bound: 65_536,
+        })
+    );
+    assert_eq!(
+        GraphBounds::new().validate(65_537),
+        Err(GraphError::FrameSamplesOutOfRange {
+            value: 65_537,
+            bound: 65_536,
         })
     );
 

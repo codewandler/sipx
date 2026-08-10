@@ -89,6 +89,29 @@ async fn session_and_peer() -> (MediaSession, UdpSocket, SocketAddr) {
     )
 }
 
+/// A valid session whose packetisation is one frame beyond the DSP contract's largest frame.
+#[cfg(target_os = "linux")]
+async fn oversized_session_and_peer() -> (MediaSession, UdpSocket, SocketAddr) {
+    let peer = UdpSocket::bind("127.0.0.1:0").await.expect("binds");
+    let peer_addr = peer.local_addr().expect("has an address");
+
+    let port = MediaPort::bind("127.0.0.1:0".parse().expect("valid"))
+        .await
+        .expect("binds");
+    let session_addr = port.local_addr();
+
+    let mut config = Config::new(peer_addr, Codec::Pcmu);
+    config.clock_rate = 384_000;
+    config.packet_duration = Duration::from_millis(172);
+    config.rtcp_interval = None;
+    assert_eq!(config.samples_per_packet(), 66_048);
+    (
+        port.start(config).expect("valid media setup"),
+        peer,
+        session_addr,
+    )
+}
+
 fn narrowband() -> PcmFormat {
     PcmFormat::new(8_000, PcmEncoding::Signed16).expect("a supported format")
 }
@@ -134,6 +157,80 @@ async fn reaped(pid: u32) {
 }
 
 // ----------------------------------------------------------------------------- tests ----
+
+/// GRAPH-28: the plan door owns the session frame size, so it refuses an out-of-contract sizing
+/// before the supervised door can spawn a worker from it.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn an_out_of_contract_frame_is_refused_before_a_worker_is_spawned() {
+    let (session, _peer, _addr) = oversized_session_and_peer().await;
+    let attempted = session.attach_dsp(
+        GraphPlan::new(AudioDirection::Outbound, GraphBounds::new()).with_supervised(failing(
+            "oversized-frame",
+            "gain",
+            3,
+            FailureAction::BypassOpen,
+        )),
+    );
+
+    let graph = match attempted {
+        Err(error) => {
+            assert_eq!(
+                error,
+                sipx_media::dsp::GraphError::FrameSamplesOutOfRange {
+                    value: 66_048,
+                    bound: 65_536,
+                }
+            );
+            session.shutdown().await;
+            return;
+        }
+        Ok(graph) => graph,
+    };
+    let pid = graph.worker_pids()[0];
+    let _ = graph.transitions();
+
+    let format = PcmFormat::new(384_000, PcmEncoding::Signed16).expect("a supported format");
+    let mut transmitted = session
+        .attach_processor(Processing::new(AudioDirection::Outbound, format))
+        .expect("attaches");
+    // The first offer lets the pump observe the worker's `Hello` refusal. Reaping is the event
+    // which orders that refusal before the two frames that spend the rest of the miss budget.
+    assert!(session.send(tone()).await);
+    tokio::time::timeout(ARRIVAL_BOUND, transmitted.recv())
+        .await
+        .expect("the first miss never holds the call's RTP")
+        .expect("a frame");
+    reaped(pid).await;
+
+    for _ in 0..2 {
+        assert!(session.send(tone()).await);
+    }
+    for _ in 0..2 {
+        tokio::time::timeout(ARRIVAL_BOUND, transmitted.recv())
+            .await
+            .expect("a lost worker never holds the call's RTP")
+            .expect("a frame");
+    }
+
+    let transitions = graph.transitions();
+    assert!(
+        transitions.iter().any(|transition| matches!(
+            transition,
+            GraphTransition::Bypassed {
+                cause: BypassCause::WorkerLost,
+                ..
+            }
+        )),
+        "the worker's own Hello refusal is retained as defence in depth: {transitions:?}"
+    );
+    let barrier = tokio::time::timeout(ARRIVAL_BOUND, graph.detach())
+        .await
+        .expect("the refused worker is still reaped");
+    assert!(barrier.is_clear(), "{barrier:?}");
+    session.shutdown().await;
+    panic!("an out-of-contract graph was admitted and failed later as WorkerLost");
+}
 
 /// Acceptance row 1: the worker is an operating-system process and not a thread, and the audio the
 /// call carried came out of that process.

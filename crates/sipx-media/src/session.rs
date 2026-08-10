@@ -3062,10 +3062,11 @@ impl MediaSession {
     /// # Errors
     ///
     /// A [`GraphError`] naming the first thing the plan is refused for — a bound outside its
-    /// domain, a chain longer than the configured ceiling, a stage declaring more frame, scratch
-    /// or retained audio than the bounds admit, a stage that may change a frame's length, a
-    /// profile this door does not admit, a direction that already has a graph, or a stopped
-    /// session. Every refusal leaves the call exactly as it was.
+    /// domain, the session's actual frame sizing outside that bound, a chain longer than the
+    /// configured ceiling, a stage declaring more frame, scratch or retained audio than the bounds
+    /// admit, a stage that may change a frame's length, a profile this door does not admit, a
+    /// direction that already has a graph, or a stopped session. Every refusal leaves the call
+    /// exactly as it was.
     pub fn attach_dsp(&self, plan: GraphPlan) -> Result<DspGraph, GraphError> {
         if self.is_stopped() {
             return Err(GraphError::SessionStopped);

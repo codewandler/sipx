@@ -134,11 +134,18 @@ exceeding rather than a hint.
 | `observation_capacity` | 1..=4,096 | an unbounded observation queue |
 | `worker_queue_capacity` | 1..=64 | an unbounded request or result channel |
 
-A bound outside its domain is refused `Bound { field, value }` before anything is sized by it. A
-stage declaring more than a bound admits — a longer tail, more scratch, a larger frame — is refused
-naming the stage, what it declared and what the bound was. `retained_tail_positions` bounds each
-stage's declared `tail_positions` **and** its declared `latency_positions`, because both are audio
-the graph holds and neither may be unbounded.
+A bound outside its domain is refused `Bound { field, value }` before anything is sized by it.
+`GraphBounds::validate(frame_samples)` also holds the session's actual interleaved frame sizing
+against `1..=max_frame_samples`; a refusal is
+`FrameSamplesOutOfRange { value, bound: max_frame_samples }`. Because the bound's own upper end is
+the processor contract's 65,536-sample ceiling, this validation proves that the `max_samples` a
+supervised runtime puts in `Hello` is one its worker must admit. It happens before any processor is
+prepared, buffer is allocated or worker is spawned.
+
+A stage declaring more than a bound admits — a longer tail, more scratch, a larger frame — is
+refused naming the stage, what it declared and what the bound was. `retained_tail_positions` bounds
+each stage's declared `tail_positions` **and** its declared `latency_positions`, because both are
+audio the graph holds and neither may be unbounded.
 
 The upper ends are [custom-call-dsp.md](custom-call-dsp.md) §5's and
 [call-audio-seam.md](call-audio-seam.md) §5's own, reused: 65,536 is the contract's frame, scratch
@@ -725,6 +732,7 @@ driver turning transitions into application events:
 | GRAPH-25 | a plan mixing a registry stage with an application processor declaring `ProvenInline` | refused `ProfileNotAdmissible` naming *that stage*; the registry stage beside it lent it nothing |
 | GRAPH-26 | a live two-stage chain: bypass stage 0, feed frames, restore it, feed more | audio unprocessed while it is out and processed again after; one `Bypassed { Requested }` and one `Restored`, at the positions the two outcomes named; the generation never changes and `contains_overrun()` never moves |
 | GRAPH-27 | the same chain: a generation that is not live, an index the chain lacks, the state the stage is already in, a supervised stage, and a restore of a stage the runtime bypassed | `StaleGeneration`, `UnknownProcessor`, `BypassUnchanged`, `NotBypassable`, `BypassNotReversible` — each changing nothing and producing no transition |
+| GRAPH-28 | a supervised plan sized at 65,537 samples against the default `max_frame_samples = 65,536` | refused `FrameSamplesOutOfRange { value: 65,537, bound: 65,536 }` before the worker program is spawned; the worker's independent `Hello` refusal remains in force |
 
 ### 10.5 One stage leaves the chain and comes back, without a new epoch
 

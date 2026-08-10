@@ -79,6 +79,7 @@ appeared twice before anyone named it.
 - [M-68 — Harden DSP real-time and failure isolation](M-68-harden-dsp-realtime-failure-isolation.md) · Media · after M-63/M-64 · measured budgets and explicit fail-open/fail-closed policy
 - [M-70 — Accept multiplexed browser offers with unused component candidates](M-70-accept-multiplexed-browser-offers-with-unused-component-candidates.md) · Media · external review finding 9 · a second browser engine reaches SDP then fails the multiplexed profile
 - [M-72 — Prove the AEAD SRTP key derivation against an independent peer](M-72-prove-the-aead-srtp-key-derivation-against-a-peer.md) · Media · RFC 7714 publishes no KDF vector · a wrong salt placement makes two sipx endpoints interoperate with each other and nobody else, and every round-trip test still passes
+- [M-127 — Bound frame_samples where the plan is validated](M-127-bound-frame-samples-at-plan-validation.md) · Media · after M-122 · the capability's ceiling is checked and the graph's own frame sizing is not
 - [P-30 — Bound the first NOTIFY in a registrar subscription](P-30-bound-the-first-notify-in-a-registrar-subscription.md) · Phone · peers --registrar waits Timer N — 64*T1, 32 seconds — with no operator control · the dominant unbounded wait once resolution is bounded
 - [T-33 — Bind browser WebSocket signalling](T-33-bind-browser-websocket-signalling.md) · Transport · after A-16 and S-41 · browser owns I/O, WASM core consumes bytes
 - [X-93 — Make protected release evidence faster without weakening it](X-93-make-protected-release-evidence-faster.md) · Build · measure cache and preflight changes against the 12m37 cold beta gate · follow-up
@@ -119,7 +120,6 @@ _Applications need small, predictable facts about live audio even when no speech
 ### custom call-audio DSP
 _Applications need to shape live call audio without forking the media runtime: ordinary gain and_
 - [M-125 — Carry a requested bypass over the application contract](M-125-carry-a-requested-bypass-over-the-application-contract.md) · Media · after M-115 · the graph door exists and an application driving it over the wire sees half of it
-- [M-127 — Bound frame_samples where the plan is validated](M-127-bound-frame-samples-at-plan-validation.md) · Media · after M-122 · the capability's ceiling is checked and the graph's own frame sizing is not
 - [M-129 — Move the worker-protocol harness into the test crate](M-129-move-the-worker-protocol-harness-into-the-test-crate.md) · Media · after M-122 · a fuzzing harness is public API of a published crate, against the convention this repo already wrote down
 - [A-34 — Publish a runnable custom call-DSP example](A-34-publish-custom-call-dsp-example.md) · Application · M18 exit after M-67 and X-109 · live graph, custom fixture, effects/noise reduction, bypass
 - [X-143 — Record the DSP cost run on a quiet box](X-143-record-the-dsp-cost-run-on-a-quiet-box.md) · Build · after X-109 · the harness exists and refuses to report under load; the figure is untaken
