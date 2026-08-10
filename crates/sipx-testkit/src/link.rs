@@ -15,6 +15,7 @@
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
+use std::fmt;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -88,13 +89,37 @@ impl Faults {
 }
 
 /// A datagram that has arrived.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Delivery {
     /// Which end it arrived at.
     pub to: Side,
     /// The bytes, unaltered — the link corrupts nothing, because a corrupted SIP message is the
     /// parser's business and there is a fuzzer for that.
     pub bytes: Bytes,
+}
+
+/// Renders which end a datagram reached and how long it was, never the datagram (`M-117`).
+///
+/// **Not "not the call", which is why this is an implementation and not a rationale.** Everything
+/// this link carries today is signalling — [`crate::call::Pair`] connects two transaction layers
+/// through it and nothing puts media on it — so the audio argument does not apply. What does apply
+/// is the other half: a SIP datagram carries `From`, `To` and `Contact`, which are the addresses
+/// of the people on the call, and this is a published crate a downstream stack points at its own
+/// users.
+/// A rationale saying these octets are neither the call nor a participant would have been false in
+/// the second clause.
+///
+/// The bytes are a public field, so a trace that wants the message reads it. What changed is that
+/// an `expect` message or a failing `assert_eq!` over a `Delivery` no longer carries a whole
+/// datagram per delivery.
+impl fmt::Debug for Delivery {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Delivery")
+            .field("to", &self.to)
+            .field("bytes", &self.bytes.len())
+            .finish()
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]

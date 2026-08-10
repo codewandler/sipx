@@ -40,12 +40,14 @@
 //! things it may not expect, so the converse assertion — that nothing valid is rejected — is
 //! where the value of this corpus lies.
 
+use std::fmt;
+
 use bytes::Bytes;
 
 pub use crate::rfc4475::{Expect, Fault};
 
 /// One message from the corpus.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct Case {
     /// The RFC's own name for the message, e.g. `ipv6-good`. RFC 5118 labels each message with
     /// this name ("Message Details: ipv6-good"), and the archive's file names match, so the
@@ -62,6 +64,26 @@ pub struct Case {
     /// pair without a terminating blank line. Use [`Case::wire`] to get bytes a SIP parser is
     /// meant to see.
     pub bytes: &'static [u8],
+}
+
+/// Renders which case it is and how long its message is, never the message (`M-117`).
+///
+/// [`crate::rfc4475::Case`]'s argument, unchanged and for the same reason the vocabulary above is
+/// imported rather than redefined: two corpora that answer the same question differently are two
+/// things a reader has to hold at once. These octets are RFC 5118 Appendix A's — published and
+/// fictional, so the redaction half of `M-107` does not apply and the bound half does.
+/// [`Case::lossy`] is where a test gets the message.
+impl fmt::Debug for Case {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Case")
+            .field("name", &self.name)
+            .field("section", &self.section)
+            .field("title", &self.title)
+            .field("expect", &self.expect)
+            .field("bytes", &self.bytes.len())
+            .finish()
+    }
 }
 
 impl Case {

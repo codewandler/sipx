@@ -148,7 +148,7 @@ pub struct Upgrade {
 /// that a bridge sending anything else is a visible fact rather than an absence: ORB-5's claim is
 /// that *only* the three arrive, and a record that could not represent a fourth would prove it
 /// vacuously.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub enum ClientEvent {
     /// `session.update`, kept whole — a test reads the session object from it to check the
@@ -175,12 +175,70 @@ pub enum ClientEvent {
     },
 }
 
+/// How much of a value the far end chose a record may carry, in characters.
+///
+/// Neither a `session.update` object nor an event type off the wire has a length this peer
+/// controls, and a diagnostic a counterparty can grow without limit is the second half of
+/// `M-107`'s defect wearing bytes that are not audio. The clip fixes the length here rather than
+/// at whatever arrived.
+const VALUE_CLIP: usize = 64;
+
+/// A value as much of which fits in a record, with its length when it does not.
+fn clipped(text: &str) -> String {
+    let length = text.chars().count();
+    if length <= VALUE_CLIP {
+        return text.to_owned();
+    }
+    let head: String = text.chars().take(VALUE_CLIP).collect();
+    format!("{head}… ({length} chars)")
+}
+
+/// Renders which event arrived, and **never the frame it carried** (`M-117`).
+///
+/// [`ClientEvent::Append`] holds one 20 ms G.711 frame — the call's uplink, decoded. The derived
+/// form printed every byte of it, and this module's own ORB-5 test formats the event list into its
+/// failure message, so a failing run put a call's audio into a CI log. That is `M-107`'s defect
+/// live rather than latent, and a fixture crate is not an excuse: the bridge tests drive real
+/// media through this peer, and a failure record is a file somebody pastes into a ticket.
+///
+/// What a failing ORB-5 run needs survives: which events arrived, in order, and how much audio
+/// each carried. A `session.update` is summarised by its member count rather than redacted — it
+/// is the app's own configuration and neither the call nor a participant — because it is
+/// unbounded and a record read through [`Record::session_updates`] is where a test that wants the
+/// object gets it whole.
+impl fmt::Debug for ClientEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SessionUpdate(update) => formatter
+                .debug_struct("SessionUpdate")
+                .field(
+                    "members",
+                    &update.as_object().map_or(0, serde_json::Map::len),
+                )
+                .finish(),
+            Self::Append { audio } => formatter
+                .debug_struct("Append")
+                .field("bytes", &audio.len())
+                .finish(),
+            Self::Cancel => formatter.write_str("Cancel"),
+            Self::Outside { event_type } => formatter
+                .debug_struct("Outside")
+                .field("event_type", &clipped(event_type))
+                .finish(),
+            Self::Unreadable { reason } => formatter
+                .debug_struct("Unreadable")
+                .field("reason", &clipped(reason))
+                .finish(),
+        }
+    }
+}
+
 /// Everything the peer observed, and everything it emitted.
 ///
 /// A snapshot: [`RealtimePeer::record`] clones it, so a test reads a consistent picture rather
 /// than a moving one. The counts span the peer's whole lifetime and every connection it served,
 /// which is what lets ORB-16 assert that no *second* upgrade was attempted.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct Record {
     /// Every upgrade attempt, in order.
     pub upgrades: Vec<Upgrade>,
@@ -199,6 +257,39 @@ pub struct Record {
     pub deltas_suppressed: usize,
     /// Connections that have ended, however they ended.
     pub sessions_ended: usize,
+}
+
+/// Renders what the peer counted, and **never the uplink it heard** (`M-117`).
+///
+/// [`Record::appended_audio`] is the whole call as the far end heard it, accumulated for the life
+/// of the peer, and the derived form printed all of it. This is where the call comes to rest
+/// outside the relay path: `sipx_media::Encoded` holds one payload for as long as it takes to send
+/// it, and this holds every payload until the test ends.
+///
+/// **Every list is a count, which is a second decision and not a side effect.** The event list and
+/// the upgrade list are both as long as the call was, so rendering either whole would leave the
+/// unbounded half of `M-107` in place — `M-110` made the same call about `Packet::csrc`, which the
+/// wire caps at fifteen and the field does not. Rendering the upgrades as a count also keeps
+/// [`Upgrade`]'s verbatim `Authorization` header out of a failure message; that field cannot be
+/// redacted at its own type without making ORB-1 vacuous, so it is held here instead, one type up.
+///
+/// **What this cannot do**, stated rather than discovered: the fields are public, so a test that
+/// formats [`Record::appended_audio`] itself still gets the bytes. That is deliberate — ORB-3
+/// asserts on those exact octets — and the difference is that leaking them is now something a
+/// caller has to reach for rather than something any record of this type does by default.
+impl fmt::Debug for Record {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Record")
+            .field("upgrades", &self.upgrades.len())
+            .field("client_events", &self.client_events.len())
+            .field("appended_audio_bytes", &self.appended_audio.len())
+            .field("pings", &self.pings)
+            .field("deltas_sent", &self.deltas_sent)
+            .field("deltas_suppressed", &self.deltas_suppressed)
+            .field("sessions_ended", &self.sessions_ended)
+            .finish()
+    }
 }
 
 impl Record {

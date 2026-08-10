@@ -22,6 +22,8 @@
 //! So each case carries an [`Expect`] naming which layer must object, and the parser tests
 //! assert against that rather than against a bare pass/fail.
 
+use std::fmt;
+
 /// Which layer must object to a message, and how.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -56,7 +58,7 @@ pub enum Fault {
 }
 
 /// One message from the corpus.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct Case {
     /// The RFC's own name for the message, e.g. `wsinv`.
     pub name: &'static str,
@@ -68,6 +70,30 @@ pub struct Case {
     pub expect: Expect,
     /// The message, bit-exact.
     pub bytes: &'static [u8],
+}
+
+/// Renders which case it is and how long its message is, never the message (`M-117`).
+///
+/// **The bound rather than the redaction**, and the distinction is worth writing down because the
+/// rule that asked for this was aimed at a call. These octets are RFC 4475 Appendix A's, recovered
+/// from the archive by the importer — published, fictional and identical in every checkout, so
+/// nothing here is anybody's conversation and no rationale about privacy would be true. What is
+/// true is the other half of `M-107`'s defect: a torture message runs to a couple of kilobytes,
+/// several are deliberately not UTF-8, and a derived record wrote all of it into every diagnostic
+/// that named a case.
+///
+/// [`Case::lossy`] is where a test gets the message, which is what the corpus tests already use.
+impl fmt::Debug for Case {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Case")
+            .field("name", &self.name)
+            .field("section", &self.section)
+            .field("title", &self.title)
+            .field("expect", &self.expect)
+            .field("bytes", &self.bytes.len())
+            .finish()
+    }
 }
 
 impl Case {
