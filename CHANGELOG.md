@@ -7,6 +7,58 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0-rc.19] — 2026-08-10
+
+Seven stories close. Five were implemented concurrently and merged as one wave, and the most
+valuable thing the release contains is what only happened when they met: a checker that had been
+half-blind for months, and the defects it had not been seeing.
+
+### Fixed
+
+- **`check-audio-claims.py` was reading part of every file.** It cut each source at the *first*
+  `#[cfg(test)]` anywhere in it, so a test-only constructor 964 lines into a 2,552-line file hid
+  everything below it from **every rule in the checker** — including the exact chain a previous
+  story had found by hand. 24 such attributes across 12 files in 5 crates. The cut is now anchored
+  at column 0, which is what the docstring always claimed it did. Widening the reader immediately
+  found three more types rendering call audio in a `Debug` record, two of them written this week.
+
+- **A peer could declare a frame ceiling of four billion samples.** The supervised worker protocol
+  accepted a `Hello` whose `max_samples` was anything at all, so a runtime sized its buffers from a
+  number the *other side* chose. Now refused above the contract's maximum, with the effective
+  ceiling bounded whatever the caller passes. Found by a hand-written case before the fuzzing
+  campaign that now guards it — 1.2 million executions, a 40-seed corpus replayed byte for byte, and
+  a CI job at the other targets' budget.
+
+- **Byte buffers outside the relay path no longer print themselves.** Six carriers across the crates
+  where a call comes to rest render a length rather than their octets. One of them removes a verbatim
+  `Authorization` header from any record-level diagnostic — not asked for, and a consequence of
+  bounding every field rather than only the buffers.
+
+- **A dialled leg that goes away is reported.** An application was told a leg had been established
+  and never told it ended, so the authoritative `legs` snapshot listed it forever. The ending carries
+  its own three-word cause rather than reusing the five that describe a call ending, because two of
+  those would have been unreachable *and* meaningless on this row.
+
+### Added
+
+- **One DSP stage can step out of a live chain and back in** without replacing the chain or opening
+  a new epoch. A bypass the runtime imposed under the miss budget stays terminal — an application
+  cannot pin a failing stage on the media path by restoring it after every failure — and a supervised
+  stage cannot be bypassed at all, because its output lags its input and the gap would be paid for in
+  audio from the wrong part of the call.
+
+- **`peers --timeout`.** The wait for a registrar's first NOTIFY was bounded but the bound was a
+  constant no operator could move; `0` returns to the event client's Timer N. Resolution is now
+  funded from the attempt like every other command, which retires the last exception in the rule that
+  every published deadline says what it covers.
+
+### Changed
+
+- **The queue is ordered.** Every open story carries a unique priority, dependencies rank above the
+  things that consume them, and work needing a resource the machine does not have ranks below work
+  that can start now. Eight duplicate priorities and ten stories with none made "the top ready story"
+  a question the board could not answer.
+
 ## [1.0.0-rc.18] — 2026-08-10
 
 Work from five stories, of which two close. An application can now drive a call's DSP graph; the

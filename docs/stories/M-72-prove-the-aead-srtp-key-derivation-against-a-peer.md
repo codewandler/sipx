@@ -3,7 +3,7 @@ id: M-72
 title: Prove the AEAD SRTP key derivation against an independent peer
 pillar: Media
 status: in-progress
-priority: 48
+priority: 49
 design: docs/designs/media-security-profiles.md
 epic: media-security-profiles
 areas: [sipx-rtp, sipx-media, interop]

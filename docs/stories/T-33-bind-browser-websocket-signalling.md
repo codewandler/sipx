@@ -3,7 +3,7 @@ id: T-33
 title: Bind browser WebSocket signalling
 pillar: Transport
 status: in-progress
-priority: 24
+priority: 25
 design: docs/designs/browser-sdk.md
 epic: browser-sdk
 areas: [browser, websocket, wss, wasm, m15]

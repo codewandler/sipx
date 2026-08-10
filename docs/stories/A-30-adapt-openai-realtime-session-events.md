@@ -3,7 +3,7 @@ id: A-30
 title: Adapt OpenAI Realtime session and lifecycle events
 pillar: Application
 status: ready
-priority: 42
+priority: 43
 design: docs/designs/openai-realtime-phone.md
 epic: openai-realtime-phone
 areas: [testkit, app-sdk, websocket, openai-realtime, m17]

@@ -3,7 +3,7 @@ id: X-108
 title: Publish the OpenAI Realtime testkit phone and measurements
 pillar: Build
 status: ready
-priority: 47
+priority: 48
 design: docs/designs/openai-realtime-phone.md
 epic: openai-realtime-phone
 areas: [testkit, example, documentation, metrics, openai-realtime, m17]

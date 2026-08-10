@@ -3,7 +3,7 @@ id: X-105
 title: Prove speech-provider substitution with one conformance suite
 pillar: Build
 status: ready
-priority: 39
+priority: 40
 design: docs/designs/local-speech.md
 epic: local-speech
 areas: [testkit, app-sdk, speech, conformance, m16]

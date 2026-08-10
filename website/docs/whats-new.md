@@ -1,13 +1,33 @@
 ---
 title: What's new
-description: Release highlights and adoption notes for the sipx 1.0.0-rc.18 release candidate.
+description: Release highlights and adoption notes for the sipx 1.0.0-rc.19 release candidate.
 ---
 
 # What's new
 
 <!-- BEGIN generated:release-heading -->
-## 1.0.0-rc.18 — 2026-08-10
+## 1.0.0-rc.19 — 2026-08-10
 <!-- END generated:release-heading -->
+
+RC.19's most valuable finding is not a feature. Five stories were implemented concurrently and merged
+as one wave, and three defects existed only in the combination.
+
+```bash
+cargo install --locked --version =1.0.0-rc.19 sipx-cli
+```
+
+- **A checker had been reading part of every file.** `check-audio-claims` cut each source at the
+  first `#[cfg(test)]` anywhere in it, hiding everything below from **every rule it has** — including
+  a chain an earlier story had found by hand. Fixing it immediately surfaced three more types
+  printing call audio into a `Debug` record.
+- **A peer could declare a four-billion-sample frame ceiling**, and the runtime would size its
+  buffers from it. Now refused, and guarded by 1.2 million fuzz executions with a replayable corpus.
+- **One DSP stage can be bypassed and restored on a live chain**, while a bypass the runtime imposed
+  stays terminal and a supervised stage cannot be bypassed at all.
+- **A dialled leg that goes away is reported**, so the authoritative snapshot stops listing it.
+- **`peers --timeout`** makes the first-NOTIFY bound the operator's rather than a constant.
+
+## 1.0.0-rc.18 — 2026-08-10
 
 RC.18 opens the DSP epic's last door and then spends most of its effort on what was already behind
 it.
@@ -830,5 +850,5 @@ answer calls, but application callback bindings are not implemented.
 This website is built from `main`, so a page or API link may describe work newer than the tagged
 release. Use the exact crates.io version when reproducibility matters, and consult the
 [complete changelog](https://github.com/codewandler/sipx/blob/main/CHANGELOG.md) before updating a
-Git revision. Unreleased behavior is not part of `1.0.0-rc.18` merely because it appears on this
+Git revision. Unreleased behavior is not part of `1.0.0-rc.19` merely because it appears on this
 site.

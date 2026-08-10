@@ -3,7 +3,7 @@ id: C-9
 title: Carry a bridge and a conference across a renegotiation
 pillar: Signalling
 status: ready
-priority: 7
+priority: 8
 design: docs/designs/app-sdk.md
 epic: app-sdk
 areas: [sipx-call, sipx-media]

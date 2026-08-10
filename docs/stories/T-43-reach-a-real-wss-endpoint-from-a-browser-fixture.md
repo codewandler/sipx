@@ -3,7 +3,7 @@ id: T-43
 title: Reach a real WSS endpoint from a browser fixture
 pillar: Transport
 status: ready
-priority: 23
+priority: 24
 design: docs/specs/browser-signalling.md
 epic: browser-sdk
 areas: [browser, websocket, wss, ci]

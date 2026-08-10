@@ -3,7 +3,7 @@ id: A-33
 title: Enforce schema idempotency and confirmation for model actions
 pillar: Application
 status: ready
-priority: 45
+priority: 46
 design: docs/designs/openai-realtime-phone.md
 epic: openai-realtime-phone
 areas: [testkit, app-sdk, call-control, policy, security, openai-realtime, m17]

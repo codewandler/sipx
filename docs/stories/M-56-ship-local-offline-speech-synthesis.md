@@ -3,7 +3,7 @@ id: M-56
 title: Ship a practical local offline speech-synthesis provider
 pillar: Media
 status: ready
-priority: 36
+priority: 37
 design: docs/designs/local-speech.md
 epic: local-speech
 areas: [sipx-media, speech, synthesis, gpu, cpu, m16]

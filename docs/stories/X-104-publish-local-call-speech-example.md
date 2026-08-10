@@ -3,7 +3,7 @@ id: X-104
 title: Publish a runnable local live-call speech example and measurements
 pillar: Build
 status: ready
-priority: 40
+priority: 41
 design: docs/designs/local-speech.md
 epic: local-speech
 areas: [example, app-sdk, speech, gpu, cpu, documentation, m16]

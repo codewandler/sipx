@@ -3,7 +3,7 @@ id: M-55
 title: Ship a practical local offline speech-recognition provider
 pillar: Media
 status: ready
-priority: 35
+priority: 36
 design: docs/designs/local-speech.md
 epic: local-speech
 areas: [sipx-media, speech, recognition, gpu, cpu, m16]

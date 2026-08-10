@@ -111,12 +111,16 @@ _Applications need small, predictable facts about live audio even when no speech
 - [A-29 — Publish a runnable live call-audio analysis example](A-29-publish-call-audio-analysis-example.md) · Application · M16 analysis exit after X-106 · no model or special hardware required
 
 ### Conformance
+- [X-144 — Bound the load-summary test against a busy machine](X-144-bound-the-load-summary-test-against-a-busy-machine.md) · Experience · found at the rc.19 boundary · passes 3/3 alone, failed once inside a fully loaded gate
+- [X-145 — Publish the redaction guarantee the checker enforces](X-145-publish-the-redaction-guarantee-the-checker-enforces.md) · Experience · found in a docs sweep at rc.19 · the strongest privacy property this project has is documented only for speech
 - [X-140 — Carry the modelled registry allowance across frontier invocations, not just its cost](X-140-carry-the-modelled-registry-allowance-across-frontier-invocations.md) · Build · found while implementing X-127 · the budget now spans invocations, the token buckets do not
+- [X-146 — Put the media DSP subsystem on the architecture page](X-146-put-the-media-dsp-subsystem-on-the-architecture-page.md) · Experience · found in a docs sweep at rc.19 · architecture.md predates the whole custom-call-DSP epic
 
 ### custom call-audio DSP
 _Applications need to shape live call audio without forking the media runtime: ordinary gain and_
 - [M-125 — Carry a requested bypass over the application contract](M-125-carry-a-requested-bypass-over-the-application-contract.md) · Media · after M-115 · the graph door exists and an application driving it over the wire sees half of it
 - [M-127 — Bound frame_samples where the plan is validated](M-127-bound-frame-samples-at-plan-validation.md) · Media · after M-122 · the capability's ceiling is checked and the graph's own frame sizing is not
+- [M-129 — Move the worker-protocol harness into the test crate](M-129-move-the-worker-protocol-harness-into-the-test-crate.md) · Media · after M-122 · a fuzzing harness is public API of a published crate, against the convention this repo already wrote down
 - [A-34 — Publish a runnable custom call-DSP example](A-34-publish-custom-call-dsp-example.md) · Application · M18 exit after M-67 and X-109 · live graph, custom fixture, effects/noise reduction, bypass
 - [X-143 — Record the DSP cost run on a quiet box](X-143-record-the-dsp-cost-run-on-a-quiet-box.md) · Build · after X-109 · the harness exists and refuses to report under load; the figure is untaken
 

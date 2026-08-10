@@ -3,7 +3,7 @@ id: X-106
 title: Measure call-audio analysis accuracy and resource cost
 pillar: Build
 status: ready
-priority: 12
+priority: 13
 design: docs/designs/call-audio-analysis.md
 epic: call-audio-analysis
 areas: [testkit, audio-analysis, vad, metrics, m16]
