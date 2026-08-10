@@ -10,8 +10,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [1.0.0-rc.20] — 2026-08-10
 
 This is the first public candidate after rc.17. It carries the changes recorded at the unpublished
-rc.18 and rc.19 boundaries, plus the release-orchestration repair that made a fresh version
-necessary.
+rc.18 and rc.19 boundaries, plus a five-story conformance wave: one early graph refusal, one
+contention-safe test, two public documentation contracts and the release-orchestration repair that
+made a fresh version necessary.
 
 ### Fixed
 
@@ -21,6 +22,27 @@ necessary.
   path is now derived only at step scope, and the repository's structural checker has failing-first
   vectors for both the expression context and the requirement that the gate, summary and preserved
   artifact use one file.
+
+- **An oversized DSP frame is refused where its plan is admitted.** A session could derive more
+  than 65,536 samples per frame while the graph validator checked only the configured ceiling. A
+  supervised graph then started a worker and reported it lost when the worker correctly rejected
+  the impossible `Hello`. Validation now returns a typed `FrameSamplesOutOfRange` before preparing,
+  allocating or spawning anything; the worker refusal stays as independent defense in depth.
+
+- **The load-summary join-barrier test no longer calls setup contention an unanswered call.** CPU
+  oversubscription did not reproduce its filed failure; holding the just-released local port did,
+  with the hidden cause `Address already in use`. The test now manufactures that collision, retries
+  setup under the existing finite event bound and keeps a real admitted-call outcome distinct.
+
+### Documentation
+
+- **The diagnostic redaction guarantee is public and checked.** The privacy and logging guides now
+  name the relay and at-rest scopes, fixed-size keys, deliberately visible protocol headers and the
+  counts retained for diagnosis. Adding a protected crate without documenting it is a test failure.
+
+- **The architecture page includes the media DSP subsystem.** It locates the sans-I/O processor
+  contract and the live graph in their owning crates, distinguishes Rust-supplied processors from
+  the narrower process contract, and assigns containment to execution profiles rather than graphs.
 
 ## [1.0.0-rc.19] — 2026-08-10
 

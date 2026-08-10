@@ -10,8 +10,8 @@ description: Release highlights and adoption notes for the sipx 1.0.0-rc.20 rele
 <!-- END generated:release-heading -->
 
 RC.20 is the first public candidate after RC.17. It includes the DSP-control and hardening work from
-the unpublished RC.18 and RC.19 boundaries, and fixes the release workflow defect found when those
-boundaries were prepared.
+the unpublished RC.18 and RC.19 boundaries, plus a five-story conformance wave that made the release
+workflow, graph validation, test evidence and public architecture agree.
 
 ```bash
 cargo install --locked --version =1.0.0-rc.20 sipx-cli
@@ -23,9 +23,15 @@ cargo install --locked --version =1.0.0-rc.20 sipx-cli
 - **An application can drive a live DSP graph**, including registered stages, parameter changes,
   bypass and restore, with terminal runtime bypasses and supervised-stage refusals preserved.
 - **The media path was hardened:** stale renegotiated graphs, lost simultaneous bypass events,
-  unbounded worker frame ceilings and raw audio in diagnostics are all refused or corrected.
+  unbounded worker frame ceilings and raw audio in diagnostics are all refused or corrected. The
+  graph now also refuses an out-of-contract session frame before it prepares or spawns anything.
 - **A checker that had silently skipped the tail of source files now reads them in full**, and the
   types it exposed no longer print call audio or credentials into record-level diagnostics.
+- **Privacy and architecture now say what the code enforces.** The public guides name both encoded
+  byte scopes, explain what remains visible, and place the processor contract, live graph and
+  execution-profile containment in their owning crates. Tests bind those pages to the source rules.
+- **The load-summary join test distinguishes setup contention from a call outcome.** Its original
+  failure was a local-port reuse race, not CPU starvation and not an admitted call going unanswered.
 - **A disappearing dialled leg is reported**, and `peers --timeout` makes the first-NOTIFY bound an
   operator decision.
 
