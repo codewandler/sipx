@@ -189,8 +189,8 @@ whose header rate differs from the call is resampled rather than played at the w
 | Sockets, TLS, WebSocket, RFC 3263 resolution, identity rotation and bounded endpoint policy | `sipx-transport` |
 | Registration, digest authentication, event subscriptions and publication | `sipx-ua` |
 | RTP, RTCP, jitter buffer, quality statistics, SRTP | `sipx-rtp` |
-| G.711 (µ-law and A-law), G.722, L16, linear PCM conversion and resampling, WAV, and Opus behind the `opus` feature | `sipx-audio` |
-| RTP/RTCP sockets bound to negotiated SDP with NAT handling, bridging, conferencing | `sipx-media` |
+| G.711 (µ-law and A-law), G.722, L16, linear PCM conversion and resampling, WAV, Opus behind the `opus` feature, and the processor contract and built-ins in `sipx-audio::dsp` | `sipx-audio` |
+| RTP/RTCP sockets bound to negotiated SDP with NAT handling, bridging, conferencing, and live per-direction graphs through `sipx-media::dsp` | `sipx-media` |
 | Calls with playback, recording, DTMF, transfer, event services, application-owned dialog requests, and confirmed-dialog snapshots | `sipx-call` |
 | Socket-free call signalling tests with seeded faults and virtual time | `sipx-testkit` |
 | A phone to run rather than embed — the `sipx` binary | `sipx-cli` |

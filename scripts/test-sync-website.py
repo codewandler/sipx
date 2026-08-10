@@ -17,6 +17,47 @@ SYNC = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(SYNC)
 
 
+class ArchitectureCoverageTests(unittest.TestCase):
+    """`X-146`: the public architecture follows the shipped DSP subsystem and its specs."""
+
+    def setUp(self) -> None:
+        self.architecture = (ROOT / "website" / "docs" / "architecture.md").read_text(
+            encoding="utf-8"
+        )
+        self.library = (
+            ROOT / "website" / "docs" / "guides" / "as-a-library.md"
+        ).read_text(encoding="utf-8")
+
+    @staticmethod
+    def section(page: str, heading: str) -> str:
+        return page.split(heading, 1)[1].split("\n## ", 1)[0]
+
+    def test_the_layer_diagram_names_both_dsp_owners(self) -> None:
+        diagram = self.architecture.split("```mermaid", 1)[1].split("```", 1)[0]
+        self.assertIn("sipx-audio::dsp", diagram)
+        self.assertIn("sipx-media::dsp", diagram)
+
+    def test_the_architecture_links_each_normative_dsp_contract_it_summarises(self) -> None:
+        for spec in (
+            "custom-call-dsp.md",
+            "call-dsp-graph.md",
+            "call-dsp-effects.md",
+            "call-dsp-noise-reduction.md",
+        ):
+            with self.subTest(spec=spec):
+                self.assertIn(f"docs/specs/{spec}", self.architecture)
+
+    def test_both_crate_selection_tables_answer_the_two_dsp_questions(self) -> None:
+        tables = (
+            ("architecture", self.section(self.architecture, "## Which crate should I use?")),
+            ("library", self.section(self.library, "## Which crate")),
+        )
+        for page, table in tables:
+            with self.subTest(page=page):
+                self.assertIn("`sipx-audio::dsp`", table)
+                self.assertIn("`sipx-media::dsp`", table)
+
+
 class GeneratedFactsTests(unittest.TestCase):
     def test_workspace_and_release_facts_come_from_canonical_files(self) -> None:
         facts = SYNC.canonical_facts()

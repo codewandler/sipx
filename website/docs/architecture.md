@@ -31,6 +31,7 @@ flowchart TB
     subgraph drivers[I/O drivers]
         TRANSPORT[sipx-transport<br/>SIP sockets, connections, timers]
         MEDIA[sipx-media<br/>RTP sockets, pacing, devices]
+        DSP_GRAPH[sipx-media::dsp<br/>call-local graphs, profiles, workers]
     end
 
     subgraph logic[Protocol and data logic]
@@ -38,6 +39,7 @@ flowchart TB
         SDP[sipx-sdp<br/>offer and answer]
         RTP[sipx-rtp<br/>RTP, RTCP, SRTP]
         AUDIO[sipx-audio<br/>codecs and samples]
+        DSP_PROCESSOR[sipx-audio::dsp<br/>processor contract, effects, noise reduction]
     end
 
     CLI --> CALL
@@ -45,19 +47,24 @@ flowchart TB
     DOWN --> CALL
     DOWN --> UA
     DOWN --> TRANSPORT
+    DOWN --> DSP_GRAPH
+    DOWN --> DSP_PROCESSOR
     CALL --> UA
     CALL --> SDP
     CALL --> MEDIA
     UA --> TRANSPORT
     TRANSPORT --> SIP
+    MEDIA --> DSP_GRAPH
     MEDIA --> RTP
     MEDIA --> AUDIO
+    DSP_GRAPH --> DSP_PROCESSOR
+    DSP_PROCESSOR --> AUDIO
 ```
 
 The arrows mean “uses,” not “sends packets to.” A call composes signalling and media policy;
 `sipx-transport` and `sipx-media` are the layers that actually perform asynchronous I/O.
 
-Two crates carry the strict sans-I/O guarantee:
+Two protocol crates carry the strict sans-I/O guarantee:
 
 - `sipx-sip` parses and serializes messages and runs the client and server transaction state
   machines. Bytes enter as data. Time enters as a notification that a named timer fired. The crate
@@ -78,6 +85,41 @@ The drivers translate between those values and the outside world:
 `sipx-call` joins user-agent signalling, SDP negotiation, and media sessions into dialogs and calls.
 Applications can use any of these layers directly; the CLI and `sipx-app` are complete surfaces built
 from the same public crates.
+
+## Media DSP
+
+The media DSP subsystem follows the same logic-and-driver split as signalling. `sipx-audio::dsp`
+owns the synchronous, sans-I/O `FrameProcessor` contract, its capability and finite-parameter
+vocabulary, and the conformance harness. Its built-in registry supplies the nine effects and filters
+defined by the [effects contract](https://github.com/codewandler/sipx/blob/main/docs/specs/call-dsp-effects.md)
+and the baseline implementation of the [interchangeable noise-reduction contract](https://github.com/codewandler/sipx/blob/main/docs/specs/call-dsp-noise-reduction.md).
+The governing [processor contract](https://github.com/codewandler/sipx/blob/main/docs/specs/custom-call-dsp.md)
+defines the transform and its bounds; this page only locates it.
+
+`sipx-media::dsp` owns the live side: an ordered graph for each call direction, whole-plan
+validation before activation, transitions at frame boundaries, failure policy, teardown and the
+supervised worker process. The graph runs at the existing linear-PCM tap rather than creating a
+second media path. The [call-local graph contract](https://github.com/codewandler/sipx/blob/main/docs/specs/call-dsp-graph.md)
+defines that ordering and lifecycle.
+
+There are two application boundaries, and they deliberately allow different things:
+
+- A Rust application may supply a custom processor through the public plan, either as a supervised
+  worker or as a cooperative `FrameProcessor`, with a declared capability and finite parameters. It
+  may not declare its own code `ProvenInline`, because that profile names evidence in this
+  repository's gate. A custom stage is either `SupervisedIsolated`, whose process keeps a stall off
+  the media worker, or `TrustedCooperativeNative`, which runs directly and makes no containment
+  claim.
+- The process-level `sipx.app.v1` surface is narrower. It can name registered processor identifiers
+  in order, a direction, a declared shape and finite parameter values. It cannot supply code, a
+  callback, an execution profile, a deadline, a failure action or graph bounds; those concepts are
+  absent from its vocabulary rather than accepted and filtered later. See the
+  [application contract](sdk/contract.md#shaping-the-calls-audio).
+
+Containment therefore belongs to each stage's execution profile, not to the fact that stages are in
+a graph. A graph containing only `ProvenInline` and `SupervisedIsolated` stages carries their
+overrun-containment claim; one `TrustedCooperativeNative` stage makes the whole graph uncontained.
+Conformance or a measured fast return cannot upgrade that profile.
 
 ## What the boundary buys
 
@@ -119,8 +161,8 @@ other effect the core deliberately does not perform.
 | Register, authenticate, subscribe, publish, or answer requests | `sipx-ua` |
 | Dial, answer, hold, transfer, record, or otherwise manage calls | `sipx-call` |
 | Parse RTP/RTCP, protect packets, or handle telephone events | `sipx-rtp` |
-| Encode, decode, mix, or read and write audio samples | `sipx-audio` |
-| Run a paced RTP media session, playback, capture, bridge, or conference | `sipx-media` |
+| Encode, decode, mix, read and write samples, or implement a processor through `sipx-audio::dsp` | `sipx-audio` |
+| Run a paced RTP media session, playback, capture, bridge, conference, or attach and control a `sipx-media::dsp` graph | `sipx-media` |
 | Drive calls from a process-level application contract | `sipx-app` and `sipx-app-protocol` |
 | Test call behavior with virtual time and controlled faults | `sipx-testkit` |
 | Operate or diagnose an endpoint from a shell | the `sipx` CLI |
