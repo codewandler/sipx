@@ -2,7 +2,7 @@
 id: M-124
 title: Resolve cluster-internal SIP names after ordinary DNS declines
 pillar: Core
-status: ready
+status: in-progress
 priority: 11
 design: docs/designs/cluster-names.md
 epic: media

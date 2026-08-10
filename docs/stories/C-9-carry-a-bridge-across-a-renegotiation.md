@@ -2,7 +2,7 @@
 id: C-9
 title: Carry a bridge and a conference across a renegotiation
 pillar: Signalling
-status: ready
+status: in-progress
 priority: 8
 design: docs/designs/app-sdk.md
 epic: app-sdk

@@ -2,7 +2,7 @@
 id: M-123
 title: Refuse an advertised media address the far end will read as its own
 pillar: Media
-status: ready
+status: in-progress
 priority: 10
 design: docs/designs/cluster-names.md
 epic: media
