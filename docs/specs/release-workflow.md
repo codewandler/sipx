@@ -71,6 +71,10 @@ the release.
 The gate run MUST record its step timings, and that record MUST state whether the build directory
 was cold or warm. The artifact cache is
 retained only if the recorded cold and warm figures differ by at least 60 seconds.
+Every expression that supplies this evidence MUST use only contexts available at the point where
+GitHub evaluates it. In particular, a path below the runner's temporary directory MUST be derived
+at step scope; job-level environment expressions cannot read runner context because no runner has
+started there yet. The gate, summary and preserved artifact MUST name the same temporary file.
 A Node dependency cache keyed on the exact `website/package-lock.json`
 MAY skip installation and MUST NOT skip the site, anchor or rustdoc builds;
 it is retained only if its recorded wall-time saving and its storage cost are material. Measured on
@@ -161,6 +165,7 @@ the workflow MUST NOT post broader publicity.
 | `RWF-9` | recovery omits protected environment, separate checkouts, failed-run step evidence, exact controller/tag/SHA binding, visible-byte proof or bounded frontier loop | static check fails |
 | `RWF-10` | remove the preflight, let it probe the public site, or let CI success stand in for the gate or the post-consumer Pages proof | static check fails |
 | `RWF-11` | restore the artifact cache before tag validation, widen its key or paths, set a shared `CARGO_TARGET_DIR`, condition a release step on a cache result, or stop recording the gate's timings | static check fails |
+| `RWF-12` | read runner context from the release job's top-level environment, or let the gate, summary and artifact name different timing files | static check fails before the workflow is pushed |
 
 These are structural tests, not evidence that GitHub or crates.io accepted a write. Actual release
 acceptance remains the run records and registry bytes produced only after explicit authorization.

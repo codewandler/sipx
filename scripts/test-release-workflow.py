@@ -31,6 +31,20 @@ class CurrentWorkflow(unittest.TestCase):
         self.assertEqual([], checker.check())
 
 
+class ExpressionContextMutations(unittest.TestCase):
+    def test_runner_context_cannot_be_read_before_the_release_job_has_a_runner(self) -> None:
+        mutated = WORKFLOW.replace(
+            "      RELEASE_TAG: ${{ github.ref_name }}\n",
+            "      INVALID_PATH: ${{ runner.temp }}/before-a-runner-exists\n"
+            "      RELEASE_TAG: ${{ github.ref_name }}\n",
+            1,
+        )
+        self.assertIn(
+            "release job environment reads runner context before a runner exists",
+            checker.workflow_problems(mutated),
+        )
+
+
 class AuthorityMutations(unittest.TestCase):
     def assert_mutation(self, old: str, new: str, expected: str) -> None:
         self.assertIn(old, WORKFLOW, f"fixture no longer contains {old!r}")
@@ -840,7 +854,7 @@ class BuildCacheMutations(unittest.TestCase):
             "release workflow sets a shared CARGO_TARGET_DIR",
             checker.workflow_problems(
                 WORKFLOW.replace(
-                    "      GATE_TIMINGS:", "      CARGO_TARGET_DIR: /shared\n      GATE_TIMINGS:", 1
+                    "      RELEASE_TAG:", "      CARGO_TARGET_DIR: /shared\n      RELEASE_TAG:", 1
                 )
             ),
         )
@@ -886,6 +900,16 @@ class BuildCacheMutations(unittest.TestCase):
             "recorded timings are skipped when the gate fails",
             checker.workflow_problems(
                 WORKFLOW.replace(timings, timings.replace("        if: always()\n", "", 1), 1)
+            ),
+        )
+        self.assertIn(
+            "gate, summary and artifact do not share one runner-temporary timings path",
+            checker.workflow_problems(
+                WORKFLOW.replace(
+                    "${{ runner.temp }}/sipx-gate-timings.json",
+                    "${{ runner.temp }}/a-different-gate-timings.json",
+                    1,
+                )
             ),
         )
 
@@ -953,6 +977,18 @@ class SpeedSpecificationMutations(unittest.TestCase):
             "MAY skip installation and MUST NOT skip the site, anchor or rustdoc builds",
             "MAY skip the site build",
             "specification lets a Node dependency cache skip more than installation",
+        )
+
+    def test_the_timings_context_rules_are_normative(self) -> None:
+        self.assert_mutation(
+            "job-level environment expressions cannot read runner context",
+            "job-level environment expressions may read runner context",
+            "specification lets job-level environment expressions read runner context",
+        )
+        self.assert_mutation(
+            "The gate, summary and preserved artifact MUST name the same temporary file",
+            "The gate, summary and preserved artifact may name different temporary files",
+            "specification lets timing evidence name different temporary files",
         )
 
 

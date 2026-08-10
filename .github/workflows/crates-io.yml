@@ -36,10 +36,6 @@ jobs:
     env:
       RELEASE_TAG: ${{ github.ref_name }}
       REQUESTED_RELEASE_TAG: ${{ inputs.tag }}
-      # Where the gate's own clock writes this run's step timings. Outside the workspace, so the
-      # release checkout stays clean and `cargo clean` inside a gate step cannot remove the record
-      # of the run that is making it.
-      GATE_TIMINGS: ${{ runner.temp }}/sipx-gate-timings.json
     steps:
       - name: Check out the exact tag
         uses: actions/checkout@v4
@@ -233,6 +229,10 @@ jobs:
       - name: Run the complete release gate
         env:
           SIPX_DENYLIST: ${{ secrets.SIPX_DENYLIST }}
+          # Step scope is deliberate: runner context does not exist while the job-level environment
+          # is evaluated. The runner temporary directory also keeps the release checkout clean and
+          # survives `cargo clean` inside a gate step.
+          GATE_TIMINGS: ${{ runner.temp }}/sipx-gate-timings.json
         run: |
           if [[ -z "$SIPX_DENYLIST" ]]; then
             echo "the release environment must provide SIPX_DENYLIST" >&2
@@ -249,6 +249,7 @@ jobs:
         if: always()
         env:
           CACHE_RESTORED: ${{ steps.build_cache.outputs.cache-hit }}
+          GATE_TIMINGS: ${{ runner.temp }}/sipx-gate-timings.json
         shell: bash
         run: |
           set -euo pipefail
@@ -282,7 +283,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: release-gate-timings
-          path: ${{ env.GATE_TIMINGS }}
+          path: ${{ runner.temp }}/sipx-gate-timings.json
           if-no-files-found: warn
 
       # Saved only from a green gate: the job stops at the first red step, so a cache entry can

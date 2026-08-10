@@ -1,13 +1,35 @@
 ---
 title: What's new
-description: Release highlights and adoption notes for the sipx 1.0.0-rc.19 release candidate.
+description: Release highlights and adoption notes for the sipx 1.0.0-rc.20 release candidate.
 ---
 
 # What's new
 
 <!-- BEGIN generated:release-heading -->
-## 1.0.0-rc.19 — 2026-08-10
+## 1.0.0-rc.20 — 2026-08-10
 <!-- END generated:release-heading -->
+
+RC.20 is the first public candidate after RC.17. It includes the DSP-control and hardening work from
+the unpublished RC.18 and RC.19 boundaries, and fixes the release workflow defect found when those
+boundaries were prepared.
+
+```bash
+cargo install --locked --version =1.0.0-rc.20 sipx-cli
+```
+
+- **The protected release workflow starts again.** A runner-only expression had been evaluated
+  before a runner existed, so the platform rejected the workflow before creating a job. Timing
+  evidence is now wired at step scope and guarded by a failing-first structural test.
+- **An application can drive a live DSP graph**, including registered stages, parameter changes,
+  bypass and restore, with terminal runtime bypasses and supervised-stage refusals preserved.
+- **The media path was hardened:** stale renegotiated graphs, lost simultaneous bypass events,
+  unbounded worker frame ceilings and raw audio in diagnostics are all refused or corrected.
+- **A checker that had silently skipped the tail of source files now reads them in full**, and the
+  types it exposed no longer print call audio or credentials into record-level diagnostics.
+- **A disappearing dialled leg is reported**, and `peers --timeout` makes the first-NOTIFY bound an
+  operator decision.
+
+## 1.0.0-rc.19 — 2026-08-10
 
 RC.19's most valuable finding is not a feature. Five stories were implemented concurrently and merged
 as one wave, and three defects existed only in the combination.
@@ -850,5 +872,5 @@ answer calls, but application callback bindings are not implemented.
 This website is built from `main`, so a page or API link may describe work newer than the tagged
 release. Use the exact crates.io version when reproducibility matters, and consult the
 [complete changelog](https://github.com/codewandler/sipx/blob/main/CHANGELOG.md) before updating a
-Git revision. Unreleased behavior is not part of `1.0.0-rc.19` merely because it appears on this
+Git revision. Unreleased behavior is not part of `1.0.0-rc.20` merely because it appears on this
 site.

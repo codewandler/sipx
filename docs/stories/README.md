@@ -83,6 +83,7 @@ appeared twice before anyone named it.
 - [T-33 — Bind browser WebSocket signalling](T-33-bind-browser-websocket-signalling.md) · Transport · after A-16 and S-41 · browser owns I/O, WASM core consumes bytes
 - [X-93 — Make protected release evidence faster without weakening it](X-93-make-protected-release-evidence-faster.md) · Build · measure cache and preflight changes against the 12m37 cold beta gate · follow-up
 - [X-109 — Measure custom DSP quality and real-time cost](X-109-measure-custom-dsp-quality-and-cost.md) · Build · after M-65/M-66/M-68 · exact effects, quality, cost, isolation and packaged conformance
+- [X-147 — Make the release workflow dispatchable](X-147-make-the-release-workflow-dispatchable.md) · Build · found while shipping rc.19 · GitHub rejects the release workflow before creating a job
 
 ## Next (ready — take the top one unless the user named a story)
 

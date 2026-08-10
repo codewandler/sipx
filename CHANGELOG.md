@@ -7,6 +7,21 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0-rc.20] — 2026-08-10
+
+This is the first public candidate after rc.17. It carries the changes recorded at the unpublished
+rc.18 and rc.19 boundaries, plus the release-orchestration repair that made a fresh version
+necessary.
+
+### Fixed
+
+- **The protected release workflow can start a job again.** Its gate-timings path was derived from
+  runner context in the job-level environment, where that context does not exist. The platform
+  rejected the workflow before creating a runner, so there was no job or step log to diagnose. The
+  path is now derived only at step scope, and the repository's structural checker has failing-first
+  vectors for both the expression context and the requirement that the gate, summary and preserved
+  artifact use one file.
+
 ## [1.0.0-rc.19] — 2026-08-10
 
 Seven stories close. Five were implemented concurrently and merged as one wave, and the most

@@ -23,8 +23,10 @@ CACHE_KEY_STEP_ID = "build_cache_key"
 CACHE_RESTORE_STEP = "Restore the Actions-managed Rust artifact cache"
 CACHE_SAVE_STEP = "Save the Actions-managed Rust artifact cache"
 TIMINGS_STEP = "Record the gate's cold or warm timings"
+PRESERVE_TIMINGS_STEP = "Preserve the gate timings record"
 TAG_VALIDATION_STEP = "Validate the immutable annotated tag"
 GATE_STEP = "Run the complete release gate"
+TIMINGS_PATH = "${{ runner.temp }}/sipx-gate-timings.json"
 
 #: Every step that carries a normative release claim. None of them may be skipped, reordered behind
 #: a cache, or conditioned on anything: a cache is an optimisation, and an optimisation that can
@@ -90,6 +92,21 @@ def _step_position(text: str, name: str) -> int:
     """Where one named step starts, or `-1`."""
 
     return text.find(f"      - name: {name}")
+
+
+def release_job_environment(text: str) -> str:
+    """Return the release job's top-level ``env`` block, excluding every step-level block.
+
+    Expression contexts are not equally available throughout a workflow. In particular, GitHub
+    evaluates this block before assigning a runner, so accepting ``runner.*`` here produces no job
+    at all and no step log for the release operator to inspect.
+    """
+
+    job = re.search(r"(?ms)^  release:\n(.*?)(?=^    steps:\s*$)", text)
+    if job is None:
+        return ""
+    environment = re.search(r"(?ms)^    env:\s*\n((?:^      [^\n]*\n?)*)", job.group())
+    return "" if environment is None else environment.group(1)
 
 
 def preflight_problems(text: str) -> list[str]:
@@ -176,6 +193,8 @@ def build_cache_problems(text: str) -> list[str]:
     save = step_body(text, CACHE_SAVE_STEP)
     key_step = step_body(text, CACHE_KEY_STEP)
     timings = step_body(text, TIMINGS_STEP)
+    gate = step_body(text, GATE_STEP)
+    preserved = step_body(text, PRESERVE_TIMINGS_STEP)
 
     # A shared build directory is refused outright rather than checked for where it points: X-34
     # recorded the decision against one, and a release job is the last place to reopen it.
@@ -251,6 +270,14 @@ def build_cache_problems(text: str) -> list[str]:
         ):
             required(timings, label, pattern, problems)
 
+    # ``runner`` exists only at step execution time. Holding the file to one exact step-scoped
+    # expression catches both the context error that prevented any job from being created and a
+    # quieter drift where the gate writes one record while the summary or artifact reads another.
+    if re.search(r"\$\{\{\s*runner\.", release_job_environment(text)):
+        problems.append("release job environment reads runner context before a runner exists")
+    if not all(TIMINGS_PATH in step for step in (gate, timings, preserved)):
+        problems.append("gate, summary and artifact do not share one runner-temporary timings path")
+
     # The Node dependency cache. `build-docs.sh` installs only when `website/node_modules` is
     # absent, so an exact-lock cache of that directory can skip installation and nothing else —
     # but only while no cache reaches the site output or the rustdoc build it also produces.
@@ -305,7 +332,7 @@ def workflow_problems(text: str) -> list[str]:
         ("complete gate is absent", r"\./scripts/gate\.py(?:\s|$)"),
         (
             "complete gate does not receive the provenance denylist secret",
-            r"Run the complete release gate\s*\n\s+env:\s*\n\s+SIPX_DENYLIST:\s*\$\{\{\s*secrets\.SIPX_DENYLIST\s*\}\}\s*\n\s+run:\s*\|.*?\./scripts/gate\.py",
+            r"Run the complete release gate\s*\n\s+env:\s*\n.*?SIPX_DENYLIST:\s*\$\{\{\s*secrets\.SIPX_DENYLIST\s*\}\}.*?\n\s+run:\s*\|.*?\./scripts/gate\.py",
         ),
         (
             "empty provenance denylist is not refused before the gate",
@@ -618,6 +645,14 @@ def specification_problems(text: str) -> list[str]:
         (
             "specification lets a Node dependency cache skip more than installation",
             "MAY skip installation and MUST NOT skip the site, anchor or rustdoc builds",
+        ),
+        (
+            "specification lets job-level environment expressions read runner context",
+            "job-level environment expressions cannot read runner context",
+        ),
+        (
+            "specification lets timing evidence name different temporary files",
+            "The gate, summary and preserved artifact MUST name the same temporary file",
         ),
     ):
         required(text, label, r"\s+".join(re.escape(word) for word in words.split()), problems)

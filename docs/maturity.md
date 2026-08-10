@@ -62,19 +62,19 @@ No aggregate percentage is given. `media` and `core` differ in size and in how m
 |---|---|
 | Application | 17 |
 | Media | 16 |
-| Build | 10 |
+| Build | 11 |
 | Experience | 3 |
 | Signalling | 3 |
 | Transport | 3 |
 | Phone | 2 |
 | Core | 1 |
-| **total** | **55** |
+| **total** | **56** |
 
 362 stories done. `blocked` counts as open: a story parked on a dependency is distance, not progress.
 
 ## Discovery versus closure
 
-<!-- maturity-event-days: {"basis":"sha256:5c09dcb65e2a0d9ee2faba4e7a1ca24a4f05dc44f6245fa600c828a38cf56ae9","closed":{"2026-07-28":58,"2026-07-29":48,"2026-07-30":40,"2026-07-31":5,"2026-08-01":1,"2026-08-03":12,"2026-08-04":39,"2026-08-05":35,"2026-08-08":89,"2026-08-09":26,"2026-08-10":9},"filed":{"2026-07-28":95,"2026-07-29":42,"2026-07-30":44,"2026-07-31":3,"2026-08-03":1,"2026-08-04":51,"2026-08-05":73,"2026-08-06":17,"2026-08-08":56,"2026-08-09":26,"2026-08-10":10}} -->
+<!-- maturity-event-days: {"basis":"sha256:eb7ab8cfccb8fe7952ee4b4f9ced7c54ea3954bc796a9689bd6c7898db68f37d","closed":{"2026-07-28":58,"2026-07-29":48,"2026-07-30":40,"2026-07-31":5,"2026-08-01":1,"2026-08-03":12,"2026-08-04":39,"2026-08-05":35,"2026-08-08":89,"2026-08-09":26,"2026-08-10":9},"filed":{"2026-07-28":95,"2026-07-29":42,"2026-07-30":44,"2026-07-31":3,"2026-08-03":1,"2026-08-04":51,"2026-08-05":73,"2026-08-06":17,"2026-08-08":56,"2026-08-09":26,"2026-08-10":11}} -->
 
 Burn-down is not a maturity signal while discovery outpaces closure. The marker to watch is not a single day where closure wins but the date that crossover becomes **durable** — that is when the codebase stops surprising its authors.
 
@@ -89,7 +89,7 @@ Burn-down is not a maturity signal while discovery outpaces closure. The marker 
 | 2026-08-06 | 17 | 0 | -17 |
 | 2026-08-08 | 56 | 89 | +33 |
 | 2026-08-09 | 26 | 26 | +0 |
-| 2026-08-10 | 10 | 9 | -1 |
+| 2026-08-10 | 11 | 9 | -2 |
 
 Filed is a story file being added; closed is a `status: done` line appearing, so a story reopened and closed again counts twice — which is the honest reading of *closed that day*.
 
