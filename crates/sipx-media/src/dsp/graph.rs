@@ -369,6 +369,50 @@ pub enum GraphError {
         /// The stage.
         processor: &'static str,
     },
+    /// A bypass request named a supervised stage (§10.5, `M-115`).
+    ///
+    /// §7.1 makes a supervised stage's output lag its input by the deadline it declared: the media
+    /// worker offers frame *n* and takes the result of frame *n* − `deadline_frames`. Stopping the
+    /// offers leaves that pipeline holding results for frames from before the gap, which would be
+    /// handed out at positions after it — so a requested bypass here would be paid for in audio
+    /// from the wrong part of the call rather than in the pass-through §10.5 promises. Refused for
+    /// the reason [`Self::NotConfigurable`] is: an application that needs a supervised stage out
+    /// of the chain replaces the chain, which is how a worker process is asked for (§7.2).
+    #[error("the supervised worker `{processor}` cannot be bypassed while it runs")]
+    NotBypassable {
+        /// The stage.
+        processor: &'static str,
+    },
+    /// A bypass request asked for the state the stage is already in (§10.5, `M-115`).
+    ///
+    /// Refused rather than absorbed, because the terminal outcome of a request is a **boundary** —
+    /// the position the change took effect at — and a request that changed nothing has no boundary
+    /// to name. Reporting one would be a position at which nothing happened, which is exactly what
+    /// an application correlating audio against its own events cannot afford.
+    #[error("the processor `{processor}` is already {}", if *.bypassed { "bypassed" } else { "contributing" })]
+    BypassUnchanged {
+        /// The stage.
+        processor: &'static str,
+        /// The state it is already in, which is the one the request asked for.
+        bypassed: bool,
+    },
+    /// A restore named a stage the **runtime** bypassed under §6.1 (§10.5, `M-115`).
+    ///
+    /// The two bypasses are one word and not one operation. §6.1's is a stage that spent its
+    /// consecutive-miss budget: terminal for that stage, because the evidence for it is a run of
+    /// frames it could not keep up with and nothing since has been evidence to the contrary. §10.5's
+    /// is the application's own, and is the reversible one.
+    ///
+    /// So this door lifts only what it placed. A stage that failed its budget comes back the way it
+    /// always has — [`DspGraph::replace`](super::DspGraph::replace), with a generation of its own —
+    /// and an application cannot launder a failing stage back onto the media path by asking nicely.
+    #[error(
+        "the processor `{processor}` was bypassed by its miss budget, and only a replacement puts it back"
+    )]
+    BypassNotReversible {
+        /// The stage.
+        processor: &'static str,
+    },
     /// The session has stopped, so a graph attached to it could never see a frame.
     #[error("this session has stopped")]
     SessionStopped,
@@ -502,6 +546,23 @@ pub enum GraphTransition {
         /// Why.
         cause: BypassCause,
     },
+    /// One stage the application had bypassed is contributing again (§5.3, `M-115`).
+    ///
+    /// Only ever the counterpart of a [`Self::Bypassed`] carrying [`BypassCause::Requested`]:
+    /// §6.1's bypass is terminal for the stage and has no counterpart at all. There is no cause
+    /// field for the same reason — an application asking for its own bypass back is the only way
+    /// this is produced, so a cause could say nothing a caller does not already know.
+    ///
+    /// The stage's first frame back carries a discontinuity, because the signal it is handed
+    /// skips the whole span it was out for (§6.2).
+    Restored {
+        /// The generation the stage belongs to.
+        generation: u64,
+        /// The first position of the first frame it contributes to again.
+        at_position: u64,
+        /// The stage.
+        processor: &'static str,
+    },
     /// The graph was torn down: no processor of this generation will see another frame.
     TornDown {
         /// The generation that ended.
@@ -547,6 +608,54 @@ impl ParameterUpdate {
     #[must_use]
     pub const fn processor(&self) -> &'static str {
         self.processor
+    }
+}
+
+/// One bypass request that applied, and where (`docs/specs/call-dsp-graph.md` §10.5, `M-115`).
+///
+/// The **terminal outcome** of [`DspGraph::set_bypassed`](super::DspGraph::set_bypassed), on
+/// [`ParameterUpdate`]'s pattern and for its reason: either this, or a [`GraphError`] and the live
+/// graph is untouched. It is returned rather than only journalled because the journal is a bounded
+/// queue (§5.3), and an application that asked for a boundary should not have to hope its own
+/// answer survived the queue to learn what that boundary was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BypassUpdate {
+    generation: u64,
+    at_position: u64,
+    processor: &'static str,
+    bypassed: bool,
+}
+
+impl BypassUpdate {
+    /// The generation the request applied to — the one the caller named, checked and not assumed.
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// The first position of the first frame the change applies to, in the graph's own epoch.
+    ///
+    /// A position and never a clock reading, so the same request against the same call lands at
+    /// the same boundary on every host.
+    #[must_use]
+    pub const fn at_position(&self) -> u64 {
+        self.at_position
+    }
+
+    /// The stage that left the chain or rejoined it.
+    #[must_use]
+    pub const fn processor(&self) -> &'static str {
+        self.processor
+    }
+
+    /// Whether that stage is now out of the chain.
+    ///
+    /// `true` for a bypass and `false` for a restore — the state asked for, echoed back from the
+    /// take that assigned it rather than from the request, so a caller that logs this is logging
+    /// what the graph did.
+    #[must_use]
+    pub const fn bypassed(&self) -> bool {
+        self.bypassed
     }
 }
 
@@ -976,7 +1085,22 @@ struct Stage {
     policy: ExecutionPolicy,
     kind: Running,
     misses: u32,
+    /// §6.1's bypass: the stage spent its miss budget under [`FailureAction::BypassOpen`].
+    ///
+    /// Terminal for the stage. Separate from [`Self::requested`] rather than folded into one
+    /// "contributing" flag, because the two are the same word and different operations: only the
+    /// requested one is reversible, and a single flag would let a restore lift a failure (`M-115`).
     bypassed: bool,
+    /// §10.5's bypass: the application asked for this stage to be out of the chain.
+    ///
+    /// Reversible, and the only producer of [`BypassCause::Requested`].
+    requested: bool,
+    /// Owed to this stage on its next frame: the discontinuity for the span it was out for.
+    ///
+    /// Set by a restore and consumed by the next frame that runs the stage. It is per stage rather
+    /// than on [`Generation::pending`], because a restore at index *k* changes the signal for *k*
+    /// onward and for nothing before it (§6.2).
+    resumed: bool,
 }
 
 /// Which processor this is and how it is faring, rather than everything it declared (`M-68`).
@@ -992,6 +1116,8 @@ impl std::fmt::Debug for Stage {
             .field("profile", &self.policy.profile())
             .field("misses", &self.misses)
             .field("bypassed", &self.bypassed)
+            .field("requested_bypass", &self.requested)
+            .field("resuming", &self.resumed)
             .field("kind", &self.kind)
             .finish()
     }
@@ -1205,9 +1331,19 @@ impl Live {
         let mut downstream = self.pending.take();
 
         for stage in &mut self.stages {
-            if stage.bypassed {
+            // §6.1's bypass and §10.5's are the same thing to a frame: this stage contributes
+            // nothing and its input passes through, so everything after it is filtering a signal
+            // that is not the one it has been filtering.
+            if stage.bypassed || stage.requested {
                 downstream = Some(merge(downstream, DiscontinuityKind::Loss));
                 continue;
+            }
+            if std::mem::take(&mut stage.resumed) {
+                // §6.2, for the span this stage was out for: the audio in front of it now is not
+                // the continuation of the audio it last saw. The flag is set here rather than the
+                // processor being reset from outside, so the reset happens inside the processor
+                // before this frame's own samples, exactly as a session break's does.
+                downstream = Some(merge(downstream, DiscontinuityKind::Loss));
             }
             match run_stage(stage, direction, format, position, downstream, &mut buffers) {
                 StageOutcome::Produced => {
@@ -1266,8 +1402,13 @@ impl Live {
             // §6.1: a run of misses is a processor that does not fit its budget on this machine,
             // and a re-anchored epoch is a different question from the one that run was asking.
             // A bypassed stage stays bypassed: its budget was already spent, and a break in the
-            // timeline is not evidence that it will now keep up.
+            // timeline is not evidence that it will now keep up. A *requested* bypass likewise
+            // survives, because it is a standing wish of the application's and a re-anchoring is
+            // not the application withdrawing it (`M-115`).
             stage.misses = 0;
+            // The reset this stage was owed for its bypassed span has just happened, along with
+            // every other stage's, so the frame that follows owes it nothing.
+            stage.resumed = false;
             counters.resets = counters.resets.saturating_add(1);
         }
         self.position = 0;
@@ -1886,6 +2027,99 @@ impl SlotRef {
         })
     }
 
+    /// Take one live stage out of the chain, or put it back, at a position boundary (§10.5).
+    ///
+    /// `configure`'s door with a different assignment behind it: the same generation and index
+    /// check, the same single take a frame needs, the same one terminal outcome, and the same
+    /// promise that every refusal leaves the live graph exactly as it was.
+    pub(crate) fn set_bypassed(
+        &self,
+        generation: u64,
+        index: usize,
+        bypassed: bool,
+    ) -> Result<BypassUpdate, GraphError> {
+        self.with(|slot| {
+            let Slot { live, journal, .. } = slot;
+            let Some(live) = live.as_mut() else {
+                // `0` is §5.1's "no graph", exactly as it is for a parameter update.
+                return Err(GraphError::StaleGeneration {
+                    expected: generation,
+                    live: 0,
+                });
+            };
+            if live.generation != generation {
+                return Err(GraphError::StaleGeneration {
+                    expected: generation,
+                    live: live.generation,
+                });
+            }
+            let processors = u32::try_from(live.stages.len()).unwrap_or(u32::MAX);
+            let at_position = live.position;
+            let Some(stage) = live.stages.get_mut(index) else {
+                return Err(GraphError::UnknownProcessor {
+                    index: u32::try_from(index).unwrap_or(u32::MAX),
+                    processors,
+                });
+            };
+            let processor = stage.capability.id();
+
+            // §7.1's pipeline cannot be paused: refused before anything is read off the stage, so
+            // the answer for a supervised stage does not depend on what state it happens to be in.
+            if matches!(stage.kind, Running::Supervised(_)) {
+                return Err(GraphError::NotBypassable { processor });
+            }
+            // §6.1's bypass is terminal, and this door lifts only what it placed. Checked before
+            // the unchanged case so that restoring a failed stage is told why rather than being
+            // told it is already bypassed — which is true and useless.
+            if stage.bypassed {
+                return if bypassed {
+                    Err(GraphError::BypassUnchanged {
+                        processor,
+                        bypassed: true,
+                    })
+                } else {
+                    Err(GraphError::BypassNotReversible { processor })
+                };
+            }
+            if stage.requested == bypassed {
+                return Err(GraphError::BypassUnchanged {
+                    processor,
+                    bypassed,
+                });
+            }
+
+            stage.requested = bypassed;
+            // `misses` is deliberately left alone. A stage that saw no frames had no success, and
+            // §6.1 resets the budget on a success; zeroing it here would make this door a way to
+            // clear a run of misses a stage had already accumulated.
+            //
+            // A stage that is contributing again is handed a signal that skipped the span it was
+            // out for, and §6.2 requires it to be told (§10.5). Owed to the stage rather than
+            // applied now, because the boundary is the next frame's and not this call's.
+            stage.resumed = !bypassed;
+            journal.push(if bypassed {
+                GraphTransition::Bypassed {
+                    generation,
+                    at_position,
+                    processor,
+                    cause: BypassCause::Requested,
+                }
+            } else {
+                GraphTransition::Restored {
+                    generation,
+                    at_position,
+                    processor,
+                }
+            });
+            Ok(BypassUpdate {
+                generation,
+                at_position,
+                processor,
+                bypassed,
+            })
+        })
+    }
+
     /// Everything the runtime has observed about this direction's processors (`M-68`).
     pub(crate) fn counters(&self) -> GraphCounters {
         self.with(|slot| slot.counters())
@@ -2313,6 +2547,8 @@ fn prepare(
             kind,
             misses: 0,
             bypassed: false,
+            requested: false,
+            resumed: false,
         });
     }
     Ok(running)

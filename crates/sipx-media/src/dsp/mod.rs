@@ -43,8 +43,10 @@
 //! # What attaching a graph promises, per profile
 //!
 //! A graph is **only as contained as its least contained stage**, and
-//! [`DspGraph::contains_overrun`] is the conjunction over its stages. It is not configurable and no
-//! measurement changes it:
+//! [`DspGraph::contains_overrun`] is the conjunction over its stages. It is not configurable, no
+//! measurement changes it, and taking a stage out of the chain with [`DspGraph::set_bypassed`] does
+//! not change it either — containment is a property of which stages are *installed*, and a bypassed
+//! stage is one request away from running again:
 //!
 //! - every stage [`ProvenInline`] or [`SupervisedIsolated`] — over-budget work in this graph cannot
 //!   stall RTP. For a supervised stage that is because the media worker never waits for it: it
@@ -90,8 +92,8 @@ mod worker;
 pub use activity::{ActivityWiring, WiringError, WiringOutcome};
 pub use builtin::BuiltIn;
 pub use graph::{
-    BypassCause, GraphBarrier, GraphBounds, GraphCounters, GraphError, GraphPlan, GraphTransition,
-    MAX_PROCESSORS, MAX_WORKER_QUEUE, ParameterUpdate, TeardownCause,
+    BypassCause, BypassUpdate, GraphBarrier, GraphBounds, GraphCounters, GraphError, GraphPlan,
+    GraphTransition, MAX_PROCESSORS, MAX_WORKER_QUEUE, ParameterUpdate, TeardownCause,
 };
 pub use supervised::WorkerProcess;
 pub use wire::WorkerProtocolError;
@@ -283,6 +285,55 @@ impl DspGraph {
         parameters: &[Parameter],
     ) -> Result<ParameterUpdate, GraphError> {
         self.slot.configure(generation, processor, parameters)
+    }
+
+    /// Take one live stage out of the chain, or put it back, at a sample boundary
+    /// (§10.5, `M-115`).
+    ///
+    /// The chain keeps its shape and its generation: a bypassed stage is still installed, still
+    /// prepared and still holding whatever it retains, and the epoch does not reopen. `bypassed`
+    /// is the state asked for rather than a toggle, so a request composed against a stage an
+    /// application has already moved is refused instead of inverting it.
+    ///
+    /// `generation` and `processor` are checked exactly as [`Self::configure`] checks them, for
+    /// the same reason: stage 2 of one generation is a different processor from stage 2 of the
+    /// next, so a request that named the chain it last saw never lands on the chain that replaced
+    /// it.
+    ///
+    /// **What it costs the audio.** The stage's input passes through untouched for as long as it
+    /// is out, and every frame in that span hands §6.2's `Loss` to the stages after it — the
+    /// processed audio that stage owed never arrived. The first frame it contributes to again
+    /// carries the same break, because the signal in front of it skipped the whole span; a stage
+    /// with a delay line therefore discards a history that is no longer about the audio it is
+    /// filtering, rather than mixing the two. Nothing is flushed at either boundary: this is not
+    /// an end of input.
+    ///
+    /// **What it does not do.** It does not reset the stage's consecutive-miss budget — a stage
+    /// that saw no frames had no success, and §6.1 resets that budget on a success. It does not
+    /// change [`Self::contains_overrun`], which is a property of which stages are *installed* and
+    /// never of which are contributing: taking a
+    /// [`TrustedCooperativeNative`](sipx_audio::dsp::ExecutionProfile::TrustedCooperativeNative)
+    /// stage out of the chain does not let that chain claim containment. And it does not add,
+    /// remove or reorder a stage — that is [`Self::replace`], and it has a generation of its own.
+    ///
+    /// # Errors
+    ///
+    /// Exactly one terminal outcome, as [`Self::configure`] has: either the [`BypassUpdate`] that
+    /// applied or a [`GraphError`], and **every refusal leaves the live graph exactly as it was**.
+    ///
+    /// [`GraphError::StaleGeneration`] for a generation that is not live (including `0`, a
+    /// direction with no graph), [`GraphError::UnknownProcessor`] for a stage index this chain
+    /// does not have, [`GraphError::BypassUnchanged`] for a stage already in the state asked for,
+    /// [`GraphError::NotBypassable`] for a supervised stage, whose §7.1 pipeline cannot be paused,
+    /// and [`GraphError::BypassNotReversible`] for a restore named at a stage the **runtime**
+    /// bypassed under §6.1 — that bypass is terminal, and a replacement is what lifts it.
+    pub fn set_bypassed(
+        &self,
+        generation: u64,
+        processor: usize,
+        bypassed: bool,
+    ) -> Result<BypassUpdate, GraphError> {
+        self.slot.set_bypassed(generation, processor, bypassed)
     }
 
     /// What this graph is holding right now (§8).
