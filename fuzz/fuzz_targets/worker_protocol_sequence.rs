@@ -17,7 +17,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use sipx_media::dsp::worker_protocol_sequence::{Program, run};
+use sipx_testkit::worker_protocol_sequence::{Program, run};
 
 fuzz_target!(|data: &[u8]| {
     let program = Program::decode(data);

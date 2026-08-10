@@ -226,6 +226,19 @@ pub enum Effect {
         /// The finite set.
         parameters: Vec<DspParameter>,
     },
+    /// Ask one live stage into or out of the chain at a declared sample boundary (`M-125`).
+    SetDspBypassed {
+        /// The instruction this belongs to; its terminal event must carry it.
+        instruction_id: String,
+        /// Which side of the call's audio.
+        direction: AudioDirection,
+        /// The generation the request was composed against.
+        generation: u64,
+        /// The stage's index in that generation's plan order.
+        processor: u32,
+        /// The desired state: out when true, contributing again when false.
+        bypassed: bool,
+    },
     /// Remove one direction's DSP chain and wait for its barrier (`M-67`).
     RemoveDsp {
         /// The instruction this belongs to; its terminal event must carry it.
@@ -525,14 +538,32 @@ impl Interpreter {
             {
                 self.running = None;
             }
-            // §10.2's "exactly one terminal outcome": each of the three DSP verbs resolves on its
-            // own success event or on the refusal, and on nothing else. A `call.dsp.bypassed` is
-            // not an outcome of anything the application asked for, so it never resolves one.
+            // §10.2 and §10.5's "exactly one terminal outcome": each DSP verb resolves on its own
+            // correlated success event or on the refusal, and on nothing else. A runtime bypass
+            // carries no instruction id, so it cannot resolve an application's request.
             (Verb::Dsp { .. }, EventKind::DspActivated { instruction_id, .. })
             | (Verb::DspParam { .. }, EventKind::DspConfigured { instruction_id, .. })
             | (
-                Verb::Dsp { .. } | Verb::DspParam { .. } | Verb::DspRemove { .. },
+                Verb::Dsp { .. }
+                | Verb::DspParam { .. }
+                | Verb::DspBypass { .. }
+                | Verb::DspRemove { .. },
                 EventKind::DspRefused { instruction_id, .. },
+            ) if *instruction_id == id => {
+                self.running = None;
+            }
+            (
+                Verb::DspBypass { bypassed: true, .. },
+                EventKind::DspBypassed {
+                    instruction_id: Some(instruction_id),
+                    ..
+                },
+            )
+            | (
+                Verb::DspBypass {
+                    bypassed: false, ..
+                },
+                EventKind::DspRestored { instruction_id, .. },
             ) if *instruction_id == id => {
                 self.running = None;
             }
@@ -686,6 +717,18 @@ impl Interpreter {
                 generation: *generation,
                 processor: *processor,
                 parameters: parameters.clone(),
+            },
+            Verb::DspBypass {
+                direction,
+                generation,
+                processor,
+                bypassed,
+            } => Effect::SetDspBypassed {
+                instruction_id: id.to_owned(),
+                direction: *direction,
+                generation: *generation,
+                processor: *processor,
+                bypassed: *bypassed,
             },
             Verb::DspRemove { direction } => Effect::RemoveDsp {
                 instruction_id: id.to_owned(),

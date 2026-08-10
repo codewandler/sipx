@@ -1,4 +1,4 @@
-//! The host's DSP door: §6.2's three `dsp` verbs, and §5.3's five `call.dsp.*` rows (`M-67`).
+//! The host's DSP door: §6.2's four `dsp` verbs, and §5.3's six `call.dsp.*` rows (`M-67`, `M-125`).
 //!
 //! [`docs/specs/app-contract.md`](../../../docs/specs/app-contract.md) §6.6 is the wire, and
 //! [`docs/specs/call-dsp-graph.md`](../../../docs/specs/call-dsp-graph.md) §10 is the graph. This
@@ -6,7 +6,7 @@
 //! workspace's own registry, assembles a plan out of them, and turns the graph's typed transitions
 //! back into contract events.
 //!
-//! It is where the five `call.dsp.*` rows are composed, because nothing else can be: a graph's
+//! It is where the six `call.dsp.*` rows are composed, because nothing else can be: a graph's
 //! transitions are `sipx-media`'s facts, no `sipx-call` event carries one, and
 //! [`sipx_app_protocol::event_from_call`] therefore has no arm for them. `spec_tables.rs` holds
 //! this file to that claim by name.
@@ -155,6 +155,45 @@ impl CallGraphs {
         }
     }
 
+    /// Ask one live stage into or out of the chain at a sample boundary (§6.2's `dsp_bypass`).
+    ///
+    /// The graph returns the boundary directly, so this instruction has one correlated outcome
+    /// even though the transition journal is bounded. A missing graph is §10.5's live generation
+    /// `0`, and therefore `stale_generation`, exactly like [`DspGraph::set_bypassed`].
+    pub(crate) fn set_bypassed(
+        &self,
+        instruction_id: String,
+        direction: AudioDirection,
+        generation: u64,
+        processor: u32,
+        bypassed: bool,
+    ) -> EventKind {
+        let Some(attached) = self.peek(direction) else {
+            return refused(instruction_id, direction, DspRefusal::StaleGeneration);
+        };
+        match attached
+            .graph
+            .set_bypassed(generation, processor as usize, bypassed)
+        {
+            Ok(update) if update.bypassed() => EventKind::DspBypassed {
+                instruction_id: Some(instruction_id),
+                direction,
+                generation: update.generation(),
+                at_position: update.at_position(),
+                processor: update.processor().to_owned(),
+                cause: DspBypassCause::Requested,
+            },
+            Ok(update) => EventKind::DspRestored {
+                instruction_id,
+                direction,
+                generation: update.generation(),
+                at_position: update.at_position(),
+                processor: update.processor().to_owned(),
+            },
+            Err(error) => refused(instruction_id, direction, refusal_for(error)),
+        }
+    }
+
     /// Remove one direction's chain and wait for its barrier (§6.2's `dsp_remove`).
     ///
     /// The wait is the barrier and never a duration: what is reported is a graph that holds nothing
@@ -251,9 +290,10 @@ impl CallGraphs {
 
 /// Which transitions are facts nobody asked for, as §5.3 rows.
 ///
-/// `Activated`, `Replaced` and `Configured` are each the outcome of an instruction and are reported
-/// from that instruction's own return value, with its `instruction_id` on them. Composing them here
-/// as well would send the application two events for one thing it asked for once.
+/// `Activated`, `Replaced`, `Configured`, requested `Bypassed`, and `Restored` are each the outcome
+/// of an instruction and are reported from that instruction's own return value, with its
+/// `instruction_id` on them. Composing them here as well would send the application two events for
+/// one thing it asked for once.
 fn unsolicited(direction: AudioDirection, transitions: &[GraphTransition]) -> Vec<EventKind> {
     transitions
         .iter()
@@ -263,7 +303,8 @@ fn unsolicited(direction: AudioDirection, transitions: &[GraphTransition]) -> Ve
                 at_position,
                 processor,
                 cause,
-            } => Some(EventKind::DspBypassed {
+            } if cause != BypassCause::Requested => Some(EventKind::DspBypassed {
+                instruction_id: None,
                 direction,
                 generation,
                 at_position,
@@ -362,6 +403,9 @@ fn refusal_for(error: GraphError) -> DspRefusal {
         GraphError::StaleGeneration { .. } | GraphError::Detached => DspRefusal::StaleGeneration,
         GraphError::UnknownProcessor { .. } => DspRefusal::UnknownProcessor,
         GraphError::NotConfigurable { .. } => DspRefusal::NotConfigurable,
+        GraphError::BypassUnchanged { .. } => DspRefusal::BypassUnchanged,
+        GraphError::NotBypassable { .. } => DspRefusal::NotBypassable,
+        GraphError::BypassNotReversible { .. } => DspRefusal::BypassNotReversible,
         GraphError::TooManyProcessors { .. }
         | GraphError::FrameExceedsBound { .. }
         | GraphError::ScratchExceedsBound { .. }
@@ -572,6 +616,136 @@ mod tests {
         );
     }
 
+    /// `M-125`: the desired-state door reports both boundaries and preserves every graph refusal.
+    #[tokio::test]
+    async fn a_requested_bypass_and_restore_each_have_one_typed_outcome() {
+        let session = session().await;
+        let mut graphs = CallGraphs::default();
+        let EventKind::DspActivated { generation, .. } = graphs.set(
+            &session,
+            "a".to_owned(),
+            AudioDirection::Outbound,
+            &gain(1_000),
+        ) else {
+            panic!("a registered chain activates");
+        };
+
+        assert_eq!(
+            graphs.set_bypassed(
+                "b".to_owned(),
+                AudioDirection::Outbound,
+                generation,
+                0,
+                true,
+            ),
+            EventKind::DspBypassed {
+                instruction_id: Some("b".to_owned()),
+                direction: AudioDirection::Outbound,
+                generation,
+                at_position: 0,
+                processor: "sipx.gain".to_owned(),
+                cause: DspBypassCause::Requested,
+            }
+        );
+        assert_eq!(
+            graphs.set_bypassed(
+                "same".to_owned(),
+                AudioDirection::Outbound,
+                generation,
+                0,
+                true,
+            ),
+            refused(
+                "same".to_owned(),
+                AudioDirection::Outbound,
+                DspRefusal::BypassUnchanged,
+            )
+        );
+        assert_eq!(
+            graphs.set_bypassed(
+                "r".to_owned(),
+                AudioDirection::Outbound,
+                generation,
+                0,
+                false,
+            ),
+            EventKind::DspRestored {
+                instruction_id: "r".to_owned(),
+                direction: AudioDirection::Outbound,
+                generation,
+                at_position: 0,
+                processor: "sipx.gain".to_owned(),
+            }
+        );
+
+        assert_bypass_refusals(&mut graphs, generation);
+
+        let transitions = graphs
+            .peek(AudioDirection::Outbound)
+            .unwrap()
+            .graph
+            .transitions();
+        assert!(
+            unsolicited(AudioDirection::Outbound, &transitions).is_empty(),
+            "requested transitions are correlated once, never emitted again: {transitions:?}"
+        );
+    }
+
+    fn assert_bypass_refusals(graphs: &mut CallGraphs, generation: u64) {
+        for (id, direction, requested_generation, processor, reason) in [
+            (
+                "stale",
+                AudioDirection::Outbound,
+                generation + 1,
+                0,
+                DspRefusal::StaleGeneration,
+            ),
+            (
+                "unknown",
+                AudioDirection::Outbound,
+                generation,
+                9,
+                DspRefusal::UnknownProcessor,
+            ),
+            (
+                "missing",
+                AudioDirection::Inbound,
+                generation,
+                0,
+                DspRefusal::StaleGeneration,
+            ),
+        ] {
+            assert_eq!(
+                graphs.set_bypassed(
+                    id.to_owned(),
+                    direction,
+                    requested_generation,
+                    processor,
+                    true,
+                ),
+                refused(id.to_owned(), direction, reason),
+                "{id}"
+            );
+        }
+    }
+
+    /// The two safety refusals keep their graph meanings instead of collapsing to `rejected`.
+    #[test]
+    fn supervised_and_runtime_bypass_refusals_keep_their_wire_types() {
+        assert_eq!(
+            refusal_for(GraphError::NotBypassable {
+                processor: "supervised",
+            }),
+            DspRefusal::NotBypassable,
+        );
+        assert_eq!(
+            refusal_for(GraphError::BypassNotReversible {
+                processor: "runtime-bypassed",
+            }),
+            DspRefusal::BypassNotReversible,
+        );
+    }
+
     /// The epic's rule at the application door: containment is reported, never supplied.
     ///
     /// Every identifier this vocabulary can carry resolves to a workspace processor, so a chain an
@@ -649,6 +823,7 @@ mod tests {
         assert_eq!(
             events[0],
             EventKind::DspBypassed {
+                instruction_id: None,
                 direction: AudioDirection::Inbound,
                 generation: 1,
                 at_position: 320,

@@ -229,6 +229,23 @@ class TheRepositoryItself(unittest.TestCase):
             with self.subTest(crate=name):
                 self.assertIn(name, self.published)
 
+    def test_every_at_rest_byte_buffer_is_redacted_or_argued_at_the_type(self):
+        """`M-126`: the application host is a resting place, not an unreviewed remainder.
+
+        Before the scope decision this reports `WssMessage`: its text variant can carry the
+        realtime contract's base64 call audio, and its binary variant carries arbitrary peer
+        bytes, while the derived `Debug` rendered either one whole.
+        """
+        self.assertIn("sipx-app", guard.AUDIO_AT_REST)
+        self.assertEqual(
+            [], guard.byte_buffer_problems(guard.where_the_call_rests(self.published))
+        )
+
+    def test_the_at_rest_scope_names_crates_that_exist(self):
+        for name in guard.AUDIO_AT_REST:
+            with self.subTest(crate=name):
+                self.assertIn(name, self.published)
+
     def test_what_the_relay_path_scope_holds_out_is_counted(self):
         """A stated scope reporting zero would mean the workspace had one relay path and no SIP
         surface, or that the reader had gone blind. It has neither."""
@@ -2075,7 +2092,7 @@ class TheDiagnosticDocumentationRule(unittest.TestCase):
     PAGES = {
         pathlib.Path("privacy.md"): (
             "relay path `sipx-media` `sipx-rtp`; comes to rest "
-            "`sipx-app-protocol` `sipx-testkit`; scripts/check-audio-claims.py"
+            "`sipx-app-protocol` `sipx-app` `sipx-testkit`; scripts/check-audio-claims.py"
         ),
         pathlib.Path("logging.md"): "scripts/check-audio-claims.py",
     }

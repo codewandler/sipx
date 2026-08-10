@@ -22,8 +22,8 @@ The rule decides each kind of carrier at the scope where its contents are knowab
   carrier in `sipx-media` and `sipx-rtp` must redact its contents or state why the bytes are neither
   the call nor a participant.
 - **The crates where a call comes to rest are checked separately.** The same byte-carrier rule
-  covers `sipx-app-protocol` and `sipx-testkit`, where a prompt or a recorded peer can keep call
-  bytes long after one packet has moved on.
+  covers `sipx-app-protocol`, `sipx-app`, and `sipx-testkit`, where a prompt, an application
+  WebSocket message, or a recorded peer can keep call bytes long after one packet has moved on.
 - **Fixed-size byte arrays are checked workspace-wide as keys.** A reachable public type containing
   `[u8; N]` must redact it or state why the array is not a secret. The fixed size is a choice the
   type made, unlike a message whose length came from the network.

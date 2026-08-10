@@ -9,8 +9,9 @@ the repository. Generated regions keep those copies mechanical:
     <!-- END generated:example -->
 
 Scalar regions (`workspace-version`, `msrv`, `release-tag`, and `rfc-count`) can sit inline.
-`release-heading`, `crate-map`, `compliance`, and `badges` render complete Markdown blocks. The
-check also rejects work-item IDs and links into internal story/design records from public content.
+`release-heading`, `crate-map`, `compliance`, `app-event-families`, and `badges` render complete
+Markdown blocks. The check also rejects work-item IDs and links into internal story/design records
+from public content.
 """
 
 from __future__ import annotations
@@ -37,6 +38,8 @@ COMPARISON = ROOT / "docs" / "comparison.md"
 COMPARISON_REPORT = ROOT / "scripts" / "comparison-report.py"
 ANSWER_CONSUMER = ROOT / "tests" / "published-answer-consumer"
 ANSWER_EXAMPLE = ROOT / "crates" / "sipx-call" / "examples" / "answer_a_call.rs"
+APP_CONTRACT = ROOT / "docs" / "specs" / "app-contract.md"
+SDK_CONTRACT_PAGE = ROOT / "website" / "docs" / "sdk" / "contract.md"
 
 REGION = re.compile(
     r"<!-- BEGIN generated:(?P<kind>[a-z-]+)(?: (?P<arg>\S+))? -->"
@@ -81,6 +84,7 @@ DOC_COMMENT = re.compile(r"^\s*(?://!|///)\s?(?P<body>.*)$")
 RUST_DOC_LANGUAGES = {"", "rust", "no_run", "ignore", "should_panic"}
 BLOCK_REGION_KINDS = {
     "answer-consumer-dependencies",
+    "app-event-families",
     "badges",
     "comparison",
     "compliance",
@@ -88,6 +92,81 @@ BLOCK_REGION_KINDS = {
     "example",
     "release-heading",
 }
+
+APP_EVENT_TABLE = "### 5.3 Event types"
+APP_EVENT_TABLE_URL = (
+    "https://github.com/codewandler/sipx/blob/main/"
+    "docs/specs/app-contract.md#53-event-types"
+)
+
+
+def app_event_types(spec: str | None = None) -> tuple[str, ...]:
+    """Every event type in the normative application-contract table, in table order.
+
+    One table row may spell two types separated by `/`, so reading only the first backticked word
+    would silently lose bridging and resume. The table ends at its first blank line; examples and
+    explanatory prose below it do not become another source of event names.
+    """
+
+    text = spec if spec is not None else APP_CONTRACT.read_text(encoding="utf-8")
+    try:
+        section = text.split(APP_EVENT_TABLE, 1)[1]
+    except IndexError as error:
+        raise ValueError(f"{APP_CONTRACT.relative_to(ROOT)} has no {APP_EVENT_TABLE!r}") from error
+    table = section.lstrip("\n").split("\n\n", 1)[0]
+    found: list[str] = []
+    for line in table.splitlines():
+        if not line.startswith("|"):
+            continue
+        for event_type in re.findall(r"`(call\.[a-z0-9_.]+)`", line.split("|", 2)[1]):
+            if event_type not in found:
+                found.append(event_type)
+    if not found:
+        raise ValueError(f"{APP_CONTRACT.relative_to(ROOT)} event table contains no event types")
+    return tuple(found)
+
+
+def render_app_event_families() -> str:
+    """The SDK tour's complete, mechanically derived event-family inventory."""
+
+    rows = "\n".join(f"- `{event_type}`" for event_type in app_event_types())
+    return (
+        "\nThe contract currently carries these event types, grouped into families by their "
+        "wire names:\n\n"
+        f"{rows}\n\n"
+        f"The [normative event table]({APP_EVENT_TABLE_URL}) defines their fields, ordering, "
+        "and emission rules; this generated inventory is only a route to that table.\n"
+    )
+
+
+def app_event_family_problems(page: str, source: str) -> list[str]:
+    """Missing or stale event types in the SDK page, named rather than counted.
+
+    Region freshness already detects any byte-level drift. This separate check supplies the fact a
+    generic stale-region message cannot: which contract family disappeared from the public tour.
+    """
+
+    regions = [
+        match for match in REGION.finditer(page) if match.group("kind") == "app-event-families"
+    ]
+    if len(regions) != 1:
+        return [
+            f"{source}: expected one generated:app-event-families region; missing event types: "
+            f"{', '.join(app_event_types())}"
+        ]
+    body = regions[0].group("body")
+    listed = set(re.findall(r"`(call\.[a-z0-9_.]+)`", body))
+    canonical = app_event_types()
+    missing = [event_type for event_type in canonical if event_type not in listed]
+    extra = sorted(listed.difference(canonical))
+    problems = []
+    if missing:
+        problems.append(f"{source}: missing event types: {', '.join(missing)}")
+    if extra:
+        problems.append(f"{source}: event types absent from the normative table: {', '.join(extra)}")
+    if APP_EVENT_TABLE_URL not in body:
+        problems.append(f"{source}: generated event inventory does not link the normative table")
+    return problems
 
 # These entry points jointly define whether somebody can adopt the current public prerelease
 # without first reading the repository's internal roadmap. Unlike a copied capability table, the
@@ -402,6 +481,9 @@ def render_generated(kind: str, arg: str | None) -> str:
         return render_answer_consumer_dependencies()
     if arg is not None:
         raise ValueError(f"generated:{kind} does not accept an argument")
+
+    if kind == "app-event-families":
+        return render_app_event_families()
 
     facts = canonical_facts()
     scalar = {
@@ -723,6 +805,8 @@ def process(update: bool) -> int:
         if page.suffix == ".md":
             failures.extend(generated_region_placement_problems(text, source))
             failures.extend(public_fact_problems(text, source))
+    sdk_source = str(SDK_CONTRACT_PAGE.relative_to(ROOT))
+    failures.extend(app_event_family_problems(public_contents.get(sdk_source, ""), sdk_source))
     failures.extend(public_adoption_problems(public_contents))
     for source in sorted((ROOT / "crates").rglob("*.rs")):
         failures.extend(

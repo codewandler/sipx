@@ -564,8 +564,8 @@ impl DocumentCall {
                 };
                 self.interpreter.handle(timestamp(), Input::Event(event))
             }
-            // §5.3's `call.dsp.bypassed` and the unsolicited half of `call.dsp.removed`: facts
-            // about a graph that no instruction is waiting on, composed by `crate::dsp`.
+            // §5.3's runtime `call.dsp.bypassed` and the unsolicited half of `call.dsp.removed`:
+            // facts about a graph that no instruction is waiting on, composed by `crate::dsp`.
             ActorAction::DspEvent(event) => {
                 self.interpreter.handle(timestamp(), Input::Event(*event))
             }
@@ -896,7 +896,10 @@ impl DocumentCall {
                 timeout_ms,
                 headers,
             }),
-            Effect::SetDsp { .. } | Effect::ConfigureDsp { .. } | Effect::RemoveDsp { .. } => {
+            Effect::SetDsp { .. }
+            | Effect::ConfigureDsp { .. }
+            | Effect::SetDspBypassed { .. }
+            | Effect::RemoveDsp { .. } => {
                 self.dsp_effect(effect).await;
             }
             // These operations need host facilities outside phase 1 (recording storage, coupling
@@ -906,7 +909,7 @@ impl DocumentCall {
         }
     }
 
-    /// Perform one of §6.2's three `dsp` operations and queue its terminal outcome (`M-67`).
+    /// Perform one of §6.2's four `dsp` operations and queue its terminal outcome (`M-67`, `M-125`).
     ///
     /// Every one of them resolves to exactly one §5.3 row, and that row goes back through
     /// [`crate::dsp::CallGraphs::next_event`] like an unsolicited one rather than being fed here:
@@ -944,11 +947,21 @@ impl DocumentCall {
                 processor,
                 &parameters,
             ),
+            Effect::SetDspBypassed {
+                instruction_id,
+                direction,
+                generation,
+                processor,
+                bypassed,
+            } => {
+                self.graphs
+                    .set_bypassed(instruction_id, direction, generation, processor, bypassed)
+            }
             Effect::RemoveDsp {
                 instruction_id,
                 direction,
             } => self.graphs.remove(instruction_id, direction).await,
-            // The caller matched the three before it delegated.
+            // The caller matched the four before it delegated.
             _ => return,
         };
         self.graphs.enqueue(outcome);

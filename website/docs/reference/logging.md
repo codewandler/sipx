@@ -25,9 +25,9 @@ The `trace` row's “never credentials, keys or message bodies” is backed by t
 than by review alone. [scripts/check-audio-claims.py](https://github.com/codewandler/sipx/blob/main/scripts/check-audio-claims.py)
 walks every reachable public `Debug`, including private carriers that rendering can reach. It
 requires raw sample buffers to render a class and count rather than audio, protects opaque byte
-buffers on the `sipx-media`/`sipx-rtp` relay path and in the `sipx-app-protocol`/`sipx-testkit`
-crates where a call comes to rest, and treats every fixed-size `[u8; N]` array as a key unless the
-type states why it is not a secret.
+buffers on the `sipx-media`/`sipx-rtp` relay path and in the `sipx-app-protocol`/`sipx-app`/
+`sipx-testkit` crates where a call comes to rest, and treats every fixed-size `[u8; N]` array as a
+key unless the type states why it is not a secret.
 
 Redaction is not anonymisation. Protocol headers are deliberately left visible because routing,
 negotiation and correlation are what a protocol diagnostic exists to explain; those headers can

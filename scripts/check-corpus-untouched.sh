@@ -29,10 +29,9 @@ untouched() {
 failed=0
 untouched crates/sipx-testkit/corpus/transaction-sequences "the transaction-sequence corpus" || failed=1
 untouched crates/sipx-testkit/corpus/call-audio-sequences "the call-audio-sequence corpus" || failed=1
-# M-122's corpus is under `sipx-media` rather than beside the other two, because its harness is: the
-# oracle's last rule is checked against `serve` and `pump`, and both are private to the crate that
-# owns the decoder.
-untouched crates/sipx-media/corpus/worker-protocol-sequences "the worker-protocol corpus" || failed=1
+# M-129 moved this beside the other harnesses. Only the one opaque observation entry point remains
+# in `sipx-media`, because `serve` and `pump` stay private to the crate that owns the decoder.
+untouched crates/sipx-testkit/corpus/worker-protocol-sequences "the worker-protocol corpus" || failed=1
 if [[ $failed -ne 0 ]]; then
     echo >&2
     echo "A fuzz corpus is the campaign's input set. It changes deliberately, by a commit that says" >&2

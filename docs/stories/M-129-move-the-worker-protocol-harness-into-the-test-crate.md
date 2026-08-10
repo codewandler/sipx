@@ -59,23 +59,39 @@ property above.
 
 ## Acceptance
 
-- [ ] `Step`, `Program`, `Seed`, `Outcome` and the generator, oracle and seed corpus live in
+- [x] `Step`, `Program`, `Seed`, `Outcome` and the generator, oracle and seed corpus live in
       `sipx-testkit`, beside the harness that already set the precedent.
-- [ ] `sipx-media` exposes at most one entry point for this, opaque enough that its signature does
+- [x] `sipx-media` exposes at most one entry point for this, opaque enough that its signature does
       not re-export the vocabulary, and marked so a reader knows it is not application surface.
-- [ ] The fuzz target and the replay test drive the same code, and a corpus entry that crashes the
+- [x] The fuzz target and the replay test drive the same code, and a corpus entry that crashes the
       fuzzer is still replayed byte for byte — proved by a test, not by inspection.
-- [ ] Every rationale added to the harness types for `check-audio-claims.py` is **removed**, not
+- [x] Every rationale added to the harness types for `check-audio-claims.py` is **removed**, not
       relocated: if one is still needed, that is a finding about the new arrangement and belongs in
       this story's Progress.
-- [ ] `check-corpus-untouched.sh` follows the corpus to its new path and still fails on both
+- [x] `check-corpus-untouched.sh` follows the corpus to its new path and still fails on both
       modification and addition.
-- [ ] The campaign is re-run at the CI budget after the move and finds nothing new; the throughput
+- [x] The campaign is re-run at the CI budget after the move and finds nothing new; the throughput
       figure is recorded, since a harness that got slower crossing a crate boundary is worth knowing
       about.
 - [ ] The gate is green.
 
 ## Progress
+
+- 2026-08-10: moved the generator, oracle, replay tests, example and byte-for-byte seed corpus into
+  `sipx-testkit`. `sipx-media` now exposes only the hidden
+  `exercise_worker_protocol_sequence(&[u8]) -> Vec<String>` bridge; the harness vocabulary does not
+  cross that boundary. The moved replay test and fuzz target both call the same test-crate driver.
+- 2026-08-10: the failing-first compile check rejected the moved consumers while they still imported
+  `sipx_media::dsp::worker_protocol_sequence`; changing both to the test-crate module made the new
+  ownership explicit. Ten corpus replay tests and three module tests then passed.
+- 2026-08-10: removed every audio-claims rationale that existed only for the former public harness
+  types. Non-exhaustive enums and a redacting `Debug` implementation provide the applicable safety
+  properties without relocating those rationales; `check-audio-claims.py --check` passes.
+- 2026-08-10: exercised both integrity failure paths after updating `check-corpus-untouched.sh`: a
+  temporary tracked-byte modification and a temporary untracked seed addition each failed the
+  checker, and the clean relocated corpus passed afterward.
+- 2026-08-10: the exact CI campaign budget completed 151,127 executions in 61 seconds at 2,477
+  executions per second, with no finding (`cov: 1514`, `ft: 5601`, 641 corpus entries / 81 KiB).
 
 - 2026-08-10: selected in the five-story rc.22 wave.
 

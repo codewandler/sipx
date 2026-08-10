@@ -88,7 +88,7 @@ mod graph;
 mod supervised;
 mod wire;
 mod worker;
-pub mod worker_protocol_sequence;
+mod worker_protocol_harness;
 
 pub use activity::{ActivityWiring, WiringError, WiringOutcome};
 pub use builtin::BuiltIn;
@@ -99,6 +99,7 @@ pub use graph::{
 pub use supervised::WorkerProcess;
 pub use wire::WorkerProtocolError;
 pub use worker::{SupervisedWorker, WorkerResult, serve_worker};
+pub use worker_protocol_harness::exercise_worker_protocol_sequence;
 
 /// The processor contract itself, re-exported unchanged from [`sipx_audio::dsp`].
 ///

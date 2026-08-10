@@ -435,12 +435,101 @@ async fn dialing_app(
     (url, received, task)
 }
 
+/// A document app that installs one graph, then asks one stage out and back in.
+///
+/// The second program is returned only after the activation is observed. That makes its generation
+/// a fact the app has received, and keeps the failure before `M-125` narrow: the call answers and
+/// the graph activates, then the callback carrying `dsp_bypass` is rejected as an unknown verb.
+async fn bypassing_app() -> (
+    String,
+    mpsc::UnboundedReceiver<String>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("binds");
+    let url = format!("http://{}/hook", listener.local_addr().expect("address"));
+    let install = r#"{"contract":"sipx.app.v1","instructions":[{"id":"a1","do":"answer"},{"id":"d1","do":"dsp","direction":"outbound","processors":[{"id":"sipx.gain","shape":0,"parameters":{"gain":{"ratio":1000}}}]}]}"#;
+    let change = r#"{"contract":"sipx.app.v1","instructions":[{"id":"b1","do":"dsp_bypass","direction":"outbound","generation":1,"processor":0,"bypassed":true},{"id":"r1","do":"dsp_bypass","direction":"outbound","generation":1,"processor":0,"bypassed":false}]}"#;
+    let (envelopes, received) = mpsc::unbounded_channel();
+    let task = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.expect("accepts a callback");
+            let request = read_request(&mut socket).await;
+            let body = if request.contains(r#""type":"call.incoming""#) {
+                install
+            } else if request.contains(r#""type":"call.dsp.activated""#) {
+                change
+            } else {
+                ""
+            };
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket
+                .write_all(reply.as_bytes())
+                .await
+                .expect("answers the callback");
+            if envelopes.send(request).is_err() {
+                return;
+            }
+        }
+    });
+    (url, received, task)
+}
+
 /// The next envelope the app was sent, bounded so that a missing one fails instead of hanging.
 async fn next_envelope(envelopes: &mut mpsc::UnboundedReceiver<String>, expected: &str) -> String {
     tokio::time::timeout(Duration::from_secs(10), envelopes.recv())
         .await
         .unwrap_or_else(|_| panic!("the app is never sent {expected}"))
         .unwrap_or_else(|| panic!("the app stopped before it was sent {expected}"))
+}
+
+/// **`M-125`** — a desired-state bypass crosses the shipped document binding in both directions.
+///
+/// This is the interpreter assertion's real-socket counterpart: the app's HTTP response carries
+/// the two instructions into the host, and later HTTP requests carry both correlated boundaries
+/// back. The second boundary is the load-bearing one — before this story the graph produced
+/// `Restored`, but the application driver discarded it.
+#[tokio::test]
+async fn requested_bypass_and_restore_are_reported_over_the_callback_socket() {
+    let (url, mut envelopes, app) = bypassing_app().await;
+    let address = webhook_host_on(&webhook_document(&url, "on_5xx", 500, 5_000)).await;
+    let (caller, _incoming) = endpoint().await;
+
+    let _call = Box::pin(within(dial(
+        &caller,
+        Target::udp(address),
+        &callee_uri(),
+        &DialOptions::new("<sip:caller@test.example>", loopback()),
+    )))
+    .await
+    .expect("the app answers the inbound call");
+
+    let _incoming = next_envelope(&mut envelopes, "`call.incoming`").await;
+    let _answered = next_envelope(&mut envelopes, "`call.answered`").await;
+    let _activated = next_envelope(&mut envelopes, "`call.dsp.activated`").await;
+    let bypassed = next_envelope(&mut envelopes, "the requested bypass boundary").await;
+    assert!(
+        bypassed.contains(r#""type":"call.dsp.bypassed""#),
+        "the requested bypass is reported: {bypassed}"
+    );
+    assert!(bypassed.contains(r#""instruction_id":"b1""#), "{bypassed}");
+    assert!(bypassed.contains(r#""cause":"requested""#), "{bypassed}");
+
+    let restored = next_envelope(&mut envelopes, "the requested restore boundary").await;
+    assert!(
+        restored.contains(r#""type":"call.dsp.restored""#),
+        "the restore is produced rather than dropped: {restored}"
+    );
+    assert!(restored.contains(r#""instruction_id":"r1""#), "{restored}");
+    assert!(restored.contains(r#""generation":1"#), "{restored}");
+    assert!(
+        restored.contains(r#""processor":"sipx.gain""#),
+        "{restored}"
+    );
+
+    app.abort();
 }
 
 /// **`M-103`** — an app is told how its `dial` resolved.

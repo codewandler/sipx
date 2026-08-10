@@ -24,7 +24,7 @@
 
 use std::collections::BTreeMap;
 
-use sipx_media::dsp::worker_protocol_sequence::{
+use sipx_testkit::worker_protocol_sequence::{
     CEILINGS, Program, Side, Step, corpus_dir, expected_refusal, run, seeds,
 };
 
@@ -57,7 +57,7 @@ fn the_committed_corpus_is_exactly_the_seed_programs() {
     assert_eq!(
         committed(),
         expected(),
-        "regenerate with: cargo run -p sipx-media --example dump_worker_protocol_sequences -- \
+        "regenerate with: cargo run -p sipx-testkit --example dump_worker_protocol_sequences -- \
          --write"
     );
 }
@@ -89,6 +89,7 @@ fn the_corpus_covers_every_row_of_the_refusal_table() {
         match seed.program.side {
             Side::Runtime => sides.0 = true,
             Side::Worker => sides.1 = true,
+            _ => panic!("the committed corpus names an unknown protocol side"),
         }
         for line in run(&seed.program).trace {
             if let Some(refusal) = line.split("refused ").nth(1) {
@@ -177,6 +178,7 @@ fn the_decoder_is_total_and_every_step_kind_is_reachable() {
             Step::Noise { .. } => 9,
             Step::Repeat => 10,
             Step::Chunk { .. } => 11,
+            _ => panic!("the decoder produced an unknown worker-protocol step"),
         };
         seen[index] = true;
     }

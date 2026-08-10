@@ -3,7 +3,7 @@
 **Status:** normative for the `sipx.app.v1` wire line — and **experimental**: the line may change
 incompatibly until two dissimilar applications run against it (an inbound IVR and an outbound
 notifier), after which changes require a new line · **Crate:** `sipx-app-protocol` (planned) ·
-**Stories:** C-5 (and C-3, C-4, C-6, M-17, M-18 for the operations it names) ·
+**Stories:** C-5 (and C-3, C-4, C-6, M-17, M-18, M-125 for the operations it names) ·
 **Design:** [app-sdk](../designs/app-sdk.md)
 
 > **Read this first.** There is no RFC for driving a call from an application over a wire; every
@@ -64,7 +64,7 @@ verb that has no operation, which is why the epic's kernel stories exist:
 | `hold`, `resume` | `reinvite(Direction)` | shipped |
 | `mute`, `unmute` | local media gate | M-18 |
 | `transfer`, `accept_transfer`, `refuse_transfer` | `refer`/`refer_attended`/`accept_referral`/`refuse_referral` | shipped |
-| `dsp`, `dsp_param`, `dsp_remove` | `MediaSession::attach_dsp`/`DspGraph::replace`, `DspGraph::configure`, `DspGraph::detach` | M-67 |
+| `dsp`, `dsp_param`, `dsp_bypass`, `dsp_remove` | `MediaSession::attach_dsp`/`DspGraph::replace`, `DspGraph::configure`, `DspGraph::set_bypassed`, `DspGraph::detach` | M-67, M-125 |
 | `hangup`, `pause`, `tag` | `hang_up`; interpreter-internal | shipped |
 
 ## 4. Versioning
@@ -195,9 +195,10 @@ here cannot go stale except by moving, and moving announces itself.
 | `call.bridged` / `call.unbridged` | `leg` | the media coupling changed |
 | `call.dsp.activated` | `instruction_id`, `direction`, `generation`, `previous`, `processors`, `contains_overrun` | a `dsp` validated whole and became what every later frame sees |
 | `call.dsp.configured` | `instruction_id`, `direction`, `generation`, `at_position`, `processor` | a `dsp_param` applied, whole, at a sample boundary |
-| `call.dsp.bypassed` | `direction`, `generation`, `at_position`, `processor`, `cause` (`requested · refused · deadline_missed · malformed_result · worker_lost`) | one stage stopped contributing; nobody asked for it |
+| `call.dsp.bypassed` | `instruction_id`, `direction`, `generation`, `at_position`, `processor`, `cause` (`requested · refused · deadline_missed · malformed_result · worker_lost`) | one stage stopped contributing; `instruction_id` is `null` when the runtime, rather than a `dsp_bypass`, caused it |
+| `call.dsp.restored` | `instruction_id`, `direction`, `generation`, `at_position`, `processor` | a `dsp_bypass` asking for `bypassed: false` put one application-bypassed stage back in the chain |
 | `call.dsp.removed` | `instruction_id`, `direction`, `generation`, `at_position`, `processor`, `cause` (`requested · detached · session_stopped · failed_closed`) | a direction's chain ended |
-| `call.dsp.refused` | `instruction_id`, `direction`, `reason` (`unknown_processor · unknown_parameter · out_of_range · stale_generation · too_many_processors · no_graph · not_configurable · rejected`) | a `dsp`, `dsp_param` or `dsp_remove` was refused and the active graph is unchanged |
+| `call.dsp.refused` | `instruction_id`, `direction`, `reason` (`unknown_processor · unknown_parameter · out_of_range · stale_generation · too_many_processors · no_graph · not_configurable · bypass_unchanged · not_bypassable · bypass_not_reversible · rejected`) | a `dsp`, `dsp_param`, `dsp_bypass` or `dsp_remove` was refused and the active graph is unchanged |
 | `call.hold` / `call.resumed` | — | the far end changed the media direction |
 | `call.ended` | `cause` (`hangup · remote · rejected{status} · timeout · error`) | the call is over; always the last event, never dropped |
 
@@ -307,13 +308,13 @@ invitation, which is a `call.dial.finished` outcome and not an ending. `remote` 
 ending it, `timeout` is the far end ceasing to refresh the session it agreed to (RFC 4028), and
 `error` is this host unable to go on holding the leg.
 
-**[sipx]** The five `call.dsp.*` events are [call-dsp-graph.md](call-dsp-graph.md) §5.3's typed
-transitions, carried onto the wire. Three of them are the **terminal outcome** of an instruction and
-carry its `instruction_id`; `call.dsp.bypassed` is never one — an application does not ask a stage to
-start failing, it is told that one did — and `call.dsp.removed` carries `null` for
-`instruction_id` when a fail-closed failure or a stopped session ended the graph rather than a
-`dsp_remove`. Every instruction has **exactly one** of these outcomes: its success event or
-`call.dsp.refused`, never both and never neither.
+**[sipx]** The six `call.dsp.*` events are [call-dsp-graph.md](call-dsp-graph.md) §5.3's typed
+transitions, carried onto the wire. Five of them can be the **terminal outcome** of an instruction
+and carry its `instruction_id`. `call.dsp.bypassed` has two producers: `instruction_id` names the
+`dsp_bypass` when its `cause` is `requested`, and is `null` when the runtime stopped a failing
+stage. `call.dsp.removed` likewise carries `null` when a fail-closed failure or a stopped session
+ended the graph rather than a `dsp_remove`. Every instruction has **exactly one** of these outcomes:
+its success event or `call.dsp.refused`, never both and never neither.
 
 `at_position` is a sample count in the graph's own epoch and never a clock reading, for the reason
 the voice events' `sample_time` is: the same change against the same call lands at the same position
@@ -321,7 +322,7 @@ on every host. `generation` counts one direction's chains from 1, and `0` is not
 "this direction has no graph", which is why a `dsp_param` naming it is refused `stale_generation`
 rather than `unknown_processor`.
 
-Neither `call.dsp.refused` nor any other of the five carries a delta or a repair. §2's rule holds:
+Neither `call.dsp.refused` nor any other of the six carries a delta or a repair. §2's rule holds:
 the envelope's own snapshot is what corrects an application that got out of step, and a history of
 what it got wrong is not something this contract sends.
 
@@ -364,6 +365,7 @@ strictly in order; a verb with a completion event blocks the queue until it reso
 | `pause` | `ms` | timer-driven |
 | `dsp` | `direction`, `processors` (an ordered list of `{id, shape, parameters}` — §6.6) | `call.dsp.activated` or `call.dsp.refused` |
 | `dsp_param` | `direction`, `generation`, `processor`, `parameters` | `call.dsp.configured` or `call.dsp.refused` |
+| `dsp_bypass` | `direction`, `generation`, `processor`, `bypassed` | `call.dsp.bypassed`, `call.dsp.restored` or `call.dsp.refused` |
 | `dsp_remove` | `direction` | `call.dsp.removed` or `call.dsp.refused` |
 | `tag` | `key`, `value` | immediate; lands in every later snapshot |
 | `hangup` | `cause` | `call.ended` |
@@ -398,9 +400,9 @@ value is rejected **whole** — no partial application — and the app's declare
 
 ### 6.6 The DSP verbs: what an application may say about a graph (`M-67`)
 
-**[sipx]** The three `dsp` verbs are a door onto
+**[sipx]** The four `dsp` verbs are a door onto
 [call-dsp-graph.md](call-dsp-graph.md) §10, and everything normative about the graph is there. What
-belongs here is what the *wire* can carry, and it is deliberately three things:
+belongs here is what the *wire* can carry:
 
 ```json
 { "id": "d1", "do": "dsp", "direction": "outbound", "processors": [
@@ -433,17 +435,25 @@ is drawn here rather than checked somewhere:
   ([call-dsp-graph.md](call-dsp-graph.md) §3.2), and a document that names two processors reaches
   the registry door once per stage.
 
-**One call, one graph vocabulary.** None of the three verbs carries a call identifier. §2's rule —
+**One call, one graph vocabulary.** None of the four verbs carries a call identifier. §2's rule —
 instructions act on the call whose event stream produced them — is therefore what decides which
 call a `dsp` reaches, and there is no field through which a document could name another call's
 graph or another call's generation. In session mode the enclosing document names the `call` whose
 program it replaces (§8), and that is the only place a call is named.
 
-**`generation` is why `dsp_param` is safe to send.** Stage 2 of one generation is a different
+**`generation` is why `dsp_param` and `dsp_bypass` are safe to send.** Stage 2 of one generation is a different
 processor from stage 2 of the next, so an update composed against the chain an application last saw
 is refused `stale_generation` rather than landing on the chain that replaced it. An application
 reads the current generation off the last `call.dsp.activated` it received — §2's rule that events
 are authoritative, applied to a graph.
+
+**`bypassed` asks for a state, not a toggle.** `true` asks that the named stage stop contributing;
+`false` asks that a stage this application previously bypassed contribute again. The generation and
+zero-based `processor` index are checked under the same graph take that applies the boundary. The
+five refusals are exactly [call-dsp-graph.md](call-dsp-graph.md) §10.5's: `stale_generation`,
+`unknown_processor`, `bypass_unchanged`, `not_bypassable`, and `bypass_not_reversible`. In
+particular a supervised stage is refused rather than paused, and a runtime-imposed bypass cannot be
+undone by an application. Every refusal changes nothing.
 
 ## 7. Document binding (HTTP)
 

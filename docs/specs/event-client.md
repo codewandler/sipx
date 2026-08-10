@@ -335,6 +335,13 @@ JoinHandle, then awaits the drained handles. A driver never removes its own fina
 later admission may reap it only after `is_finished`. Thus a start racing shutdown either enters the
 drained set or returns typed `ShuttingDown`, and a start after the barrier always returns that error.
 
+The runtime's awaited unsubscribe command acknowledges only after the driver has applied every
+immediate output from the corresponding `Unsubscribe` input. If that input emits `SendSubscribe`,
+the endpoint request-admission attempt has completed before acknowledgement. This is a dispatch
+barrier, not a protocol deadline: it does not await a response, a terminal NOTIFY or Timer N.
+Dispatcher shutdown remains the ownership barrier which cancels and joins the response, timer and
+lifecycle tasks.
+
 ## 9. Byte-level vectors
 
 All displayed lines end in CRLF and every message ends with the displayed empty line. `<branch>` and

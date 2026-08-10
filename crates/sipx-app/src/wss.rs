@@ -454,13 +454,31 @@ impl WssClient {
 }
 
 /// One message from the peer, in the application's terms rather than the frame layer's.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum WssMessage {
     /// A text message (RFC 6455 §5.6 guarantees it is UTF-8).
+    ///
+    /// The realtime binding carries base64 call audio inside JSON text frames, so diagnostic
+    /// rendering reports only this variant and its byte length.
     Text(String),
-    /// A binary message.
+    /// A binary message, likewise rendered by length rather than content.
     Binary(Bytes),
+}
+
+impl fmt::Debug for WssMessage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Text(text) => formatter
+                .debug_struct("Text")
+                .field("bytes", &text.len())
+                .finish(),
+            Self::Binary(bytes) => formatter
+                .debug_struct("Binary")
+                .field("bytes", &bytes.len())
+                .finish(),
+        }
+    }
 }
 
 /// A live connection to a non-SIP peer.

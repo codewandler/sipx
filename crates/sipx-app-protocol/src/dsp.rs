@@ -1,7 +1,7 @@
 //! The DSP vocabulary an application composes a graph out of, app → host and host → app.
 //!
-//! [`docs/specs/app-contract.md`](../../../../docs/specs/app-contract.md) §6.2's three `dsp` verbs
-//! and §5.3's five `call.dsp.*` events, plus the values they carry. The normative graph behind them
+//! [`docs/specs/app-contract.md`](../../../../docs/specs/app-contract.md) §6.2's four `dsp` verbs
+//! and §5.3's six `call.dsp.*` events, plus the values they carry. The normative graph behind them
 //! is [`docs/specs/call-dsp-graph.md`](../../../../docs/specs/call-dsp-graph.md) §10.
 //!
 //! **What this vocabulary can say.** An ordered list of processor *identifiers*, a shape where a
@@ -279,7 +279,7 @@ impl DspTeardownCause {
     }
 }
 
-/// Why a `dsp`, `dsp_param` or `dsp_remove` instruction was refused (§5.3).
+/// Why a `dsp`, `dsp_param`, `dsp_bypass` or `dsp_remove` instruction was refused (§5.3).
 ///
 /// Every one of these leaves the active graph exactly as it was. That is the whole point of the
 /// vocabulary: a refusal is a thing the application did wrong, never a thing the call now has to
@@ -301,6 +301,12 @@ pub enum DspRefusal {
     NoGraph,
     /// A stage whose parameters cannot be moved while it runs.
     NotConfigurable,
+    /// The named stage is already in the requested bypass state.
+    BypassUnchanged,
+    /// A supervised stage cannot leave its deadline pipeline without misaligning its audio.
+    NotBypassable,
+    /// The runtime bypassed this failing stage terminally; only graph replacement can restore it.
+    BypassNotReversible,
     /// The host refused the plan for a reason with no narrower word here. The operator's log is
     /// where the detail belongs; a vocabulary that grew a word per internal refusal would be
     /// reporting the host's diagnosis rather than what the application got wrong.
@@ -319,13 +325,16 @@ impl DspRefusal {
             Self::TooManyProcessors => "too_many_processors",
             Self::NoGraph => "no_graph",
             Self::NotConfigurable => "not_configurable",
+            Self::BypassUnchanged => "bypass_unchanged",
+            Self::NotBypassable => "not_bypassable",
+            Self::BypassNotReversible => "bypass_not_reversible",
             Self::Rejected => "rejected",
         }
     }
 
     /// Every value §5.3's row lists, in the row's order.
     #[must_use]
-    pub const fn all() -> [Self; 8] {
+    pub const fn all() -> [Self; 11] {
         [
             Self::UnknownProcessor,
             Self::UnknownParameter,
@@ -334,6 +343,9 @@ impl DspRefusal {
             Self::TooManyProcessors,
             Self::NoGraph,
             Self::NotConfigurable,
+            Self::BypassUnchanged,
+            Self::NotBypassable,
+            Self::BypassNotReversible,
             Self::Rejected,
         ]
     }

@@ -571,28 +571,35 @@ MEDIA_SURFACE = ("sipx-media", "sipx-rtp")
 RELAY_PATH = ("sipx-media", "sipx-rtp")
 
 #: The crates where the call's own bytes come to **rest**, and the byte-buffer rule's second scope
-#: (`M-117`). See `byte_buffer_problems`.
+#: (`M-117`, widened deliberately by `M-126`). See `byte_buffer_problems`.
 #:
-#: A second constant rather than three more crates in `RELAY_PATH`, because that name means "the
-#: call in flight" and these two crates are the opposite half of the same sentence.
+#: A second constant rather than more crates in `RELAY_PATH`, because that name means "the call in
+#: flight" and these crates are the opposite half of the same sentence.
 #: `sipx_media::Encoded` holds one payload for as long as it takes to send it;
 #: `sipx_app_protocol::Source::Inline` holds a prompt inside a document a host may have logged
-#: whole on arrival, and `sipx_testkit::Record` holds every uplink byte of a call for the life of
-#: the test. Same defect, opposite lifetime — and a rule whose scope constant claimed these were on
-#: the relay path would be wrong about where they are.
+#: whole on arrival, `sipx_app::WssMessage` can hold a text frame containing base64 call audio while
+#: the client waits on control flow, and `sipx_testkit::Record` holds every uplink byte of a call for
+#: the life of the test. Same defect, opposite lifetime — and a rule whose scope constant claimed
+#: these were on the relay path would be wrong about where they are.
 #:
-#: **Why these two crates and not the other nine.** `M-110`'s finding was that the fifty carriers
+#: **Why these three crates and not the other eight.** `M-110`'s finding was that the fifty carriers
 #: outside its scope are spread across eleven crates and that a crate is the unit on which they can
-#: be decided one by one. That is true here and stays false for the rest: `sipx-sip`'s twenty-eight
-#: are a `Call-ID`, a `Via`, a URI and a body, where rendering the octets is the entire purpose of
-#: the log. These two hold six between them, every one of them was read, and each is either
+#: be decided one by one. That is true here and stays false for the rest: `sipx-sip`'s carriers are
+#: a `Call-ID`, a `Via`, a URI and a body, where rendering the octets is the entire purpose of the
+#: log. These three were each reviewed as a crate; every reachable public carrier in them is
 #: redacted by hand or carries the reason its bytes are neither the call nor a participant.
 #:
 #: A test-fixture crate is in scope on purpose. `sipx-testkit`'s realtime peer stands in for the far
 #: end of a real call — the bridge tests drive real media through it — and its record is formatted
 #: into an assertion message by this workspace's own tests, so a failing run wrote a call's audio to
 #: a CI log. Latent elsewhere, live here.
-AUDIO_AT_REST = ("sipx-app-protocol", "sipx-testkit")
+#:
+#: `sipx-app` is in scope on purpose too (`M-126`). Its general-purpose WebSocket client is also the
+#: realtime binding's carrier. That contract sends JSON text frames and can put base64 call audio in
+#: them; a byte-element selector sees only the binary variant, but the behavioural test beside the
+#: type holds both variants to the same variant-and-length rendering. Leaving the crate out because
+#: the audio is text would protect the carrier least likely to be audio and print the one that is.
+AUDIO_AT_REST = ("sipx-app-protocol", "sipx-app", "sipx-testkit")
 
 #: The public pages that explain the diagnostics rules above. A scope added here in code must be
 #: named on at least one of these pages, or be accompanied by a narrow, reviewable exception below.
@@ -1717,22 +1724,23 @@ def byte_buffer_problems(crates: list[str]) -> list[str]:
     `unread_relay_path`. The escape is a line-anchored phrase, so a reader that stopped recognising
     it reports the types it excuses.
 
-    **A second scope, on the same terms** (`M-117`). `AUDIO_AT_REST` names the two crates where the
-    same call comes to rest rather than passes through: a prompt carried inside a document, and
-    every uplink byte of a call kept in a test peer's record. The rule is not widened, duplicated or
-    weakened for them — it is the same rule over a second list of crates, and its six carriers were
-    read the same way `M-110` read its eight. Two scopes rather than one list because the names mean
-    different things about their own futures; see both constants.
+    **A second scope, on the same terms** (`M-117`, `M-126`). `AUDIO_AT_REST` names the three crates
+    where the same call comes to rest rather than passes through: a prompt carried inside a
+    document, the application host's bounded carrier, and every uplink byte of a call kept in a test
+    peer's record. The rule is not widened, duplicated or weakened for them — it is the same rule
+    over a second list of crates. Two scopes rather than one list because the names mean different
+    things about their own futures; see both constants.
 
     **What it still cannot do.** It cannot read what an implementation *prints* — the tests beside
     each type do that: `crates/sipx-rtp/tests/payload_diagnostics.rs` for `M-110`'s,
     `crates/sipx-app-protocol/tests/document_diagnostics.rs` and
-    `crates/sipx-testkit/tests/realtime_peer_diagnostics.rs` for `M-117`'s. It cannot see a *field*,
-    only a type, so a caller who formats `Record::appended_audio` itself still gets the bytes; that
-    field is public because ORB-3 asserts on those octets, and the type's own documentation says so.
-    And it still reaches no further than the four crates it names — forty-four carriers stay
-    outside, `outstanding_byte_buffers` counts them on every run, and they are protocol headers a
-    log exists to print rather than a debt.
+    `crates/sipx-testkit/tests/realtime_peer_diagnostics.rs` for `M-117`'s, and
+    `crates/sipx-app/tests/at_rest_diagnostics.rs` for `M-126`'s. It cannot see a *field*, only a
+    type, so a caller who formats `Record::appended_audio` itself still gets the bytes; that field
+    is public because ORB-3 asserts on those octets, and the type's own documentation says so.
+    And it still reaches no further than the five crates the scopes name. The remaining carriers
+    stay outside, and `outstanding_byte_buffers` counts them on every run rather than silently
+    treating an unreviewed carrier as safe.
     """
     problems = []
     for path, name, offset in byte_buffer_carriers(crates):
@@ -1820,7 +1828,7 @@ def key_problems(crates: list[str]) -> list[str]:
     that shape for a message: see `_KEY_ARRAY`. So the rule runs over every published crate and
     excuses nothing for being protocol.
 
-    **It overlaps `byte_buffer_problems` on the four crates those two scopes name, deliberately.**
+    **It overlaps `byte_buffer_problems` on the five crates those two scopes name, deliberately.**
     `_BYTE_BUFFER` already matches `[u8; N]`, so a key on the relay path is selected twice — and the
     two rules ask different questions, so it must answer both. A type that says its bytes are not
     the call has said nothing about whether they are a secret, which is `NOT_A_SECRET_REASON`'s
@@ -2343,7 +2351,7 @@ def main() -> int:
         f"octets where the call passes through, and {len(at_rest)} across "
         f"{' and '.join(AUDIO_AT_REST)} where it comes to rest; every one of them implements "
         f"`Debug` or argues its bytes are not the call, and the {len(outside)} carriers outside "
-        f"both scopes are protocol headers a log exists to print"
+        f"both scopes remain counted for review rather than silently treated as safe"
     )
     # The key rule's population, on the same terms and for the weakest of the three reasons — see
     # `_PLAUSIBLE_KEY_CARRIERS`, which is the only floor here set *at* its population.

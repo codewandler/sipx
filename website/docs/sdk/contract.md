@@ -39,9 +39,40 @@ An event identifies the contract version and sequence and carries a call snapsho
 }
 ```
 
-The vocabulary covers incoming, ringing, answered, and ended calls; DTMF; voice activity; signal
-metrics; playback, gather, recording, and dial completion; transfer progress; bridge state; and hold
-state.
+<!-- BEGIN generated:app-event-families -->
+The contract currently carries these event types, grouped into families by their wire names:
+
+- `call.incoming`
+- `call.ringing`
+- `call.early_media.started`
+- `call.answered`
+- `call.dtmf`
+- `call.voice.started`
+- `call.voice.ended`
+- `call.voice.thresholds`
+- `call.signal.metrics`
+- `call.signal.silence`
+- `call.playback.finished`
+- `call.gather.finished`
+- `call.recording.finished`
+- `call.dial.finished`
+- `call.leg.ended`
+- `call.transfer.requested`
+- `call.transfer.progress`
+- `call.bridged`
+- `call.unbridged`
+- `call.dsp.activated`
+- `call.dsp.configured`
+- `call.dsp.bypassed`
+- `call.dsp.restored`
+- `call.dsp.removed`
+- `call.dsp.refused`
+- `call.hold`
+- `call.resumed`
+- `call.ended`
+
+The [normative event table](https://github.com/codewandler/sipx/blob/main/docs/specs/app-contract.md#53-event-types) defines their fields, ordering, and emission rules; this generated inventory is only a route to that table.
+<!-- END generated:app-event-families -->
 
 Voice activity is `call.voice.started` and `call.voice.ended`, and it is **deterministic signal
 analysis rather than recognition** — no speech model is loaded to produce it, so a host built

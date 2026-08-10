@@ -38,17 +38,29 @@ reintroduce, because the next event family will land the same way this one did.
 
 ## Acceptance
 
-- [ ] The page either names every event family the contract carries, or says in its own words that
+- [x] The page either names every event family the contract carries, or says in its own words that
       the list is illustrative and points at the normative table.
-- [ ] Whichever is chosen is *checked*: a generated region, or a test that fails when a family
+- [x] Whichever is chosen is *checked*: a generated region, or a test that fails when a family
       exists in the contract and appears in neither the page nor an explicit exemption. Prose that
       can silently fall behind is what this story is about.
-- [ ] The check names what is missing, not merely that something is.
+- [x] The check names what is missing, not merely that something is.
 - [ ] The gate is green.
 
 ## Progress
 
 - 2026-08-10: selected in the five-story rc.22 wave.
+
+- Failing first: `python3 scripts/test-sync-website.py` ran 33 tests and raised three errors because
+  the sync tool had no `app_event_types`, `app_event_family_problems`, or
+  `generated:app-event-families` support.
+- Chose the durable complete-list branch. `sync-website.py` now reads every exact `call.*` entry from
+  the normative §5.3 table, including rows that contain two event types, renders them into the SDK
+  page, and links that inventory back to the normative table. A separate exact checker reports the
+  missing names even when the generated region is absent or manually damaged; its mutation test
+  proves the diagnostic names `call.leg.ended`.
+- Focused verification: `python3 scripts/test-sync-website.py` passes all 33 tests and
+  `./scripts/sync-website.py --check` reports all 28 generated regions in sync. The full repository
+  gate remains for the release coordinator.
 
 - Filed 2026-08-10 by the `M-108` implementor, who found the omission and judged a docs sweep to be
   outside a behavioural story's fence.

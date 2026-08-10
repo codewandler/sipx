@@ -43,20 +43,29 @@ forever by restoring it after every failure.
 
 ## Acceptance
 
-- [ ] A `dsp_bypass` verb (name to be settled with the existing three) carries stage and desired
+- [x] A `dsp_bypass` verb (name to be settled with the existing three) carries stage and desired
       state, and refuses exactly what `set_bypassed` refuses, with the refusal typed on the wire.
-- [ ] `call.dsp.restored` exists, is produced, and the contract's reachability table holds it
+- [x] `call.dsp.restored` exists, is produced, and the contract's reachability table holds it
       against the thing that composes it rather than against its absence from the bridge.
-- [ ] `spec_tables.rs` names the producer for both rows, so neither can become specified and
+- [x] `spec_tables.rs` names the producer for both rows, so neither can become specified and
       unreachable.
-- [ ] An application cannot reach another call's graph through the new verb, and cannot bypass a
+- [x] An application cannot reach another call's graph through the new verb, and cannot bypass a
       supervised stage or restore a runtime-imposed bypass — each refused, not ignored.
-- [ ] A failing-first test at the interpreter level and one over a real socket.
+- [x] A failing-first test at the interpreter level and one over a real socket.
 - [ ] The gate is green.
 
 ## Progress
 
 - 2026-08-10: selected in the five-story rc.22 wave.
+- 2026-08-10: failing-first interpreter proof: `cargo test -p sipx-app-protocol --test vectors
+  dsp_bypass_becomes_one_desired_state_effect_for_this_call -- --exact` produced no graph effect
+  (`[ClearTimer(Callback)]`) because `dsp_bypass` was still an unknown verb.
+- 2026-08-10: failing-first socket proof: `cargo test -p sipx-app --test host
+  requested_bypass_and_restore_are_reported_over_the_callback_socket -- --exact` timed out waiting
+  for the requested bypass boundary after the call answered and its graph activated.
+- 2026-08-10: `cargo test -p sipx-app-protocol -p sipx-app` passes, as do
+  `cargo clippy -p sipx-app-protocol --all-targets -- -D warnings` and
+  `cargo clippy -p sipx-app --lib -- -D warnings`. The coordinator owns the full gate row.
 
 - Filed 2026-08-10 by the `M-115` implementor, who named the gap rather than widening the contract
   inside another story's fence.

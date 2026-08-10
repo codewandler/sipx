@@ -17,7 +17,7 @@ use sipx_ua::event_client::{
     StateChange, SubscriptionId, Timer, Transport,
 };
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -138,11 +138,20 @@ impl<V> EventSubscription<V> {
         }
     }
 
-    /// Send Expires 0 and wait only for command admission. Terminal NOTIFY or Timer N completes
-    /// the protocol operation and is observable through [`Self::next_state`].
+    /// Send Expires 0 and wait until the driver has applied the command's immediate outputs.
+    ///
+    /// When cancellation produces an in-dialog SUBSCRIBE, this returns after endpoint request
+    /// admission has completed. It does not wait for the response, a terminal NOTIFY or Timer N;
+    /// protocol completion remains observable through [`Self::next_state`].
     pub async fn unsubscribe(&self) -> Result<(), EventSubscriptionError> {
+        let (applied, completed) = oneshot::channel();
         self.commands
-            .send(Command::Unsubscribe)
+            .send(Command::Unsubscribe {
+                applied: Some(applied),
+            })
+            .await
+            .map_err(|_| EventSubscriptionError::NotAttached)?;
+        completed
             .await
             .map_err(|_| EventSubscriptionError::NotAttached)
     }
@@ -151,7 +160,9 @@ impl<V> EventSubscription<V> {
 impl<V> Drop for EventSubscription<V> {
     fn drop(&mut self) {
         // discard: Drop cannot wait; finite expiry and dispatcher shutdown remain backstops.
-        let _ = self.commands.try_send(Command::Unsubscribe);
+        let _ = self
+            .commands
+            .try_send(Command::Unsubscribe { applied: None });
     }
 }
 
@@ -348,7 +359,9 @@ impl Drop for EventSubscriptions {
 #[derive(Debug)]
 enum Command {
     Drained(usize),
-    Unsubscribe,
+    Unsubscribe {
+        applied: Option<oneshot::Sender<()>>,
+    },
 }
 
 #[derive(Debug)]
@@ -394,7 +407,7 @@ impl<C: PackageConsumer> Driver<C> {
                     () = self.delivery.closed() => DriverInput::Shutdown,
                 }
             };
-            let (outputs, incoming) = match event {
+            let (outputs, incoming, applied) = match event {
                 DriverInput::Incoming(incoming) => {
                     let incoming = *incoming;
                     // `None` when the NOTIFY arrived over a transport the event client cannot
@@ -404,28 +417,35 @@ impl<C: PackageConsumer> Driver<C> {
                     let outputs = peer_from_incoming(&incoming)
                         .map(|source| self.core.notify(1, &incoming.request, source))
                         .unwrap_or_default();
-                    (outputs, Some(incoming))
+                    (outputs, Some(incoming), None)
                 }
                 DriverInput::Command(Some(Command::Drained(count))) => {
                     self.core.consumer_drained(self.id, count);
-                    (Vec::new(), None)
+                    (Vec::new(), None, None)
                 }
-                DriverInput::Command(Some(Command::Unsubscribe)) => {
-                    (self.core.unsubscribe(self.id), None)
+                DriverInput::Command(Some(Command::Unsubscribe { applied })) => {
+                    (self.core.unsubscribe(self.id), None, applied)
                 }
                 DriverInput::Event(Some(RuntimeEvent::Response(response))) => (
                     self.core
                         .response(self.id, response.as_ref(), &sipx_ua::auth::new_cnonce()),
                     None,
+                    None,
                 ),
-                DriverInput::Event(Some(RuntimeEvent::Timer(timer, generation))) => {
-                    (self.core.timer_fired(self.id, timer, generation), None)
-                }
+                DriverInput::Event(Some(RuntimeEvent::Timer(timer, generation))) => (
+                    self.core.timer_fired(self.id, timer, generation),
+                    None,
+                    None,
+                ),
                 DriverInput::Shutdown | DriverInput::Command(None) | DriverInput::Event(None) => {
-                    (self.core.shutdown_deadline(), None)
+                    (self.core.shutdown_deadline(), None, None)
                 }
             };
             self.apply(outputs, incoming.as_ref()).await;
+            if let Some(applied) = applied {
+                // discard: closure means the caller stopped waiting after the outputs were applied.
+                let _ = applied.send(());
+            }
         }
         if self.core.contains(self.id) {
             let outputs = self.core.shutdown_deadline();

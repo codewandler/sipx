@@ -1,13 +1,40 @@
 ---
 title: What's new
-description: Release highlights and adoption notes for the sipx 1.0.0-rc.21 release candidate.
+description: Release highlights and adoption notes for the sipx 1.0.0-rc.22 release candidate.
 ---
 
 # What's new
 
 <!-- BEGIN generated:release-heading -->
-## 1.0.0-rc.21 — 2026-08-10
+## 1.0.0-rc.22 — 2026-08-10
 <!-- END generated:release-heading -->
+
+RC.22 closes five stories: application-controlled live-stage bypass, clean registrar cancellation,
+an expanded at-rest diagnostic boundary, an exact SDK event inventory, and a fuzz harness that no
+longer enlarges a production crate's public API.
+
+```bash
+cargo install --locked --version =1.0.0-rc.22 sipx-cli
+```
+
+- **Applications can bypass and restore one DSP stage by desired state.** The instruction names the
+  graph generation and stage, returns one correlated boundary event, and refuses stale, supervised
+  or runtime-imposed state without changing the graph. Interpreter and real-socket tests prove the
+  complete path and keep one call out of another call's graph.
+- **`peers` cancels its registrar subscription before exit.** The command waits through local
+  endpoint admission of Expires 0, then closes and joins its owned work without waiting for an
+  uncooperative registrar's response, terminal NOTIFY or Timer N.
+- **Application diagnostics withhold resting call bytes.** The source checker now includes
+  `sipx-app`; WebSocket text and binary messages render only their variant and length, and behavioral
+  tests cover the public encoded-audio and credential carriers.
+- **The SDK page's event inventory is exact and generated.** It follows every row in the normative
+  wire table, including the new restore event, and drift reports the missing event by name.
+- **The worker-protocol harness moved into `sipx-testkit`.** The media crate keeps one hidden opaque
+  bridge to its real private callers, while the generator, oracle, replay suite and corpus stay one
+  shared test implementation. A fresh 60-second fuzz run completed 151,127 executions with no
+  finding.
+
+## 1.0.0-rc.21 — 2026-08-10
 
 RC.21 is the first public candidate after RC.17. It includes the DSP-control and hardening work from
 the unpublished RC.18 and RC.19 boundaries and the RC.20 tag whose protected gate stopped before
@@ -881,5 +908,5 @@ answer calls, but application callback bindings are not implemented.
 This website is built from `main`, so a page or API link may describe work newer than the tagged
 release. Use the exact crates.io version when reproducibility matters, and consult the
 [complete changelog](https://github.com/codewandler/sipx/blob/main/CHANGELOG.md) before updating a
-Git revision. Unreleased behavior is not part of `1.0.0-rc.21` merely because it appears on this
+Git revision. Unreleased behavior is not part of `1.0.0-rc.22` merely because it appears on this
 site.

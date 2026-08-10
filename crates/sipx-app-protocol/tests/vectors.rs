@@ -17,9 +17,9 @@
 )]
 
 use sipx_app_protocol::{
-    CallSnapshot, CallState, Callback, DialOutcome, Direction, Document, Effect, EndCause,
-    Envelope, EventKind, Failure, GatherReason, Input, Interpreter, LegEndCause, OnFailure, Output,
-    Policy, Response, Timer, Timestamp,
+    AudioDirection, CallSnapshot, CallState, Callback, DialOutcome, Direction, Document, Effect,
+    EndCause, Envelope, EventKind, Failure, GatherReason, Input, Interpreter, LegEndCause,
+    OnFailure, Output, Policy, Response, Timer, Timestamp,
 };
 
 /// A fixed instant. The interpreter never asks what time it is, so the tests never have to move
@@ -585,6 +585,39 @@ fn ac_10_an_answered_leg_is_listed_until_it_ends() {
         interpreter.running(),
         Some("p1"),
         "a leg's ending completes no instruction"
+    );
+}
+
+/// **`M-125`** — the wire's desired-state request becomes one correlated graph effect.
+///
+/// This is deliberately an interpreter test rather than a document-only round trip: accepting a
+/// fourth spelling without issuing the graph operation would leave the application surface just as
+/// unreachable as rejecting it. The absence of a call identifier is asserted in the document text
+/// itself; the only graph this effect can name is the one owned by this interpreter's call.
+#[test]
+fn dsp_bypass_becomes_one_desired_state_effect_for_this_call() {
+    let mut interpreter = interpreter(Policy::default());
+    let (_, callback) = delivery(interpreter.handle(now(), Input::Event(EventKind::Incoming)));
+    let outputs = interpreter.handle(
+        now(),
+        Input::Response {
+            callback,
+            response: Response::Body(body(
+                r#"{"id":"b1","do":"dsp_bypass","call":"some-other-call","direction":"outbound","generation":7,"processor":2,"bypassed":true}"#,
+            )),
+        },
+    );
+
+    assert_eq!(
+        effects(&outputs),
+        vec![&Effect::SetDspBypassed {
+            instruction_id: "b1".to_owned(),
+            direction: AudioDirection::Outbound,
+            generation: 7,
+            processor: 2,
+            bypassed: true,
+        }],
+        "a valid desired-state request issues one graph effect for this call"
     );
 }
 

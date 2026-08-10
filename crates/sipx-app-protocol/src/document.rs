@@ -292,6 +292,20 @@ pub enum Verb {
         /// The finite set, validated whole against the stage's declared schema.
         parameters: Vec<DspParameter>,
     },
+    /// Ask one live stage into or out of the chain without replacing its generation (`M-125`).
+    ///
+    /// Completes with `call.dsp.bypassed`, `call.dsp.restored`, or `call.dsp.refused`. This asks
+    /// for a desired state rather than toggling, so replay cannot invert a stage by accident.
+    DspBypass {
+        /// Which side of the call's audio.
+        direction: AudioDirection,
+        /// The generation the request was composed against.
+        generation: u64,
+        /// The stage's index in that generation's plan order, from 0.
+        processor: u32,
+        /// `true` to take it out; `false` to restore an application-requested bypass.
+        bypassed: bool,
+    },
     /// Remove one direction's DSP chain and wait for its barrier (`M-67`).
     ///
     /// Completes with `call.dsp.removed`, or `call.dsp.refused` when the direction had no graph.
@@ -332,6 +346,7 @@ impl Verb {
             Self::Tag { .. } => "tag",
             Self::Dsp { .. } => "dsp",
             Self::DspParam { .. } => "dsp_param",
+            Self::DspBypass { .. } => "dsp_bypass",
             Self::DspRemove { .. } => "dsp_remove",
             Self::Hangup { .. } => "hangup",
         }
@@ -342,7 +357,7 @@ impl Verb {
     /// Enumerable so that "the crate covers the table" is a test rather than a promise;
     /// `tests/spec_tables.rs` reads §6.2 out of the spec and compares against this.
     #[must_use]
-    pub fn names() -> [&'static str; 23] {
+    pub fn names() -> [&'static str; 24] {
         [
             "answer",
             "ring",
@@ -365,6 +380,7 @@ impl Verb {
             "tag",
             "dsp",
             "dsp_param",
+            "dsp_bypass",
             "dsp_remove",
             "hangup",
         ]
@@ -388,6 +404,7 @@ impl Verb {
                 | Self::Hangup { .. }
                 | Self::Dsp { .. }
                 | Self::DspParam { .. }
+                | Self::DspBypass { .. }
                 | Self::DspRemove { .. }
         )
     }
@@ -500,7 +517,10 @@ impl Instruction {
                 members.push(("key", Some(Json::Str(key.clone()))));
                 members.push(("value", Some(Json::Str(value.clone()))));
             }
-            Verb::Dsp { .. } | Verb::DspParam { .. } | Verb::DspRemove { .. } => {
+            Verb::Dsp { .. }
+            | Verb::DspParam { .. }
+            | Verb::DspBypass { .. }
+            | Verb::DspRemove { .. } => {
                 members.extend(dsp_members(&self.verb));
             }
             Verb::Hangup { cause } => members.push(("cause", Some(cause.to_json()))),
@@ -668,6 +688,22 @@ impl Instruction {
                     .ok_or(Error::MissingField { field: "processor" })?,
                 parameters: crate::dsp::parameters_from_json(value.get("parameters"))?,
             },
+            "dsp_bypass" => Verb::DspBypass {
+                direction: direction_field(value)?,
+                generation: value
+                    .get("generation")
+                    .and_then(Json::as_i64)
+                    .and_then(|raw| u64::try_from(raw).ok())
+                    .ok_or(Error::BadField {
+                        field: "generation",
+                    })?,
+                processor: optional_u32(value, "processor")?
+                    .ok_or(Error::MissingField { field: "processor" })?,
+                bypassed: value
+                    .get("bypassed")
+                    .and_then(Json::as_bool)
+                    .ok_or(Error::BadField { field: "bypassed" })?,
+            },
             "dsp_remove" => Verb::DspRemove {
                 direction: direction_field(value)?,
             },
@@ -782,10 +818,10 @@ impl Document {
     }
 }
 
-/// The three `dsp` verbs' fields (§6.6), written in one place.
+/// The four `dsp` verbs' fields (§6.6), written in one place.
 ///
 /// Split out of [`Instruction::to_json`] for the reason §5.3's signal events are split out of
-/// [`crate::EventKind::to_json`]: three rows sharing a `direction` and carrying a nested list
+/// [`crate::EventKind::to_json`]: four rows sharing a `direction` and carrying a nested list
 /// between them read better together than spread across a match whose other twenty arms carry two
 /// fields each.
 fn dsp_members(verb: &Verb) -> Vec<(&'static str, Option<Json>)> {
@@ -793,8 +829,9 @@ fn dsp_members(verb: &Verb) -> Vec<(&'static str, Option<Json>)> {
     let direction = match verb {
         Verb::Dsp { direction, .. }
         | Verb::DspParam { direction, .. }
+        | Verb::DspBypass { direction, .. }
         | Verb::DspRemove { direction } => *direction,
-        // The caller matched the three before it delegated.
+        // The caller matched the four before it delegated.
         _ => return members,
     };
     members.push(("direction", Some(Json::Str(direction.as_str().to_owned()))));
@@ -817,6 +854,16 @@ fn dsp_members(verb: &Verb) -> Vec<(&'static str, Option<Json>)> {
                 "parameters",
                 Some(crate::dsp::parameters_to_json(parameters)),
             ));
+        }
+        Verb::DspBypass {
+            generation,
+            processor,
+            bypassed,
+            ..
+        } => {
+            members.push(("generation", Some(Json::from(*generation))));
+            members.push(("processor", Some(Json::from(*processor))));
+            members.push(("bypassed", Some(Json::from(*bypassed))));
         }
         _ => {}
     }

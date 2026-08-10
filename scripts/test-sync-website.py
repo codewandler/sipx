@@ -59,6 +59,39 @@ class ArchitectureCoverageTests(unittest.TestCase):
 
 
 class GeneratedFactsTests(unittest.TestCase):
+    def test_the_sdk_event_list_is_derived_from_every_normative_table_row(self) -> None:
+        """`M-128`: prose cannot silently lose the next event family."""
+        event_types = SYNC.app_event_types()
+        rendered = SYNC.render_generated("app-event-families", None)
+        self.assertGreater(len(event_types), 20)
+        for event_type in event_types:
+            with self.subTest(event_type=event_type):
+                self.assertIn(f"`{event_type}`", rendered)
+        self.assertIn("#53-event-types", rendered)
+
+    def test_the_sdk_event_check_names_each_missing_family(self) -> None:
+        rendered = SYNC.render_generated("app-event-families", None)
+        missing = "call.leg.ended"
+        page = (
+            "<!-- BEGIN generated:app-event-families -->"
+            f"{rendered.replace(f'`{missing}`', '')}"
+            "<!-- END generated:app-event-families -->"
+        )
+        problems = SYNC.app_event_family_problems(
+            page,
+            "website/docs/sdk/contract.md",
+        )
+        self.assertEqual(1, len(problems))
+        self.assertIn(missing, problems[0])
+
+    def test_the_public_sdk_page_carries_the_complete_generated_event_list(self) -> None:
+        page = (ROOT / "website" / "docs" / "sdk" / "contract.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(
+            [], SYNC.app_event_family_problems(page, "website/docs/sdk/contract.md")
+        )
+
     def test_workspace_and_release_facts_come_from_canonical_files(self) -> None:
         facts = SYNC.canonical_facts()
         manifest = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))

@@ -231,10 +231,10 @@ fn section_5_3_s_rows_are_reachable_through_the_bridge() {
     /// all. Nothing composed them either, so the entry was a claim about a producer that did not
     /// exist; they now have an arm, and this test's other branch is what keeps it.
     ///
-    /// The five `call.dsp.*` rows join the list for the same reason as the first three and with the
+    /// The six `call.dsp.*` rows join the list for the same reason as the first three and with the
     /// same obligation: a graph's transitions belong to `sipx-media`, no `CallEvent` carries one,
     /// and the file that composes them has to contain the construction (`M-67`).
-    const COMPOSED_BY_THE_DRIVER: [(&str, &str, &str); 9] = [
+    const COMPOSED_BY_THE_DRIVER: [(&str, &str, &str); 10] = [
         ("call.incoming", "crates/sipx-app/src/host.rs", DRIVER),
         (
             "call.gather.finished",
@@ -250,6 +250,7 @@ fn section_5_3_s_rows_are_reachable_through_the_bridge() {
             HOST_DSP,
         ),
         ("call.dsp.bypassed", "crates/sipx-app/src/dsp.rs", HOST_DSP),
+        ("call.dsp.restored", "crates/sipx-app/src/dsp.rs", HOST_DSP),
         ("call.dsp.removed", "crates/sipx-app/src/dsp.rs", HOST_DSP),
         ("call.dsp.refused", "crates/sipx-app/src/dsp.rs", HOST_DSP),
     ];

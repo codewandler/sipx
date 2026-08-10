@@ -42,3 +42,4 @@ pub mod rtp_echo;
 pub mod soak;
 pub mod time;
 pub mod transaction_sequence;
+pub mod worker_protocol_sequence;

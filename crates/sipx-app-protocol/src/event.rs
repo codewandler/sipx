@@ -1057,11 +1057,13 @@ pub enum EventKind {
         /// The stage's declared identifier.
         processor: String,
     },
-    /// One stage stopped contributing; the frames after it carry a discontinuity (`M-67`).
+    /// One stage stopped contributing; the frames after it carry a discontinuity (`M-67`, `M-125`).
     ///
-    /// Never solicited: an application does not ask for this, it is told. The call keeps working
-    /// and the audio that stage owed is not in it.
+    /// Correlated when an application asked, and uncorrelated when the runtime imposed the bypass.
+    /// The call keeps working and the audio that stage owed is not in it.
     DspBypassed {
+        /// The `dsp_bypass` this completes, or `null` for a runtime-imposed bypass.
+        instruction_id: Option<String>,
         /// Which side of the call's audio.
         direction: AudioDirection,
         /// The generation the stage belongs to.
@@ -1072,6 +1074,19 @@ pub enum EventKind {
         processor: String,
         /// Why.
         cause: DspBypassCause,
+    },
+    /// One stage an application had bypassed is contributing again (`M-125`).
+    DspRestored {
+        /// The `dsp_bypass` asking for `bypassed: false` that this completes.
+        instruction_id: String,
+        /// Which side of the call's audio.
+        direction: AudioDirection,
+        /// The generation the stage belongs to.
+        generation: u64,
+        /// Where in the epoch it started contributing again.
+        at_position: u64,
+        /// The stage's declared identifier.
+        processor: String,
     },
     /// One direction's DSP chain ended: no stage of that generation sees another frame (`M-67`).
     DspRemoved {
@@ -1088,8 +1103,8 @@ pub enum EventKind {
         /// Why.
         cause: DspTeardownCause,
     },
-    /// A `dsp`, `dsp_param` or `dsp_remove` was refused, and the active graph is unchanged
-    /// (`M-67`).
+    /// A `dsp`, `dsp_param`, `dsp_bypass` or `dsp_remove` was refused, and the active graph is
+    /// unchanged (`M-67`, `M-125`).
     ///
     /// It carries no delta and no repair: §2's rule is that a snapshot corrects an application
     /// rather than a history of what it got wrong.
@@ -1148,6 +1163,7 @@ impl EventKind {
             Self::DspActivated { .. } => "call.dsp.activated",
             Self::DspConfigured { .. } => "call.dsp.configured",
             Self::DspBypassed { .. } => "call.dsp.bypassed",
+            Self::DspRestored { .. } => "call.dsp.restored",
             Self::DspRemoved { .. } => "call.dsp.removed",
             Self::DspRefused { .. } => "call.dsp.refused",
             Self::Hold => "call.hold",
@@ -1162,7 +1178,7 @@ impl EventKind {
     /// Enumerable so that "the crate covers the table" is a test rather than a promise; the
     /// derived test in `tests/spec_tables.rs` reads the section and compares.
     #[must_use]
-    pub fn type_names() -> [&'static str; 27] {
+    pub fn type_names() -> [&'static str; 28] {
         [
             "call.incoming",
             "call.ringing",
@@ -1186,6 +1202,7 @@ impl EventKind {
             "call.dsp.activated",
             "call.dsp.configured",
             "call.dsp.bypassed",
+            "call.dsp.restored",
             "call.dsp.removed",
             "call.dsp.refused",
             "call.hold",
@@ -1204,8 +1221,11 @@ impl EventKind {
             | Self::DialFinished { instruction_id, .. }
             | Self::DspActivated { instruction_id, .. }
             | Self::DspConfigured { instruction_id, .. }
+            | Self::DspRestored { instruction_id, .. }
             | Self::DspRefused { instruction_id, .. } => Some(instruction_id),
-            Self::DspRemoved { instruction_id, .. } => instruction_id.as_deref(),
+            Self::DspBypassed { instruction_id, .. } | Self::DspRemoved { instruction_id, .. } => {
+                instruction_id.as_deref()
+            }
             _ => None,
         }
     }
@@ -1224,8 +1244,7 @@ impl EventKind {
             | Self::Other { .. } => {}
             Self::Ringing { reliable } => members.push(("reliable", Some(Json::from(*reliable)))),
             Self::Dtmf { digit, duration_ms } => {
-                members.push(("digit", Some(Json::Str(digit.to_string()))));
-                members.push(("duration_ms", Some(Json::from(*duration_ms))));
+                members.extend(dtmf_members(*digit, *duration_ms));
             }
             Self::VoiceStarted {
                 direction,
@@ -1311,6 +1330,7 @@ impl EventKind {
             Self::DspActivated { .. }
             | Self::DspConfigured { .. }
             | Self::DspBypassed { .. }
+            | Self::DspRestored { .. }
             | Self::DspRemoved { .. }
             | Self::DspRefused { .. } => members.extend(self.dsp_members()),
             Self::Ended { cause } => members.push(("cause", Some(cause.to_json()))),
@@ -1491,6 +1511,13 @@ impl Envelope {
     }
 }
 
+fn dtmf_members(digit: char, duration_ms: u32) -> [(&'static str, Option<Json>); 2] {
+    [
+        ("digit", Some(Json::Str(digit.to_string()))),
+        ("duration_ms", Some(Json::from(duration_ms))),
+    ]
+}
+
 /// §4: the line is in every envelope and every document, and a different one is not ours to read.
 pub(crate) fn check_contract(value: &Json) -> Result<()> {
     match value.get("contract").and_then(Json::as_str) {
@@ -1554,10 +1581,10 @@ fn optional_count(value: &Json, field: &'static str) -> Result<Option<u64>> {
     }
 }
 
-/// The `M-67` DSP events' extra fields (§5.3), read and written in one place.
+/// The `M-67` and `M-125` DSP events' extra fields (§5.3), read and written in one place.
 ///
 /// Split out of [`EventKind::to_json`] and [`EventKind::from_json`] for the reason the signal
-/// events are: five rows sharing four of their members read better together than spread across a
+/// events are: six rows sharing four of their members read better together than spread across a
 /// match whose other twenty-one arms carry two fields each.
 impl EventKind {
     fn dsp_members(&self) -> Vec<(&'static str, Option<Json>)> {
@@ -1584,6 +1611,13 @@ impl EventKind {
                 generation,
                 at_position,
                 processor,
+            }
+            | Self::DspRestored {
+                instruction_id,
+                direction,
+                generation,
+                at_position,
+                processor,
             } => {
                 members.push(("instruction_id", Some(Json::Str(instruction_id.clone()))));
                 members.push(("direction", Some(Json::Str(direction.as_str().to_owned()))));
@@ -1592,12 +1626,17 @@ impl EventKind {
                 members.push(("processor", Some(Json::Str(processor.clone()))));
             }
             Self::DspBypassed {
+                instruction_id,
                 direction,
                 generation,
                 at_position,
                 processor,
                 cause,
             } => {
+                members.push((
+                    "instruction_id",
+                    Some(instruction_id.clone().map_or(Json::Null, Json::Str)),
+                ));
                 members.push(("direction", Some(Json::Str(direction.as_str().to_owned()))));
                 members.push(("generation", Some(Json::from(*generation))));
                 members.push(("at_position", Some(Json::from(*at_position))));
@@ -1688,11 +1727,19 @@ impl EventKind {
                 processor: string_field(value, "processor")?,
             },
             "call.dsp.bypassed" => Self::DspBypassed {
+                instruction_id: optional_string(value, "instruction_id"),
                 direction,
                 generation: u64_field(value, "generation")?,
                 at_position: u64_field(value, "at_position")?,
                 processor: string_field(value, "processor")?,
                 cause: crate::dsp::bypass_cause_field(value)?,
+            },
+            "call.dsp.restored" => Self::DspRestored {
+                instruction_id: string_field(value, "instruction_id")?,
+                direction,
+                generation: u64_field(value, "generation")?,
+                at_position: u64_field(value, "at_position")?,
+                processor: string_field(value, "processor")?,
             },
             "call.dsp.removed" => Self::DspRemoved {
                 instruction_id: optional_string(value, "instruction_id"),
@@ -1713,7 +1760,7 @@ impl EventKind {
     }
 }
 
-/// Whether a type name is one of §5.3's five `call.dsp.*` rows.
+/// Whether a type name is one of §5.3's six `call.dsp.*` rows.
 ///
 /// A closed set rather than a prefix test: `call.dsp.` followed by a word this version does not
 /// define is an unknown *event type*, which §4 requires an app to be able to ignore, so it has to
@@ -1724,6 +1771,7 @@ fn is_dsp(type_name: &str) -> bool {
         "call.dsp.activated"
             | "call.dsp.configured"
             | "call.dsp.bypassed"
+            | "call.dsp.restored"
             | "call.dsp.removed"
             | "call.dsp.refused"
     )

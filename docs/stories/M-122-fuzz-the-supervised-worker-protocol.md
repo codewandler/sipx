@@ -66,7 +66,7 @@ parser in this workspace is.
   is ever offered it. §7.4 gained the paragraph that says so.
 
   **The shape, and why it is not either of the two below.** The harness is
-  `sipx_media::dsp::worker_protocol_sequence`, a public module of the crate that owns the decoder,
+  `sipx_media::dsp::worker_protocol_sequence`, then a public module of the crate that owns the decoder,
   and the fuzz target is thin. Neither shape this story sketched survived writing the oracle: its
   last rule — *a refusal is terminal in both directions* — is only worth asserting against the real
   callers, and both of them (`worker::serve`, `supervised::pump`) are crate-private. A driver in
@@ -74,6 +74,10 @@ parser in this workspace is.
   to reach a *model* of them, which is more public surface for a weaker claim. So the only
   dependency edit is `sipx-media` in `fuzz/Cargo.toml`; the workspace `Cargo.toml` is untouched and
   `fuzz/Cargo.lock` is gitignored, so no lockfile moved.
+
+  `M-129` later moved the vocabulary, oracle and corpus to `sipx-testkit`, leaving one opaque
+  observation entry point beside the private callers. This paragraph records the arrangement at
+  delivery rather than the current public path.
 
   **The oracle, and the evidence it is not vacuous.** Five invariants: the refusal §7.4's table
   gives for the header octets, derived independently and compared to the decoder's; a

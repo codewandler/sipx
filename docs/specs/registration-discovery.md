@@ -75,6 +75,14 @@ No snapshot is printed before authority exists. Initial 403 is `unauthorized`, i
 explicit timeout or failure. The diagnostic names the registrar status. A refusal never falls back
 to a book-only success, because that would present a partial merged result as complete.
 
+Every terminal command outcome requests cancellation after a subscription has established a
+dialog. The command MUST wait until the event runtime has applied the cancellation's immediate
+outputs: when the client produces an in-dialog SUBSCRIBE with Expires 0, the endpoint MUST have
+completed request admission before endpoint shutdown begins. This is a dispatch barrier, not
+protocol completion. The command MUST NOT wait for the cancellation response, a terminal NOTIFY or
+Timer N. Endpoint and dispatcher shutdown then cancel and join the remaining response, timer and
+lifecycle work before the command exits.
+
 ## 5. Conformance vectors
 
 - **S24-V1 — full then registration.** A full version 0 document contains no active contacts. A
@@ -89,3 +97,7 @@ to a book-only success, because that would present a partial merged result as co
 - **S24-V5 — generic lifecycle and cleanup.** A real endpoint test observes SUBSCRIBE Event `reg`,
   sends full and partial NOTIFY through the generic S-38 runtime, sees the newly registered contact,
   then unsubscribes and observes zero lifecycle, timer and transaction work.
+- **S24-V6 — command cancellation barrier.** A registrar accepts the initial SUBSCRIBE, sends one
+  full NOTIFY, receives an in-dialog SUBSCRIBE with Expires 0 when the command has its result, and
+  leaves that cancellation unanswered. The command exits without waiting for Timer N, closes the
+  endpoint and has joined its local subscription work.

@@ -7,6 +7,48 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0-rc.22] — 2026-08-10
+
+Five stories close in this candidate. The application contract gains the last live DSP control the
+graph already supported, command-line registrar discovery now leaves no cancellation behind, two
+public documentation and diagnostic boundaries become mechanically complete, and the worker fuzz
+harness stops being published application surface.
+
+### Added
+
+- **An application can bypass and restore one live DSP stage without replacing its graph.** The
+  `dsp_bypass` instruction carries a generation, stage index and desired state rather than a toggle.
+  Requested bypass and restore each have one correlated terminal event; stale generations, unknown
+  stages, repeated state, supervised stages and runtime-imposed bypasses are typed refusals which
+  leave the active graph unchanged. Interpreter and real-socket tests hold the complete path and
+  prove one call cannot address another call's graph.
+
+### Changed
+
+- **The worker-protocol fuzz harness is test support again.** Its program vocabulary, generator,
+  oracle, replay suite, example and seed corpus now live in `sipx-testkit`. `sipx-media` retains one
+  hidden byte-in/records-out bridge so the fuzzer and replay tests still drive its real private
+  worker callers without publishing the harness types. Corpus modification and addition checks
+  follow the move, and a fresh 60-second campaign completed 151,127 executions with no finding.
+
+### Fixed
+
+- **`peers` dispatches registrar cancellation before it exits.** Awaited unsubscribe now returns
+  after the event driver has applied its immediate outputs and admitted the in-dialog SUBSCRIBE with
+  Expires 0 to the endpoint. It deliberately does not wait for the peer's response, terminal NOTIFY
+  or Timer N; endpoint shutdown then cancels and joins the remaining work.
+
+- **Application-host diagnostics no longer print resting call bytes.** `sipx-app` is now explicitly
+  inside the at-rest diagnostic scope. Text and binary WebSocket messages render their variant and
+  byte count, never their call content, and behavioral tests cover the public carriers that can
+  hold credentials or encoded audio.
+
+### Documentation
+
+- **The SDK page names every event type in the wire contract.** Its inventory is generated from the
+  normative table, so a new or removed event changes the public page in the same update; sync tests
+  report the exact missing event instead of only saying the page drifted.
+
 ## [1.0.0-rc.21] — 2026-08-10
 
 This is the first public candidate after rc.17. It carries the changes recorded at the unpublished

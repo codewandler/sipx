@@ -3206,6 +3206,63 @@ async fn the_first_notify_bound_is_the_one_the_operator_stated() {
     );
 }
 
+/// A completed registrar observation tears down its binding before `peers` exits (`P-30`,
+/// `S24-V6`).
+///
+/// After its first full NOTIFY the registrar deliberately leaves the cancellation unanswered. The
+/// command therefore has to dispatch Expires 0, close the endpoint, and join its local subscription
+/// work without silently turning cancellation into a wait for the response, a terminal NOTIFY, or
+/// Timer N.
+#[tokio::test]
+async fn peers_cancels_and_joins_its_registrar_subscription_before_exit() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("the fixture registrar binds");
+    let address = listener.local_addr().expect("the fixture has an address");
+    let serving = tokio::spawn(teardown_registrar(listener, address));
+
+    let mut command = sipx();
+    command.args([
+        "peers",
+        "--registrar",
+        "sip:alice@example.com",
+        "--target",
+        &address.to_string(),
+        "--transport",
+        "tcp",
+        "--local",
+        "127.0.0.1:0",
+        "--expires",
+        "60",
+        "--timeout",
+        "1",
+        "--json",
+    ]);
+    // A failure bound: cancellation waiting for Timer N must fail this assertion rather than hold
+    // the test job for the protocol timer's thirty-two seconds.
+    let output = tokio::time::timeout(bound(Duration::from_secs(10)), command.output())
+        .await
+        .expect("peers cancellation is bounded")
+        .expect("peers runs");
+    // A failure bound: command exit closes the TCP endpoint, so the fixture must observe EOF rather
+    // than wait indefinitely if teardown returns without closing its transport.
+    let saw_cancellation = tokio::time::timeout(bound(Duration::from_secs(2)), serving)
+        .await
+        .expect("endpoint teardown closes the registrar connection")
+        .expect("the fixture registrar joins");
+
+    let rendered = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "the registrar was observed: {rendered}"
+    );
+    assert!(
+        saw_cancellation,
+        "peers exited without sending the registrar an in-dialog SUBSCRIBE with Expires 0: \
+         {rendered}"
+    );
+}
+
 /// Every `register` outcome names the registration it is about (`P-28`).
 ///
 /// The success report has always carried `aor`. A failure did not, so a script reading it to tell
@@ -3652,6 +3709,87 @@ fn header_value<'a>(message: &'a str, name: &str) -> &'a str {
     header_line(message, name)
         .split_once(':')
         .map_or("", |(_, value)| value.trim())
+}
+
+/// Notify once, then record cancellation before endpoint EOF without answering the cancellation.
+async fn teardown_registrar(
+    listener: tokio::net::TcpListener,
+    address: std::net::SocketAddr,
+) -> bool {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let Ok((mut stream, _)) = listener.accept().await else {
+        return false;
+    };
+    let contact = format!("sip:registrar@{address};transport=tcp");
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 2048];
+    let mut saw_cancellation = false;
+    let mut notified = false;
+
+    loop {
+        let Ok(read) = stream.read(&mut chunk).await else {
+            return false;
+        };
+        if read == 0 {
+            return saw_cancellation;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+
+        while let Some(message) = take_message(&mut buffer) {
+            if !message.starts_with("SUBSCRIBE ") {
+                continue;
+            }
+            if header_value(&message, "Expires") == "0" {
+                saw_cancellation = true;
+                // Deliberately no final response and no terminal NOTIFY: the dispatch barrier is
+                // the command contract, not Timer N or peer acknowledgement.
+                continue;
+            }
+
+            let to = header_value(&message, "To");
+            let tagged = if to.contains(";tag=") {
+                to.to_owned()
+            } else {
+                format!("{to};tag=fixture-p30")
+            };
+            let accepted = format!(
+                "SIP/2.0 200 OK\r\nVia: {}\r\nTo: {tagged}\r\nFrom: {}\r\nCall-ID: {}\r\n\
+                 CSeq: {}\r\nContact: <{contact}>\r\nExpires: 60\r\nContent-Length: 0\r\n\r\n",
+                header_value(&message, "Via"),
+                header_value(&message, "From"),
+                header_value(&message, "Call-ID"),
+                header_value(&message, "CSeq"),
+            );
+            if stream.write_all(accepted.as_bytes()).await.is_err() {
+                return false;
+            }
+            if notified {
+                continue;
+            }
+            notified = true;
+
+            let document = "<reginfo xmlns=\"urn:ietf:params:xml:ns:reginfo\" version=\"0\" \
+                            state=\"full\"><registration aor=\"sip:alice@example.com\" id=\"r1\" \
+                            state=\"active\"><contact id=\"c1\" state=\"active\" \
+                            event=\"registered\"><uri>sip:alice@192.0.2.10</uri></contact>\
+                            </registration></reginfo>";
+            let notify = format!(
+                "NOTIFY {} SIP/2.0\r\nVia: SIP/2.0/TCP {address};branch=z9hG4bK-p30\r\n\
+                 Max-Forwards: 70\r\nFrom: {tagged}\r\nTo: {}\r\nCall-ID: {}\r\n\
+                 CSeq: 1 NOTIFY\r\nContact: <{contact}>\r\nEvent: reg\r\n\
+                 Subscription-State: active;expires=60\r\n\
+                 Content-Type: application/reginfo+xml\r\nContent-Length: {}\r\n\r\n{document}",
+                header_value(&message, "Contact").trim_matches(['<', '>']),
+                header_value(&message, "From"),
+                header_value(&message, "Call-ID"),
+                document.len(),
+            );
+            if stream.write_all(notify.as_bytes()).await.is_err() {
+                return false;
+            }
+        }
+    }
 }
 
 /// A registrar that answers SUBSCRIBE over TCP and notifies once, for as long as it is asked.

@@ -511,7 +511,7 @@ jobs:
           mkdir -p fuzz/corpus/worker_protocol_sequence
           cargo fuzz run worker_protocol_sequence \
             fuzz/corpus/worker_protocol_sequence \
-            crates/sipx-media/corpus/worker-protocol-sequences \
+            crates/sipx-testkit/corpus/worker-protocol-sequences \
             -- -max_total_time=60 -max_len=512
       # The corpora are committed test data: prove the fuzzer did not modify them.
       - name: Verify the RFC 4475 corpus is untouched

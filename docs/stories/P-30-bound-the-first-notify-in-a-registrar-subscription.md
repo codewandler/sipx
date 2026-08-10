@@ -26,13 +26,31 @@ which is now the longest thing it can do without saying so.
 - [x] A failing-first test proves a registrar that accepts the SUBSCRIBE and never notifies returns
       on the stated deadline, distinguishable in text, JSON and exit status from a refused
       subscription and from a transport failure.
-- [ ] Cancellation drops and joins the subscription without leaving a binding the registrar still
+- [x] Cancellation drops and joins the subscription without leaving a binding the registrar still
       believes in.
 - [x] The published reference states the bound and its default alongside the other command
       deadlines, checked rather than prose.
 - [ ] `./scripts/gate.py` green.
 
 ## Progress
+
+- 2026-08-10: **row 3 complete.** The awaited unsubscribe operation is now a dispatch barrier: its
+  driver acknowledges only after applying the command's immediate outputs and awaiting endpoint
+  request admission for the in-dialog SUBSCRIBE with Expires 0. It remains deliberately shorter
+  than protocol completion; the fixture registrar leaves cancellation unanswered and the command
+  still exits in **0.03 s**, closes the TCP endpoint, and joins the dispatcher-owned response, timer
+  and lifecycle work. The command test is backed by the generic subscription suites, which assert
+  zero owned tasks, timers and transactions after joined shutdown. Focused subscriber and
+  registration discovery suites pass (2 tests each), both existing first-NOTIFY deadline tests
+  pass, focused `sipx-call`/`sipx-cli` clippy is warning-free, and fixed-sleep/provenance checks pass.
+  The full gate row remains for the release wave.
+
+- 2026-08-10: failing-first teardown evidence: after a full NOTIFY, the command-level TCP registrar
+  test completed successfully in **0.03 s**, observed endpoint EOF, and failed because it received
+  **no in-dialog SUBSCRIBE with Expires 0**. `EventSubscription::unsubscribe` acknowledged command
+  admission, so endpoint shutdown could overtake the driver's application of that command. The
+  specified repair is an immediate-output dispatch barrier followed by the existing dispatcher
+  join; it deliberately does not wait for a cancellation response, terminal NOTIFY or Timer N.
 
 - 2026-08-10: selected as the highest-priority carry-over in the five-story rc.22 wave. The open
   contract is the cancellation proof and its joined teardown; the already delivered operator

@@ -108,9 +108,9 @@ pub fn one_of_every_event() -> Vec<EventKind> {
     .collect()
 }
 
-/// §5.3's five `call.dsp.*` rows, one of each (`M-67`).
+/// §5.3's six `call.dsp.*` rows, one of each (`M-67`, `M-125`).
 ///
-/// A function of its own because five rows sharing four members push [`one_of_every_event`] past
+/// A function of its own because six rows sharing four members push [`one_of_every_event`] past
 /// this workspace's function-length limit on their own. The split is where §5.3 puts them, so the
 /// section's order is still the list's order.
 fn dsp_events() -> Vec<EventKind> {
@@ -131,14 +131,22 @@ fn dsp_events() -> Vec<EventKind> {
             processor: "sipx.gain".to_owned(),
         },
         EventKind::DspBypassed {
+            instruction_id: None,
             direction: AudioDirection::Inbound,
             generation: 2,
             at_position: 480,
             processor: "sipx.low_pass".to_owned(),
             cause: DspBypassCause::DeadlineMissed,
         },
+        EventKind::DspRestored {
+            instruction_id: "x3".to_owned(),
+            direction: AudioDirection::Outbound,
+            generation: 2,
+            at_position: 560,
+            processor: "sipx.gain".to_owned(),
+        },
         EventKind::DspRemoved {
-            instruction_id: Some("x3".to_owned()),
+            instruction_id: Some("x4".to_owned()),
             direction: AudioDirection::Outbound,
             generation: 2,
             at_position: 640,
@@ -146,7 +154,7 @@ fn dsp_events() -> Vec<EventKind> {
             cause: DspTeardownCause::Requested,
         },
         EventKind::DspRefused {
-            instruction_id: "x4".to_owned(),
+            instruction_id: "x5".to_owned(),
             direction: AudioDirection::Inbound,
             reason: DspRefusal::UnknownProcessor,
         },
@@ -257,7 +265,7 @@ pub fn one_of_every_verb() -> Vec<Instruction> {
     .into_iter()
     .chain(dsp_verbs())
     .chain(vec![Instruction::new(
-        "i23",
+        "i24",
         Verb::Hangup {
             cause: EndCause::Hangup,
         },
@@ -265,10 +273,10 @@ pub fn one_of_every_verb() -> Vec<Instruction> {
     .collect()
 }
 
-/// §6.2's three `dsp` verbs, one of each (`M-67`).
+/// §6.2's four `dsp` verbs, one of each (`M-67`, `M-125`).
 ///
 /// Split from [`one_of_every_verb`] for the reason [`dsp_events`] is split from
-/// [`one_of_every_event`]: three verbs carrying a nested chain and a parameter set between them
+/// [`one_of_every_event`]: four verbs carrying a nested chain and a parameter set between them
 /// push that function past this workspace's function-length limit on their own.
 fn dsp_verbs() -> Vec<Instruction> {
     vec![
@@ -300,6 +308,15 @@ fn dsp_verbs() -> Vec<Instruction> {
         ),
         Instruction::new(
             "i22",
+            Verb::DspBypass {
+                direction: AudioDirection::Inbound,
+                generation: 3,
+                processor: 1,
+                bypassed: true,
+            },
+        ),
+        Instruction::new(
+            "i23",
             Verb::DspRemove {
                 direction: AudioDirection::Inbound,
             },
