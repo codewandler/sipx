@@ -55,6 +55,15 @@ are, because a deployment job that succeeded and a page that answers are differe
 success on the release commit
 MUST NOT be substituted for the complete gate or for any other normative proof.
 
+The protected runner MUST provision every external tool the complete gate requires before the gate
+starts. Because ordinary CI splits those configurations across jobs, this includes the
+`x86_64-pc-windows-gnu` Rust target and its `gcc-mingw-w64` cross compiler, the
+`wasm32-unknown-unknown` and `wasm32-wasip1` Rust targets, and the `wasmtime` runtime in addition to
+the stable and MSRV toolchains and native feature libraries. The workflow checker MUST hold each of
+those prerequisites and their position before the gate. A missing hosted-runner tool is an
+infrastructure defect, not a product finding, and MUST be a structural finding before the candidate
+is tagged.
+
 One Actions-managed Rust artifact cache
 MAY be restored, and only after the immutable-tag facts of §3 are established.
 Its key MUST cover the runner image, the workspace lockfile, the CI flags the gate runs under, the

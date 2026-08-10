@@ -765,6 +765,38 @@ class PreflightMutations(unittest.TestCase):
                 self.assertIn(expected, checker.workflow_problems(mutated))
 
 
+class GatePrerequisiteMutations(unittest.TestCase):
+    """X-147: a protected runner must be able to execute every complete-gate step."""
+
+    def assert_prerequisite(self, token: str, expected: str) -> None:
+        self.assertIn(token, WORKFLOW, f"release workflow no longer provisions {token!r}")
+        self.assertIn(expected, checker.workflow_problems(WORKFLOW.replace(token, "", 1)))
+
+    def test_the_release_runner_provisions_the_non_linux_cross_check(self) -> None:
+        self.assert_prerequisite(
+            "gcc-mingw-w64",
+            "release runner does not install the Windows cross compiler",
+        )
+        self.assert_prerequisite(
+            "x86_64-pc-windows-gnu",
+            "release runner does not install the Windows Rust target",
+        )
+
+    def test_the_release_runner_provisions_both_wasm_targets(self) -> None:
+        for target in ("wasm32-unknown-unknown", "wasm32-wasip1"):
+            with self.subTest(target=target):
+                self.assert_prerequisite(
+                    target,
+                    f"release runner does not install the {target} Rust target",
+                )
+
+    def test_the_release_runner_provisions_the_wasm_runtime(self) -> None:
+        self.assert_prerequisite(
+            "tool: wasmtime",
+            "release runner does not install the WebAssembly runtime",
+        )
+
+
 class BuildCacheMutations(unittest.TestCase):
     """X-93: the artifact cache is an optimisation, and every rule here says so structurally."""
 

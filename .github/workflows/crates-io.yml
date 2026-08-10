@@ -162,10 +162,19 @@ jobs:
       - name: Install release build prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev libopus-dev libssl-dev pkg-config
+          sudo apt-get install -y gcc-mingw-w64 libasound2-dev libopus-dev libssl-dev pkg-config
           rustup toolchain install stable --profile minimal --component rustfmt,clippy
           msrv="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["rust-version"])')"
           rustup toolchain install "$msrv" --profile minimal
+          rustup target add x86_64-pc-windows-gnu wasm32-unknown-unknown wasm32-wasip1
+
+      # The complete gate reunites configurations ordinary CI runs in separate jobs. The runtime
+      # is explicit here for the same reason as the cross compiler and targets above: an absent
+      # hosted-runner tool is not a product failure and must not be discovered after tagging.
+      - name: Install release WebAssembly runtime
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasmtime
 
       # The Node dependency cache. `cache: npm` keyed on the exact website lockfile, which caches
       # the npm *downloads* only. A `website/node_modules` cache was measured rather than assumed

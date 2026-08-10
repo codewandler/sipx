@@ -25,6 +25,8 @@ CACHE_SAVE_STEP = "Save the Actions-managed Rust artifact cache"
 TIMINGS_STEP = "Record the gate's cold or warm timings"
 PRESERVE_TIMINGS_STEP = "Preserve the gate timings record"
 TAG_VALIDATION_STEP = "Validate the immutable annotated tag"
+BUILD_PREREQUISITES_STEP = "Install release build prerequisites"
+WASM_RUNTIME_STEP = "Install release WebAssembly runtime"
 GATE_STEP = "Run the complete release gate"
 TIMINGS_PATH = "${{ runner.temp }}/sipx-gate-timings.json"
 
@@ -164,6 +166,58 @@ def preflight_problems(text: str) -> list[str]:
     ):
         if len(re.findall(pattern, text)) != 2:
             problems.append(label)
+
+    return problems
+
+
+def gate_prerequisite_problems(text: str) -> list[str]:
+    """Require the protected runner to provision every external tool used by the local gate.
+
+    Ordinary CI splits these configurations across jobs whose setup lives beside each command.
+    The release job deliberately reunites them in one complete gate, so it must reunite their
+    prerequisites too. A missing tool is not a product finding and must be caught before a tag
+    spends a cold gate discovering it.
+    """
+
+    problems: list[str] = []
+    build = step_body(text, BUILD_PREREQUISITES_STEP)
+    runtime = step_body(text, WASM_RUNTIME_STEP)
+    requirements = (
+        (build, r"\bgcc-mingw-w64\b", "release runner does not install the Windows cross compiler"),
+        (
+            build,
+            r"rustup target add[^\n]*\bx86_64-pc-windows-gnu\b",
+            "release runner does not install the Windows Rust target",
+        ),
+        (
+            build,
+            r"rustup target add[^\n]*\bwasm32-unknown-unknown\b",
+            "release runner does not install the wasm32-unknown-unknown Rust target",
+        ),
+        (
+            build,
+            r"rustup target add[^\n]*\bwasm32-wasip1\b",
+            "release runner does not install the wasm32-wasip1 Rust target",
+        ),
+        (
+            runtime,
+            r"uses:\s*taiki-e/install-action@v2.*?tool:\s*wasmtime",
+            "release runner does not install the WebAssembly runtime",
+        ),
+    )
+    for body, pattern, label in requirements:
+        required(body, label, pattern, problems)
+
+    build_position = _step_position(text, BUILD_PREREQUISITES_STEP)
+    runtime_position = _step_position(text, WASM_RUNTIME_STEP)
+    gate_position = _step_position(text, GATE_STEP)
+    if not (
+        build_position >= 0
+        and runtime_position >= 0
+        and gate_position >= 0
+        and build_position < runtime_position < gate_position
+    ):
+        problems.append("release gate prerequisites are not installed before the complete gate")
 
     return problems
 
@@ -380,6 +434,7 @@ def workflow_problems(text: str) -> list[str]:
         required(text, label, pattern, problems)
 
     problems.extend(preflight_problems(text))
+    problems.extend(gate_prerequisite_problems(text))
     problems.extend(build_cache_problems(text))
 
     if re.search(r"(?m)^\s*cargo\s+publish\b", text):

@@ -24,9 +24,9 @@ compiles the [answer-a-call example](answer-a-call.md):
 <!-- BEGIN generated:answer-consumer-dependencies -->
 ```toml
 [dependencies]
-sipx-call = "=1.0.0-rc.20"
-sipx-sip = "=1.0.0-rc.20"
-sipx-transport = "=1.0.0-rc.20"
+sipx-call = "=1.0.0-rc.21"
+sipx-sip = "=1.0.0-rc.21"
+sipx-transport = "=1.0.0-rc.21"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 <!-- END generated:answer-consumer-dependencies -->
@@ -45,7 +45,7 @@ Optional behavior is opt-in. For example, make Opus selectable by `sipx-call` li
 
 ```toml
 [dependencies]
-sipx-call = { version = "=1.0.0-rc.20", features = ["opus"] }
+sipx-call = { version = "=1.0.0-rc.21", features = ["opus"] }
 ```
 
 Opus links a C library. Enabling the feature makes `Codecs::Opus` available; it does not silently
@@ -56,7 +56,7 @@ selected explicitly:
 
 ```toml
 [dependencies]
-sipx-call = { version = "=1.0.0-rc.20", features = ["opus", "dtls"] }
+sipx-call = { version = "=1.0.0-rc.21", features = ["opus", "dtls"] }
 ```
 
 ### Opus packaging policy

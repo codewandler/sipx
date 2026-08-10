@@ -7,12 +7,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [1.0.0-rc.20] — 2026-08-10
+## [1.0.0-rc.21] — 2026-08-10
 
 This is the first public candidate after rc.17. It carries the changes recorded at the unpublished
-rc.18 and rc.19 boundaries, plus a five-story conformance wave: one early graph refusal, one
-contention-safe test, two public documentation contracts and the release-orchestration repair that
-made a fresh version necessary.
+rc.18 and rc.19 boundaries and the rc.20 tag whose protected gate stopped before publication, plus
+a five-story conformance wave: one early graph refusal, one contention-safe test, two public
+documentation contracts and the release-orchestration repair that made a fresh version necessary.
 
 ### Fixed
 
@@ -22,6 +22,11 @@ made a fresh version necessary.
   path is now derived only at step scope, and the repository's structural checker has failing-first
   vectors for both the expression context and the requirement that the gate, summary and preserved
   artifact use one file.
+
+- **The protected runner provisions the complete gate.** The first dispatchable run found that its
+  single combined gate lacked the cross compiler, three Rust targets and WebAssembly runtime that
+  ordinary CI installed in separate jobs. The release job now installs the whole set before the
+  gate, and structural mutation tests refuse every individual omission.
 
 - **An oversized DSP frame is refused where its plan is admitted.** A session could derive more
   than 65,536 samples per frame while the graph validator checked only the configured ceiling. A
