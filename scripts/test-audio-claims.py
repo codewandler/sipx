@@ -1620,6 +1620,253 @@ class TheSampleBufferRule(unittest.TestCase):
         self.assertEqual(1, len(self.problems(argued)))
 
 
+#: `M-68`'s finding in the smallest shape that holds it: a public type whose derived `Debug`
+#: renders the call's audio through a private field, holding no buffer of its own. `M-107`'s reader
+#: passed the tree that contained this, which is what `M-121` is.
+INDIRECT = (
+    "/// One call direction's live graph.\n"
+    "#[derive(Debug)]\n"
+    "pub struct Graph { slot: Slot }\n"
+    "\n"
+    "/// What the graph is carrying.\n"
+    "#[derive(Debug)]\n"
+    "struct Slot { front: Vec<i16> }\n"
+)
+
+#: The redaction that answers the rule from the private carrier, which is where `M-68` wrote it.
+SLOT_REDACTION = (
+    "impl std::fmt::Debug for Slot {\n"
+    "    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n"
+    '        f.debug_struct("Slot").field("carrying", &self.front.len()).finish()\n'
+    "    }\n"
+    "}\n"
+)
+
+#: The chain `M-68` found by hand, hop for hop, at the visibilities it was written in. `DspGraph`
+#: holds a `SlotRef`, which holds an `Arc<Mutex<Slot>>`, which holds the live generation, which
+#: holds the three buffers — the frame in flight among them.
+FOUR_HOPS = (
+    "/// One call direction's live DSP graph.\n"
+    "#[derive(Debug)]\n"
+    "pub struct DspGraph { slot: SlotRef }\n"
+    "\n"
+    "#[derive(Debug)]\n"
+    "pub(crate) struct SlotRef { slot: Arc<Mutex<Slot>>, direction: AudioDirection }\n"
+    "\n"
+    "#[derive(Debug)]\n"
+    "struct Slot { live: Option<Live>, generation: u64 }\n"
+    "\n"
+    "#[derive(Debug)]\n"
+    "struct Live { buffers: Buffers, position: u64 }\n"
+    "\n"
+    "#[derive(Debug)]\n"
+    "struct Buffers { front: Vec<i16>, back: Vec<i16>, scratch: Vec<i16> }\n"
+)
+
+
+def hops(count: int) -> str:
+    """A public type whose derived `Debug` reaches a buffer `count` private fields away."""
+    source = "/// The head of a chain.\n#[derive(Debug)]\npub struct Head { next: Hop0 }\n"
+    for index in range(count - 1):
+        source += f"\n#[derive(Debug)]\nstruct Hop{index} {{ next: Hop{index + 1} }}\n"
+    return source + f"\n#[derive(Debug)]\nstruct Hop{count - 1} {{ samples: Vec<i16> }}\n"
+
+
+class TheCarrierChase(unittest.TestCase):
+    """`M-121`: the raw-audio rule follows a public type's fields into the crate's private ones.
+
+    `M-107`'s reader looked at a public type's *own* fields, which was the right first cut and one
+    hop short of the defect. `M-68` then found `sipx_media::DspGraph` rendering every sample of the
+    frame in flight through four private hops — `DspGraph` holds a `SlotRef`, which holds an
+    `Arc<Mutex<Slot>>`, which holds the live generation, which holds the buffers — and the checker
+    passed the tree that contained it, because `DspGraph` holds no buffer of its own.
+
+    Four things have to hold and each is a group below: the chase reaches a buffer however many
+    private hops away it is written, a redaction anywhere on the chain answers it, the chase does
+    not follow what a `Debug` would not render, and it says where it stopped looking.
+    """
+
+    def problems(self, source):
+        return demo_crate({"lib.rs": source}, guard.sample_buffer_problems)
+
+    # -- what it now reaches --------------------------------------------------------------
+
+    def test_a_public_debug_over_a_private_carrier_is_reported(self):
+        """`M-68`'s finding, as the Acceptance states it: one hop, and nothing else."""
+        problems = self.problems(INDIRECT)
+        self.assertEqual(1, len(problems))
+        self.assertIn("`Graph`", problems[0])
+        self.assertIn("PCM samples", problems[0])
+
+    def test_the_four_hop_chain_m68_found_by_hand_is_reported(self):
+        problems = self.problems(FOUR_HOPS)
+        self.assertEqual(1, len(problems))
+        self.assertIn("`DspGraph`", problems[0])
+
+    def test_the_report_names_the_chain_and_the_type_the_redaction_belongs_on(self):
+        """A rule that reported only the public type would send a reviewer to the one file where
+        there is nothing to fix: the buffer is on `Buffers`, four hops down."""
+        problem = self.problems(FOUR_HOPS)[0]
+        self.assertIn("DspGraph -> SlotRef -> Slot -> Live -> Buffers", problem)
+        self.assertIn("`Buffers`", problem)
+
+    def test_a_private_carrier_in_another_module_is_reached(self):
+        """`SlotRef` lives in `dsp::graph` and `DspGraph` in `dsp`; a reader confined to one file
+        would have missed the first hop of the chain this rule exists for."""
+        problems = demo_crate(
+            {
+                "lib.rs": "mod graph;\n\n/// A handle.\n#[derive(Debug)]\n"
+                "pub struct Graph { slot: graph::SlotRef }\n",
+                "graph.rs": "#[derive(Debug)]\npub(crate) struct SlotRef { front: Vec<i16> }\n",
+            },
+            guard.sample_buffer_problems,
+        )
+        self.assertEqual(1, len(problems))
+        self.assertIn("Graph -> SlotRef", problems[0])
+
+    def test_an_indirect_carrier_joins_the_population_the_floor_is_read_from(self):
+        """The printed count and `unreadable_surface` both read this, so a rule that reported a
+        chain without counting it would report a carrier the run says it never found.
+
+        `Slot` is not in it and holds the buffer: the population is *reachable public* types, and
+        a private carrier is what the chase walks through rather than something a caller can name.
+        """
+        carriers = demo_crate({"lib.rs": INDIRECT}, guard.sample_buffer_carriers)
+        self.assertEqual(["Graph"], sorted(name for _path, name, _offset in carriers))
+
+    # -- what answers it ------------------------------------------------------------------
+
+    def test_a_hand_written_debug_on_the_public_type_answers_the_rule(self):
+        """The Acceptance's other half. A type that writes its own rendering decides what it
+        prints, which is the whole of what this rule asks anybody for."""
+        redaction = (
+            "impl std::fmt::Debug for Graph {\n"
+            "    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n"
+            '        f.debug_struct("Graph").finish()\n'
+            "    }\n"
+            "}\n"
+        )
+        self.assertEqual([], self.problems(INDIRECT.replace("#[derive(Debug)]\npub", "pub") + redaction))
+
+    def test_a_hand_written_debug_on_the_private_carrier_cuts_the_chain(self):
+        """Where `M-68` actually wrote its fixes, and the reason the chase stops rather than
+        reports: a derived `Debug` above a redacted one renders the redaction."""
+        source = INDIRECT.replace("/// What the graph is carrying.\n#[derive(Debug)]\n", "")
+        self.assertEqual([], self.problems(source + SLOT_REDACTION))
+
+    def test_a_redaction_halfway_down_cuts_everything_behind_it(self):
+        """`Live` renders shape, so `Slot` and `SlotRef` above it cannot render samples however
+        many buffers `Buffers` holds."""
+        source = FOUR_HOPS.replace("#[derive(Debug)]\nstruct Live", "struct Live") + (
+            "impl std::fmt::Debug for Live {\n"
+            "    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n"
+            '        f.debug_struct("Live").finish()\n'
+            "    }\n"
+            "}\n"
+        )
+        self.assertEqual([], self.problems(source))
+
+    def test_a_private_carrier_can_argue_its_buffer_is_not_call_audio(self):
+        """The coefficient table's escape, reachable from the same phrase at the same anchor
+        wherever on the chain it is written."""
+        argued = INDIRECT.replace(
+            "/// What the graph is carrying.",
+            "/// A window.\n///\n/// Not call audio: these are the Hann coefficients.",
+        )
+        self.assertEqual([], self.problems(argued))
+
+    # -- what it deliberately does not follow ----------------------------------------------
+
+    def test_a_container_that_does_not_render_what_it_holds_is_not_followed(self):
+        """`sipx_media::MediaSession` holds an `mpsc::Sender<Frame>`, and a channel's `Debug`
+        prints the channel. Following it would report a leak that cannot happen, and a rule that
+        reports what cannot happen is switched off by whoever hits it second."""
+        source = (
+            "/// A session.\n#[derive(Debug)]\npub struct Session { outgoing: mpsc::Sender<Frame> }\n"
+            "\n#[derive(Debug)]\nstruct Frame { samples: Vec<i16> }\n"
+        )
+        self.assertEqual([], self.problems(source))
+
+    def test_a_container_that_does_render_what_it_holds_is_followed(self):
+        """The other side of the same decision, and the shape `M-68` was written in: every one of
+        `Arc`, `Mutex`, `Option` and `VecDeque` renders what it holds."""
+        source = (
+            "/// A session.\n#[derive(Debug)]\n"
+            "pub struct Session { incoming: Arc<Mutex<Option<VecDeque<Frame>>>> }\n"
+            "\n#[derive(Debug)]\nstruct Frame { samples: Vec<i16> }\n"
+        )
+        self.assertEqual(1, len(self.problems(source)))
+
+    def test_a_name_declared_twice_resolves_to_the_one_beside_it(self):
+        """`sipx-audio` declares three private `Band`s, and only G.722's holds a delay line. A
+        reader that resolved a name across the whole crate would report the peaking filter for a
+        buffer in a codec it has never heard of."""
+        problems = demo_crate(
+            {
+                "lib.rs": "pub mod filter;\npub mod g722;\n",
+                "filter.rs": "/// A peaking band.\n#[derive(Debug)]\n"
+                "pub struct Peaking { bands: [Band; 2] }\n"
+                "\n#[derive(Debug)]\nstruct Band { upper: i32, lower: i32 }\n",
+                "g722.rs": "#[derive(Debug)]\nstruct Band { qmf_delay: [i16; 24] }\n",
+            },
+            guard.sample_buffer_problems,
+        )
+        self.assertEqual([], problems)
+
+    def test_a_cycle_in_the_type_graph_terminates(self):
+        """A graph is walked and not a tree: `sipx-media`'s `MediaSession` holds a
+        `Mutex<Vec<MediaSession>>` of retired generations."""
+        source = (
+            "/// A ring.\n#[derive(Debug)]\npub struct Head { next: Node }\n"
+            "\n#[derive(Debug)]\nstruct Node { back: Head, count: usize }\n"
+        )
+        self.assertEqual([], self.problems(source))
+
+    # -- where it stops looking, and how each reader fails when it narrows ------------------
+
+    def test_the_chase_reaches_the_stated_depth(self):
+        problems = self.problems(hops(guard._CARRIER_HOPS))
+        self.assertEqual(1, len(problems))
+        self.assertIn("`Head`", problems[0])
+
+    def test_a_carrier_past_the_stated_depth_is_not_reported(self):
+        """The stated limit, asserted rather than described. A chain one hop longer than the
+        depth is what the docstring says stays a reviewer's question."""
+        self.assertEqual([], self.problems(hops(guard._CARRIER_HOPS + 1)))
+
+    def test_a_test_only_item_does_not_hide_the_rest_of_its_file(self):
+        """The reader cuts a file at its *test module*, which is what its own docstring claims.
+        Cutting at the first `cfg(test)` anywhere cut `sipx-media`'s DSP graph at a test-only
+        constructor 1,300 lines above the buffers, so every private type on `M-68`'s chain was
+        invisible to the reader widened to chase it."""
+        source = (
+            "impl Graph {\n"
+            f"    {TEST_ATTRIBUTE}\n"
+            "    fn probe(&self) -> usize { 0 }\n"
+            "}\n"
+            "\n" + INDIRECT
+        )
+        self.assertEqual(1, len(self.problems(source)))
+
+    def test_the_test_module_is_still_cut_off(self):
+        """The half that has to keep holding: a fixture inside a test module is not the crate's."""
+        self.assertEqual([], self.problems(f"{TEST_ATTRIBUTE}\nmod tests {{\n{INDIRECT}}}\n"))
+
+    def test_a_reader_blind_to_the_implementation_reports_every_chain(self):
+        """`sample_buffer_problems`' argument, carried down the chain: the side that is narrowed
+        has to be the side whose failure reports types. A reader that stopped recognising a
+        hand-written `Debug` reports every redacted carrier the chase reaches."""
+        pattern = guard._IMPLEMENTS_DEBUG
+        guard._IMPLEMENTS_DEBUG = r"(?!)"
+        try:
+            source = INDIRECT.replace("/// What the graph is carrying.\n#[derive(Debug)]\n", "")
+            problems = self.problems(source + SLOT_REDACTION)
+        finally:
+            guard._IMPLEMENTS_DEBUG = pattern
+        self.assertEqual(1, len(problems))
+        self.assertIn("`Graph`", problems[0])
+
+
 #: A relay-path type holding octets with nothing but the derive: the shape `M-110` was filed for.
 CARRYING = "/// One packet.\n#[derive(Debug)]\npub struct Packet { payload: Bytes }\n"
 

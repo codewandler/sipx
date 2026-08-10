@@ -539,3 +539,82 @@ async fn an_encoded_payload_renders_its_type_and_its_length_and_not_the_call() {
 
     session.shutdown().await;
 }
+
+/// `M-121`: nothing an attachment renders may carry the frames it has not delivered yet.
+///
+/// `M-107`'s rule, at the type a checker could not see it from. A [`PcmProcessor`] holds no buffer
+/// of its own — it holds an `Arc<Queue>`, whose state holds a whole attachment's bound of offered
+/// frames — so a derived rendering put every sample of every undelivered frame into whatever record
+/// named the processor, at a length that is the queue's. That is the shape `M-68` found on the DSP
+/// graph and `M-121` widened `check-audio-claims.py` to reach; this is the half a checker cannot
+/// do, which is what the redaction actually prints.
+///
+/// The unread attachment is rendered while a second attachment's `recv` has already returned the
+/// same frame, so the queue provably holds the call's audio at the moment of the rendering rather
+/// than after a wait that assumes it.
+#[tokio::test]
+async fn an_attachment_renders_its_depth_and_not_the_frames_it_is_holding() {
+    /// A sample value no port, SSRC, rate or count in this record can be confused with: the
+    /// leading minus cannot appear inside any of them.
+    const SENTINEL: i16 = -4_001;
+
+    let (session, _peer, _session_addr) = session_and_peer().await;
+
+    let mut watched = session
+        .attach_processor(Processing::new(AudioDirection::Outbound, narrowband()))
+        .expect("attaches to transmitted audio");
+    let mut held = session
+        .attach_processor(Processing::new(AudioDirection::Outbound, narrowband()))
+        .expect("a second attachment observes the same audio independently");
+
+    assert!(
+        session.send(vec![SENTINEL; SAMPLES_PER_PACKET]).await,
+        "queues outbound audio"
+    );
+    let observed = tokio::time::timeout(ARRIVAL_BOUND, watched.recv())
+        .await
+        .expect("transmitted audio reaches the seam")
+        .expect("a frame");
+    assert_eq!(
+        signed(observed.pcm().samples())[0],
+        SENTINEL,
+        "the seam carries the samples this side sent, which is what makes the record below a leak"
+    );
+
+    // An attachment only sees offers made after it attached, so this one's queue is empty and its
+    // record is the same type's with none of the call in it.
+    let fresh = session
+        .attach_processor(Processing::new(AudioDirection::Outbound, narrowband()))
+        .expect("a third attachment, after the audio");
+
+    // One offer feeds every attachment, so `held`'s queue holds the frame `watched` just returned.
+    let record = format!("{held:?}");
+    let empty = format!("{fresh:?}");
+    assert!(
+        !record.contains(&SENTINEL.to_string()),
+        "an undelivered frame's samples survived into the attachment's record: {record}"
+    );
+    // What one held frame may add to the record. Its shape — a sequence, a rate, a length and a
+    // break — is under a hundred octets; its 160 samples would be nearer a thousand, so a record
+    // whose length is the audio's cannot pass this.
+    assert!(
+        record.len().abs_diff(empty.len()) < 256,
+        "an attachment holding a frame renders {} octets and one holding none renders {}, so the \
+         record's length is the frame's rather than the type's: {record}",
+        record.len(),
+        empty.len()
+    );
+    assert!(
+        record.contains("PcmProcessor"),
+        "the record still says what it is: {record}"
+    );
+
+    // And the audio was there to leak: the attachment delivers the frame the record did not carry.
+    let delivered = tokio::time::timeout(ARRIVAL_BOUND, held.recv())
+        .await
+        .expect("the held attachment still has the frame")
+        .expect("a frame");
+    assert_eq!(signed(delivered.pcm().samples())[0], SENTINEL);
+
+    session.shutdown().await;
+}

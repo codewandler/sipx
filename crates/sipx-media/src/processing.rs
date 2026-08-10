@@ -319,13 +319,30 @@ impl Break {
 }
 
 /// One frame as the media path offered it, before this attachment's own conversion.
-#[derive(Debug)]
 struct Offered {
     sequence: u64,
     source_rate: u32,
     samples: Vec<i16>,
     /// The break immediately before this frame.
     preceded_by: Option<Break>,
+}
+
+/// What the frame is, never what it contains (`M-107`, `M-121`).
+///
+/// [`PcmFrame`]'s rule, one hop earlier on the same path and for a larger quantity of the same
+/// audio: a [`Queue`] holds a whole attachment's bound of these, so a derived rendering of one
+/// carries every sample of every frame the consumer has not read yet. It is reachable from
+/// [`PcmProcessor`], which is public, `Debug` and the type an application names when it reports
+/// that its own tap has fallen behind.
+impl std::fmt::Debug for Offered {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Offered")
+            .field("sequence", &self.sequence)
+            .field("source_rate", &self.source_rate)
+            .field("samples", &self.samples.len())
+            .field("preceded_by", &self.preceded_by)
+            .finish()
+    }
 }
 
 /// Everything one attachment's queue holds, behind one lock.
