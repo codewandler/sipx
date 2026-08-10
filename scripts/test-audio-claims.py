@@ -234,6 +234,10 @@ class TheRepositoryItself(unittest.TestCase):
         surface, or that the reader had gone blind. It has neither."""
         self.assertGreater(len(guard.outstanding_byte_buffers(self.published)), 0)
 
+    def test_public_pages_name_every_checked_diagnostics_scope(self):
+        """`X-145`: adding a protected crate cannot silently leave the public claim behind."""
+        self.assertEqual([], guard.diagnostic_documentation_problems())
+
     def test_every_claim_every_crate_makes_is_backed(self):
         """`X-35`'s failing-first assertion.
 
@@ -2063,6 +2067,57 @@ class TheByteBufferRule(unittest.TestCase):
             [],
             guard.unread_relay_path([("path", "Packet", 0)] * guard._PLAUSIBLE_RELAY_CARRIERS),
         )
+
+
+class TheDiagnosticDocumentationRule(unittest.TestCase):
+    """`X-145`: the public privacy claim follows the checker scopes that make it true."""
+
+    PAGES = {
+        pathlib.Path("privacy.md"): (
+            "relay path `sipx-media` `sipx-rtp`; comes to rest "
+            "`sipx-app-protocol` `sipx-testkit`; scripts/check-audio-claims.py"
+        ),
+        pathlib.Path("logging.md"): "scripts/check-audio-claims.py",
+    }
+
+    def test_a_new_crate_in_either_scope_is_reported(self):
+        for scope, relay, at_rest in (
+            ("relay path", (*guard.RELAY_PATH, "sipx-new-relay"), guard.AUDIO_AT_REST),
+            ("comes to rest", guard.RELAY_PATH, (*guard.AUDIO_AT_REST, "sipx-new-store")),
+        ):
+            with self.subTest(scope=scope):
+                problems = guard.diagnostic_documentation_problems(relay, at_rest, self.PAGES)
+                self.assertEqual(1, len(problems))
+                self.assertIn(scope, problems[0])
+                self.assertIn("appears on neither public page", problems[0])
+
+    def test_a_reasoned_exemption_is_explicit_and_an_empty_one_is_not(self):
+        relay = (*guard.RELAY_PATH, "sipx-internal")
+        self.assertEqual(
+            [],
+            guard.diagnostic_documentation_problems(
+                relay,
+                guard.AUDIO_AT_REST,
+                self.PAGES,
+                (("relay path", "sipx-internal", "not part of the public API"),),
+            ),
+        )
+        problems = guard.diagnostic_documentation_problems(
+            relay,
+            guard.AUDIO_AT_REST,
+            self.PAGES,
+            (("relay path", "sipx-internal", ""),),
+        )
+        self.assertEqual(1, len(problems))
+
+    def test_both_pages_name_the_checker(self):
+        pages = dict(self.PAGES)
+        pages[pathlib.Path("logging.md")] = "no enforcement named here"
+        problems = guard.diagnostic_documentation_problems(
+            guard.RELAY_PATH, guard.AUDIO_AT_REST, pages
+        )
+        self.assertEqual(1, len(problems))
+        self.assertIn("logging.md", problems[0])
 
 
 if __name__ == "__main__":

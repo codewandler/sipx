@@ -1,9 +1,47 @@
 ---
-title: Speech privacy
-description: What a speech provider may do with a call's audio and text in sipx, what the defaults are, and which opt-ins a host has to write down.
+title: Privacy and diagnostic redaction
+description: What sipx diagnostic records may reveal, how the rule is checked, and what a speech provider may do with a call's audio and text.
 ---
 
-# Speech privacy
+# Privacy and diagnostic redaction
+
+sipx's diagnostic types retain enough structure to investigate a call without rendering the call's
+content by default. This is a property of their `Debug` implementations, not an instruction for a
+reviewer to remember. [scripts/check-audio-claims.py](https://github.com/codewandler/sipx/blob/main/scripts/check-audio-claims.py)
+walks every reachable public diagnostic type, follows a rendering through private carriers, and
+fails the build when protected bytes could reach the record.
+
+## What the checker protects
+
+The rule decides each kind of carrier at the scope where its contents are knowable:
+
+- **Raw call audio is checked workspace-wide.** A reachable public type holding `i16` or `f32`
+  samples must render a class and a sample count, implement an equivalent redaction, or state beside
+  the type why the samples are not call audio.
+- **The relay path is checked where encoded call bytes pass through.** Every reachable public byte
+  carrier in `sipx-media` and `sipx-rtp` must redact its contents or state why the bytes are neither
+  the call nor a participant.
+- **The crates where a call comes to rest are checked separately.** The same byte-carrier rule
+  covers `sipx-app-protocol` and `sipx-testkit`, where a prompt or a recorded peer can keep call
+  bytes long after one packet has moved on.
+- **Fixed-size byte arrays are checked workspace-wide as keys.** A reachable public type containing
+  `[u8; N]` must redact it or state why the array is not a secret. The fixed size is a choice the
+  type made, unlike a message whose length came from the network.
+
+Encoded audio inside an opaque byte type cannot be identified by its element type alone. A byte
+buffer can equally be a SIP URI, a message body, a routing header or media, so applying the relay
+rule to every byte buffer would hide the protocol fields a diagnostic log exists to print. Carriers
+outside the relay and at-rest scopes are counted by the checker rather than silently treated as
+safe; protocol headers, including identities used to route and correlate a call, are deliberately
+not redacted by this guarantee.
+
+Counts, payload lengths, sample lengths, sequence numbers and lifecycle states also remain visible
+on purpose. They make an incident diagnosable without carrying the audio, body or secret that had
+that size. This guarantee covers ordinary diagnostic rendering; an application can still read a
+public field and explicitly record it, and its subscriber, retention policy and destination remain
+its responsibility. See [Logging](logging.md) for that boundary.
+
+## Speech provider privacy
 
 sipx defines two substitutable speech provider contracts — recognition and synthesis — and this
 page is the rule about what a provider may do with the audio and text a call gives it.
