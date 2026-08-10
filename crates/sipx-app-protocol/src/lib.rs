@@ -81,7 +81,7 @@ pub use crate::dsp::{
 pub use crate::error::{Error, Result};
 pub use crate::event::{
     AudioDirection, CONTRACT, CallSnapshot, CallState, DialOutcome, Direction, EndCause, Envelope,
-    EventKind, GatherReason, Headers, Leg, MediaState, TransferState, VoiceEndCause,
+    EventKind, GatherReason, Headers, Leg, LegEndCause, MediaState, TransferState, VoiceEndCause,
     VoiceThresholds,
 };
 pub use crate::interpreter::{

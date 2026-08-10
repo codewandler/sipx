@@ -27,8 +27,8 @@ use sipx_sip::{HeaderName, Host as UriHost, HostName, Method, Uri, build::Reques
 use sipx_transport::{Config, Handle, Incoming, Target, bind};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 use tokio::sync::mpsc::Receiver;
-use tokio::sync::oneshot;
 
 fn loopback() -> IpAddr {
     "127.0.0.1".parse().expect("valid")
@@ -325,17 +325,82 @@ async fn busy_peer() -> (SocketAddr, tokio::task::JoinHandle<()>) {
     (address, task)
 }
 
-/// A document app that answers the call, dials `target`, and hands back what it is told next.
+/// A SIP endpoint that answers one invitation and then hangs that call up itself.
 ///
-/// Three callbacks: `call.incoming` gets the program, the event that completes `answer` gets an
-/// empty document ("keep going"), and the third — whatever it turns out to be — is reported to the
-/// test verbatim. Reported rather than asserted here so that the failure names the event the host
-/// actually sent.
+/// The other far end of the `dial` under test, and the one [`busy_peer`] cannot be: an ending only
+/// exists for a leg that answered, so this endpoint holds a confirmed dialog and then ends it.
+///
+/// The BYE waits for the **ACK** rather than for a duration. That is a happens-after of the dialog
+/// being confirmed, so nothing here races the 2xx this endpoint would otherwise still be
+/// retransmitting. Answering runs inside the dispatcher loop and the waiting does not: the ACK is
+/// an in-dialog request the dispatcher has to route, and a loop parked on the inbox is a loop not
+/// pumping the socket that would deliver it.
+async fn answering_peer() -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    let (handle, incoming) = endpoint().await;
+    let address = handle.local_addr();
+    let answering = handle.clone();
+    let task = tokio::spawn(async move {
+        let mut dispatcher = Dispatcher::new(answering.clone(), incoming);
+        while let Some(event) = dispatcher.next().await {
+            let Dispatched::Invitation(invitation) = event else {
+                continue;
+            };
+            let Ok(mut call) = invitation.answer(&answering, loopback()).await else {
+                continue;
+            };
+            let (_invite, mut inbox) = invitation.into_parts();
+            tokio::spawn(async move {
+                while let Some(message) = inbox.recv().await {
+                    if message.request.method == Method::Ack {
+                        break;
+                    }
+                }
+                let _ = call.hang_up().await;
+            });
+        }
+    });
+    (address, task)
+}
+
+/// One HTTP request off a callback connection: the head, then exactly the body it declares.
+///
+/// Read against `Content-Length` rather than against the first `read` returning. These tests assert
+/// on the envelope text, and a callback split across two segments would otherwise be reported
+/// half-read — which reads as "the host sent the wrong event" rather than as a short read.
+async fn read_request(socket: &mut tokio::net::TcpStream) -> String {
+    let mut buffer = [0_u8; 4096];
+    let mut raw: Vec<u8> = Vec::new();
+    loop {
+        let read = socket.read(&mut buffer).await.expect("reads the envelope");
+        assert_ne!(read, 0, "the callback request is complete");
+        raw.extend_from_slice(&buffer[..read]);
+        assert!(raw.len() <= 64 * 1024, "the request stays bounded");
+        let text = String::from_utf8_lossy(&raw).into_owned();
+        let Some(head) = text.find("\r\n\r\n") else {
+            continue;
+        };
+        let declared = text[..head]
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        if raw.len() >= head + "\r\n\r\n".len() + declared {
+            return text;
+        }
+    }
+}
+
+/// A document app that answers the call, dials `target`, and reports every envelope it is sent.
+///
+/// The first callback gets the program; every later one gets an empty document ("keep going"), so
+/// the app never takes the call away from what is under test. Envelopes are reported rather than
+/// asserted here, so that a test's failure names the events the host actually sent.
 async fn dialing_app(
     target: &str,
 ) -> (
     String,
-    oneshot::Receiver<String>,
+    mpsc::UnboundedReceiver<String>,
     tokio::task::JoinHandle<()>,
 ) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("binds");
@@ -343,49 +408,39 @@ async fn dialing_app(
     let program = format!(
         r#"{{"contract":"sipx.app.v1","instructions":[{{"id":"a1","do":"answer"}},{{"id":"d1","do":"dial","target":"{target}"}}]}}"#
     );
-    let (third, third_rx) = oneshot::channel();
+    let (envelopes, received) = mpsc::unbounded_channel();
     let task = tokio::spawn(async move {
-        let mut third = Some(third);
-        for turn in 0..3_u8 {
+        let mut answered_once = false;
+        loop {
             let (mut socket, _) = listener.accept().await.expect("accepts a callback");
-            let mut buffer = [0_u8; 4096];
-            let mut body = Vec::new();
-            loop {
-                let read = socket.read(&mut buffer).await.expect("reads the envelope");
-                assert_ne!(read, 0, "the callback request is complete");
-                body.extend_from_slice(&buffer[..read]);
-                // Every envelope carries exactly one event type, and the two the host can send
-                // third are the outcome under test and the ending that stands in for it when the
-                // effect was refused. Either one means the request has arrived whole.
-                if turn < 2
-                    || body
-                        .windows(b"\"type\":".len())
-                        .any(|window| window == b"\"type\":")
-                {
-                    break;
-                }
-                assert!(body.len() <= 64 * 1024, "the request stays bounded");
-            }
-            let reply = if turn == 0 {
+            let request = read_request(&mut socket).await;
+            let reply = if answered_once {
+                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned()
+            } else {
                 format!(
                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{program}",
                     program.len()
                 )
-            } else {
-                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned()
             };
+            answered_once = true;
             socket
                 .write_all(reply.as_bytes())
                 .await
                 .expect("answers the callback");
-            if turn == 2
-                && let Some(third) = third.take()
-            {
-                let _ = third.send(String::from_utf8_lossy(&body).into_owned());
+            if envelopes.send(request).is_err() {
+                return;
             }
         }
     });
-    (url, third_rx, task)
+    (url, received, task)
+}
+
+/// The next envelope the app was sent, bounded so that a missing one fails instead of hanging.
+async fn next_envelope(envelopes: &mut mpsc::UnboundedReceiver<String>, expected: &str) -> String {
+    tokio::time::timeout(Duration::from_secs(10), envelopes.recv())
+        .await
+        .unwrap_or_else(|_| panic!("the app is never sent {expected}"))
+        .unwrap_or_else(|| panic!("the app stopped before it was sent {expected}"))
 }
 
 /// **`M-103`** — an app is told how its `dial` resolved.
@@ -405,7 +460,7 @@ async fn dialing_app(
 #[tokio::test]
 async fn a_dial_refused_by_the_far_end_tells_the_app_its_leg_is_busy() {
     let (busy, peer) = busy_peer().await;
-    let (url, third, app) = dialing_app(&format!("sip:bob@{busy}")).await;
+    let (url, mut envelopes, app) = dialing_app(&format!("sip:bob@{busy}")).await;
     let address = webhook_host_on(&webhook_document(&url, "on_5xx", 500, 5_000)).await;
     let (caller, _incoming) = endpoint().await;
 
@@ -418,9 +473,9 @@ async fn a_dial_refused_by_the_far_end_tells_the_app_its_leg_is_busy() {
     .await
     .expect("the app answers the inbound call");
 
-    let envelope = within(third)
-        .await
-        .expect("the app receives a third event after the dial");
+    let _incoming = next_envelope(&mut envelopes, "`call.incoming`").await;
+    let _answered = next_envelope(&mut envelopes, "the event completing its `answer`").await;
+    let envelope = next_envelope(&mut envelopes, "a third event after the dial").await;
     assert!(
         envelope.contains("call.dial.finished"),
         "the app is told how its `dial` resolved; it was told this instead: {envelope}"
@@ -436,6 +491,70 @@ async fn a_dial_refused_by_the_far_end_tells_the_app_its_leg_is_busy() {
     assert!(
         envelope.contains(r#""outcome":"busy""#),
         "486 is §5.3's `busy`, not a `rejected{{486}}`: {envelope}"
+    );
+
+    peer.abort();
+    app.abort();
+}
+
+/// **`M-108`** — an app is told when a leg it dialled goes away.
+///
+/// The neighbour of the test above, and the gap `M-103` left the moment `dial` started working: a
+/// second leg that **answers** and is later ended by the far end was reported to the app by
+/// nothing. `call.dial.finished` fires once, when the dial resolves; `interpreter.rs`'s
+/// `apply_to_snapshot` rewrote §5.2's `legs` in that one arm and no other, so a leg that answered
+/// stayed in the snapshot as `answered` for the rest of the call, however long ago it had hung up.
+///
+/// `call.unbridged` was not the answer to this. §6.2 makes a bridge a state, entered by the
+/// `bridge` verb, so a coupling ending cannot report a leg nobody coupled — and this driver still
+/// refuses `Effect::Bridge`, so today no leg can have been coupled at all.
+///
+/// Both halves of the fix are asserted on one envelope: it carries §5.3's `call.leg.ended` naming
+/// the leg and how it ended, and the snapshot on that same envelope no longer lists the leg.
+#[tokio::test]
+async fn a_dialled_leg_the_far_end_hangs_up_is_reported_to_the_app() {
+    let (answering, peer) = answering_peer().await;
+    let (url, mut envelopes, app) = dialing_app(&format!("sip:bob@{answering}")).await;
+    let address = webhook_host_on(&webhook_document(&url, "on_5xx", 500, 5_000)).await;
+    let (caller, _incoming) = endpoint().await;
+
+    let _call = Box::pin(within(dial(
+        &caller,
+        Target::udp(address),
+        &callee_uri(),
+        &DialOptions::new("<sip:caller@test.example>", loopback()),
+    )))
+    .await
+    .expect("the app answers the inbound call");
+
+    let _incoming = next_envelope(&mut envelopes, "`call.incoming`").await;
+    let _answered = next_envelope(&mut envelopes, "the event completing its `answer`").await;
+    let resolved = next_envelope(&mut envelopes, "`call.dial.finished`").await;
+    assert!(
+        resolved.contains(r#""outcome":"answered""#),
+        "the far end answers, which is what gives the leg an ending to report: {resolved}"
+    );
+    assert!(
+        resolved.contains(r#""state":"answered","to":"sip:bob@"#),
+        "§5.2 lists the answered leg while it is up: {resolved}"
+    );
+
+    let envelope = next_envelope(&mut envelopes, "an event for the leg's own ending").await;
+    assert!(
+        envelope.contains(r#""type":"call.leg.ended""#),
+        "the app is told the leg it dialled went away; it was told this instead: {envelope}"
+    );
+    assert!(
+        envelope.contains(r#""leg":"b""#),
+        "the ending names the leg §5.2 listed, in the app's own vocabulary: {envelope}"
+    );
+    assert!(
+        envelope.contains(r#""cause":"remote""#),
+        "the far end hung up, which is §5.3's `remote`: {envelope}"
+    );
+    assert!(
+        envelope.contains(r#""legs":[]"#),
+        "§5.2's `legs` stops listing a leg that is over: {envelope}"
     );
 
     peer.abort();

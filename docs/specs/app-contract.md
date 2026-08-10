@@ -189,6 +189,7 @@ here cannot go stale except by moving, and moving announces itself.
 | `call.gather.finished` | `instruction_id`, `digits`, `reason` (`terminator · max · timeout`) | a `gather` resolved |
 | `call.recording.finished` | `instruction_id`, `duration_ms` | a `record` resolved |
 | `call.dial.finished` | `instruction_id`, `leg`, `outcome` (`answered · busy · rejected{status} · timeout`) | a `dial` resolved |
+| `call.leg.ended` | `leg`, `cause` (`remote · timeout · error`) | a leg this call dialled, and that answered, is over |
 | `call.transfer.requested` | `target`, `attended` | an inbound REFER arrived; the app must decide (§6.3) |
 | `call.transfer.progress` | `state` (`trying · ringing · succeeded · failed{status}`) | a NOTIFY moved the transfer |
 | `call.bridged` / `call.unbridged` | `leg` | the media coupling changed |
@@ -280,6 +281,31 @@ two apart from this event**, and that is deliberate — a fifth outcome for "the
 try" would put a host diagnosis into a vocabulary that otherwise says only what a far end did, and
 the operator's log is where that belongs. Either way §5.2's `legs` stops listing the leg, which is
 the fact an app acts on.
+
+**[sipx]** `call.leg.ended` is the **rest of that leg's life**, and a host that can `dial` MUST send
+it: a leg reported `answered` is listed in §5.2's `legs` from then on, and the only thing that may
+stop listing it is this event. An answered leg that ended with nothing said would leave the
+authoritative snapshot of §2 describing a leg that no longer exists, for as long as the call lasts.
+Exactly one of these follows a `call.dial.finished{outcome: answered}`, and none follows any other
+outcome, because a leg that never answered was never a leg — its non-arrival is already the whole of
+what that outcome said.
+
+`call.unbridged` is **not** this event and may not be sent in its place. §6.2 makes a bridge a
+*state* that the `bridge` verb enters, so a coupling ending presupposes a coupling; a leg an
+application dialled and did not bridge has none, and reporting one would tell the app that something
+it never asked for had stopped. The two are also about different things where both exist: a bridge
+can end with both legs still up, and a leg can end while nothing was ever coupled to it.
+
+It carries a **cause** where `call.unbridged` deliberately carries none, and the difference is which
+facts an app has elsewhere. That event's reasoning is *"that leg's own `call.ended` is where an app
+reads it"* — true of a bridge between two calls the app is bound to, and false here: a leg this host
+placed on the app's behalf is not a call of the app's, has no envelope stream of its own, and
+therefore has no other place the reason could be read. The vocabulary is this row's own rather than
+`call.ended`'s five words, because two of those say nothing that can be true of a leg — `hangup` is
+*the app asked for it* and §6.2 has no verb to ask with, and `rejected{status}` describes a refused
+invitation, which is a `call.dial.finished` outcome and not an ending. `remote` is the far end
+ending it, `timeout` is the far end ceasing to refresh the session it agreed to (RFC 4028), and
+`error` is this host unable to go on holding the leg.
 
 **[sipx]** The five `call.dsp.*` events are [call-dsp-graph.md](call-dsp-graph.md) §5.3's typed
 transitions, carried onto the wire. Three of them are the **terminal outcome** of an instruction and
@@ -491,3 +517,4 @@ host-to-app, `←` is app-to-host.
 | AC-7 | `dial` refused with 486 | `call.dial.finished{outcome: busy}`; snapshot's `legs` no longer lists the leg |
 | AC-8 | `call.dtmf` fires while AC-2's callback outstanding | delivered after the response is applied, `seq` in order, snapshot current |
 | AC-9 | `call.ended` under full event queue | still delivered; whatever the overflow policy drops, it is never `call.ended` |
+| AC-10 | AC-7's `dial` answers, then `call.leg.ended` | the leg is listed `answered` until the ending, then not at all; the running program is untouched |

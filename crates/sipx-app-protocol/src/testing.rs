@@ -9,7 +9,7 @@ use crate::document::{DtmfMode, Gather, Instruction, Source, TransferTarget, Ver
 use crate::dsp::{DspBypassCause, DspRefusal, DspStage, DspTeardownCause, DspValue};
 use crate::event::{
     AudioDirection, CallSnapshot, CallState, DialOutcome, Direction, EndCause, EventKind,
-    GatherReason, Leg, TransferState, VoiceEndCause, VoiceThresholds,
+    GatherReason, Leg, LegEndCause, TransferState, VoiceEndCause, VoiceThresholds,
 };
 use crate::interpreter::Callback;
 
@@ -83,6 +83,10 @@ pub fn one_of_every_event() -> Vec<EventKind> {
             instruction_id: "d1".to_owned(),
             leg: "b".to_owned(),
             outcome: DialOutcome::Rejected { status: 603 },
+        },
+        EventKind::LegEnded {
+            leg: "b".to_owned(),
+            cause: LegEndCause::Remote,
         },
         EventKind::TransferRequested {
             target: "sip:carol@example.net".to_owned(),

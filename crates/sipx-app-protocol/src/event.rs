@@ -522,6 +522,46 @@ impl DialOutcome {
     }
 }
 
+/// Why a leg of this call ended (§5.3's `call.leg.ended`, `M-108`).
+///
+/// A closed vocabulary of its own rather than [`EndCause`], for the reason §5.3 gives: two of that
+/// type's five words say nothing that can be true of a leg. `hangup` is *the app asked for it*, and
+/// §6.2 has no verb an app can ask with; `rejected{status}` is a refused invitation, which is a
+/// `call.dial.finished` outcome and not an ending, because a leg that never answered was never a
+/// leg. Every word here is produced by a named arm of the driver that composes the row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LegEndCause {
+    /// The far end ended it.
+    Remote,
+    /// It stopped answering: the session it agreed to keep refreshing expired.
+    Timeout,
+    /// The host could not go on holding it.
+    Error,
+}
+
+impl LegEndCause {
+    /// Its spelling on the wire. No word here carries a field, so each is the bare string §5.3's
+    /// tagged form uses for a name on its own.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Remote => "remote",
+            Self::Timeout => "timeout",
+            Self::Error => "error",
+        }
+    }
+
+    /// Every word §5.3 gives this field, so that "the table and the type agree" is a test.
+    #[must_use]
+    pub fn all() -> [Self; 3] {
+        [Self::Remote, Self::Timeout, Self::Error]
+    }
+
+    pub(crate) fn parse(text: &str) -> Option<Self> {
+        Self::all().into_iter().find(|cause| cause.as_str() == text)
+    }
+}
+
 /// Which side of a call's audio an observation belongs to (§5.3, `call.voice.*`).
 ///
 /// Not [`Direction`], which says who called whom: an inbound call's *outbound* audio is this side
@@ -950,6 +990,16 @@ pub enum EventKind {
         /// How it went.
         outcome: DialOutcome,
     },
+    /// A leg this call dialled ended (`M-108`).
+    ///
+    /// Unsolicited: it completes no instruction, because the `dial` that created the leg was
+    /// completed by its own `call.dial.finished` however long ago the leg answered.
+    LegEnded {
+        /// The leg that is over, in the name §5.2's `legs` listed it under.
+        leg: String,
+        /// Why.
+        cause: LegEndCause,
+    },
     /// An inbound REFER arrived; the app must decide (§6.3).
     TransferRequested {
         /// Where the transferor wants the call sent.
@@ -1090,6 +1140,7 @@ impl EventKind {
             Self::GatherFinished { .. } => "call.gather.finished",
             Self::RecordingFinished { .. } => "call.recording.finished",
             Self::DialFinished { .. } => "call.dial.finished",
+            Self::LegEnded { .. } => "call.leg.ended",
             Self::TransferRequested { .. } => "call.transfer.requested",
             Self::TransferProgress { .. } => "call.transfer.progress",
             Self::Bridged { .. } => "call.bridged",
@@ -1111,7 +1162,7 @@ impl EventKind {
     /// Enumerable so that "the crate covers the table" is a test rather than a promise; the
     /// derived test in `tests/spec_tables.rs` reads the section and compares.
     #[must_use]
-    pub fn type_names() -> [&'static str; 26] {
+    pub fn type_names() -> [&'static str; 27] {
         [
             "call.incoming",
             "call.ringing",
@@ -1127,6 +1178,7 @@ impl EventKind {
             "call.gather.finished",
             "call.recording.finished",
             "call.dial.finished",
+            "call.leg.ended",
             "call.transfer.requested",
             "call.transfer.progress",
             "call.bridged",
@@ -1244,6 +1296,10 @@ impl EventKind {
                 members.push(("leg", Some(Json::Str(leg.clone()))));
                 members.push(("outcome", Some(outcome.to_json())));
             }
+            Self::LegEnded { leg, cause } => {
+                members.push(("leg", Some(Json::Str(leg.clone()))));
+                members.push(("cause", Some(Json::Str(cause.as_str().to_owned()))));
+            }
             Self::TransferRequested { target, attended } => {
                 members.push(("target", Some(Json::Str(target.clone()))));
                 members.push(("attended", Some(Json::from(*attended))));
@@ -1332,14 +1388,7 @@ impl EventKind {
                 instruction_id: string_field(value, "instruction_id")?,
                 duration_ms: u32_field(value, "duration_ms")?,
             },
-            "call.dial.finished" => Self::DialFinished {
-                instruction_id: string_field(value, "instruction_id")?,
-                leg: string_field(value, "leg")?,
-                outcome: value
-                    .get("outcome")
-                    .and_then(DialOutcome::from_json)
-                    .ok_or(Error::BadField { field: "outcome" })?,
-            },
+            "call.dial.finished" | "call.leg.ended" => Self::leg_from_json(type_name, value)?,
             "call.transfer.requested" => Self::TransferRequested {
                 target: string_field(value, "target")?,
                 attended: bool_field(value, "attended")?,
@@ -1588,6 +1637,36 @@ impl EventKind {
             _ => {}
         }
         members
+    }
+
+    /// §5.3's two rows about another leg of this call: how a `dial` resolved (`M-103`), and how the
+    /// leg it made finally ended (`M-108`).
+    ///
+    /// Split out of [`Self::from_json`] for the reason [`Self::dsp_from_json`] is — that reader is
+    /// held to this workspace's function-length limit — and the two rows travel together because
+    /// they are the same leg's beginning and end, named by the same `leg`.
+    fn leg_from_json(type_name: &str, value: &Json) -> Result<Self> {
+        let leg = string_field(value, "leg")?;
+        Ok(match type_name {
+            "call.dial.finished" => Self::DialFinished {
+                instruction_id: string_field(value, "instruction_id")?,
+                leg,
+                outcome: value
+                    .get("outcome")
+                    .and_then(DialOutcome::from_json)
+                    .ok_or(Error::BadField { field: "outcome" })?,
+            },
+            // The caller matched both names before it delegated, so the fallthrough is unreachable
+            // rather than a type nobody handled.
+            _ => Self::LegEnded {
+                leg,
+                cause: value
+                    .get("cause")
+                    .and_then(Json::as_str)
+                    .and_then(LegEndCause::parse)
+                    .ok_or(Error::BadField { field: "cause" })?,
+            },
+        })
     }
 
     fn dsp_from_json(type_name: &str, value: &Json) -> Result<Self> {

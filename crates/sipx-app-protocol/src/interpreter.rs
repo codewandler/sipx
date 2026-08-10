@@ -1106,6 +1106,13 @@ impl Interpreter {
                     self.snapshot.legs.retain(|existing| existing.leg != *leg);
                 }
             }
+            // The other half of the same member (`M-108`, vector AC-10). Until this arm existed
+            // `legs` was rewritten by the arm above and by nothing else, so a leg that answered and
+            // was later ended by its far end stayed listed as `answered` for the rest of the call —
+            // a snapshot §2 calls authoritative, describing a leg that no longer existed.
+            EventKind::LegEnded { leg, .. } => {
+                self.snapshot.legs.retain(|existing| existing.leg != *leg);
+            }
             _ => {}
         }
     }
