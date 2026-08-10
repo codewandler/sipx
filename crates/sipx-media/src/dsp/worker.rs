@@ -114,7 +114,12 @@ struct Job {
 /// The protocol is lockstep (§7.4), so exactly one frame is ever outstanding.
 const OUTSTANDING: usize = 1;
 
-fn serve<W, R, O>(worker: W, mut input: R, output: O) -> io::Result<()>
+/// [`serve_worker`] over two arbitrary streams rather than this process's own.
+///
+/// `M-122`'s protocol probe puts a scripted octet stream where the runtime's writes go, so §7.4's
+/// "a refused message is terminal, and a worker stops reading and exits" is checked against this
+/// function and not against a second copy of it.
+pub(super) fn serve<W, R, O>(worker: W, mut input: R, output: O) -> io::Result<()>
 where
     W: SupervisedWorker + 'static,
     R: Read,

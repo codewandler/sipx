@@ -491,6 +491,17 @@ of a buffer already bounded by the previous rule. A refused message is terminal 
 in both directions: the runtime stops the pump and records `MalformedResult` (§7.2), and a worker
 stops reading and exits.
 
+**The ceiling is bounded too** (`M-122`). `max_samples` is the number every later length is checked
+against, and on the worker's side it is declared by whatever wrote to its standard input — so a
+`Hello` carrying a `max_samples` above 65,536, which is §4's own `max_frame_samples` ceiling and
+[custom-call-dsp.md](custom-call-dsp.md) §5's, is refused as a `Value` this version does not define,
+exactly as an undefined `direction` is. Without that bound the rule above
+says nothing on that side: the peer picks the ceiling, so the peer picks the size of the next read,
+and at the top of the range the arithmetic that compares a payload's own count against its declared
+length saturates and stops deciding anything. A ceiling above that bound could never carry a frame a
+stage would accept, because a frame larger than it is refused by the processor contract before any
+stage is offered it.
+
 The runtime's `max_samples` is the frame length its buffers were sized for (§4.3). A `Result` whose
 `samples` is not the offered frame's own count is **not** a wire refusal — it is well-formed and
 wrong, which is §7.2's `MalformedResult` at the contract level.

@@ -496,6 +496,21 @@ jobs:
           cargo fuzz run call_audio_sequence \
             fuzz/corpus/call_audio_sequence crates/sipx-testkit/corpus/call-audio-sequences \
             -- -max_total_time=60 -max_len=512
+      # M-122. The one place in the DSP epic where the media process parses octets it did not write:
+      # `docs/specs/call-dsp-graph.md` §7.4's framing, read by the runtime off a worker's standard
+      # output and by a worker off the runtime's writes. The input decodes into a program of message
+      # specifications — well-formed messages with one field corrupted, truncations, noise, and a
+      # reader that answers a few octets at a time — and the oracle is §7.4's own four sentences
+      # rather than "did it panic", with the last of them checked against the real `serve` and `pump`
+      # instead of a model of them. Same budget and the same -max_len as the two drivers above: four
+      # bytes is a step, so 512 is already a 127-step exchange.
+      - name: Fuzz the supervised worker protocol
+        run: |
+          mkdir -p fuzz/corpus/worker_protocol_sequence
+          cargo fuzz run worker_protocol_sequence \
+            fuzz/corpus/worker_protocol_sequence \
+            crates/sipx-media/corpus/worker-protocol-sequences \
+            -- -max_total_time=60 -max_len=512
       # The corpora are committed test data: prove the fuzzer did not modify them.
       - name: Verify the RFC 4475 corpus is untouched
         run: ./scripts/import-rfc4475-corpus.sh --check

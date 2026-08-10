@@ -20,8 +20,8 @@
 
 use std::collections::VecDeque;
 use std::ffi::OsString;
-use std::io::{self, BufReader};
-use std::process::{ChildStdin, ChildStdout, Command, Stdio};
+use std::io::{self, BufReader, Read, Write};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::thread::JoinHandle;
@@ -102,11 +102,11 @@ pub(crate) enum Exchange {
 }
 
 /// One frame offered to a worker, carrying the buffer it borrows.
-struct Request {
-    sequence: u64,
-    position: u64,
-    discontinuity: Option<DiscontinuityKind>,
-    samples: Vec<i16>,
+pub(super) struct Request {
+    pub(super) sequence: u64,
+    pub(super) position: u64,
+    pub(super) discontinuity: Option<DiscontinuityKind>,
+    pub(super) samples: Vec<i16>,
 }
 
 /// What the request is, never the audio it carries (`M-107`, `M-68`).
@@ -122,10 +122,10 @@ impl std::fmt::Debug for Request {
 }
 
 /// One worker answer, carrying the buffer the runtime lent it back again.
-struct Response {
-    sequence: u64,
-    result: WorkerResult,
-    samples: Vec<i16>,
+pub(super) struct Response {
+    pub(super) sequence: u64,
+    pub(super) result: WorkerResult,
+    pub(super) samples: Vec<i16>,
 }
 
 /// What the answer is, never the audio it carries (`M-107`, `M-68`).
@@ -451,9 +451,15 @@ impl Drop for Supervised {
 ///
 /// It owns both pipes, which is what makes the worker's input close when it returns — §7.3's step
 /// 2, delivered by dropping a handle rather than by asking the worker for anything.
-fn pump(
-    stdin: ChildStdin,
-    stdout: ChildStdout,
+///
+/// Generic over the two ends rather than over [`ChildStdin`](std::process::ChildStdin) and
+/// [`ChildStdout`](std::process::ChildStdout), so `M-122`'s
+/// protocol probe can put a scripted octet stream where a worker's standard output goes and check
+/// §7.2's "the pump stops and the worker is lost" against this function instead of against a
+/// second copy of it. A stage still hands it the real pipes; nothing on the live path changes.
+pub(super) fn pump<I: Write, O: Read>(
+    stdin: I,
+    stdout: O,
     inbox: &Receiver<Request>,
     outbox: &SyncSender<Response>,
     direction: AudioDirection,
