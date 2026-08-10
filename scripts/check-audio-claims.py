@@ -594,6 +594,17 @@ RELAY_PATH = ("sipx-media", "sipx-rtp")
 #: a CI log. Latent elsewhere, live here.
 AUDIO_AT_REST = ("sipx-app-protocol", "sipx-testkit")
 
+#: The public pages that explain the diagnostics rules above. A scope added here in code must be
+#: named on at least one of these pages, or be accompanied by a narrow, reviewable exception below.
+DIAGNOSTIC_DOCUMENTATION = (
+    ROOT / "website" / "docs" / "reference" / "privacy.md",
+    ROOT / "website" / "docs" / "reference" / "logging.md",
+)
+
+#: `(scope, crate, reason)` entries that deliberately do not belong in the public diagnostics
+#: contract. Empty today: every crate in both scopes is part of the guarantee readers need to see.
+DIAGNOSTIC_DOCUMENTATION_EXEMPTIONS: tuple[tuple[str, str, str], ...] = ()
+
 #: `sipx-app-protocol` owns a closed, versioned application vocabulary and documents its own
 #: exceptions, so `A-9` explicitly leaves it out — a decision that outlives any particular
 #: rollout boundary, which is why it survived `M-83` retiring the one the enum rule had.
@@ -602,6 +613,44 @@ AUDIO_AT_REST = ("sipx-app-protocol", "sipx-testkit")
 #: mechanical way: this names one crate and never an item, and what it holds out of the enum rule
 #: is counted and printed on every run rather than disappearing.
 CLOSED_VOCABULARY = "sipx-app-protocol"
+
+
+def diagnostic_documentation_problems(
+    relay_path: tuple[str, ...] = RELAY_PATH,
+    audio_at_rest: tuple[str, ...] = AUDIO_AT_REST,
+    pages: dict[Path, str] | None = None,
+    exemptions: tuple[tuple[str, str, str], ...] = DIAGNOSTIC_DOCUMENTATION_EXEMPTIONS,
+) -> list[str]:
+    """Checked diagnostic scopes absent from both public pages and the explicit exceptions.
+
+    The two scope constants are what make opaque byte buffers decidable. If one grows while the
+    public contract does not, the checker would protect more of the workspace than the page claims
+    and a reader could not discover the guarantee. Reading the constants here makes that drift a
+    red check rather than another documentation sweep.
+    """
+    read_pages = pages or {path: path.read_text() for path in DIAGNOSTIC_DOCUMENTATION}
+    joined = "\n".join(read_pages.values())
+    allowed = {
+        (scope, crate)
+        for scope, crate, reason in exemptions
+        if reason.strip()
+    }
+    problems = []
+    for scope, crates in (("relay path", relay_path), ("comes to rest", audio_at_rest)):
+        if scope not in joined:
+            problems.append(
+                f"the public privacy and logging pages do not name the `{scope}` diagnostics scope"
+            )
+        for crate in crates:
+            if f"`{crate}`" not in joined and (scope, crate) not in allowed:
+                problems.append(
+                    f"`{crate}` is in the `{scope}` diagnostics scope but appears on neither "
+                    "public page and has no documented exemption"
+                )
+    for path, text in read_pages.items():
+        if "scripts/check-audio-claims.py" not in text:
+            problems.append(f"{path} does not name the checker that enforces diagnostic redaction")
+    return problems
 
 
 def words(identifier: str) -> set[str]:
@@ -2230,14 +2279,14 @@ def main() -> int:
     # on a reader stopping reading, which is an accusation this file is careful not to make.
     problems += byte_buffer_problems(where_the_call_rests(crates))
     problems += key_problems(crates) + unread_keys(keys)
+    problems += diagnostic_documentation_problems()
     for crate in read_crates:
         problems += (
             claim_problems(crate) + agreement_problems(crate) + stability_problems(crate)
         )
     if problems:
         print(
-            "the crate front doors advertise what the crates do not implement, or do not say what "
-            "they guarantee:",
+            "the published claims, API guarantees, or diagnostic redaction pages have drifted:",
             file=sys.stderr,
         )
         for problem in problems:

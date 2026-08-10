@@ -2,7 +2,7 @@
 id: X-145
 title: Publish the redaction guarantee the checker enforces
 pillar: Experience
-status: ready
+status: in-progress
 priority: 8
 design:
 epic: conformance
@@ -47,16 +47,16 @@ is in fact enforced.
 
 ## Acceptance
 
-- [ ] `privacy.md` states the guarantee at workspace scope, names the two scopes the checker
+- [x] `privacy.md` states the guarantee at workspace scope, names the two scopes the checker
       distinguishes (the relay path a call passes through, and the crates where it comes to rest),
       and says what is deliberately *outside* them and why — encoded audio in an opaque byte type is
       not something an element type can decide.
-- [ ] The claim names its enforcement, so a reader can check it rather than believe it.
-- [ ] `logging.md`'s "never credentials, keys or message bodies" is tied to the rule that makes it
+- [x] The claim names its enforcement, so a reader can check it rather than believe it.
+- [x] `logging.md`'s "never credentials, keys or message bodies" is tied to the rule that makes it
       true, including the fixed-size-array rule that treats such an array as a key.
-- [ ] What is *not* redacted is stated as plainly as what is: protocol headers a log exists to print,
+- [x] What is *not* redacted is stated as plainly as what is: protocol headers a log exists to print,
       and the counts and lengths kept on purpose because an incident has to stay diagnosable.
-- [ ] The page cannot silently fall behind the checker again — a generated region, or a test that
+- [x] The page cannot silently fall behind the checker again — a generated region, or a test that
       fails when a scope exists in the checker and appears in neither the page nor an exemption.
 - [ ] The gate is green.
 
@@ -64,3 +64,29 @@ is in fact enforced.
 
 - Filed 2026-08-10 from a sweep of published docs against all behavioural changes since their last
   update.
+
+- 2026-08-10: implemented on `impl/X-145`.
+
+  **Failing first.** `TheRepositoryItself.test_public_pages_name_every_checked_diagnostics_scope`
+  was added before either public page changed. Its first run failed with eight omissions: the two
+  scope names, all four crates those scopes cover, and the enforcing checker's name on both pages.
+
+  **Published contract.** `privacy.md` now states the raw-sample and fixed-size-key guarantees at
+  workspace scope, and distinguishes the encoded byte relay path from the crates where a call comes
+  to rest. It also states the boundary the narrowing exists for: an opaque byte element cannot
+  distinguish audio from a protocol field, protocol headers remain visible, and counts and lengths
+  remain visible deliberately. `logging.md` ties its existing trace-level promise to the same
+  checker, including the `[u8; N]` key rule, and says explicitly that a SIP identity may appear in
+  a protocol diagnostic.
+
+  **Held in sync.** `diagnostic_documentation_problems` reads `RELAY_PATH` and `AUDIO_AT_REST`
+  directly. Every crate in either constant must appear on the privacy or logging page or carry a
+  reasoned `(scope, crate, reason)` exemption; both pages must name the checker. Mutation tests add
+  a crate to each scope, accept a reasoned exemption, reject an empty one, and remove the checker
+  from one page.
+
+  **Focused verification.** `scripts/test-audio-claims.py` passes all 169 tests,
+  `scripts/check-audio-claims.py --check` passes against the workspace, and
+  `scripts/build-docs.sh` builds the samples, checks generated regions and 1,123 relative links,
+  builds the site, checks a deliberately dead anchor, and builds the API reference. The full gate
+  is the coordinator's wave gate, so the final acceptance row remains open.
