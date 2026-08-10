@@ -35,13 +35,34 @@ use crate::counters::DiscardMeters;
 use crate::processing::hold;
 
 /// What is waiting, and whether more is coming.
-#[derive(Debug)]
 struct State {
     frames: VecDeque<Vec<i16>>,
     /// The total length of `frames`, kept alongside them so the bound is checked without walking
     /// the queue on every packet.
     queued: usize,
     closed: bool,
+}
+
+/// How much is waiting, never what is in it (`M-107`, `M-121`).
+///
+/// `frames` is the far end's own audio and there is more of it here than anywhere else on the
+/// inbound path: this queue exists to hold up to [`Config::DEFAULT_INBOUND_QUEUE`] of a call, so a
+/// derived rendering puts a fifth of a second of somebody's conversation into whatever record names
+/// it — at a length that is the audio's rather than the format's, and reachable from a
+/// `MediaSession`, which is the type in this crate a diagnostic is most likely to name.
+///
+/// `queued` is already the second number a reader of this wants, so it is rendered as itself; what
+/// changes is that `frames` reports how many are waiting rather than what they are.
+///
+/// [`Config::DEFAULT_INBOUND_QUEUE`]: crate::Config::DEFAULT_INBOUND_QUEUE
+impl std::fmt::Debug for State {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("State")
+            .field("frames", &self.frames.len())
+            .field("queued", &self.queued)
+            .field("closed", &self.closed)
+            .finish()
+    }
 }
 
 /// One session's inbound audio queue: bounded in time, shed-oldest, counted.

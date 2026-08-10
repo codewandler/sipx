@@ -277,3 +277,76 @@ async fn every_frame_the_queue_could_not_hold_is_counted() {
 fn the_stated_bound_is_the_configured_default() {
     assert_eq!(Config::DEFAULT_INBOUND_QUEUE, STATED_BOUND);
 }
+
+/// `M-121`: nothing a session renders may carry the audio it has not handed over yet.
+///
+/// `M-107`'s rule at the type most likely to reach a log. A [`MediaSession`] holds no sample buffer
+/// of its own; it holds an `Arc<InboundQueue>`, whose state holds up to
+/// [`Config::DEFAULT_INBOUND_QUEUE`] of received audio — so a derived rendering put a fifth of a
+/// second of the far end's conversation into whatever record named the session, at a length that
+/// was the queue's. `check-audio-claims.py` reaches that shape since `M-121`; what a checker cannot
+/// do is read what the redaction prints, which is this.
+///
+/// The loaded session is rendered *before* anything reads its queue and the audio is claimed
+/// afterwards, so the frames are provably in it at the moment of the rendering. The length is held
+/// against an idle session's rather than against a constant: a `MediaSession` renders a great deal
+/// of shape, and what this rule is about is whether any of that length is the *audio's*.
+#[tokio::test]
+async fn a_session_renders_its_queue_depth_and_not_the_audio_waiting_in_it() {
+    /// A sample value no port, SSRC, rate or count in this record can be confused with: the
+    /// leading minus cannot appear inside any of them.
+    const SENTINEL: i16 = -4_001;
+    const COUNT: u16 = 8;
+    /// What two sessions' records may differ by without the difference being audio.
+    ///
+    /// Ports, SSRCs, a jitter estimate and a queue depth all render at different widths in two
+    /// sessions. `COUNT` frames of 160 positions each render as roughly six octets a sample, which
+    /// is 7,680 — an order of magnitude past this, so the two cases cannot be confused.
+    const SHAPE_DRIFT: usize = 512;
+
+    let ptime = Duration::from_millis(20);
+    let (loaded, peer, loaded_addr) = session_and_peer(ptime).await;
+    let (idle, _quiet_peer, _idle_addr) = session_and_peer(ptime).await;
+    burst(&peer, &loaded, loaded_addr, COUNT, ptime, |_| SENTINEL).await;
+
+    let record = format!("{loaded:?}");
+    let empty = format!("{idle:?}");
+
+    // µ-law is lossy, so the queued value is the sentinel as the codec can carry it. Claimed after
+    // the record is taken, which is what proves the audio was waiting while it was taken.
+    let heard = tokio::time::timeout(ARRIVAL_BOUND, loaded.recv())
+        .await
+        .expect("the queue hands over the audio it was holding")
+        .expect("a frame");
+    // The tolerance is µ-law's own: one quantisation step at this magnitude is 128 positions, so
+    // what comes back is the sentinel as G.711 can carry it and never a different frame's audio.
+    let queued = heard[0];
+    assert!(
+        queued < 0 && (queued - SENTINEL).abs() <= 128,
+        "the queue held the burst's audio, which is what makes the record above a leak: {queued}"
+    );
+    assert!(
+        !record.contains(&queued.to_string()),
+        "a waiting frame's samples survived into the session's record: {record}"
+    );
+    assert!(
+        record.len().abs_diff(empty.len()) < SHAPE_DRIFT,
+        "a session holding {COUNT} frames renders {} octets and one holding none renders {}, so \
+         the record's length is the audio's rather than the type's: {record}",
+        record.len(),
+        empty.len()
+    );
+
+    // The same buffer is reachable through the capture handle, which borrows the session whole.
+    let capture = loaded
+        .capture(sipx_audio::PcmFormat::new(8_000, sipx_audio::PcmEncoding::Signed16).expect("ok"))
+        .expect("a supported capture format");
+    let borrowed = format!("{capture:?}");
+    assert!(
+        !borrowed.contains(&queued.to_string()),
+        "the capture handle renders the session it borrows, samples and all: {borrowed}"
+    );
+
+    loaded.stop();
+    idle.stop();
+}

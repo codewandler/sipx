@@ -93,7 +93,12 @@ outside the rule was not one.
 its crate promises or what its shape breaks. `M-61` found a derived `Debug` printing 65,536 samples
 of a call into a refusal record and `M-107` found the same derive on two more types, so a type
 holding an `i16` or `f32` buffer now implements `Debug` or argues its samples are not somebody's
-conversation — see `sample_buffer_problems`. `M-107` also concluded that the *encoded* half could
+conversation — see `sample_buffer_problems`. `M-107`'s reader read a public type's *own* fields,
+which `M-68` then found to be one hop short: `sipx_media::DspGraph` rendered the frame in flight
+through four private types and this check passed the tree that held it. So the rule follows a
+public type's fields into the crate's private ones, `_CARRIER_HOPS` deep, and cuts a chain at the
+first type that writes its own rendering — see `carrier_chain`. `M-107` also concluded that the
+*encoded* half could
 not be checked, because a payload is `Bytes` and so is a `Call-ID`. `M-110` found the narrowing
 that makes it checkable: not a different element type but a different **scope**. On the two crates
 the call's own bytes pass through, every byte buffer is decidable and every one is decided — see
@@ -322,6 +327,84 @@ _IMPLEMENTS_DEFAULT = r"(?m)^impl(?:<[^>]*>)?\s+Default\s+for\s+{name}\b"
 #: root writes a long one. What it re-exports is read out of the body by `reexports` below.
 _REEXPORT = re.compile(r"(?m)^[ \t]*pub use\s+(?P<body>[^;]+);")
 
+#: A file's test module, read as the attribute at the file's own top level. See `code`: at any
+#: indentation this is a test-only item inside a real one, and cutting there loses the rest of the
+#: file.
+_TEST_MODULE = re.compile(r"(?m)^#\[cfg\(test\)\]")
+
+#: Any struct or enum a crate declares, at whatever visibility, and the pattern the carrier chase
+#: walks into (`M-121`). `_PUBLIC_STRUCT` and `_PUBLIC_ENUM` answer "can a caller outside write
+#: this type's name"; this answers "is there a declaration here to follow a field into", which is a
+#: different question with a different answer for precisely the types this rule exists to reach.
+#: Every hop of `M-68`'s chain is one nothing outside `sipx-media` can name.
+#:
+#: The offset a caller wants is the **keyword's** and not the line's, which is why `kind` is a
+#: group rather than an alternation. `type_body` scans forward from the offset for the first `{`,
+#: `(` or `;`; handed the start of `pub(crate) struct SlotRef` it reads the parenthesis in the
+#: visibility as a tuple body and returns `crate`, so half the workspace's private types looked
+#: like a one-field tuple struct holding nothing.
+_DECLARED_TYPE = re.compile(
+    r"(?m)^[ \t]*(?:pub(?:\([\w:]+\))?[ \t]+)?(?P<kind>struct|enum)[ \t]+(?P<name>\w+)"
+)
+
+#: A generic constructor in a field's type, read as the name immediately before its `<`.
+_CONSTRUCTOR = re.compile(r"(\w+)\s*<")
+
+#: An identifier, for reading the type names out of a field's type expression.
+_IDENTIFIER = re.compile(r"\b[A-Za-z_]\w*\b")
+
+#: The four bracket pairs a Rust type expression nests with, for splitting a body into fields.
+_OPENERS, _CLOSERS = "<([{", ">)]}"
+
+#: The containers whose `Debug` renders the container and never what is inside it, so a buffer
+#: behind one cannot reach a log through the type holding it (`M-121`).
+#:
+#: `sipx_media::MediaSession` holds an `mpsc::Sender<Frame>` and `Frame::Audio` holds the packet's
+#: samples, but a channel's rendering is the channel: no chain runs through it, and a rule that
+#: reported one would be reporting a leak that cannot happen. `Arc`, `Mutex`, `Option`, `Vec` and
+#: `VecDeque` are the opposite — every one of them renders what it holds, which is how the four
+#: hops between `DspGraph` and the frame in flight rendered raw audio.
+#:
+#: **A deny list and not an allow list, for the reason every other narrowing here is written the
+#: way it is.** An allow list fails by *not* recognising a container: a wrapper nobody thought of
+#: would end the chase silently, at exit 0, which is the one failure this file cannot afford. This
+#: fails the other way — a container missing from it is followed, and what that costs is a report
+#: at a type whose `Debug` was never going to print the buffer. That is a reviewer's minute and a
+#: line in this set, against a leak nobody hears about.
+OPAQUE_CONTAINERS = frozenset(
+    {
+        "Sender",
+        "SyncSender",
+        "UnboundedSender",
+        "Receiver",
+        "UnboundedReceiver",
+        "JoinHandle",
+        "Weak",
+        "PhantomData",
+    }
+)
+
+#: How many hops through a crate's private types the carrier chase follows before it stops.
+#:
+#: **The depth is the defect's and not the workspace's.** `M-68` found `sipx_media::DspGraph`
+#: rendering the call's own audio at two distances: the frame in flight is four hops down —
+#: `DspGraph → SlotRef → Slot → Live → Buffers` — and a supervised stage's pool of up to nine more
+#: frames is six, through `Live → Stage → Running → Supervised`. Six is the deeper of the two, so
+#: the whole of the one finding this rule was filed for is inside it rather than half of it.
+#:
+#: What the workspace says about that number is a check on it rather than the reason for it: the
+#: chase's report saturates at four hops and its carrier population at six, and seven and eight
+#: select nothing further. So six is chosen from the defect and confirmed to cover everything this
+#: workspace currently writes.
+#:
+#: **What a carrier past it still costs a reviewer, stated rather than discovered.** A chain of
+#: seven private hops from a public type to a PCM buffer is not reported, and there is nothing in
+#: a red gate that would say so — the rule is silent about it exactly as `M-107`'s was silent about
+#: `DspGraph`. What stands in for that is the count this run prints: a workspace that grows a
+#: seventh hop grows its carrier population first, and the number moving is the prompt to re-read
+#: this constant. A rule that narrows has to say where it stopped looking, and this is where.
+_CARRIER_HOPS = 6
+
 #: A raw buffer of linear PCM samples, in every shape a field can be written in: `Vec<i16>`, a
 #: borrowed or boxed `[i16]`, and a fixed `[i16; N]`. `f32` joins `i16` because a float sample
 #: buffer is the same audio at a different depth, and matching it now costs nothing.
@@ -356,9 +439,15 @@ NOT_AUDIO_REASON = "/// Not call audio:"
 #: the exception side of `sample_buffer_problems` is loud by construction — a reader that stopped
 #: recognising a hand-written `Debug` reports every carrier in the workspace. Over-narrowing
 #: `_SAMPLE_BUFFER` is the opposite: it finds nothing, holds nothing, and passes. So the population
-#: is counted and a run that recognises almost none of it fails instead. Nine public types across
-#: two crates carry one today; four is low enough that removing a crate's worth of them is not a
-#: red gate and high enough that a reader which has gone blind is.
+#: is counted and a run that recognises almost none of it fails instead.
+#:
+#: Twenty-eight public types across two crates hold or reach one today, which is `M-107`'s ten
+#: plus the eighteen `M-121` widened the reader to reach. The floor stays at four rather than
+#: following the number up: what it is set against is a *selector* that has stopped selecting, and
+#: `_SAMPLE_BUFFER` going blind takes the count to zero however far the chase reaches. Four is low
+#: enough that removing a crate's worth of carriers is not a red gate and high enough that a reader
+#: which has gone blind is, and neither half of that sentence is about how many hops the chase now
+#: follows.
 _PLAUSIBLE_CARRIERS = 4
 
 #: A buffer of raw octets, in every shape a field can be written in. The byte-buffer rule's
@@ -625,8 +714,19 @@ def code(text: str) -> str:
     functions as items would find `record`, `quality` and most of English behind every crate. A
     capability backed by the name of a test is not implemented, which is the one thing this whole
     check exists to say.
+
+    **The cut is the test *module*, and the anchor is what says so** (`M-121`). This read the first
+    `#[cfg(test)]` anywhere in the file, and a test-only *item* carries the same attribute at an
+    inner indentation: `sipx-media`'s DSP graph declares a `#[cfg(test)]` constructor 1,357 lines
+    above the end of the file, so every declaration after it — `Stage`, `Buffers`, `Live`, `Slot`
+    and `SlotRef`, which is the whole of `M-68`'s chain — was invisible to every rule here. Twelve
+    files across five crates were cut short the same way. A test module in this workspace is
+    written at the file's top level, and every one of those twenty-four inner attributes is a
+    helper function, a field or a statement, so anchoring the cut at column zero cuts exactly what
+    this docstring always claimed it did.
     """
-    return text.partition("#[cfg(test)]")[0]
+    found = _TEST_MODULE.search(text)
+    return text if found is None else text[: found.start()]
 
 
 def modules(crate: str, entry: Path) -> list[Module]:
@@ -1155,19 +1255,216 @@ def type_body(source: str, offset: int) -> str:
     raise ValueError(f"an item at offset {offset} has no closing `{closer}`")
 
 
+class Declaration(NamedTuple):
+    """Where one struct or enum of a crate is written, however private it is."""
+
+    #: The file it is declared in.
+    path: Path
+    #: The offset of its `struct` or `enum` keyword. See `_DECLARED_TYPE` for why not the line's.
+    offset: int
+
+
+class TypeIndex(NamedTuple):
+    """A crate's type declarations, and the source of every module they were read out of."""
+
+    #: Every name a field can be written in, to the declarations that carry it. A name is not
+    #: unique in a crate — `sipx-audio` declares three private `Band`s — so this is a tuple.
+    declarations: dict[str, tuple[Declaration, ...]]
+    #: Each module's file, already cut at its test module, so the chase reads each one once.
+    sources: dict[Path, str]
+
+
+def type_index(crate: str) -> TypeIndex:
+    """Every struct and enum a crate declares, by name, with the sources they were read from.
+
+    The same modules `reachable` walks, read for the third question this file asks of them: not
+    what backs a claim and not what a caller can name, but what a field of a public type points at.
+    """
+    declarations: dict[str, list[Declaration]] = {}
+    sources: dict[Path, str] = {}
+    for reach in module_graph(crate, entry_point(crate)).values():
+        text = code(reach.path.read_text(encoding="utf-8"))
+        sources[reach.path] = text
+        for found in _DECLARED_TYPE.finditer(text):
+            declarations.setdefault(found.group("name"), []).append(
+                Declaration(path=reach.path, offset=found.start("kind"))
+            )
+    return TypeIndex(
+        declarations={name: tuple(sites) for name, sites in declarations.items()},
+        sources=sources,
+    )
+
+
+def _parts(text: str) -> list[str]:
+    """`text` split on the commas that are not inside a bracket of any of the four kinds."""
+    parts: list[str] = []
+    depth, current = 0, ""
+    for character in text:
+        if character in _OPENERS:
+            depth += 1
+        elif character in _CLOSERS:
+            depth -= 1
+        if character == "," and depth == 0:
+            parts.append(current)
+            current = ""
+        else:
+            current += character
+    parts.append(current)
+    return [part.strip() for part in parts if part.strip()]
+
+
+def _outermost(text: str, character: str) -> int:
+    """Where `character` first appears outside every bracket, or -1."""
+    depth = 0
+    for index, found in enumerate(text):
+        if found in _OPENERS:
+            depth += 1
+        elif found in _CLOSERS:
+            depth -= 1
+        elif found == character and depth == 0:
+            return index
+    return -1
+
+
+def field_types(body: str) -> list[str]:
+    """The type expression of every field in a struct or enum body, field names dropped.
+
+    Per field rather than over the whole body, because whether a chain runs through a field is a
+    property of *that* field's type: `MediaSession` holds both an `mpsc::Sender<Frame>`, which
+    renders nothing it carries, and an `Arc<InboundQueue>`, which renders everything. A reader that
+    decided for a whole type would have to choose between missing the second and inventing the
+    first.
+
+    An enum is unwrapped rather than read flat: a variant's own name is not a type, and
+    `RecognitionInput::Frame(RecognitionFrame)` resolved by name would chase every `Frame` in the
+    crate on the strength of a variant label. Both variant forms are unwrapped, and a unit variant
+    is left as it is written — it names no type, and no declaration will answer to it.
+
+    `->` is spelled away first: a `>` in a function type is not a closing bracket, and one counted
+    as one leaves every field after it at the wrong depth.
+    """
+    types: list[str] = []
+    for part in _parts(body.replace("->", "  ")):
+        colon = _outermost(part, ":")
+        if colon >= 0:
+            types.append(part[colon + 1 :].strip())
+        elif "{" in part:
+            types += field_types(part[part.index("{") + 1 : part.rfind("}")])
+        elif "(" in part:
+            types += _parts(part[part.index("(") + 1 : part.rfind(")")])
+        else:
+            types.append(part)
+    return types
+
+
+def followed_types(body: str) -> list[str]:
+    """The names a rendering of this body would render, which is what the chase follows.
+
+    Every identifier of a field's type and not just its head, because a buffer reached through
+    `Arc<Mutex<Slot>>` is reached through `Slot`. Names that are not this crate's declarations —
+    `Arc`, `u64`, a lifetime, a const generic — resolve to nothing and fall away in `resolve`.
+    """
+    names: list[str] = []
+    for field in field_types(body):
+        if any(name in OPAQUE_CONTAINERS for name in _CONSTRUCTOR.findall(field)):
+            continue
+        names += _IDENTIFIER.findall(field)
+    return list(dict.fromkeys(names))
+
+
+def resolve(index: TypeIndex, path: Path, name: str) -> tuple[Declaration, ...]:
+    """Where a name written in `path` is declared, preferring a declaration in that same file.
+
+    A crate is not a flat namespace and this reader does not parse `use` lines, so a name is
+    resolved by the one rule that is right whenever it applies and conservative when it does not:
+    a type declared beside the field that names it *is* the one meant, and otherwise every
+    declaration of that name is followed.
+
+    Both halves were measured. `sipx-audio` declares three private `Band`s — the peaking filter's
+    two one-pole sections, the sub-band suppressor's three integers, and G.722's twenty-four-sample
+    delay line — and resolving flatly reported the first two for a buffer in a codec neither has
+    heard of. The fall-back is what reaches `SlotRef` from `dsp/mod.rs`, four hops of `M-68`'s
+    chain being in a file the type naming them is not, and it errs toward reporting: a name that
+    resolves to two declarations is chased into both, and the cost of guessing wrong is a report
+    rather than a silence.
+    """
+    sites = index.declarations.get(name, ())
+    beside = tuple(site for site in sites if site.path == path)
+    return beside or sites
+
+
+def answers_the_rule(source: str, name: str, offset: int) -> bool:
+    """Whether a type decides its own rendering, which is what stops the chase at it.
+
+    The same two answers `sample_buffer_problems` has always accepted, asked at every hop rather
+    than only at the public type. A derived `Debug` above a hand-written one renders the
+    hand-written one, so a redaction halfway down a chain cuts everything above it — which is
+    exactly where `M-68` wrote four of its five fixes.
+    """
+    if re.search(_IMPLEMENTS_DEBUG.format(name=re.escape(name)), source):
+        return True
+    return argued(preamble(source, offset), NOT_AUDIO_REASON)
+
+
+def carrier_chain(
+    index: TypeIndex, path: Path, name: str, offset: int, *, redacted: bool
+) -> tuple[str, ...]:
+    """The types from the one at `offset` to the PCM buffer its `Debug` reaches, or empty.
+
+    `redacted` is the difference between the two questions this rule asks of the same walk. With it
+    the chase stops at any type that decides its own rendering, and what comes back is a leak; with
+    it off nothing stops the chase but the depth, and what comes back is the *population* — every
+    reachable public type that can reach a buffer at all, whether or not somebody has already
+    redacted it. `sample_buffer_carriers` counts the second so the printed number describes the
+    reader's reach rather than the workspace's remaining debt.
+
+    Depth-first and first-answer-wins: one chain is enough to report a type, and the shortest is
+    not more true than another. A type is entered once per chain, so the cycles a real type graph
+    has — `sipx_media::MediaSession` holds a `Mutex<Vec<MediaSession>>` of retired generations —
+    terminate rather than recur.
+    """
+
+    def walk(
+        path: Path, name: str, offset: int, seen: frozenset[tuple[Path, str]], trail: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        if (path, name) in seen:
+            return ()
+        source = index.sources[path]
+        if redacted and answers_the_rule(source, name, offset):
+            return ()
+        trail = (*trail, name)
+        body = type_body(source, offset)
+        if _SAMPLE_BUFFER.search(body):
+            return trail
+        if len(trail) > _CARRIER_HOPS:
+            return ()
+        seen = seen | {(path, name)}
+        for word in followed_types(body):
+            for site in resolve(index, path, word):
+                found = walk(site.path, word, site.offset, seen, trail)
+                if found:
+                    return found
+        return ()
+
+    return walk(path, name, offset, frozenset(), ())
+
+
 def sample_buffer_carriers(crates: list[str]) -> list[tuple[Path, str, int]]:
-    """Every reachable public type of these crates that holds a raw buffer of PCM samples.
+    """Every reachable public type of these crates whose `Debug` can reach a buffer of PCM samples.
 
     Structs and enums together, because the two leak identically: `PcmSamples` is the enum that
     holds every owned buffer in this workspace, and a rule that read only structs would have missed
     the one type all the others are made of.
+
+    Its own field or a private type's, up to `_CARRIER_HOPS` away (`M-121`). Counting only the
+    first would print a number about the reader this one replaced.
     """
     found = []
     for crate in crates:
+        index = type_index(crate)
         for pattern in (_PUBLIC_STRUCT, _PUBLIC_ENUM):
             for path, _module, name, offset in reachable(crate, pattern):
-                source = code(path.read_text(encoding="utf-8"))
-                if _SAMPLE_BUFFER.search(type_body(source, offset)):
+                if carrier_chain(index, path, name, offset, redacted=False):
                     found.append((path, name, offset))
     return found
 
@@ -1198,25 +1495,51 @@ def sample_buffer_problems(crates: list[str]) -> list[str]:
     from a header, and they stay a reviewer's question: `M-107` redacted the first by hand and
     `M-110` is the second. It also cannot read what an implementation *prints*; it enforces that
     somebody wrote one, and the tests beside each type enforce what it says.
+
+    **What `M-121` added, and where it still stops.** The reader above read a public type's *own*
+    fields, and `M-68` then found the same defect one indirection past that: `sipx_media::DspGraph`
+    holds no buffer, it holds a `SlotRef`, which holds an `Arc<Mutex<Slot>>`, which holds the live
+    generation, which holds the frame in flight — and this check passed the tree that contained it.
+    So a public type's fields are now followed into the crate's private types, `_CARRIER_HOPS` deep,
+    and a chain is cut at the first type that decides its own rendering. That constant states the
+    depth, why it is what it is, and what a carrier past it still costs; `OPAQUE_CONTAINERS` states
+    the one kind of field the chase deliberately does not follow, and which way each of the two
+    fails. Running it over the workspace found `MediaSession` and `PcmProcessor` rendering the whole
+    of a bounded audio queue, three hops down in both cases — the same defect a third and fourth
+    time.
     """
     problems = []
-    for path, name, offset in sample_buffer_carriers(crates):
-        source = code(path.read_text(encoding="utf-8"))
-        above = preamble(source, offset)
-        if re.search(_IMPLEMENTS_DEBUG.format(name=re.escape(name)), source):
-            continue
-        if argued(above, NOT_AUDIO_REASON):
-            continue
-        line = source.count("\n", 0, offset) + 1
-        try:
-            where = path.relative_to(ROOT)
-        except ValueError:
-            where = path
-        problems.append(
-            f"{where}:{line} `{name}` is reachable from the crate root and holds a buffer of PCM "
-            f"samples, so a derived `Debug` renders the call's own audio; implement `Debug` with a "
-            f"sample count, or add an adjacent `{NOT_AUDIO_REASON}` rationale"
-        )
+    for crate in crates:
+        index = type_index(crate)
+        for pattern in (_PUBLIC_STRUCT, _PUBLIC_ENUM):
+            for path, _module, name, offset in reachable(crate, pattern):
+                chain = carrier_chain(index, path, name, offset, redacted=True)
+                if not chain:
+                    continue
+                source = index.sources[path]
+                line = source.count("\n", 0, offset) + 1
+                try:
+                    where = path.relative_to(ROOT)
+                except ValueError:
+                    where = path
+                if len(chain) == 1:
+                    problems.append(
+                        f"{where}:{line} `{name}` is reachable from the crate root and holds a "
+                        f"buffer of PCM samples, so a derived `Debug` renders the call's own "
+                        f"audio; implement `Debug` with a sample count, or add an adjacent "
+                        f"`{NOT_AUDIO_REASON}` rationale"
+                    )
+                else:
+                    # The chain, because the type to redact is not the type reported: a reviewer
+                    # sent to `MediaSession` for a buffer three private hops away has nothing to
+                    # fix in the file the report names.
+                    problems.append(
+                        f"{where}:{line} `{name}` is reachable from the crate root and its "
+                        f"derived `Debug` reaches a buffer of PCM samples through "
+                        f"{' -> '.join(chain)}, so rendering it renders the call's own audio; "
+                        f"implement `Debug` on `{chain[-1]}` with a sample count, or add an "
+                        f"adjacent `{NOT_AUDIO_REASON}` rationale"
+                    )
     return problems
 
 
@@ -1230,9 +1553,9 @@ def unreadable_surface(carriers: list[tuple[Path, str, int]]) -> list[str]:
     if len(carriers) >= _PLAUSIBLE_CARRIERS:
         return []
     return [
-        f"the sample-buffer reader recognised {len(carriers)} public types holding PCM samples, "
-        f"below the {_PLAUSIBLE_CARRIERS} this workspace's audio path is built from; the reader "
-        f"has narrowed rather than the workspace changed"
+        f"the sample-buffer reader recognised {len(carriers)} public types that hold or reach PCM "
+        f"samples, below the {_PLAUSIBLE_CARRIERS} this workspace's audio path is built from; the "
+        f"reader has narrowed rather than the workspace changed"
     ]
 
 
@@ -1774,9 +2097,10 @@ def main() -> int:
     # selector that quietly stopped selecting is the one narrowing in this file that a red gate
     # would not report by itself (`M-107`).
     print(
-        f"{len(carriers)} reachable public types hold a buffer of PCM samples and every one of "
-        f"them implements `Debug` or argues it is not call audio; encoded audio in `Bytes` is "
-        f"outside what an element type can decide and is held by scope instead"
+        f"{len(carriers)} reachable public types hold a buffer of PCM samples or reach one within "
+        f"{_CARRIER_HOPS} private hops, and every one of them implements `Debug`, argues it is not "
+        f"call audio, or is cut off from the buffer by a type that does; encoded audio in `Bytes` "
+        f"is outside what an element type can decide and is held by scope instead"
     )
     # The byte-buffer rule's population and the scope's remainder, on the terms every other
     # boundary in this file is held to (`M-110`). Both numbers, because they answer different
