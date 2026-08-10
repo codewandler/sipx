@@ -2,7 +2,7 @@
 id: M-128
 title: Name the event families the SDK page omits
 pillar: Application
-status: in-progress
+status: done
 priority: 5
 design:
 epic: app-sdk
@@ -44,9 +44,13 @@ reintroduce, because the next event family will land the same way this one did.
       exists in the contract and appears in neither the page nor an explicit exemption. Prose that
       can silently fall behind is what this story is about.
 - [x] The check names what is missing, not merely that something is.
-- [ ] The gate is green.
+- [x] The gate is green.
 
 ## Progress
+
+- 2026-08-10: **done in 1.0.0-rc.22.** The complete local acceptance gate passed all 51 steps, exact
+  main CI run 31412337169 passed, and protected release run 31413202714 attempt 2 published and
+  verified the annotated `v1.0.0-rc.22` tag.
 
 - 2026-08-10: selected in the five-story rc.22 wave.
 

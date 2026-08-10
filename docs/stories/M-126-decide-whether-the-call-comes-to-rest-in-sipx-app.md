@@ -2,7 +2,7 @@
 id: M-126
 title: Decide whether the call comes to rest in sipx-app
 pillar: Media
-status: in-progress
+status: done
 priority: 3
 design:
 epic: media
@@ -47,9 +47,13 @@ record their own boundaries. What it must not do is stay unexamined, because "no
 - [x] If out of scope: a test pins the property that makes it so, so the decision fails when the
       property stops holding rather than when someone notices.
 - [x] `WssMessage::Binary` is resolved either way and not left as the one carrier nobody classified.
-- [ ] The gate is green.
+- [x] The gate is green.
 
 ## Progress
+
+- 2026-08-10: **done in 1.0.0-rc.22.** The complete local acceptance gate passed all 51 steps, exact
+  main CI run 31412337169 passed, and protected release run 31413202714 attempt 2 published and
+  verified the annotated `v1.0.0-rc.22` tag.
 
 - 2026-08-10: selected in the five-story rc.22 wave.
 

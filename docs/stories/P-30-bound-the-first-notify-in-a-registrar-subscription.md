@@ -2,7 +2,7 @@
 id: P-30
 title: Bound the first NOTIFY in a registrar subscription
 pillar: Phone
-status: in-progress
+status: done
 priority: 1
 design:
 epic: diagnostic-automation
@@ -30,9 +30,13 @@ which is now the longest thing it can do without saying so.
       believes in.
 - [x] The published reference states the bound and its default alongside the other command
       deadlines, checked rather than prose.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
+
+- 2026-08-10: **done in 1.0.0-rc.22.** The complete local acceptance gate passed all 51 steps, exact
+  main CI run 31412337169 passed, and protected release run 31413202714 attempt 2 published and
+  verified the annotated `v1.0.0-rc.22` tag.
 
 - 2026-08-10: **row 3 complete.** The awaited unsubscribe operation is now a dispatch barrier: its
   driver acknowledges only after applying the command's immediate outputs and awaiting endpoint

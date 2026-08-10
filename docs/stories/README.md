@@ -79,11 +79,6 @@ appeared twice before anyone named it.
 - [M-68 — Harden DSP real-time and failure isolation](M-68-harden-dsp-realtime-failure-isolation.md) · Media · after M-63/M-64 · measured budgets and explicit fail-open/fail-closed policy
 - [M-70 — Accept multiplexed browser offers with unused component candidates](M-70-accept-multiplexed-browser-offers-with-unused-component-candidates.md) · Media · external review finding 9 · a second browser engine reaches SDP then fails the multiplexed profile
 - [M-72 — Prove the AEAD SRTP key derivation against an independent peer](M-72-prove-the-aead-srtp-key-derivation-against-a-peer.md) · Media · RFC 7714 publishes no KDF vector · a wrong salt placement makes two sipx endpoints interoperate with each other and nobody else, and every round-trip test still passes
-- [M-125 — Carry a requested bypass over the application contract](M-125-carry-a-requested-bypass-over-the-application-contract.md) · Media · after M-115 · the graph door exists and an application driving it over the wire sees half of it
-- [M-126 — Decide whether the call comes to rest in sipx-app](M-126-decide-whether-the-call-comes-to-rest-in-sipx-app.md) · Media · after M-117 · WssMessage::Binary derives its Debug and sipx-app is in neither redaction scope
-- [M-128 — Name the event families the SDK page omits](M-128-name-the-event-families-the-sdk-page-omits.md) · Application · after M-108 · the page lists event families in prose and has not tracked the last several rows
-- [M-129 — Move the worker-protocol harness into the test crate](M-129-move-the-worker-protocol-harness-into-the-test-crate.md) · Media · after M-122 · a fuzzing harness is public API of a published crate, against the convention this repo already wrote down
-- [P-30 — Bound the first NOTIFY in a registrar subscription](P-30-bound-the-first-notify-in-a-registrar-subscription.md) · Phone · peers --registrar waits Timer N — 64*T1, 32 seconds — with no operator control · the dominant unbounded wait once resolution is bounded
 - [T-33 — Bind browser WebSocket signalling](T-33-bind-browser-websocket-signalling.md) · Transport · after A-16 and S-41 · browser owns I/O, WASM core consumes bytes
 - [X-93 — Make protected release evidence faster without weakening it](X-93-make-protected-release-evidence-faster.md) · Build · measure cache and preflight changes against the 12m37 cold beta gate · follow-up
 - [X-109 — Measure custom DSP quality and real-time cost](X-109-measure-custom-dsp-quality-and-cost.md) · Build · after M-65/M-66/M-68 · exact effects, quality, cost, isolation and packaged conformance
@@ -293,7 +288,11 @@ _None._
 - [M-119 — Wire the activity hint through the DSP control surface](M-119-wire-the-activity-hint-through-the-dsp-control-surface.md) · Media · after M-114 and M-67 · the producer and its measurement exist; the per-call wiring needs M-67's parameter path
 - [M-121 — Follow private types in the raw-audio carrier reader](M-121-follow-private-types-in-the-audio-carrier-reader.md) · Media · after M-68 · the checker reads one level deep, and M-68 found a carrier two levels down
 - [M-122 — Fuzz the supervised DSP worker protocol](M-122-fuzz-the-supervised-worker-protocol.md) · Media · after M-68 · the one hostile-octet surface of the epic, unreachable from fuzz/ today
+- [M-125 — Carry a requested bypass over the application contract](M-125-carry-a-requested-bypass-over-the-application-contract.md) · Media · after M-115 · the graph door exists and an application driving it over the wire sees half of it
+- [M-126 — Decide whether the call comes to rest in sipx-app](M-126-decide-whether-the-call-comes-to-rest-in-sipx-app.md) · Media · after M-117 · WssMessage::Binary derives its Debug and sipx-app is in neither redaction scope
 - [M-127 — Bound frame_samples where the plan is validated](M-127-bound-frame-samples-at-plan-validation.md) · Media · after M-122 · the capability's ceiling is checked and the graph's own frame sizing is not
+- [M-128 — Name the event families the SDK page omits](M-128-name-the-event-families-the-sdk-page-omits.md) · Application · after M-108 · the page lists event families in prose and has not tracked the last several rows
+- [M-129 — Move the worker-protocol harness into the test crate](M-129-move-the-worker-protocol-harness-into-the-test-crate.md) · Media · after M-122 · a fuzzing harness is public API of a published crate, against the convention this repo already wrote down
 - [P-1 — Build the CLI scaffold and machine-readable output](P-1-cli-scaffold-and-output.md) · Phone
 - [P-2 — Implement `sipx register`](P-2-cli-register.md) · Phone
 - [P-3 — Implement `sipx dial`](P-3-cli-dial.md) · Phone
@@ -322,6 +321,7 @@ _None._
 - [P-27 — Make every command exit a join barrier](P-27-make-every-command-exit-a-join-barrier.md) · Phone · P-25 added the join on register's deadline path only · every other exit still reports before its work is observably finished
 - [P-28 — Report the same fields across every outcome](P-28-report-the-same-fields-across-every-outcome.md) · Phone · register's success report carries aor and its failure report does not, so no script can match on it across both
 - [P-29 — Fund every phase from one process budget](P-29-fund-every-phase-from-one-process-budget.md) · Phone · P-26 bounded resolution BY the deadline rather than subtracting it FROM the deadline, so the worst case is two phases of the stated value
+- [P-30 — Bound the first NOTIFY in a registrar subscription](P-30-bound-the-first-notify-in-a-registrar-subscription.md) · Phone · peers --registrar waits Timer N — 64*T1, 32 seconds — with no operator control · the dominant unbounded wait once resolution is bounded
 - [P-31 — Walk every candidate in peers](P-31-walk-every-candidate-in-peers.md) · Phone · peers --registrar resolves and then takes first() only, so a registrar whose first address is dead is unreachable from peers while register recovers
 - [S-1 — Specify the SIP message model and parser](S-1-sip-message-parser-specs.md) · Signalling · gates every other sip-core story
 - [S-2 — Implement SIP URIs, header names and header parameters](S-2-uri-and-header-primitives.md) · Signalling

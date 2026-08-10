@@ -2,7 +2,7 @@
 id: M-125
 title: Carry a requested bypass over the application contract
 pillar: Media
-status: in-progress
+status: done
 priority: 2
 design: docs/designs/custom-call-dsp.md
 epic: custom-call-dsp
@@ -52,9 +52,13 @@ forever by restoring it after every failure.
 - [x] An application cannot reach another call's graph through the new verb, and cannot bypass a
       supervised stage or restore a runtime-imposed bypass — each refused, not ignored.
 - [x] A failing-first test at the interpreter level and one over a real socket.
-- [ ] The gate is green.
+- [x] The gate is green.
 
 ## Progress
+
+- 2026-08-10: **done in 1.0.0-rc.22.** The complete local acceptance gate passed all 51 steps, exact
+  main CI run 31412337169 passed, and protected release run 31413202714 attempt 2 published and
+  verified the annotated `v1.0.0-rc.22` tag.
 
 - 2026-08-10: selected in the five-story rc.22 wave.
 - 2026-08-10: failing-first interpreter proof: `cargo test -p sipx-app-protocol --test vectors

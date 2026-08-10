@@ -2,7 +2,7 @@
 id: M-129
 title: Move the worker-protocol harness into the test crate
 pillar: Media
-status: in-progress
+status: done
 priority: 6
 design: docs/designs/custom-call-dsp.md
 epic: custom-call-dsp
@@ -73,9 +73,13 @@ property above.
 - [x] The campaign is re-run at the CI budget after the move and finds nothing new; the throughput
       figure is recorded, since a harness that got slower crossing a crate boundary is worth knowing
       about.
-- [ ] The gate is green.
+- [x] The gate is green.
 
 ## Progress
+
+- 2026-08-10: **done in 1.0.0-rc.22.** The complete local acceptance gate passed all 51 steps, exact
+  main CI run 31412337169 passed, and protected release run 31413202714 attempt 2 published and
+  verified the annotated `v1.0.0-rc.22` tag.
 
 - 2026-08-10: moved the generator, oracle, replay tests, example and byte-for-byte seed corpus into
   `sipx-testkit`. `sipx-media` now exposes only the hidden
