@@ -12,6 +12,7 @@
 //!   interpreter, which is the only place that knows what the host allows.
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 use crate::base64;
 use crate::dsp::{DspParameter, DspStage};
@@ -24,12 +25,55 @@ use crate::json::Json;
 /// There is deliberately no URL variant. §6.5: fetching by URL is a host capability behind an
 /// allowlist, outside this contract — and a variant here would make it representable, which is
 /// exactly the property the limit exists to keep.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Source {
     /// A host-local file, named by the host's own resolution rules.
     File(String),
     /// PCM carried in the document itself, base64 (RFC 4648 §4) on the wire.
     Inline(Vec<u8>),
+}
+
+/// How much of a caller-chosen name a record may carry, in characters.
+///
+/// §6.5 sets no length on a host-local file name, so a rendering that wrote one whole is as
+/// unbounded as one that wrote the audio — the second half of `M-107`'s defect, on a field that is
+/// not the audio. The clip keeps the fact a reader wants (which file) at a length this
+/// implementation fixes rather than the document does.
+const NAME_CLIP: usize = 64;
+
+/// A name as much of which fits in a record, with its length when it does not.
+fn clipped(name: &str) -> String {
+    let length = name.chars().count();
+    if length <= NAME_CLIP {
+        return name.to_owned();
+    }
+    let head: String = name.chars().take(NAME_CLIP).collect();
+    format!("{head}… ({length} chars)")
+}
+
+/// Renders which source it is, and **never the audio it carries** (`M-117`).
+///
+/// [`Source::Inline`] holds §6.5's second source: PCM in the document itself, `Vec<u8>` once
+/// parsed. The derived form printed every one of those bytes, so an `expect` message, a `tracing`
+/// field or a test failure carrying an instruction put an app's audio into a record whose length
+/// was the audio's — `M-107` at `PcmFrame` and `M-110` at `Packet`, one crate further out.
+///
+/// It is the same defect and not a lesser one. The relay path's copy is the conversation in
+/// flight; this copy is the conversation **at rest**, in a document a host may have logged whole
+/// on arrival, and it stays in that record as long as the record does.
+///
+/// What a `play` log is for survives: which of the two sources, and how much audio there was.
+/// `crates/sipx-app-protocol/tests/document_diagnostics.rs` holds both halves.
+impl fmt::Debug for Source {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::File(path) => formatter.debug_tuple("File").field(&clipped(path)).finish(),
+            Self::Inline(pcm) => formatter
+                .debug_struct("Inline")
+                .field("bytes", &pcm.len())
+                .finish(),
+        }
+    }
 }
 
 impl Source {
