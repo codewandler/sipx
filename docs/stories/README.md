@@ -79,15 +79,10 @@ appeared twice before anyone named it.
 - [M-68 — Harden DSP real-time and failure isolation](M-68-harden-dsp-realtime-failure-isolation.md) · Media · after M-63/M-64 · measured budgets and explicit fail-open/fail-closed policy
 - [M-70 — Accept multiplexed browser offers with unused component candidates](M-70-accept-multiplexed-browser-offers-with-unused-component-candidates.md) · Media · external review finding 9 · a second browser engine reaches SDP then fails the multiplexed profile
 - [M-72 — Prove the AEAD SRTP key derivation against an independent peer](M-72-prove-the-aead-srtp-key-derivation-against-a-peer.md) · Media · RFC 7714 publishes no KDF vector · a wrong salt placement makes two sipx endpoints interoperate with each other and nobody else, and every round-trip test still passes
-- [M-127 — Bound frame_samples where the plan is validated](M-127-bound-frame-samples-at-plan-validation.md) · Media · after M-122 · the capability's ceiling is checked and the graph's own frame sizing is not
 - [P-30 — Bound the first NOTIFY in a registrar subscription](P-30-bound-the-first-notify-in-a-registrar-subscription.md) · Phone · peers --registrar waits Timer N — 64*T1, 32 seconds — with no operator control · the dominant unbounded wait once resolution is bounded
 - [T-33 — Bind browser WebSocket signalling](T-33-bind-browser-websocket-signalling.md) · Transport · after A-16 and S-41 · browser owns I/O, WASM core consumes bytes
 - [X-93 — Make protected release evidence faster without weakening it](X-93-make-protected-release-evidence-faster.md) · Build · measure cache and preflight changes against the 12m37 cold beta gate · follow-up
 - [X-109 — Measure custom DSP quality and real-time cost](X-109-measure-custom-dsp-quality-and-cost.md) · Build · after M-65/M-66/M-68 · exact effects, quality, cost, isolation and packaged conformance
-- [X-144 — Bound the load-summary test against a busy machine](X-144-bound-the-load-summary-test-against-a-busy-machine.md) · Experience · found at the rc.19 boundary · passes 3/3 alone, failed once inside a fully loaded gate
-- [X-145 — Publish the redaction guarantee the checker enforces](X-145-publish-the-redaction-guarantee-the-checker-enforces.md) · Experience · found in a docs sweep at rc.19 · the strongest privacy property this project has is documented only for speech
-- [X-146 — Put the media DSP subsystem on the architecture page](X-146-put-the-media-dsp-subsystem-on-the-architecture-page.md) · Experience · found in a docs sweep at rc.19 · architecture.md predates the whole custom-call-DSP epic
-- [X-147 — Make the release workflow dispatchable](X-147-make-the-release-workflow-dispatchable.md) · Build · found while shipping rc.19 · GitHub rejects the release workflow before creating a job
 
 ## Next (ready — take the top one unless the user named a story)
 
@@ -298,6 +293,7 @@ _None._
 - [M-119 — Wire the activity hint through the DSP control surface](M-119-wire-the-activity-hint-through-the-dsp-control-surface.md) · Media · after M-114 and M-67 · the producer and its measurement exist; the per-call wiring needs M-67's parameter path
 - [M-121 — Follow private types in the raw-audio carrier reader](M-121-follow-private-types-in-the-audio-carrier-reader.md) · Media · after M-68 · the checker reads one level deep, and M-68 found a carrier two levels down
 - [M-122 — Fuzz the supervised DSP worker protocol](M-122-fuzz-the-supervised-worker-protocol.md) · Media · after M-68 · the one hostile-octet surface of the epic, unreachable from fuzz/ today
+- [M-127 — Bound frame_samples where the plan is validated](M-127-bound-frame-samples-at-plan-validation.md) · Media · after M-122 · the capability's ceiling is checked and the graph's own frame sizing is not
 - [P-1 — Build the CLI scaffold and machine-readable output](P-1-cli-scaffold-and-output.md) · Phone
 - [P-2 — Implement `sipx register`](P-2-cli-register.md) · Phone
 - [P-3 — Implement `sipx dial`](P-3-cli-dial.md) · Phone
@@ -537,6 +533,10 @@ _None._
 - [X-135 — A contention subject that can tell the load-pair headroom from its absence](X-135-a-contention-subject-that-can-tell-the-load-pair-headroom-from-its-absence.md) · Quality · the generated-media load pair rolls its handover race twice per run, so contention-proof.py cannot make it red and adding it to SUBJECTS would cost minutes to prove nothing
 - [X-136 — The load candidate count goes null under suite load](X-136-the-load-candidate-count-goes-null-under-suite-load.md) · Quality · a_load_run_that_reaches_no_address_reports_what_it_attempted reported candidates_attempted null in a full workspace run and 3 alone
 - [X-142 — Register the DSP heap probe in the gate](X-142-register-the-dsp-heap-probe-in-the-gate.md) · Build · after X-128 · `check-dsp-heap.sh` measures what `DSP-K9` could not, and nothing runs it automatically
+- [X-144 — Bound the load-summary test against a busy machine](X-144-bound-the-load-summary-test-against-a-busy-machine.md) · Experience · found at the rc.19 boundary · passes 3/3 alone, failed once inside a fully loaded gate
+- [X-145 — Publish the redaction guarantee the checker enforces](X-145-publish-the-redaction-guarantee-the-checker-enforces.md) · Experience · found in a docs sweep at rc.19 · the strongest privacy property this project has is documented only for speech
+- [X-146 — Put the media DSP subsystem on the architecture page](X-146-put-the-media-dsp-subsystem-on-the-architecture-page.md) · Experience · found in a docs sweep at rc.19 · architecture.md predates the whole custom-call-DSP epic
+- [X-147 — Make the release workflow dispatchable](X-147-make-the-release-workflow-dispatchable.md) · Build · found while shipping rc.19 · GitHub rejects the release workflow before creating a job
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

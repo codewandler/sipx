@@ -2,7 +2,7 @@
 id: X-147
 title: Make the release workflow dispatchable
 pillar: Build
-status: in-progress
+status: done
 priority:
 design:
 epic: conformance
@@ -49,7 +49,7 @@ prerelease. The provisioning repair therefore ships from `v1.0.0-rc.21`, not by 
 - [x] The ordinary and recovery workflow definitions pass an independent Actions syntax check.
 - [x] A fresh RC boundary consistently names the new version in manifests, public docs, comparison
       evidence, changelog and reviewed release notes.
-- [ ] The complete local gate passes, exact-SHA `main` CI including Pages passes, and the protected
+- [x] The complete local gate passes, exact-SHA `main` CI including Pages passes, and the protected
       tag workflow publishes and verifies the registry packages, portable artifacts and GitHub
       prerelease.
 
@@ -71,3 +71,8 @@ prerelease. The provisioning repair therefore ships from `v1.0.0-rc.21`, not by 
   portable build or prerelease step started. Failing-first mutations now remove the cross compiler,
   three Rust targets and runtime one at a time; the workflow checker refuses each omission, and the
   protected job installs them before the gate. Prepared rc.21 as the fresh reviewed boundary.
+- 2026-08-10: the complete 51-step local gate passed at `eb8c3193d436` in 14m22s. Exact-SHA main CI
+  including Pages passed in run `31399788932`. Protected tag run `31400675577` then passed its cold
+  gate, published and verified all 12 registry packages, built and aggregated five portable CLI
+  targets, probed the public guide and API, and published the reviewed prerelease and checksum set.
+  Public release: `https://github.com/codewandler/sipx/releases/tag/v1.0.0-rc.21`.

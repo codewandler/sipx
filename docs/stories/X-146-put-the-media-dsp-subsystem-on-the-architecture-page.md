@@ -2,7 +2,7 @@
 id: X-146
 title: Put the media DSP subsystem on the architecture page
 pillar: Experience
-status: in-progress
+status: done
 priority: 9
 design:
 epic: conformance
@@ -50,7 +50,7 @@ from the next reader's mental model no matter how many stories add to it.
       likely new reason to reach past `sipx-call`.
 - [x] No claim on the page is made that the specs do not already carry — the page summarises and
       links; it does not become a second normative source.
-- [ ] The gate is green.
+- [x] The gate is green.
 
 ## Progress
 
@@ -83,5 +83,7 @@ from the next reader's mental model no matter how many stories add to it.
   **Focused verification.** `scripts/build-docs.sh` passes: all 30 public-generator and content
   tests, 27 generated regions, the published consumer, 563 internal pages with 1,124 relative
   links, the site and anchor guard, and the API reference. `scripts/check-audio-claims.py --check`
-  also accepts the expanded crate table. The full gate is the coordinator's wave gate, so the final
-  acceptance row remains open.
+  also accepts the expanded crate table. The complete wave gate was left for integration evidence.
+
+- 2026-08-10: the complete 51-step local gate passed at `eb8c3193d436`; exact-SHA main CI and Pages
+  passed in run `31399788932`, and the protected rc.21 release passed in run `31400675577`.

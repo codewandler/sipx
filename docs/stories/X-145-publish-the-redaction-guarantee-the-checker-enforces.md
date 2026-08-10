@@ -2,7 +2,7 @@
 id: X-145
 title: Publish the redaction guarantee the checker enforces
 pillar: Experience
-status: in-progress
+status: done
 priority: 8
 design:
 epic: conformance
@@ -58,7 +58,7 @@ is in fact enforced.
       and the counts and lengths kept on purpose because an incident has to stay diagnosable.
 - [x] The page cannot silently fall behind the checker again — a generated region, or a test that
       fails when a scope exists in the checker and appears in neither the page nor an exemption.
-- [ ] The gate is green.
+- [x] The gate is green.
 
 ## Progress
 
@@ -88,5 +88,8 @@ is in fact enforced.
   **Focused verification.** `scripts/test-audio-claims.py` passes all 169 tests,
   `scripts/check-audio-claims.py --check` passes against the workspace, and
   `scripts/build-docs.sh` builds the samples, checks generated regions and 1,123 relative links,
-  builds the site, checks a deliberately dead anchor, and builds the API reference. The full gate
-  is the coordinator's wave gate, so the final acceptance row remains open.
+  builds the site, checks a deliberately dead anchor, and builds the API reference. The complete
+  wave gate was left for integration evidence.
+
+- 2026-08-10: the complete 51-step local gate passed at `eb8c3193d436`; exact-SHA main CI and Pages
+  passed in run `31399788932`, and the protected rc.21 release passed in run `31400675577`.

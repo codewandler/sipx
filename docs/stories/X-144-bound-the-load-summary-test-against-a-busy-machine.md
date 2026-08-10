@@ -2,7 +2,7 @@
 id: X-144
 title: Bound the load-summary test against a busy machine
 pillar: Experience
-status: in-progress
+status: done
 priority: 7
 design:
 epic: conformance
@@ -59,7 +59,7 @@ loaded box.
       call that genuinely went unanswered. The previous message asserted the second when setup had
       never admitted a call.
 - [x] The test is a subject of `scripts/contention-proof.py`, so this cannot regress silently.
-- [ ] The gate is green.
+- [x] The gate is green.
 
 ## Progress
 
@@ -87,11 +87,13 @@ loaded box.
 
   The exact repaired test is green, the contention-proof checker resolves six subjects and its
   deliberate control, and the full proof is green with 40 burners: all six subjects held in the
-  same run where the unbounded control went red. The Python harness suite is 15 of 15. The wave
-  coordinator owns the complete gate, so its acceptance row remains open and the story remains
-  in progress.
+  same run where the unbounded control went red. The Python harness suite is 15 of 15. The
+  complete wave gate was left for integration evidence.
 
   **Owed CHANGELOG sentence** (the release coordinator owns `CHANGELOG.md`):
 
   > The load-summary join-barrier test now distinguishes local-port contention from an unanswered
   > admitted call and retries setup within a finite bound before judging the command outcome.
+
+- 2026-08-10: the complete 51-step local gate passed at `eb8c3193d436`; exact-SHA main CI and Pages
+  passed in run `31399788932`, and the protected rc.21 release passed in run `31400675577`.

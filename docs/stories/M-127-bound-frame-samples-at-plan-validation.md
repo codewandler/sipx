@@ -2,7 +2,7 @@
 id: M-127
 title: Bound frame_samples where the plan is validated
 pillar: Media
-status: in-progress
+status: done
 priority: 4
 design: docs/designs/custom-call-dsp.md
 epic: custom-call-dsp
@@ -49,7 +49,7 @@ a hole in it.
       from different places — and a test pins that removing the plan-side check does not silently
       restore the old behaviour.
 - [x] No live-path behaviour changes for a plan that was already admissible.
-- [ ] The gate is green.
+- [x] The gate is green.
 
 ## Progress
 
@@ -71,5 +71,8 @@ a hole in it.
 
   Focused evidence: `cargo test -p sipx-media --all-features` passes; the crate itself is clean
   under `cargo clippy -p sipx-media --all-features --all-targets --no-deps -- -D warnings`;
-  provenance, story-closure and whitespace checks pass. The integration coordinator owns the one
-  complete wave gate and the final row.
+  provenance, story-closure and whitespace checks pass. The complete wave gate was left for
+  integration evidence.
+
+- 2026-08-10: the complete 51-step local gate passed at `eb8c3193d436`; exact-SHA main CI and Pages
+  passed in run `31399788932`, and the protected rc.21 release passed in run `31400675577`.
