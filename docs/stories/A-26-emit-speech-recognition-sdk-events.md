@@ -3,7 +3,7 @@ id: A-26
 title: Emit speech-recognition events through the application SDK
 pillar: Application
 status: ready
-priority: 38
+priority: 37
 design: docs/designs/local-speech.md
 epic: local-speech
 areas: [app-sdk, speech, recognition, m16]

@@ -85,7 +85,6 @@ appeared twice before anyone named it.
 - [X-109 — Measure custom DSP quality and real-time cost](X-109-measure-custom-dsp-quality-and-cost.md) · Build · after M-65/M-66/M-68 · exact effects, quality, cost, isolation and packaged conformance
 
 ## Next (ready — take the top one unless the user named a story)
-- [M-121 — Follow private types in the raw-audio carrier reader](M-121-follow-private-types-in-the-audio-carrier-reader.md) · Media · after M-68 · the checker reads one level deep, and M-68 found a carrier two levels down
 
 ### The application host
 _The [app-sdk](https://github.com/codewandler/sipx/blob/main/docs/designs/app-sdk.md) epic ends where a process has to exist: something must hold real_
@@ -95,7 +94,7 @@ _The [app-sdk](https://github.com/codewandler/sipx/blob/main/docs/designs/app-sd
 
 ### Application SDK
 _The measure of this stack's reach is what can be built on it **without writing Rust**. Today the_
-- [M-108 — Tell an app that a dialled leg went away](M-108-tell-an-app-that-a-dialled-leg-went-away.md) · Media · filed by M-103 · §5.2's `legs` is only ever rewritten by `call.dial.finished`, so a leg that answers and later hangs up stays in the snapshot forever
+- [M-128 — Name the event families the SDK page omits](M-128-name-the-event-families-the-sdk-page-omits.md) · Application · after M-108 · the page lists event families in prose and has not tracked the last several rows
 - [C-9 — Carry a bridge and a conference across a renegotiation](C-9-carry-a-bridge-across-a-renegotiation.md) · Signalling · filed from C-6 · a re-INVITE, a hold/resume or an ICE restart replaces a call's MediaSession and the bridge keeps forwarding the stopped one · size S/M
 
 ### browser audio SDK
@@ -116,8 +115,8 @@ _Applications need small, predictable facts about live audio even when no speech
 
 ### custom call-audio DSP
 _Applications need to shape live call audio without forking the media runtime: ordinary gain and_
-- [M-115 — Let an application bypass one DSP stage without replacing the chain](M-115-let-an-application-bypass-one-dsp-stage.md) · Media · after M-67 · `BypassCause::Requested` is in the spec and nothing sets it
-- [M-122 — Fuzz the supervised DSP worker protocol](M-122-fuzz-the-supervised-worker-protocol.md) · Media · after M-68 · the one hostile-octet surface of the epic, unreachable from fuzz/ today
+- [M-125 — Carry a requested bypass over the application contract](M-125-carry-a-requested-bypass-over-the-application-contract.md) · Media · after M-115 · the graph door exists and an application driving it over the wire sees half of it
+- [M-127 — Bound frame_samples where the plan is validated](M-127-bound-frame-samples-at-plan-validation.md) · Media · after M-122 · the capability's ceiling is checked and the graph's own frame sizing is not
 - [A-34 — Publish a runnable custom call-DSP example](A-34-publish-custom-call-dsp-example.md) · Application · M18 exit after M-67 and X-109 · live graph, custom fixture, effects/noise reduction, bypass
 - [X-143 — Record the DSP cost run on a quiet box](X-143-record-the-dsp-cost-run-on-a-quiet-box.md) · Build · after X-109 · the harness exists and refuses to report under load; the figure is untaken
 
@@ -143,7 +142,7 @@ _A live call on a machine with a local accelerator should be able to transcribe 
 
 ### Media
 _Signalling that cannot carry audio is a curiosity. The media layer is also where the sans-IO_
-- [M-117 — Redact the byte buffers outside the relay path](M-117-redact-the-byte-buffers-outside-the-relay-path.md) · Quality · after M-110 · four named carriers outside RELAY_PATH — two are call audio, one is PCM in a document, one is a nonce-signing key
+- [M-126 — Decide whether the call comes to rest in sipx-app](M-126-decide-whether-the-call-comes-to-rest-in-sipx-app.md) · Media · after M-117 · WssMessage::Binary derives its Debug and sipx-app is in neither redaction scope
 - [M-123 — Refuse an advertised media address the far end will read as its own](M-123-refuse-an-advertised-address-the-far-end-owns.md) · Media · found while dialling a real endpoint · answered, and no audio, with no error anywhere
 - [M-124 — Resolve cluster-internal SIP names after ordinary DNS declines](M-124-resolve-cluster-internal-sip-names.md) · Core · after M-123 · RFC 3263 runs first and unchanged; this is only what happens when it returns nothing
 
@@ -286,9 +285,14 @@ _None._
 - [M-102 — Run a supervised DSP worker in its own process](M-102-run-a-supervised-dsp-worker-in-its-own-process.md) · Media · after M-64 · the operating-system half of the supervised-isolated profile
 - [M-103 — Give `call.dial.finished` a producer](M-103-give-call-dial-finished-a-producer.md) · Media · filed by M-99 · the last §5.3 row with no producer anywhere, and the driver refuses the effect that would create the leg
 - [M-107 — Stop a PCM frame rendering its audio](M-107-stop-a-pcm-frame-rendering-its-audio.md) · Media · PcmFrame derives Debug over its samples · the same shape M-61 fixed one layer down, where it was reachable from a real refusal record
+- [M-108 — Tell an app that a dialled leg went away](M-108-tell-an-app-that-a-dialled-leg-went-away.md) · Media · filed by M-103 · §5.2's `legs` is only ever rewritten by `call.dial.finished`, so a leg that answers and later hangs up stays in the snapshot forever
 - [M-110 — Stop an RTP packet rendering its payload](M-110-stop-an-rtp-packet-rendering-its-payload.md) · Media · after M-107 · Packet, Rtcp and SdesItem derive Debug over Bytes; M-107 redacted Encoded at the other end of the same relay path
 - [M-114 — Produce the activity hint a noise reducer declares it consumes](M-114-produce-the-noise-reducer-activity-hint.md) · Media · after M-66 and M-67 · the hint is declared and honoured; nothing in the workspace sets it
+- [M-115 — Let an application bypass one DSP stage without replacing the chain](M-115-let-an-application-bypass-one-dsp-stage.md) · Media · after M-67 · `BypassCause::Requested` is in the spec and nothing sets it
+- [M-117 — Redact the byte buffers outside the relay path](M-117-redact-the-byte-buffers-outside-the-relay-path.md) · Quality · after M-110 · four named carriers outside RELAY_PATH — two are call audio, one is PCM in a document, one is a nonce-signing key
 - [M-119 — Wire the activity hint through the DSP control surface](M-119-wire-the-activity-hint-through-the-dsp-control-surface.md) · Media · after M-114 and M-67 · the producer and its measurement exist; the per-call wiring needs M-67's parameter path
+- [M-121 — Follow private types in the raw-audio carrier reader](M-121-follow-private-types-in-the-audio-carrier-reader.md) · Media · after M-68 · the checker reads one level deep, and M-68 found a carrier two levels down
+- [M-122 — Fuzz the supervised DSP worker protocol](M-122-fuzz-the-supervised-worker-protocol.md) · Media · after M-68 · the one hostile-octet surface of the epic, unreachable from fuzz/ today
 - [P-1 — Build the CLI scaffold and machine-readable output](P-1-cli-scaffold-and-output.md) · Phone
 - [P-2 — Implement `sipx register`](P-2-cli-register.md) · Phone
 - [P-3 — Implement `sipx dial`](P-3-cli-dial.md) · Phone

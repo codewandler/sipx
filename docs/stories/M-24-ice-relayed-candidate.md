@@ -3,7 +3,7 @@ id: M-24
 title: Gather a relayed candidate from a configured relay
 pillar: Media
 status: ready
-priority: 32
+priority: 31
 design: docs/designs/media.md
 epic: ice
 areas: [sipx-media]

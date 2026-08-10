@@ -3,7 +3,7 @@ id: A-17
 title: Generate and package the browser SDK
 pillar: Application
 status: ready
-priority: 28
+priority: 27
 design: docs/designs/browser-sdk.md
 epic: browser-sdk
 areas: [browser, javascript, typescript, wasm, npm, m15]

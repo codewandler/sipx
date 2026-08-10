@@ -3,7 +3,7 @@ id: M-60
 title: Calibrate and adapt audio-activity thresholds deterministically
 pillar: Media
 status: in-progress
-priority: 15
+priority: 13
 design: docs/designs/call-audio-analysis.md
 epic: call-audio-analysis
 areas: [sipx-audio, audio-analysis, vad, m16]

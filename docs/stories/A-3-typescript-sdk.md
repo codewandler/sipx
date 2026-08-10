@@ -3,7 +3,7 @@ id: A-3
 title: The TypeScript SDK and the two reference applications
 pillar: Application
 status: ready
-priority: 23
+priority: 22
 design: docs/designs/ts-sdk.md
 epic: app-host
 areas: [sipx-app]

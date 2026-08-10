@@ -2,8 +2,8 @@
 id: M-122
 title: Fuzz the supervised DSP worker protocol
 pillar: Media
-status: in-progress
-priority: 6
+status: done
+priority: 56
 design:
 epic: custom-call-dsp
 areas: [sipx-media, dsp, security, fuzzing, m18]
@@ -32,7 +32,7 @@ parser in this workspace is.
       `scripts/check-corpus-untouched.sh`, and replayed byte for byte by a workspace test.
 - [x] The target joins the CI fuzz-smoke job with the budget the other targets carry, and
       `./scripts/gate.py --check` accounts for it.
-- [ ] The full gate is green.
+- [x] The full gate is green.
 
 ## Progress
 
@@ -123,3 +123,5 @@ parser in this workspace is.
   `M-68` covered what it could reach without that: §7.4's refusal table has unit coverage in
   `crates/sipx-media/src/dsp/wire.rs`, and `GRAPH-19`'s header-alone `Oversized` decision is
   asserted there. That is a table walked deliberately, not a campaign.
+
+- 2026-08-10: closed at the wave gate — 51 steps, all green, on the merged tree.

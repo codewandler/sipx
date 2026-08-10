@@ -3,7 +3,7 @@ id: M-70
 title: "Accept multiplexed browser offers with unused component candidates"
 pillar: Media
 status: in-progress
-priority: 26
+priority: 25
 epic: media-interoperability
 areas: [sipx-sdp, sipx-media]
 design: docs/designs/media-interoperability.md

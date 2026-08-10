@@ -3,7 +3,7 @@ id: X-107
 title: Prove the Realtime phone against mock and opt-in live services
 pillar: Build
 status: ready
-priority: 47
+priority: 46
 design: docs/designs/openai-realtime-phone.md
 epic: openai-realtime-phone
 areas: [testkit, integration-test, openai-realtime, security, m17]

@@ -3,7 +3,7 @@ id: M-123
 title: Refuse an advertised media address the far end will read as its own
 pillar: Media
 status: ready
-priority: 11
+priority: 9
 design: docs/designs/cluster-names.md
 epic: media
 areas: [sipx-media, sipx-call, sdp, diagnostics]

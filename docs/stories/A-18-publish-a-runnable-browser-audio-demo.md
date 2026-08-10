@@ -3,7 +3,7 @@ id: A-18
 title: Publish a runnable browser-audio demo
 pillar: Application
 status: ready
-priority: 29
+priority: 28
 design: docs/designs/browser-sdk.md
 epic: browser-sdk
 areas: [browser, website, example, audio, m15]

@@ -1906,7 +1906,11 @@ class TheByteBufferRule(unittest.TestCase):
         problems = self.problems(CARRYING)
         self.assertEqual(1, len(problems))
         self.assertIn("`Packet`", problems[0])
-        self.assertIn("buffer of octets", problems[0])
+        # Both halves of the sentence, not the phrasing that happened to join them: the message was
+        # reworded when the at-rest scope landed and this assertion went stale against wording
+        # rather than against behaviour.
+        self.assertIn("octets", problems[0])
+        self.assertIn("buffer", problems[0])
 
     def test_every_shape_a_byte_buffer_is_written_in_is_one(self):
         """Owned, borrowed, boxed, fixed, and both `bytes` crate types.

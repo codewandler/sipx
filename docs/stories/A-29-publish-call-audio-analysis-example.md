@@ -3,7 +3,7 @@ id: A-29
 title: Publish a runnable live call-audio analysis example
 pillar: Application
 status: ready
-priority: 16
+priority: 14
 design: docs/designs/call-audio-analysis.md
 epic: call-audio-analysis
 areas: [example, app-sdk, audio-analysis, vad, documentation, m16]

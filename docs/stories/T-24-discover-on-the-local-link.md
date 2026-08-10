@@ -3,7 +3,7 @@ id: T-24
 title: Discover SIP endpoints on the local link
 pillar: Transport
 status: blocked
-priority: 33
+priority: 32
 design: docs/designs/discovery.md
 epic: discovery
 areas: [sipx-transport, sipx-cli]

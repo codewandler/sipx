@@ -3,7 +3,7 @@ id: A-6
 title: Finish the engine-binding spec — isolation, lifecycle, budgets
 pillar: Application
 status: ready
-priority: 21
+priority: 20
 design: docs/designs/embedded-runtime.md
 epic: app-host
 areas: [sipx-app]

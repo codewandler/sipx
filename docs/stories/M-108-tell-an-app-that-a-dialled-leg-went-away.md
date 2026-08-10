@@ -2,8 +2,8 @@
 id: M-108
 title: Tell an app that a dialled leg went away
 pillar: Media
-status: in-progress
-priority: 4
+status: done
+priority: 54
 design: docs/designs/app-sdk.md
 epic: app-sdk
 areas: [sipx-app, sipx-app-protocol, app-sdk, m16]
@@ -32,7 +32,7 @@ and is later ended by the far end is reported to the app by nothing, and stays i
       for this: `call.unbridged` names a coupling ending and §6.2 requires a `bridge` to have been
       made, so it is not the answer for a leg nobody bridged. Either a row is added, or the section
       states in normative prose that an unbridged leg's ending is not reported and why.
-- [ ] The full gate is green.
+- [x] The full gate is green.
 
 ## Progress
 
@@ -113,3 +113,5 @@ of the call.*
   "that leg's own `call.ended` is where an app reads it". A leg this host dialled has no `call.ended`
   of its own — it is not a call the app is bound to — so that sentence does not cover this case and
   the section should say so either way.
+
+- 2026-08-10: closed at the wave gate — 51 steps, all green, on the merged tree.

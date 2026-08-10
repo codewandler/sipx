@@ -3,7 +3,7 @@ id: M-124
 title: Resolve cluster-internal SIP names after ordinary DNS declines
 pillar: Core
 status: ready
-priority: 12
+priority: 10
 design: docs/designs/cluster-names.md
 epic: media
 areas: [sipx-transport, sipx-call, dns, resolution]

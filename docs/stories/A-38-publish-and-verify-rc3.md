@@ -3,7 +3,7 @@ id: A-38
 title: Publish and verify the second release candidate
 pillar: Application
 status: in-progress
-priority: 52
+priority: 51
 design:
 epic: release
 areas: [release, docs, sipx-cli, rc3]

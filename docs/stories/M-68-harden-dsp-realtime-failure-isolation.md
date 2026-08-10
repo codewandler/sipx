@@ -3,7 +3,7 @@ id: M-68
 title: Harden DSP real-time and failure isolation
 pillar: Media
 status: in-progress
-priority: 19
+priority: 18
 design: docs/designs/custom-call-dsp.md
 epic: custom-call-dsp
 areas: [sipx-media, dsp, security, realtime, m18]

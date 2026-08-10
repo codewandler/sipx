@@ -3,7 +3,7 @@ id: A-34
 title: Publish a runnable custom call-DSP example
 pillar: Application
 status: ready
-priority: 7
+priority: 15
 design: docs/designs/custom-call-dsp.md
 epic: custom-call-dsp
 areas: [example, app-sdk, dsp, documentation, m18]

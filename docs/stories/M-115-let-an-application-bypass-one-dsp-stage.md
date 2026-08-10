@@ -2,8 +2,8 @@
 id: M-115
 title: Let an application bypass one DSP stage without replacing the chain
 pillar: Media
-status: in-progress
-priority: 5
+status: done
+priority: 52
 design: docs/designs/custom-call-dsp.md
 epic: custom-call-dsp
 areas: [sipx-media, app-sdk, dsp, m18]
@@ -49,9 +49,9 @@ which one `Requested` means before it implements it.
       stale generation, an unknown index, or a stage already in that state.
 - [x] `contains_overrun()` is unchanged by a bypass: containment is a property of which stages are
       installed, not of which are contributing.
-- [ ] A verb and a completion event, if the application contract grows them, are held by
+- [x] A verb and a completion event, if the application contract grows them, are held by
       `spec_tables.rs` to the same producer rule `M-67`'s five rows are.
-- [ ] The full gate is green.
+- [x] The full gate is green.
 
 ## Progress
 
@@ -111,3 +111,10 @@ which one `Requested` means before it implements it.
   `An application can now take one DSP stage out of a live chain and put it back with`
   `DspGraph::set_bypassed, without replacing the chain or opening a new epoch; a bypass the runtime`
   `imposed under the miss budget stays terminal.`
+
+- 2026-08-10: the conditional row is ticked because its condition did not fire — the
+  application contract deliberately did not grow, so `spec_tables.rs` has nothing to hold.
+  The half that leaves (a wire verb, `call.dsp.restored`, and their producer rows) is filed
+  as `M-125` rather than left implied by an unticked row.
+
+- 2026-08-10: closed at the wave gate — 51 steps, all green, on the merged tree.

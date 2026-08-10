@@ -3,7 +3,7 @@ id: X-109
 title: Measure custom DSP quality and real-time cost
 pillar: Build
 status: in-progress
-priority: 18
+priority: 17
 design: docs/designs/custom-call-dsp.md
 epic: custom-call-dsp
 areas: [testkit, dsp, benchmark, documentation, m18]

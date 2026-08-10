@@ -3,7 +3,7 @@ id: P-6
 title: Dial a peer by name
 pillar: Phone
 status: ready
-priority: 34
+priority: 33
 design: docs/designs/discovery.md
 epic: discovery
 areas: [sipx-cli]

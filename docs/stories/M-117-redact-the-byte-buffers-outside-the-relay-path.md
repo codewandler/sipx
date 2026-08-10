@@ -2,8 +2,8 @@
 id: M-117
 title: Redact the byte buffers outside the relay path
 pillar: Quality
-status: in-progress
-priority: 2
+status: done
+priority: 53
 design:
 epic: media
 areas: [sipx-app-protocol, sipx-testkit, sipx-ua]
@@ -65,7 +65,7 @@ that must not happen is a fix without a decision, because that is how `M-107` le
       the next type that keeps a key in a `[u8; N]`, or the story says why nothing does.
 - [x] The scope question is answered in `check-audio-claims.py` either way — a named scope covering
       them, or a stated reason no rule reaches them and a count that keeps saying so.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
 
@@ -183,3 +183,4 @@ that must not happen is a fix without a decision, because that is how `M-107` le
   third crate where the call rests is the same question this story answered for two others, and it
   should be asked by a story rather than by an implementor widening a constant.
 
+- 2026-08-10: closed at the wave gate — 51 steps, all green, on the merged tree.

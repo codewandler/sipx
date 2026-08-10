@@ -101,7 +101,7 @@ pub struct Delivery {
 /// Renders which end a datagram reached and how long it was, never the datagram (`M-117`).
 ///
 /// **Not "not the call", which is why this is an implementation and not a rationale.** Everything
-/// this link carries today is signalling — [`crate::call::Pair`] connects two transaction layers
+/// this link carries today is signalling — [`crate::call::TransactionHarness`] connects two transaction layers
 /// through it and nothing puts media on it — so the audio argument does not apply. What does apply
 /// is the other half: a SIP datagram carries `From`, `To` and `Contact`, which are the addresses
 /// of the people on the call, and this is a published crate a downstream stack points at its own

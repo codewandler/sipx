@@ -2,8 +2,8 @@
 id: M-121
 title: Follow private types in the raw-audio carrier reader
 pillar: Media
-status: in-progress
-priority: 3
+status: done
+priority: 55
 design:
 epic:
 areas: [tooling, audio, security, media]
@@ -29,7 +29,7 @@ through a private field, which is the shape `M-68` found by hand after the check
       its site; the check does not land reporting known-unfixed carriers.
 - [x] The docstring states the new depth, why that depth, and what a carrier past it still costs a
       reviewer — the check narrows deliberately or not at all.
-- [ ] The full gate is green.
+- [x] The full gate is green.
 
 ## Progress
 
@@ -116,3 +116,5 @@ through a private field, which is the shape `M-68` found by hand after the check
   > hops deep, so a derived `Debug` that reaches call audio indirectly is caught rather than
   > reviewed by hand; `MediaSession` and `PcmProcessor` no longer render the audio waiting in their
   > queues.
+
+- 2026-08-10: closed at the wave gate — 51 steps, all green, on the merged tree.
