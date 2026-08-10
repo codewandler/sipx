@@ -18,8 +18,8 @@
 
 use sipx_app_protocol::{
     CallSnapshot, CallState, Callback, DialOutcome, Direction, Document, Effect, EndCause,
-    Envelope, EventKind, Failure, GatherReason, Input, Interpreter, OnFailure, Output, Policy,
-    Response, Timer, Timestamp,
+    Envelope, EventKind, Failure, GatherReason, Input, Interpreter, LegEndCause, OnFailure, Output,
+    Policy, Response, Timer, Timestamp,
 };
 
 /// A fixed instant. The interpreter never asks what time it is, so the tests never have to move
@@ -516,6 +516,76 @@ fn ac_7_a_busy_dial_removes_the_leg_from_the_snapshot() {
     );
     assert!(interpreter.snapshot().legs.is_empty());
     assert_eq!(interpreter.running(), None, "the dial resolved");
+}
+
+/// **AC-10** — AC-7's `dial` answers instead, and the leg is later ended by its far end: §5.2
+/// lists it `answered` until then and not at all afterwards, and the running program is untouched.
+///
+/// The pair to AC-7, and the half that was missing until `M-108`. `apply_to_snapshot` rewrote
+/// `legs` in the `call.dial.finished` arm and in no other, so the `answered` this vector's third
+/// step asserts used to be permanent: the leg stayed in every later snapshot of the call, however
+/// long ago the far end had hung up. The `pause` is here to hold the queue across the ending —
+/// `call.leg.ended` completes no instruction, so a program blocked on one must still be blocked on
+/// it afterwards.
+#[test]
+fn ac_10_an_answered_leg_is_listed_until_it_ends() {
+    let mut interpreter = interpreter(Policy::default());
+    let (_, callback) = delivery(interpreter.handle(now(), Input::Event(EventKind::Incoming)));
+    interpreter.handle(
+        now(),
+        Input::Response {
+            callback,
+            response: Response::Body(body(
+                r#"{"id":"d1","do":"dial","target":"sip:bob@example.net"}"#,
+            )),
+        },
+    );
+    assert_eq!(interpreter.snapshot().legs[0].state, CallState::Ringing);
+
+    let outputs = interpreter.handle(
+        now(),
+        Input::Event(EventKind::DialFinished {
+            instruction_id: "d1".to_owned(),
+            leg: "b".to_owned(),
+            outcome: DialOutcome::Answered,
+        }),
+    );
+    let (envelope, callback) = delivery(outputs);
+    assert_eq!(
+        envelope.call.legs[0].state,
+        CallState::Answered,
+        "the answered leg is listed while it is up"
+    );
+
+    // The app writes something that blocks the queue, so that "untouched" is observable.
+    interpreter.handle(
+        now(),
+        Input::Response {
+            callback,
+            response: Response::Body(body(r#"{"id":"p1","do":"pause","ms":5000}"#)),
+        },
+    );
+    assert_eq!(interpreter.running(), Some("p1"));
+
+    let outputs = interpreter.handle(
+        now(),
+        Input::Event(EventKind::LegEnded {
+            leg: "b".to_owned(),
+            cause: LegEndCause::Remote,
+        }),
+    );
+    let (envelope, _callback) = delivery(outputs);
+    assert!(
+        envelope.call.legs.is_empty(),
+        "the snapshot the app receives with the ending no longer lists the leg: {:?}",
+        envelope.call.legs
+    );
+    assert!(interpreter.snapshot().legs.is_empty());
+    assert_eq!(
+        interpreter.running(),
+        Some("p1"),
+        "a leg's ending completes no instruction"
+    );
 }
 
 /// **AC-8** — a `call.dtmf` firing while a callback is outstanding: delivered after the response

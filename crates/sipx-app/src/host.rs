@@ -39,10 +39,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
 use sipx_app_protocol::{
     CallSnapshot, DialOutcome, Direction, Effect, EventKind, Failure, Input, Interpreter,
-    OnFailure as ContractOnFailure, Output, Policy, Response, Source, Timer, Timestamp,
+    LegEndCause, OnFailure as ContractOnFailure, Output, Policy, Response, Source, Timer,
+    Timestamp,
 };
 use sipx_call::{
-    Call, CallEvent, CallEvents, Calls, DialOptions, Dispatched, Dispatcher, Invitation,
+    Call, CallEvent, CallEvents, Calls, DialOptions, Dispatched, Dispatcher, Invitation, Served,
     dial_early_until,
 };
 use sipx_media::{Interrupt, Playback, PlaybackId};
@@ -251,7 +252,25 @@ struct DialedLeg {
     outcome: DialOutcome,
 }
 
-/// How many resolutions may wait behind a busy actor before a leg task blocks on reporting.
+/// What one leg task tells the actor, in the order the leg lives it.
+///
+/// Both facts travel the same channel because their **order** is the contract: §5.2 lists a leg
+/// from the `call.dial.finished` that answered it until the `call.leg.ended` that removes it, so an
+/// ending that overtook its own resolution would leave the leg listed forever. One mpsc from one
+/// task is what makes that ordering structural rather than a thing to be careful about.
+enum LegReport {
+    /// The attempt resolved, however it went (§5.3's `call.dial.finished`, `M-103`).
+    Resolved(DialedLeg),
+    /// An answered leg is over (§5.3's `call.leg.ended`, `M-108`).
+    Ended {
+        /// The name §5.2 listed it under, held by the task for exactly this.
+        leg: String,
+        /// Why, in §5.3's closed vocabulary for this row.
+        cause: LegEndCause,
+    },
+}
+
+/// How many leg reports may wait behind a busy actor before a leg task blocks on reporting.
 ///
 /// A `dial` blocks the program until it resolves (§6.2), so more than a handful in flight would
 /// mean a driver that had lost track of its own queue. Bounded rather than unbounded because
@@ -275,19 +294,19 @@ const DIAL_RESOLUTIONS: usize = 8;
 struct DialTasks {
     tasks: JoinSet<()>,
     stop: watch::Sender<bool>,
-    resolutions: mpsc::Sender<DialedLeg>,
-    resolved: mpsc::Receiver<DialedLeg>,
+    reports: mpsc::Sender<LegReport>,
+    reported: mpsc::Receiver<LegReport>,
 }
 
 impl DialTasks {
     fn new() -> Self {
         let (stop, _) = watch::channel(false);
-        let (resolutions, resolved) = mpsc::channel(DIAL_RESOLUTIONS);
+        let (reports, reported) = mpsc::channel(DIAL_RESOLUTIONS);
         Self {
             tasks: JoinSet::new(),
             stop,
-            resolutions,
-            resolved,
+            reports,
+            reported,
         }
     }
 
@@ -296,9 +315,23 @@ impl DialTasks {
     /// Both halves matter. Without the signal the tasks would serve calls the actor has left;
     /// without the await, dropping the [`JoinSet`] would abort one at whatever await its BYE had
     /// reached, which is the leak `AGENTS.md`'s bounded-background-work rule names.
+    ///
+    /// The reports are drained while joining because this is the one stretch where nothing else
+    /// reads them: a leg whose far end hung up in the same breath as the stop still has a
+    /// [`LegReport::Ended`] to send, and a task blocked on a full channel is a task that never
+    /// joins. Draining is safe precisely because the actor is finishing — the interpreter is at or
+    /// past its own `call.ended`, so there is nothing left that a leg report could change.
     async fn finish(&mut self) {
         let _ = self.stop.send(true);
-        while self.tasks.join_next().await.is_some() {}
+        let Self {
+            tasks, reported, ..
+        } = self;
+        loop {
+            tokio::select! {
+                joined = tasks.join_next() => if joined.is_none() { return },
+                _ = reported.recv() => {}
+            }
+        }
     }
 }
 
@@ -459,7 +492,7 @@ impl DocumentCall {
         };
         let shutdown = &mut self.shutdown;
         let binding = &mut self.binding;
-        let resolved = &mut self.legs.resolved;
+        let reported = &mut self.legs.reported;
         let graphs = &mut self.graphs;
         tokio::select! {
             _ = shutdown.changed() => ActorAction::Shutdown,
@@ -478,7 +511,7 @@ impl DocumentCall {
             input = binding.next_session_input() => ActorAction::Session(input),
             // This actor holds a sender of its own, so the channel never closes while it lives and
             // a `None` here is unreachable rather than an ending to interpret.
-            Some(leg) = resolved.recv() => ActorAction::Dialed(Box::new(leg)),
+            Some(report) = reported.recv() => ActorAction::Leg(Box::new(report)),
             // Woken where the graph records a transition, never on a timer and never by looking
             // (`docs/specs/call-dsp-graph.md` §10.3). Pends forever while this call has no graph,
             // and is safe to lose this race: a losing branch is one that never drained.
@@ -492,7 +525,7 @@ impl DocumentCall {
         };
         let shutdown = &mut self.shutdown;
         let binding = &mut self.binding;
-        let resolved = &mut self.legs.resolved;
+        let reported = &mut self.legs.reported;
         tokio::select! {
             _ = shutdown.changed() => ActorAction::Shutdown,
             event = events.recv() => event.map_or(ActorAction::Closed, ActorAction::CallEvent),
@@ -500,7 +533,7 @@ impl DocumentCall {
             // A `dial` before the invitation is answered is a document's to write, so its
             // resolution has to be read here too — §6.1 orders instructions and does not require an
             // `answer` before them.
-            Some(leg) = resolved.recv() => ActorAction::Dialed(Box::new(leg)),
+            Some(report) = reported.recv() => ActorAction::Leg(Box::new(report)),
         }
     }
 
@@ -512,23 +545,24 @@ impl DocumentCall {
                 Input::Event(EventKind::Dtmf { digit, duration_ms }),
             ),
             ActorAction::Digit(None) | ActorAction::Closed => Vec::new(),
-            // §5.3's `call.dial.finished`, composed here because nothing else can: the app's
-            // `instruction_id` and `leg` are this driver's, and how the invitation resolved is the
-            // `Err` of the dial rather than anything on the leg's event stream (`M-103`).
-            ActorAction::Dialed(leg) => {
-                let DialedLeg {
-                    instruction_id,
-                    leg,
-                    outcome,
-                } = *leg;
-                self.interpreter.handle(
-                    timestamp(),
-                    Input::Event(EventKind::DialFinished {
+            // §5.3's two rows about a leg of this call, composed here because nothing else can: the
+            // app's `instruction_id` and `leg` are this driver's, and neither how the invitation
+            // resolved (`M-103`) nor how the answered leg finally ended (`M-108`) reaches the
+            // *inbound* call's event stream at all.
+            ActorAction::Leg(report) => {
+                let event = match *report {
+                    LegReport::Resolved(DialedLeg {
                         instruction_id,
                         leg,
                         outcome,
-                    }),
-                )
+                    }) => EventKind::DialFinished {
+                        instruction_id,
+                        leg,
+                        outcome,
+                    },
+                    LegReport::Ended { leg, cause } => EventKind::LegEnded { leg, cause },
+                };
+                self.interpreter.handle(timestamp(), Input::Event(event))
             }
             // §5.3's `call.dsp.bypassed` and the unsolicited half of `call.dsp.removed`: facts
             // about a graph that no instruction is waiting on, composed by `crate::dsp`.
@@ -965,9 +999,10 @@ impl DocumentCall {
             // never entitled to set would make that statement a hazard to use.
             headers: allowed_dial_headers(&headers, &self.grants),
         };
-        let resolutions = self.legs.resolutions.clone();
+        let reports = self.legs.reports.clone();
         let mut stop = self.legs.stop.subscribe();
         self.legs.tasks.spawn(async move {
+            let named = leg.clone();
             let placed = attempt.place(&mut stop).await;
             let outcome = match &placed {
                 Ok(_) => sipx_app_protocol::dial_outcome(None),
@@ -981,15 +1016,21 @@ impl DocumentCall {
             // Reporting before serving: the app is told how its `dial` resolved as soon as that is
             // known, and the leg's own lifetime follows behind it. A closed channel means the
             // actor is already gone, which is not a reason to leave a confirmed dialog up.
-            let _ = resolutions
-                .send(DialedLeg {
+            let _ = reports
+                .send(LegReport::Resolved(DialedLeg {
                     instruction_id,
                     leg,
                     outcome,
-                })
+                }))
                 .await;
             if let Ok(established) = placed {
-                established.serve(&mut stop).await;
+                let served = established.serve(&mut stop).await;
+                // §5.3's `call.leg.ended` (`M-108`). Sent on the same channel as the resolution
+                // above and from the same task, so it can never overtake it — §5.2 lists this leg
+                // between the two, and an ending delivered first would list it forever.
+                if let Some(cause) = leg_end_cause(&served) {
+                    let _ = reports.send(LegReport::Ended { leg: named, cause }).await;
+                }
             }
         });
     }
@@ -1087,9 +1128,10 @@ enum ActorAction {
     CallEvent(CallEvent),
     Incoming(Box<Incoming>),
     Digit(Option<(char, u32)>),
-    /// A `dial` this actor placed resolved (`M-103`). Boxed for the same reason `Incoming` is: the
-    /// enum is held across an await in a future whose size is already lint-budgeted.
-    Dialed(Box<DialedLeg>),
+    /// A leg this actor placed resolved (`M-103`) or ended (`M-108`). Boxed for the same reason
+    /// `Incoming` is: the enum is held across an await in a future whose size is already
+    /// lint-budgeted.
+    Leg(Box<LegReport>),
     /// A DSP transition nobody asked for — a bypass, or a teardown this call did not request
     /// (`M-67`). Boxed for the same reason the two above are.
     DspEvent(Box<EventKind>),
@@ -1642,14 +1684,48 @@ impl EstablishedLeg {
     /// media work of its own: coupling it to the inbound call is §6.2's `bridge`, which this
     /// driver still refuses, so until then the leg exists to answer its own signalling and to be
     /// hung up cleanly.
-    async fn serve(mut self, stop: &mut watch::Receiver<bool>) {
-        let _: sipx_call::Result<sipx_call::Served<()>> = sipx_call::serve_until(
+    ///
+    /// The outcome is returned rather than discarded because it is the *only* observation of this
+    /// leg's ending anywhere in the process (`M-108`): the leg's own `CallEvents` are not read by
+    /// the actor, and §5.3's `call.leg.ended` is composed from what this reports.
+    async fn serve(mut self, stop: &mut watch::Receiver<bool>) -> sipx_call::Result<Served<()>> {
+        sipx_call::serve_until(
             &mut self.call,
             &mut self.inbox,
             |_media, cancelled| async move { cancelled.cancelled().await },
             shutdown_signal(stop),
         )
-        .await;
+        .await
+    }
+}
+
+/// How a served leg ended, in §5.3's vocabulary for `call.leg.ended` — or `None` where the ending
+/// is not the app's news (`M-108`).
+///
+/// `None` is the case where **this side** ended the leg, and it is not an omission. The only thing
+/// that stops a leg is [`DialTasks::finish`], which runs when the actor itself is finishing, so the
+/// app has already been sent — or is about to be sent — the `call.ended` that is the whole story.
+/// A `call.leg.ended` there would report the consequence of an ending as if it were a second one,
+/// and the interpreter is terminal by then and would drop it anyway.
+fn leg_end_cause(served: &sipx_call::Result<Served<()>>) -> Option<LegEndCause> {
+    match served {
+        // The far end ended the confirmed dialog. Its own cause is `sipx-call`'s, and the one
+        // distinction §5.3 keeps is the session it agreed to refresh running out (RFC 4028) versus
+        // it hanging up: anything else under `Remote` is still the far end ending the leg, which is
+        // what `remote` says, so an unrecognised cause there concludes no more than is known.
+        Ok(Served::Remote {
+            cause: sipx_call::EndCause::Timeout,
+            ..
+        }) => Some(LegEndCause::Timeout),
+        Ok(Served::Remote { .. }) => Some(LegEndCause::Remote),
+        Ok(Served::Local { .. } | Served::Interrupted { .. }) => None,
+        // Serving could not go on — a transport failure, or an in-dialog request this side could
+        // not answer — and, because [`Served`] is `#[non_exhaustive]`, an outcome added to it after
+        // this arm was written. The leg is over in all of them and §5.2 may not go on listing it,
+        // so this reports rather than staying silent, and reports it as the contract's own "the
+        // host could not go on" rather than guessing which of the other two words it resembles.
+        // The same judgement `sipx_app_protocol::event_from_call` makes for `call.ended`.
+        Ok(_) | Err(_) => Some(LegEndCause::Error),
     }
 }
 
@@ -2766,6 +2842,64 @@ on_4xx = {{ reject = 488 }}
 
         // And a grant of nothing — what an absent `grants` table means — sets nothing.
         assert!(allowed_dial_headers(&asked, &Grants::denied()).is_empty());
+    }
+
+    /// **`M-108`** — every word §5.3 gives `call.leg.ended` is one this driver can send, and the
+    /// endings it does not report are the ones it ends itself.
+    ///
+    /// The integration test in `tests/host.rs` drives `remote` over a real socket. This is the rest
+    /// of the mapping, which no far end can be asked to produce on demand — and the assertion that
+    /// matters most is the pair of `None`s: a leg stopped by [`DialTasks::finish`] is the actor's
+    /// own teardown, and reporting it would announce a second ending to an app that has already
+    /// been told the call is over.
+    #[test]
+    fn every_leg_ending_the_far_end_can_cause_has_a_word_and_the_rest_have_none() {
+        let reported: Vec<Option<LegEndCause>> = [
+            Ok(Served::Remote {
+                cause: sipx_call::EndCause::RemoteBye,
+                output: (),
+            }),
+            Ok(Served::Remote {
+                cause: sipx_call::EndCause::Timeout,
+                output: (),
+            }),
+            Err(sipx_call::Error::Transport(
+                sipx_transport::Error::EndpointClosed,
+            )),
+            Ok(Served::Interrupted {
+                output: (),
+                bye: Ok(200),
+            }),
+            Ok(Served::Local {
+                output: (),
+                bye: Ok(200),
+            }),
+        ]
+        .iter()
+        .map(leg_end_cause)
+        .collect();
+
+        assert_eq!(
+            reported,
+            [
+                Some(LegEndCause::Remote),
+                Some(LegEndCause::Timeout),
+                Some(LegEndCause::Error),
+                None,
+                None,
+            ]
+        );
+        // And the three words the section lists are exactly the three this driver can produce, so
+        // neither the row nor this mapping can grow one the other has no arm for.
+        let mut words: Vec<&str> = reported
+            .iter()
+            .flatten()
+            .map(|cause| cause.as_str())
+            .collect();
+        words.sort_unstable();
+        let mut all: Vec<&str> = LegEndCause::all().iter().map(|c| c.as_str()).collect();
+        all.sort_unstable();
+        assert_eq!(words, all);
     }
 
     #[test]

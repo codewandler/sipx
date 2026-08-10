@@ -24,7 +24,7 @@ use std::collections::BTreeSet;
 
 use sipx_app_protocol::{
     AudioDirection, DialOutcome, DspBypassCause, DspRefusal, DspTeardownCause, EndCause, EventKind,
-    Failure, GatherReason, OnFailure, Policy, TransferState, Verb, VoiceEndCause,
+    Failure, GatherReason, LegEndCause, OnFailure, Policy, TransferState, Verb, VoiceEndCause,
 };
 
 const SPEC: &str = include_str!("../../../docs/specs/app-contract.md");
@@ -221,6 +221,9 @@ fn section_5_3_s_rows_are_reachable_through_the_bridge() {
     /// - `call.dial.finished` — about the second leg the driver created, which is a different call
     ///   from the one whose stream this bridges, and whose outcome is not on a `CallEvent` at all:
     ///   `sipx-call` reports a refusal as the `Err` of the dial, never as an event (`M-103`).
+    /// - `call.leg.ended` — about that same second leg, one lifetime later. The leg's own events are
+    ///   not the ones this bridge maps, and the name §5.3 puts on the row is the app's, which only
+    ///   the driver that issued the `dial` holds (`M-108`).
     ///
     /// `call.bridged` and `call.unbridged` were here until `M-99` and are not any more. The reason
     /// given for them — §5.3 names the other `leg` and `C-6`'s events do not carry it — was a
@@ -231,7 +234,7 @@ fn section_5_3_s_rows_are_reachable_through_the_bridge() {
     /// The five `call.dsp.*` rows join the list for the same reason as the first three and with the
     /// same obligation: a graph's transitions belong to `sipx-media`, no `CallEvent` carries one,
     /// and the file that composes them has to contain the construction (`M-67`).
-    const COMPOSED_BY_THE_DRIVER: [(&str, &str, &str); 8] = [
+    const COMPOSED_BY_THE_DRIVER: [(&str, &str, &str); 9] = [
         ("call.incoming", "crates/sipx-app/src/host.rs", DRIVER),
         (
             "call.gather.finished",
@@ -239,6 +242,7 @@ fn section_5_3_s_rows_are_reachable_through_the_bridge() {
             INTERPRETER,
         ),
         ("call.dial.finished", "crates/sipx-app/src/host.rs", DRIVER),
+        ("call.leg.ended", "crates/sipx-app/src/host.rs", DRIVER),
         ("call.dsp.activated", "crates/sipx-app/src/dsp.rs", HOST_DSP),
         (
             "call.dsp.configured",
@@ -329,8 +333,8 @@ fn section_5_3_s_inline_enumerations_match_their_types() {
     }
     assert_eq!(
         lists.len(),
-        9,
-        "§5.3 should carry nine inline lists: {lists:?}"
+        10,
+        "§5.3 should carry ten inline lists: {lists:?}"
     );
 
     for (field, values) in lists {
@@ -362,6 +366,13 @@ fn section_5_3_s_inline_enumerations_match_their_types() {
             .iter()
             .map(|o| tag_of(&o.to_json()))
             .collect(),
+            // `M-108`'s row keeps a vocabulary of its own rather than `call.ended`'s five words, so
+            // this is the assertion that the three the section lists are the three the type has —
+            // and that neither grew a word the other does not.
+            "call.leg.ended" => LegEndCause::all()
+                .iter()
+                .map(|cause| cause.as_str().to_owned())
+                .collect(),
             "call.transfer.progress" => [
                 TransferState::Trying,
                 TransferState::Ringing,
