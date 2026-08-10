@@ -213,6 +213,9 @@ async fn execute(arguments: &Arguments) -> Result<Value, Box<dyn std::error::Err
             let to = Uri::sip(Host::Name(HostName::new("localhost")?));
             let options = DialOptions::new("<sip:sipx@localhost>", arguments.media_address)
                 .with_media_policy(MediaPolicy::browser_audio())
+                // This proof deliberately runs both media endpoints on one CI host. The shared
+                // private range is therefore its topology, not an accidental advertised route.
+                .with_media_range_overlap(true)
                 .with_timeout(Duration::from_secs(20));
             dial(&endpoint, target, &to, &options).await
         }

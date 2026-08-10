@@ -73,3 +73,7 @@ makes the silent case loud.
   media destination, tears down a split dialog, and reports both local interface addresses under a
   separate diagnostic. Pure vectors cover non-collision, override, and same/split route pairs.
 - The complete local acceptance gate passed all 51 steps on the rc.23 candidate on 2026-08-10.
+- The first remote candidate proved the explicit override is also required by the native browser
+  proof, whose two media endpoints intentionally share one CI host. That public-API consumer now
+  opts in rather than weakening the default collision refusal.
+- The complete local acceptance gate passed all 51 steps again after that proof-consumer fix.
