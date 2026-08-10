@@ -21,14 +21,14 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use sipx_media::dsp::{
-    BuiltIn, BypassCause, DspCapability, DspFrame, DspResetCause, ExecutionPolicy,
+    BuiltIn, BypassCause, DspCapability, DspFrame, DspGraph, DspResetCause, ExecutionPolicy,
     ExecutionProfile, FailureAction, FormatError, FrameAdmission, FrameProcessor, FrameSink,
     GraphBounds, GraphError, GraphPlan, GraphTransition, Parameter, ParameterError, ParameterValue,
     ProcessError, Scratch, StreamFormat, TeardownCause, WorkerProcess,
 };
 use sipx_media::{
-    AudioDirection, Codec, Config, MediaPort, MediaSession, PcmEncoding, PcmFormat, PcmSamples,
-    Processing,
+    AudioDirection, Codec, Config, MediaPort, MediaSession, PcmEncoding, PcmFormat, PcmProcessor,
+    PcmSamples, Processing,
 };
 use sipx_rtp::Packet;
 use tokio::net::UdpSocket;
@@ -1185,6 +1185,273 @@ async fn registry_provenance_does_not_spread_along_a_chain() {
             bound: 4,
         })
     );
+
+    session.shutdown().await;
+}
+
+/// Drain the journal and assert this exact transition was in it.
+///
+/// The whole value rather than a shape: a boundary an outcome named and a boundary the journal
+/// recorded are the same boundary or the pair is worthless.
+fn recorded(graph: &DspGraph, wanted: GraphTransition) {
+    let transitions = graph.transitions();
+    assert!(
+        transitions.contains(&wanted),
+        "{wanted:?} is not in {transitions:?}"
+    );
+}
+
+/// Send one tone and assert what the chain made of it, so a test reads as a sequence of boundaries
+/// rather than as a sequence of timeouts.
+async fn crosses(
+    session: &MediaSession,
+    transmitted: &mut PcmProcessor,
+    expected: &[i16],
+    what: &str,
+) {
+    assert!(session.send(tone()).await, "{what}");
+    let sent = tokio::time::timeout(ARRIVAL_BOUND, transmitted.recv())
+        .await
+        .expect("RTP keeps flowing")
+        .expect("a frame");
+    assert_eq!(signed(sent.pcm().samples()), expected, "{what}");
+}
+
+/// `M-115` Acceptance rows 2 and 4: a live stage leaves the chain and comes back at named
+/// positions, the frames on either side of each boundary carry §6.2's break, and the containment
+/// claim never moves.
+///
+/// The audio is the assertion rather than the transition: a bypassed gain stage means the tone
+/// arrives at the level it was sent at, and a restored one means it arrives doubled again. Both
+/// happen inside one generation, so the epoch never reopens and nothing was replaced.
+#[tokio::test]
+async fn a_requested_bypass_takes_one_stage_out_of_a_live_chain_and_puts_it_back() {
+    let (session, _peer, _addr) = session_and_peer().await;
+    let breaks = Arc::new(AtomicU32::new(0));
+
+    let graph = session
+        .attach_dsp(
+            GraphPlan::new(AudioDirection::Outbound, GraphBounds::new())
+                .with_processor(Box::new(Gain2::new(
+                    "gain",
+                    ExecutionProfile::TrustedCooperativeNative,
+                )))
+                .with_processor(Box::new(Downstream {
+                    admission: FrameAdmission::new(),
+                    breaks: Arc::clone(&breaks),
+                })),
+        )
+        .expect("activates");
+    let generation = graph.generation();
+    // §3.3 is a property of which stages are *installed*. Read before the bypass so the reading
+    // after it has something to be equal to.
+    let contained = graph.contains_overrun();
+
+    let mut transmitted = session
+        .attach_processor(Processing::new(AudioDirection::Outbound, narrowband()))
+        .expect("attaches");
+
+    let doubled: Vec<i16> = tone().iter().map(|sample| sample * 2).collect();
+    crosses(
+        &session,
+        &mut transmitted,
+        &doubled,
+        "the stage is contributing",
+    )
+    .await;
+
+    // ---- out of the chain, without replacing it ----
+    let before = breaks.load(Ordering::Relaxed);
+    let out = graph
+        .set_bypassed(generation, 0, true)
+        .expect("a live stage can be taken out");
+    assert_eq!(out.generation(), generation);
+    assert_eq!(out.processor(), "gain");
+    assert!(out.bypassed());
+    assert_eq!(
+        graph.generation(),
+        generation,
+        "a requested bypass is not a replacement and opens no epoch"
+    );
+    assert_eq!(
+        graph.contains_overrun(),
+        contained,
+        "containment is about which stages are installed, not which are contributing"
+    );
+
+    recorded(
+        &graph,
+        GraphTransition::Bypassed {
+            generation,
+            at_position: out.at_position(),
+            processor: "gain",
+            cause: BypassCause::Requested,
+        },
+    );
+
+    for _ in 0..2 {
+        crosses(
+            &session,
+            &mut transmitted,
+            &tone(),
+            "the bypassed stage's input passes through untouched",
+        )
+        .await;
+    }
+    assert!(
+        breaks.load(Ordering::Relaxed) > before,
+        "§6.2: the stage after the bypassed one was told the signal ahead of it changed"
+    );
+
+    // ---- and back in again ----
+    let before = breaks.load(Ordering::Relaxed);
+    let back = graph
+        .set_bypassed(generation, 0, false)
+        .expect("a requested bypass is reversible");
+    assert_eq!(back.generation(), generation);
+    assert!(!back.bypassed());
+
+    recorded(
+        &graph,
+        GraphTransition::Restored {
+            generation,
+            at_position: back.at_position(),
+            processor: "gain",
+        },
+    );
+
+    for _ in 0..2 {
+        crosses(
+            &session,
+            &mut transmitted,
+            &doubled,
+            "the stage is contributing again, in the same generation",
+        )
+        .await;
+    }
+    assert!(
+        breaks.load(Ordering::Relaxed) > before,
+        "§6.2: resuming a stage changes the signal shape too, and the frame says so"
+    );
+
+    session.shutdown().await;
+}
+
+/// `M-115` Acceptance row 3: every refusal names what was wrong and changes nothing.
+///
+/// The stale generation, the unknown index and the stage already in the state asked for; and the
+/// one asymmetry that makes `Requested` a different word from the rest of `BypassCause` — §6.1's
+/// bypass is terminal for the stage, so a stage the *runtime* took out does not come back through
+/// this door.
+#[tokio::test]
+async fn a_requested_bypass_is_refused_without_touching_the_live_graph() {
+    let (session, _peer, _addr) = session_and_peer().await;
+
+    let graph = session
+        .attach_dsp(
+            GraphPlan::new(AudioDirection::Outbound, GraphBounds::new())
+                .with_processor(Box::new(Gain2::new(
+                    "gain",
+                    ExecutionProfile::TrustedCooperativeNative,
+                )))
+                .with_processor(Box::new(AlwaysRefuses::new(FailureAction::BypassOpen, 1))),
+        )
+        .expect("activates");
+    let generation = graph.generation();
+    let _ = graph.transitions();
+
+    // A generation that is not live, including one that never was.
+    assert_eq!(
+        graph.set_bypassed(generation + 1, 0, true).map(|_| ()),
+        Err(GraphError::StaleGeneration {
+            expected: generation + 1,
+            live: generation,
+        })
+    );
+    // An index this chain does not have.
+    assert_eq!(
+        graph.set_bypassed(generation, 7, true).map(|_| ()),
+        Err(GraphError::UnknownProcessor {
+            index: 7,
+            processors: 2,
+        })
+    );
+    // Already contributing, and asked to contribute.
+    assert_eq!(
+        graph.set_bypassed(generation, 0, false).map(|_| ()),
+        Err(GraphError::BypassUnchanged {
+            processor: "gain",
+            bypassed: false,
+        })
+    );
+    assert!(
+        graph.transitions().is_empty(),
+        "a refusal changes nothing, so there is nothing to report"
+    );
+
+    // Out, and then asked to go out again.
+    graph
+        .set_bypassed(generation, 0, true)
+        .expect("a live stage can be taken out");
+    assert_eq!(
+        graph.set_bypassed(generation, 0, true).map(|_| ()),
+        Err(GraphError::BypassUnchanged {
+            processor: "gain",
+            bypassed: true,
+        })
+    );
+
+    // §6.1's own bypass is terminal for the stage: spend the refusing stage's budget and it stays
+    // out, because a replacement is what brings it back and this door is not one.
+    let mut transmitted = session
+        .attach_processor(Processing::new(AudioDirection::Outbound, narrowband()))
+        .expect("attaches");
+    for _ in 0..3 {
+        assert!(session.send(tone()).await);
+        tokio::time::timeout(ARRIVAL_BOUND, transmitted.recv())
+            .await
+            .expect("RTP keeps flowing")
+            .expect("a frame");
+    }
+    assert_eq!(
+        graph.set_bypassed(generation, 1, false).map(|_| ()),
+        Err(GraphError::BypassNotReversible {
+            processor: "always-refuses",
+        }),
+        "the runtime took this stage out under §6.1, and only a replacement puts it back"
+    );
+
+    session.shutdown().await;
+}
+
+/// `M-115` Acceptance row 3: a supervised stage has no requested bypass, for §7.1's reason.
+///
+/// Its output lags its input by the deadline it declared, so a gap in the frames it is offered is
+/// a gap in a pipeline the media worker is still counting positions against. Refused rather than
+/// accepted and paid for in audio from before the bypass, exactly as `NotConfigurable` refuses a
+/// parameter set there.
+#[tokio::test]
+async fn a_supervised_stage_has_no_requested_bypass() {
+    let (session, _peer, _addr) = session_and_peer().await;
+
+    let graph = session
+        .attach_dsp(
+            GraphPlan::new(AudioDirection::Outbound, GraphBounds::new())
+                .with_supervised(supervised_gain2()),
+        )
+        .expect("activates");
+    let generation = graph.generation();
+
+    assert_eq!(
+        graph.set_bypassed(generation, 0, true).map(|_| ()),
+        Err(GraphError::NotBypassable {
+            processor: "supervised-gain2",
+        })
+    );
+    assert!(graph.transitions().iter().all(|transition| !matches!(
+        transition,
+        GraphTransition::Bypassed { .. } | GraphTransition::Restored { .. }
+    )));
 
     session.shutdown().await;
 }

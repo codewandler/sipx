@@ -1,7 +1,7 @@
 # The call-local DSP graph
 
 **Status:** normative · **Epic:** `custom-call-dsp` · **Stories:** `M-64`, `M-102` (§7's process),
-`M-68` (§5.5, §6.4), `M-67` (§10's door) ·
+`M-68` (§5.5, §6.4), `M-67` (§10's door), `M-115` (§10.5's requested bypass) ·
 **Design:** [custom-call-dsp](../designs/custom-call-dsp.md) · **Crate:** `sipx-media` (`dsp`)
 
 [custom-call-dsp.md](custom-call-dsp.md) defines what one processor is and says, in its §1, that it
@@ -193,6 +193,7 @@ GraphTransition ::= Activated  { generation, at_position, processors }
                   | Replaced   { generation, previous, at_position, processors }
                   | Configured { generation, at_position, processor }
                   | Bypassed   { generation, at_position, processor, cause }
+                  | Restored   { generation, at_position, processor }
                   | TornDown   { generation, at_position, cause }
 
 BypassCause     ::= Requested | Refused | DeadlineMissed | MalformedResult | WorkerLost
@@ -213,8 +214,11 @@ caller can still act on. This is the seam's own drop-oldest end
 `Configured` is recorded for a stage of a generation, an earlier `Configured` for that same stage of
 that same generation is removed and counted, because a stage has one current parameter state and the
 earlier entry describes a value the application has itself replaced. Nothing else coalesces:
-`Activated`, `Replaced`, `Bypassed` and `TornDown` are each a fact no later entry supersedes, and
-each is the kind a caller cannot reconstruct from anything it holds. Without this narrowing an
+`Activated`, `Replaced`, `Bypassed`, `Restored` and `TornDown` are each a fact no later entry
+supersedes, and each is the kind a caller cannot reconstruct from anything it holds. In particular a
+`Restored` does **not** cancel the `Bypassed` it answers: between them is a span of the call whose
+audio that stage did not shape, and an application correlating audio against events needs both ends
+of it. Without this narrowing an
 application moving a parameter faster than it reads its events would push its own activation out of
 a bounded queue with facts it had already overwritten — the queue's bound would be spent on the one
 kind of entry that is safe to lose.
@@ -286,6 +290,23 @@ absence is a policy breach stopped running with nothing saying so.
 `TerminateClosed` stopping the audio is the point of it: unprocessed audio leaving the stack is
 worse than no audio leaving it, for the processor whose absence is a policy breach.
 
+**A bypass under this section is terminal for the stage, and §10.5's is not.** `BypassCause` is one
+word covering two operations, and which one produced a `Bypassed` decides whether it can be undone:
+
+| | Causes | Reversible? |
+|---|---|---|
+| the runtime imposed it (§6.1) | `Refused`, `DeadlineMissed`, `MalformedResult`, `WorkerLost` | **No.** The stage stays out for the rest of the generation; §5.4's replacement is what puts it back |
+| the application asked for it (§10.5) | `Requested` | **Yes**, through the same door, and a `Restored` reports it |
+
+The asymmetry is the evidence behind each, not a convenience. A stage bypassed here spent a run of
+consecutive frames it could not keep up with on this machine, and nothing since has been evidence to
+the contrary — restoring it would be a guess dressed as a recovery, and one an application could
+repeat indefinitely to keep a failing stage on the media path. A stage bypassed under §10.5 never
+failed at all: it is out because the application put it there, so the application can take it back.
+
+`Requested` therefore never reaches this section's miss budget. It is not a miss, it does not
+increment a stage's consecutive-miss counter, and it is not one of §6.4's counted bypasses.
+
 ### 6.2 A miss reaches every downstream processor
 
 When a stage contributes nothing to a frame — refused, missed, bypassed — the signal reaching
@@ -297,6 +318,12 @@ discontinuity** and every stage after the affected one sees it. The kind is
 |---|---|---|
 | a supervised stage's result was abandoned at its deadline, or its channel dropped it | `Overflow` | §7: "the bounded-queue policy dropped queued frames". A bounded result channel is that queue |
 | any other stage contributed nothing — a refusal, a bypass, a lost worker | `Loss` | §7: upstream audio never became a frame. The processed audio that stage owed never arrived |
+| a stage restored under §10.5 sees its first frame back | `Loss` | the signal in front of it skipped the whole span it was out for, so the history it holds is not about the audio it is now filtering |
+
+The restored stage's own frame is flagged as well as the frames after it, which is the one place a
+stage is told about a break that happened *to it* rather than upstream of it. It is the same rule
+either way — a stage is told when the signal reaching it changed shape — and it is what lets a
+delay line discard a history spanning a gap instead of mixing across it.
 
 Under [custom-call-dsp.md](custom-call-dsp.md) §3.5 a flagged frame at the expected position is
 accepted and its reset runs before its own samples, so a downstream delay line discards a history
@@ -347,6 +374,13 @@ and lost workers — are exactly the four things that increment a stage's consec
 nothing else. A frame passed through for exceeding §4's bound is **not** one of them: no stage was
 late and no stage refused, the frame was never offered to the chain at all, and counting it as a
 miss would fail a processor for a producer's mistake.
+
+**The bypass counter is §6.1's, not §10.5's.** A counter here is what the *runtime* observed, and a
+requested bypass is not an observation — it is the application's own instruction, answered
+synchronously with the boundary it took effect at. Counting it would put an application's control
+traffic in the same figure an operator reads to decide whether a processor fits this machine, and
+would make that figure rise on a healthy call. §10.5's boundaries are reported as transitions and as
+that instruction's own return value; neither is a tally.
 
 ## 7. Supervised stages
 
@@ -678,3 +712,51 @@ driver turning transitions into application events:
 | GRAPH-23 | 32 parameter updates against a queue of 4 | the `Activated` survives and exactly one `Configured` remains — superseded parameter state gave way, not the activation |
 | GRAPH-24 | a chain of registry stages, and the same chain with one cooperative-native stage | `contains_overrun()` true, then false; no parameter, identifier or built-in beside it changes either answer |
 | GRAPH-25 | a plan mixing a registry stage with an application processor declaring `ProvenInline` | refused `ProfileNotAdmissible` naming *that stage*; the registry stage beside it lent it nothing |
+| GRAPH-26 | a live two-stage chain: bypass stage 0, feed frames, restore it, feed more | audio unprocessed while it is out and processed again after; one `Bypassed { Requested }` and one `Restored`, at the positions the two outcomes named; the generation never changes and `contains_overrun()` never moves |
+| GRAPH-27 | the same chain: a generation that is not live, an index the chain lacks, the state the stage is already in, a supervised stage, and a restore of a stage the runtime bypassed | `StaleGeneration`, `UnknownProcessor`, `BypassUnchanged`, `NotBypassable`, `BypassNotReversible` — each changing nothing and producing no transition |
+
+### 10.5 One stage leaves the chain and comes back, without a new epoch
+
+A live stage is taken out of the chain, or put back into it, by naming three things: the
+**generation** the chain was read from, the stage's **index** in that generation's plan order, and
+the state asked for. This is §10.2's door with a different assignment behind it, and deliberately
+not a second shape: the same generation check, the same single take a frame needs, the same one
+terminal outcome, and the same promise that a refusal changes nothing.
+
+It is the **only** producer of §5.3's `Requested`, and the counterpart the other four causes do not
+have (§6.1).
+
+- **The chain keeps its shape.** A bypassed stage is still installed, still prepared and still
+  holding whatever it retains. The generation does not change, the epoch does not reopen, no stage
+  is re-prepared and position numbering continues. This is what separates it from §5.4's
+  replacement, which is how a chain's *shape* changes and which costs an epoch to do it.
+- **The state asked for, not a toggle.** A request names the state it wants. A stage already in
+  that state is refused rather than inverted, so a request composed against a stage the application
+  has since moved cannot land as its own opposite.
+- **Applied at a position boundary**, under the same take a frame needs, so §5.1 holds: the change
+  is between frames and no frame sees half of it.
+
+**What it costs the audio.** For as long as the stage is out, its input passes through untouched and
+every frame in that span hands §6.2's `Loss` to the stages after it — this is §6.1's `BypassOpen`
+behaviour, reached deliberately rather than by failure. The first frame the stage contributes to
+again carries the same break, because the signal in front of it skipped the whole span. Nothing is
+flushed at either boundary: a bypass is not an end of input, and the stage's retained audio belongs
+to a timeline the call is still on. An application that wants a stage's tail rendered removes the
+stage, which is a replacement.
+
+**What it does not do.** It does not reset the stage's consecutive-miss budget: a stage that saw no
+frames had no success, and §6.1 resets that budget on a success and not on a gap. It does not touch
+§3.3's `contains_overrun()`, which is the conjunction over the profiles of the stages **installed** —
+bypassing a `TrustedCooperativeNative` stage does not let its chain claim containment, because that
+stage is one request away from running again and the claim would have to be withdrawn to keep it
+true. And it does not add, remove or reorder a stage.
+
+Five refusals, and each of them changes nothing:
+
+| Refusal | When |
+|---|---|
+| `StaleGeneration { expected, live }` | the named generation is not the live one, `0` being a direction with no graph |
+| `UnknownProcessor { index, processors }` | the live chain has no stage at that index |
+| `BypassUnchanged { processor, bypassed }` | the stage is already in the state asked for. Refused rather than absorbed, because the outcome of a request is a boundary and a request that changed nothing has none to name |
+| `NotBypassable { processor }` | a supervised stage. §7.1 makes its output lag its input by the deadline it declared, so a gap in the frames it is offered leaves results for frames from *before* the gap due at positions after it — a requested bypass there would be paid for in audio from the wrong part of the call rather than in pass-through. Refused for §10.2's `NotConfigurable` reason: an application that needs a supervised stage out of the chain replaces the chain |
+| `BypassNotReversible { processor }` | a restore named at a stage the **runtime** bypassed under §6.1. That bypass is terminal, and §5.4's replacement is what lifts it |
