@@ -154,7 +154,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y libopus-dev libssl-dev pkg-config
+      # Building one example still resolves this crate's live-device dev-dependency, so the
+      # native proof needs ALSA beside the Opus and DTLS libraries it exercises directly.
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libopus-dev libssl-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build -p sipx-call --example browser_audio_proof --features opus,dtls

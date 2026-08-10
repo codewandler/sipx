@@ -23,6 +23,7 @@ from typing import Any, NamedTuple
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 DRIVER_PATH = ROOT / "tests/browser-audio/driver.py"
 RUNNER = ROOT / "tests/browser-audio/run.sh"
+WORKFLOW = ROOT / ".github/workflows/ci.yml"
 sys.dont_write_bytecode = True
 SPEC = importlib.util.spec_from_file_location("browser_audio_driver", DRIVER_PATH)
 assert SPEC is not None and SPEC.loader is not None
@@ -676,6 +677,26 @@ class BrowserAudioProofTest(unittest.TestCase):
         self.assertEqual(observation, DRIVER.unwrap_webdriver_value({"value": observation}))
         with self.assertRaisesRegex(DRIVER.ProofError, "WebDriver: timeout"):
             DRIVER.unwrap_webdriver_value({"value": {"error": "timeout", "message": "late"}})
+
+
+class BrowserAudioWorkflowTest(unittest.TestCase):
+    def test_native_proof_job_installs_every_linked_system_library(self) -> None:
+        """The one-example build still resolves dev-dependencies, including live-device audio."""
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        lines = workflow.splitlines()
+        start = lines.index("  browser-audio:")
+        job = []
+        for line in lines[start + 1 :]:
+            if line.startswith("  ") and not line.startswith("    "):
+                break
+            job.append(line)
+        install = next(line for line in job if "apt-get install" in line)
+        installed = set(install.split("install -y", 1)[1].split())
+        self.assertEqual(
+            {"libasound2-dev", "libopus-dev", "libssl-dev", "pkg-config"},
+            installed,
+            "the native browser proof must provision every C library its build resolves",
+        )
 
 
 if __name__ == "__main__":

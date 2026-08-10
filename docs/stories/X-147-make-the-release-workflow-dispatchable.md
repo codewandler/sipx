@@ -55,3 +55,7 @@ must ship from a fresh version and annotated tag rather than moving that tag.
   the checker's blind spot. The repaired checker holds both expression scope and the identity of the
   timings file; 53 release-workflow tests and independent syntax checks of the ordinary and recovery
   workflows pass. Prepared `1.0.0-rc.20` as the fresh reviewed boundary.
+- 2026-08-10: the 51-step local gate passed at `058db1d5d30d`. Exact-SHA main CI then exposed a
+  separate hosted-runner provisioning gap: the native browser proof resolved its live-device
+  dev-dependency but installed only its direct Opus and DTLS libraries. A failing-first harness test
+  now holds the complete system-library set, and the proof job provisions it before compiling.
