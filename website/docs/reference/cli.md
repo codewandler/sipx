@@ -111,8 +111,9 @@ A command's deadline pays for its own lookup rather than starting again afterwar
 --timeout` and `scenario --timeout` — or a `dial` frame's `timeout_ms` — fund resolution and then
 the invitation from one budget; `load` bounds the one lookup its calls share under the lower of
 `--timeout`, which bounds a call, and `--duration`, which bounds the run; `register --timeout`
-funds resolution, the transaction and any retry from whatever the attempt has left; and `peers`,
-which states no attempt deadline, resolves under the subscription lifetime `--expires` asks for. A
+funds resolution, the transaction and any retry from whatever the attempt has left; and
+`peers --timeout` funds resolution and the wait for the first NOTIFY, capped by the lifetime
+`--expires` asks for. A
 command given two seconds spends at most two seconds in total, of which the lookup takes what it
 takes — not two on the lookup and then two more. A generous deadline changes nothing: these are
 minimums against the two figures above, never extensions of them, and `--timeout 0` leaves the
@@ -491,7 +492,8 @@ List what can be called: `sipx peers --json`
 | `--registrar <AOR>` | Subscribe to this registrar's current registrations |
 | `--password <P>` | Digest password; prefer `SIPX_PASSWORD` because argv is visible |
 | `--target <ADDR>` | Registrar host or address, when it cannot be derived from the AOR |
-| `--expires <S>` | Positive requested subscription lifetime (default 3600). This command states no attempt deadline, so it is also the ceiling on target resolution: a subscription that may live one second does not spend eight finding the registrar |
+| `--expires <S>` | Positive requested subscription lifetime (default 3600) |
+| `--timeout <S>` | Attempt deadline in seconds (default 20): the bound on the first NOTIFY, funding target resolution and every address of the registrar together. `0` delegates to the event client's Timer N — 64·T1, 32 seconds. Capped by `--expires`, because a subscription that may live one second does not spend eight finding the registrar |
 | `--watch <S>` | Keep applying updates for this many seconds after the first snapshot |
 | `--local <ADDR>` | Local signalling bind address |
 | `--transport <T>` | `udp`, `tcp`, `tls`, `ws`, or `wss`, with the shared TLS options |

@@ -278,11 +278,16 @@ async fn discover(options: &PeersOptions, registrar: &str) -> Result<Vec<Peer>, 
             "--expires must be positive for a registrar subscription",
         ));
     }
-    // This command states no attempt deadline, so the lifetime it asks the registrar for is the
-    // only duration its caller gives it. A subscription that may live one second must not spend
-    // `T-38`'s eight finding where to send itself, and a generous lifetime — the 3600-second
-    // default among them — leaves the resolver's own bounds exactly where they were.
-    let resolver = crate::destination::Resolver::within(Some(expires));
+    // `P-26` made `--expires` the resolution ceiling because it was the only duration this command
+    // stated. `P-30` gave it a real attempt deadline, so that reading is revisited here exactly as
+    // `P-26`'s deviation 2 anticipated: resolution is funded from the attempt, like every other
+    // command, and falls back to the lifetime only when the caller delegated the attempt to Timer N.
+    // A subscription that may live one second must still not spend `T-38`'s eight finding where to
+    // send itself, which is what the fallback preserves.
+    let resolver = crate::destination::Resolver::within(Some(match options.timeout {
+        0 => expires,
+        seconds => Duration::from_secs(seconds).min(expires),
+    }));
     let candidates = resolver
         .resolve(
             &parsed,
@@ -319,13 +324,19 @@ async fn discover(options: &PeersOptions, registrar: &str) -> Result<Vec<Peer>, 
     let dispatch = tokio::spawn(async move { while dispatcher.next().await.is_some() {} });
 
     let watch = Duration::from_secs(options.watch);
+    // Zero delegates to the event client's Timer N, matching how every other command in this CLI
+    // reads a zero deadline: the caller asked for the transaction layer's own schedule.
+    let first_notify = match options.timeout {
+        0 => None,
+        seconds => Some(Duration::from_secs(seconds)),
+    };
     let local_identity = format!("<sip:{user}@{domain}>");
     let contact = format!("<sip:{user}@{}>", endpoint.advertised());
 
     // `P-31`: the serial pass, taken from the library rather than written a fifth time. What is
     // this command's and not the pass's is the classification below and the budget it is funded
     // from — one deadline over every candidate together, never a copy of it each.
-    let outcome = crate::destination::walk(&candidates, Some(FIRST_NOTIFY), |target, remaining| {
+    let outcome = crate::destination::walk(&candidates, first_notify, |target, remaining| {
         let resource = parsed.clone();
         let local_identity = local_identity.clone();
         let contact = contact.clone();
@@ -373,7 +384,7 @@ async fn discover(options: &PeersOptions, registrar: &str) -> Result<Vec<Peer>, 
             };
             match subscriptions.subscribe(start) {
                 Ok(mut subscription) => {
-                    let observed = observe(&mut subscription, watch, remaining).await;
+                    let observed = observe(&mut subscription, watch, remaining, first_notify).await;
                     let _ = subscription.unsubscribe().await;
                     match observed {
                         Ok(delivery) => {
@@ -398,14 +409,14 @@ async fn discover(options: &PeersOptions, registrar: &str) -> Result<Vec<Peer>, 
     // be running when a script reads the result (`P-27`).
     endpoint.shutdown().await;
     let _ = dispatch.await;
-    outcome.map_err(unreached)
+    outcome.map_err(|failure| unreached(failure, first_notify.unwrap_or(FIRST_NOTIFY)))
 }
 
 /// How many contacts one registration snapshot may carry before it is refused.
 const CONTACT_LIMIT: usize = 4_096;
 
 /// Turn the pass's outcome into the record the command emits.
-fn unreached(outcome: crate::destination::Unreached<Failed>) -> Unreachable {
+fn unreached(outcome: crate::destination::Unreached<Failed>, stated: Duration) -> Unreachable {
     let attempts = outcome.attempts();
     match outcome {
         // `first` above already refused an empty list, so nothing reaches this today. It is
@@ -421,7 +432,7 @@ fn unreached(outcome: crate::destination::Unreached<Failed>) -> Unreachable {
             exit: Exit::Timeout,
             message: format!(
                 "no address of the registrar answered within {}s",
-                FIRST_NOTIFY.as_secs()
+                stated.as_secs()
             ),
             attempts,
         },
@@ -457,17 +468,31 @@ fn unreached(outcome: crate::destination::Unreached<Failed>) -> Unreachable {
 /// funds every candidate together, because sixteen candidates with a copy of it each would multiply
 /// the only duration this command states by sixteen (`P-26`). `--watch` is not spent from it — that
 /// is an observation window opened after a registrar has been reached, not part of reaching one.
+///
+/// `P-30` made it `--timeout`'s default rather than the bound itself. A constant is a bound the
+/// command states and the operator cannot move, which is only half of what the story asked for: a
+/// registrar on a slow path and one that is simply not going to notify want different numbers, and
+/// only the operator knows which they are looking at. Zero delegates to Timer N, which is the
+/// documented way back to the old behaviour rather than a hidden one.
 const FIRST_NOTIFY: Duration = Duration::from_secs(20);
 
 async fn observe(
     subscription: &mut EventSubscription<RegistrationSnapshot>,
     watch: Duration,
     within: Option<Duration>,
+    stated: Option<Duration>,
 ) -> Result<EventNotification<RegistrationSnapshot>, Failed> {
+    // `--timeout 0` states no bound of this command's own, so there is no deadline to impose here:
+    // the wait is the event client's Timer N, which is what the caller asked to be returned to.
+    let Some(stated) = stated else {
+        return match next_snapshot(subscription).await {
+            Ok(first) if watch.is_zero() => Ok(first),
+            Ok(first) => watch_after(subscription, watch, first).await,
+            Err(failed) => Err(failed),
+        };
+    };
     let first =
-        match tokio::time::timeout(within.unwrap_or(FIRST_NOTIFY), next_snapshot(subscription))
-            .await
-        {
+        match tokio::time::timeout(within.unwrap_or(stated), next_snapshot(subscription)).await {
             Ok(result) => result?,
             // Distinguished from `Termination::NoInitialNotify` — which is the *registrar* saying
             // it will not notify — by naming the bound that expired. Both exit `Timeout`, because a
@@ -481,7 +506,7 @@ async fn observe(
                     format!(
                         "the registrar accepted the subscription but sent no notification \
                          within {}s",
-                        FIRST_NOTIFY.as_secs()
+                        stated.as_secs()
                     ),
                 ));
             }
@@ -489,6 +514,19 @@ async fn observe(
     if watch.is_zero() {
         return Ok(first);
     }
+    watch_after(subscription, watch, first).await
+}
+
+/// The `--watch` window, opened once a registrar has answered.
+///
+/// Split out so that a delegated wait and a bounded one share it rather than each growing their own
+/// copy: the window is the same observation either way, and only how the first notification was
+/// waited for differs.
+async fn watch_after(
+    subscription: &mut EventSubscription<RegistrationSnapshot>,
+    watch: Duration,
+    first: EventNotification<RegistrationSnapshot>,
+) -> Result<EventNotification<RegistrationSnapshot>, Failed> {
     let mut latest = first;
     // The clock is the measurement: `--watch` asks for an observation window of exactly this size.
     let deadline = tokio::time::sleep(watch);

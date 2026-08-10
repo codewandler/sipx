@@ -535,6 +535,10 @@ pub(crate) struct PeersOptions {
     pub(crate) target: Option<String>,
     #[arg(long, default_value_t = 3600, value_name = "S", value_parser = parse_seconds)]
     pub(crate) expires: u64,
+    /// How long to wait for the registrar's first NOTIFY, in seconds; zero delegates to the event
+    /// client's Timer N.
+    #[arg(long, default_value_t = 20, value_name = "S", value_parser = parse_seconds)]
+    pub(crate) timeout: u64,
     #[arg(long, default_value_t = 0, value_name = "S", value_parser = parse_seconds)]
     pub(crate) watch: u64,
     #[arg(long, default_value = "0.0.0.0:0")]

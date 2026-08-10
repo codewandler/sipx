@@ -3131,6 +3131,81 @@ async fn a_silent_registrar_does_not_hold_peers_for_timer_n() {
     );
 }
 
+/// The first-NOTIFY bound is the operator's, not a constant (`P-30`).
+///
+/// `P-30` shipped the bound first and left it a constant, which is only half of what the row asked
+/// for: a registrar on a slow path and one that is never going to notify want different numbers,
+/// and only the operator knows which they are looking at. This asserts the *stated* number is the
+/// one that runs out — twenty would pass a test that merely checked "sooner than Timer N".
+#[tokio::test]
+async fn the_first_notify_bound_is_the_one_the_operator_stated() {
+    let registrar = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("the fixture registrar binds");
+    let address = registrar.local_addr().expect("the fixture has an address");
+    let accepting = tokio::spawn(async move {
+        let mut buffer = [0_u8; 4096];
+        if let Ok((read, from)) = registrar.recv_from(&mut buffer).await {
+            let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+            let field = |name: &str| header_line(&request, name);
+            let to = field("To");
+            let to = if to.contains(";tag=") {
+                to.to_string()
+            } else {
+                format!("{to};tag=fixture0002")
+            };
+            let response = format!(
+                "SIP/2.0 200 OK\r\n{}\r\n{}\r\n{}\r\n{}\r\n{}\r\nContact: <sip:registrar@{}>\r\nExpires: 60\r\nContent-Length: 0\r\n\r\n",
+                field("Via"),
+                to,
+                field("From"),
+                field("Call-ID"),
+                field("CSeq"),
+                address,
+            );
+            let _ = registrar.send_to(response.as_bytes(), from).await;
+        }
+        // Deliberately no NOTIFY.
+        tokio::time::sleep(Duration::from_secs(60)).await;
+    });
+
+    let started = std::time::Instant::now();
+    let output = sipx()
+        .args([
+            "peers",
+            "--registrar",
+            "sip:alice@example.com",
+            "--target",
+            &address.to_string(),
+            "--expires",
+            "60",
+            "--timeout",
+            "3",
+            "--json",
+        ])
+        .output()
+        .await
+        .expect("peers runs");
+    let elapsed = started.elapsed();
+    accepting.abort();
+
+    let rendered = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        elapsed < Duration::from_secs(15),
+        "peers waited {elapsed:?} against a stated three-second bound, so the number the operator \
+         gave is not the one that ran out: {rendered}"
+    );
+    assert!(
+        rendered.contains("within 3s"),
+        "the message must name the bound the operator stated, not the default: {rendered}"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(5),
+        "a stated bound running out is still a timeout: {rendered}"
+    );
+}
+
 /// Every `register` outcome names the registration it is about (`P-28`).
 ///
 /// The success report has always carried `aor`. A failure did not, so a script reading it to tell
@@ -4552,13 +4627,13 @@ fn every_published_command_deadline_states_that_it_covers_resolution() {
     let reference = include_str!("../../../website/docs/reference/cli.md");
     let mut checked: Vec<&str> = Vec::new();
     for (command, section) in reference_sections(reference) {
-        // `peers` states no attempt deadline. Its requested subscription lifetime is the only
-        // duration its caller gives it, so that is the row that has to carry the statement.
-        let deadline = if command == "peers" {
-            "| `--expires <S>`"
-        } else {
-            "| `--timeout <S>`"
-        };
+        // Every command now states an attempt deadline under the same name. `peers` was the
+        // exception until `P-30` gave it `--timeout`: while its subscription lifetime was the only
+        // duration its caller gave it, `--expires` was the row that had to carry the statement.
+        // Retiring the exception is `P-26`'s deviation 2 being revisited, which `P-30` said it would
+        // force — and it matters that the exception is *gone* rather than widened, because an
+        // exception per command is how this assertion would stop meaning anything.
+        let deadline = "| `--timeout <S>`";
         let Some(row) = section.iter().find(|line| line.starts_with(deadline)) else {
             continue;
         };
