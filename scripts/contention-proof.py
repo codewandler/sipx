@@ -100,10 +100,13 @@ class Subject:
 #: The assertions this proof covers. Each has been seen red on a busy box at least once, and each
 #: is green on an idle one, which is the only property that makes a subject worth the minutes.
 #:
-#: The first three are `X-118`'s mechanism: a wall-clock bound that expired because the machine had
-#: not scheduled the process yet. The last two are not, and they are here because the technique
-#: transfers even though the diagnosis did not — `X-126` was a *protocol* rejection, a 503 the
-#: responder was configured to send, and it was reproduced by loading the box exactly like this
+#: The first two are `X-118`'s mechanism: a wall-clock bound that expired because the machine had
+#: not scheduled the process yet. The two unit-test subjects exercise bounded local-port contention
+#: while the host is oversubscribed; the load-summary subject manufactures the first collision so
+#: a green proves the retry actually ran. The last two are a third mechanism, and they are here
+#: because the technique transfers even though the diagnosis did not — `X-126` was a *protocol*
+#: rejection, a 503 the responder was configured to send, and it was reproduced by loading the box
+#: exactly like this
 #: (4 of 10 runs at two burners per core). Those fixtures now give the responder headroom over the
 #: generator; running them here is what stops that headroom being quietly taken back.
 #:
@@ -135,6 +138,12 @@ SUBJECTS = (
         "sipx",
         "register::tests::every_exit_joins_the_endpoint_before_the_terminal_record",
         "crates/sipx-cli/src/register.rs",
+    ),
+    Subject(
+        "--bin",
+        "sipx",
+        "load::tests::the_summary_joins_the_endpoint_before_it_is_printed",
+        "crates/sipx-cli/src/load.rs",
     ),
     Subject(
         "--test",

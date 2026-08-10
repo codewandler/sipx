@@ -83,6 +83,7 @@ appeared twice before anyone named it.
 - [T-33 — Bind browser WebSocket signalling](T-33-bind-browser-websocket-signalling.md) · Transport · after A-16 and S-41 · browser owns I/O, WASM core consumes bytes
 - [X-93 — Make protected release evidence faster without weakening it](X-93-make-protected-release-evidence-faster.md) · Build · measure cache and preflight changes against the 12m37 cold beta gate · follow-up
 - [X-109 — Measure custom DSP quality and real-time cost](X-109-measure-custom-dsp-quality-and-cost.md) · Build · after M-65/M-66/M-68 · exact effects, quality, cost, isolation and packaged conformance
+- [X-144 — Bound the load-summary test against a busy machine](X-144-bound-the-load-summary-test-against-a-busy-machine.md) · Experience · found at the rc.19 boundary · passes 3/3 alone, failed once inside a fully loaded gate
 - [X-145 — Publish the redaction guarantee the checker enforces](X-145-publish-the-redaction-guarantee-the-checker-enforces.md) · Experience · found in a docs sweep at rc.19 · the strongest privacy property this project has is documented only for speech
 - [X-147 — Make the release workflow dispatchable](X-147-make-the-release-workflow-dispatchable.md) · Build · found while shipping rc.19 · GitHub rejects the release workflow before creating a job
 
@@ -113,7 +114,6 @@ _Applications need small, predictable facts about live audio even when no speech
 - [A-29 — Publish a runnable live call-audio analysis example](A-29-publish-call-audio-analysis-example.md) · Application · M16 analysis exit after X-106 · no model or special hardware required
 
 ### Conformance
-- [X-144 — Bound the load-summary test against a busy machine](X-144-bound-the-load-summary-test-against-a-busy-machine.md) · Experience · found at the rc.19 boundary · passes 3/3 alone, failed once inside a fully loaded gate
 - [X-140 — Carry the modelled registry allowance across frontier invocations, not just its cost](X-140-carry-the-modelled-registry-allowance-across-frontier-invocations.md) · Build · found while implementing X-127 · the budget now spans invocations, the token buckets do not
 - [X-146 — Put the media DSP subsystem on the architecture page](X-146-put-the-media-dsp-subsystem-on-the-architecture-page.md) · Experience · found in a docs sweep at rc.19 · architecture.md predates the whole custom-call-DSP epic
 
