@@ -88,6 +88,7 @@ mod graph;
 mod supervised;
 mod wire;
 mod worker;
+pub mod worker_protocol_sequence;
 
 pub use activity::{ActivityWiring, WiringError, WiringOutcome};
 pub use builtin::BuiltIn;

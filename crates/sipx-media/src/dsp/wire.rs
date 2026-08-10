@@ -9,10 +9,17 @@
 //! against that. Sizing a read or an allocation from a number the peer chose is how a malformed
 //! message becomes a memory fault, so the ceiling is compared against the header alone, before a
 //! single octet of payload is read.
+//!
+//! The rule has a second half, and `M-122`'s fuzz campaign is what asked for it. The ceiling a
+//! length is compared against is itself declared by a peer — it is the `Hello`'s `max_samples` —
+//! and on the worker's side that peer is whatever wrote to its standard input. So the ceiling is
+//! bounded too, by [`MAX_FRAME_SAMPLES`]: a frame larger than that is refused by the processor
+//! contract before it could ever be offered to a stage, which makes a `Hello` promising one a
+//! statement this version cannot honour rather than a large configuration.
 
 use std::io::{self, Read, Write};
 
-use sipx_audio::dsp::StreamFormat;
+use sipx_audio::dsp::{MAX_FRAME_SAMPLES, StreamFormat};
 
 use crate::processing::{AudioDirection, DiscontinuityKind};
 
@@ -183,6 +190,11 @@ pub(crate) enum Incoming {
 }
 
 /// The most octets a message of `kind` may carry at a ceiling of `max_samples`.
+///
+/// `max_samples` is bounded by [`MAX_FRAME_SAMPLES`] whatever the caller passes, so the buffer this
+/// sizes has a bound that holds without trusting either the peer or the call site. A negotiated
+/// ceiling above that is outside the processor contract's own domain and could never carry a frame
+/// a stage would accept.
 const fn ceiling(kind: u8, max_samples: u32) -> Option<(u32, u32)> {
     let fixed = match kind {
         TYPE_HELLO => return Some((HELLO_FIXED, HELLO_FIXED)),
@@ -190,8 +202,20 @@ const fn ceiling(kind: u8, max_samples: u32) -> Option<(u32, u32)> {
         TYPE_RESULT => RESULT_FIXED,
         _ => return None,
     };
-    Some((fixed, fixed.saturating_add(max_samples.saturating_mul(2))))
+    let bounded = if max_samples > MAX_FRAME_SAMPLES {
+        MAX_FRAME_SAMPLES
+    } else {
+        max_samples
+    };
+    Some((fixed, fixed.saturating_add(bounded.saturating_mul(2))))
 }
+
+/// The most octets any message may carry, whatever a peer declared (`M-122`).
+///
+/// The invariant `docs/specs/call-dsp-graph.md` §7.4 states as "no declared length ever sizes a
+/// buffer", as one number: no read this module performs is larger than this, for any octets and any
+/// negotiated ceiling.
+pub(crate) const MESSAGE_LIMIT: u32 = FRAME_FIXED.saturating_add(MAX_FRAME_SAMPLES * 2);
 
 /// Read one message, decoding its samples into `samples`.
 ///
@@ -297,10 +321,22 @@ fn decode(
                     field: "sample rate",
                     value: rate,
                 })?;
+            // §7.4: the ceiling every later message is checked against, so a value out of the
+            // contract's domain is refused here rather than adopted. Left unchecked it is the peer
+            // choosing the size of the next read: the frame limit saturates at `u32::MAX`, and so
+            // does `fill`'s exact-accounting arithmetic, which stops deciding anything.
+            let max_samples = quad(payload, 8)?;
+            if max_samples > MAX_FRAME_SAMPLES {
+                return Err(WorkerProtocolError::Value {
+                    field: "max_samples",
+                    value: max_samples,
+                }
+                .into());
+            }
             Ok(Incoming::Hello {
                 direction,
                 format,
-                max_samples: quad(payload, 8)?,
+                max_samples,
             })
         }
         TYPE_FRAME => {
@@ -780,6 +816,44 @@ mod tests {
             matches!(
                 fault,
                 Fault::Refused(WorkerProtocolError::Reserved { value: 1 })
+            ),
+            "{fault:?}"
+        );
+    }
+
+    /// §7.4: a ceiling above the contract's own largest frame is a value this version does not
+    /// define (`M-122`).
+    ///
+    /// The other end of "no declared length ever sizes a buffer". A `Hello`'s `max_samples` *is*
+    /// the ceiling every later message is checked against, so a peer that declares one this
+    /// runtime cannot honour has chosen the size of the next read: at `u32::MAX` the frame limit
+    /// saturates, `payload.resize` is handed four gigabytes, and `fill`'s exact-accounting rule
+    /// saturates with it and stops deciding anything.
+    #[test]
+    fn a_ceiling_above_the_contracts_largest_frame_is_refused() {
+        let mut wire = Vec::new();
+        let mut out = Vec::new();
+        write_hello(
+            &mut wire,
+            &mut out,
+            AudioDirection::Inbound,
+            narrowband(),
+            160,
+        )
+        .unwrap();
+        let at = HEADER + 8;
+        wire[at..at + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+        let mut payload = Vec::new();
+        let mut samples = Vec::new();
+        let fault =
+            read_message(&mut wire.as_slice(), &mut payload, &mut samples, 0).expect_err("refused");
+        assert!(
+            matches!(
+                fault,
+                Fault::Refused(WorkerProtocolError::Value {
+                    field: "max_samples",
+                    value: u32::MAX,
+                })
             ),
             "{fault:?}"
         );

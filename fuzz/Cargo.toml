@@ -23,6 +23,12 @@ sipx-sip = { path = "../crates/sipx-sip" }
 # tests in `crates/sipx-sip/tests/` drive exactly the same code. A corpus entry that crashes the
 # fuzzer is replayed by a test byte for byte; two copies of the driver would make that a lie.
 sipx-testkit = { path = "../crates/sipx-testkit" }
+# `M-122`'s harness — the program vocabulary, the octet encoder and §7.4's invariant oracle — lives
+# in the crate that owns the decoder, because the oracle's last rule is checked against the two real
+# callers and both are crate-private: a worker's `serve` and a stage's `pump`. Reaching them from
+# here through a public door would mean publishing the decoder; reaching them from the test crate
+# would mean publishing it twice.
+sipx-media = { path = "../crates/sipx-media" }
 
 [[bin]]
 name = "parse_datagram"
@@ -62,6 +68,13 @@ bench = false
 [[bin]]
 name = "call_audio_sequence"
 path = "fuzz_targets/call_audio_sequence.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "worker_protocol_sequence"
+path = "fuzz_targets/worker_protocol_sequence.rs"
 test = false
 doc = false
 bench = false
