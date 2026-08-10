@@ -10,17 +10,14 @@
 //! re-encode, whatever codec each one negotiated. So joining a conference always costs a
 //! transcode, and that is a property of mixing rather than of this wrapper.
 //!
-//! # What a participation does not survive
-//!
-//! A participant is the media session the call had when it joined. Renegotiating that call
-//! replaces its session, and the conference goes on mixing the one it was given, which has
-//! stopped. Rejoining is the remedy; `C-9` is the story that removes the manual step. For the same
-//! reason a call that ends should be [`CallConference::leave`]-d: the mixer keeps a slot for a
-//! participant nobody removed, contributing silence, until it is.
+//! A call that ends should still be [`CallConference::leave`]-d: signalling teardown does not
+//! identify which opaque [`Participant`] handle the host intends to remove, so the mixer otherwise
+//! keeps a silent slot until the conference closes.
 
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use sipx_media::{Conference, ConferenceError};
+use sipx_media::{Conference, ConferenceError, MediaSession};
 
 use crate::call::Call;
 
@@ -31,6 +28,29 @@ use crate::call::Call;
 #[must_use = "a participant that is never left keeps a slot in the mix"]
 pub struct Participant(u64);
 
+/// One call's participation, retained by the call so media replacement can follow it.
+#[derive(Debug, Clone)]
+pub(crate) struct Membership {
+    conference: Weak<Conference>,
+    participant: u64,
+}
+
+impl Membership {
+    fn new(conference: &Arc<Conference>, participant: u64) -> Self {
+        Self {
+            conference: Arc::downgrade(conference),
+            participant,
+        }
+    }
+
+    pub(crate) async fn rebind(&self, session: Arc<MediaSession>) -> bool {
+        let Some(conference) = self.conference.upgrade() else {
+            return false;
+        };
+        conference.rebind(self.participant, session).await
+    }
+}
+
 /// Several calls a host owns, mixed so each hears all the others.
 ///
 /// Participants join and leave while it runs, and neither disturbs the others: the mixing clock
@@ -38,7 +58,7 @@ pub struct Participant(u64);
 /// into.
 #[derive(Debug)]
 pub struct CallConference {
-    inner: Conference,
+    inner: Arc<Conference>,
 }
 
 impl CallConference {
@@ -54,7 +74,7 @@ impl CallConference {
     /// before anything is spawned.
     pub fn new(samples_per_frame: usize, interval: Duration) -> Result<Self, ConferenceError> {
         Ok(Self {
-            inner: Conference::new(samples_per_frame, interval)?,
+            inner: Arc::new(Conference::new(samples_per_frame, interval)?),
         })
     }
 
@@ -66,7 +86,7 @@ impl CallConference {
     /// this on the same explicit startup contract as [`Self::new`].
     pub fn narrowband() -> Result<Self, ConferenceError> {
         Ok(Self {
-            inner: Conference::narrowband()?,
+            inner: Arc::new(Conference::narrowband()?),
         })
     }
 
@@ -82,7 +102,9 @@ impl CallConference {
     /// one reader.
     pub async fn join(&self, call: &mut Call) -> Participant {
         call.release_bridge();
-        Participant(self.inner.join(call.media_handle()).await)
+        let participant = self.inner.join(call.media_handle()).await;
+        call.attach_conference(Membership::new(&self.inner, participant));
+        Participant(participant)
     }
 
     /// Remove a participant. The others carry on, and their mixes simply stop containing this one.

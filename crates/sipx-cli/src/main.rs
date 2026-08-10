@@ -33,6 +33,7 @@ mod advertise;
 mod answer;
 mod budget;
 mod cli;
+mod cluster;
 mod counters;
 mod destination;
 mod device;

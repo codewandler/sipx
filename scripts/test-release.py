@@ -1624,7 +1624,7 @@ class TheRegistryRateLimit(unittest.TestCase):
             clock,
             waits,
             {
-                "monotonic": lambda: clock[0],
+                "clock": lambda: clock[0],
                 "pause": pause,
                 "now": lambda: 0.0,
                 "report": lambda _line: None,
@@ -1646,6 +1646,169 @@ class TheRegistryRateLimit(unittest.TestCase):
         # crates.io states a burst of five new crates and one further name every ten minutes.
         self.assertEqual([0.0, 0.0, 0.0, 0.0, 0.0, 600.0, 1200.0], [at for _name, at in attempts])
         self.assertEqual([600.0, 600.0], waits)
+
+    def test_a_second_invocation_waits_for_the_new_name_allowance_the_first_spent(self) -> None:
+        """X-140: a process boundary does not manufacture a second five-name burst."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = pathlib.Path(directory) / "pacing.json"
+            first_clock, first_waits, first = self.injected_clock()
+            first_clock[0] = 10_000.0
+            first_attempts: list[tuple[str, float]] = []
+            first_frontier = tuple(f"sipx-{index}" for index in range(5))
+            self.assertEqual(
+                first_frontier,
+                release.publish_frontier(
+                    first_frontier,
+                    paced_dispatch(first_clock, first_attempts, {}),
+                    new_crates=first_frontier,
+                    budget_seconds=1200.0,
+                    carried_allowances=release.pacing_allowance_model(ledger),
+                    record_allowances=lambda buckets: release.pacing_allowance_model_record(
+                        ledger, buckets
+                    ),
+                    **first,
+                ),
+            )
+            self.assertEqual([], first_waits)
+
+            # This is a new process with its own injected clock object at the same comparable
+            # wall-clock instant. Before X-140 it starts with another burst and the first attempt
+            # receives the refusal the model could have predicted.
+            second_clock, second_waits, second = self.injected_clock()
+            second_clock[0] = 10_000.0
+            second_attempts: list[tuple[str, float]] = []
+
+            def registry(package: str) -> subprocess.CompletedProcess[str]:
+                second_attempts.append((package, second_clock[0]))
+                if second_clock[0] < 10_600.0:
+                    return subprocess.CompletedProcess((), 101, "", RATE_LIMITED_WITH_HEADER)
+                return subprocess.CompletedProcess((), 0, "", "")
+
+            self.assertEqual(
+                ("sipx-fifth",),
+                release.publish_frontier(
+                    ("sipx-fifth",),
+                    registry,
+                    new_crates=("sipx-fifth",),
+                    budget_seconds=1200.0,
+                    carried_allowances=release.pacing_allowance_model(ledger),
+                    record_allowances=lambda buckets: release.pacing_allowance_model_record(
+                        ledger, buckets
+                    ),
+                    **second,
+                ),
+            )
+            self.assertEqual([600.0], second_waits)
+            self.assertEqual([("sipx-fifth", 10_600.0)], second_attempts)
+
+    def test_a_registry_deadline_replaces_and_crosses_the_persisted_model(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = pathlib.Path(directory) / "pacing.json"
+            first_clock, _first_waits, first = self.injected_clock()
+            first_clock[0] = 20_000.0
+            with self.assertRaises(release.ReleaseError):
+                release.publish_frontier(
+                    ("sipx-core",),
+                    paced_dispatch(
+                        first_clock,
+                        [],
+                        {("sipx-core", 1): (101, RATE_LIMITED_WITH_HEADER)},
+                    ),
+                    new_crates=("sipx-core",),
+                    budget_seconds=10.0,
+                    carried_allowances=release.pacing_allowance_model(ledger),
+                    record_allowances=lambda buckets: release.pacing_allowance_model_record(
+                        ledger, buckets
+                    ),
+                    **first,
+                )
+
+            second_clock, second_waits, second = self.injected_clock()
+            second_clock[0] = 20_000.0
+            attempts: list[tuple[str, float]] = []
+            self.assertEqual(
+                ("sipx-core",),
+                release.publish_frontier(
+                    ("sipx-core",),
+                    paced_dispatch(second_clock, attempts, {}),
+                    new_crates=("sipx-core",),
+                    budget_seconds=1000.0,
+                    carried_allowances=release.pacing_allowance_model(ledger),
+                    record_allowances=lambda buckets: release.pacing_allowance_model_record(
+                        ledger, buckets
+                    ),
+                    **second,
+                ),
+            )
+            self.assertEqual([900.0], second_waits)
+            self.assertEqual([("sipx-core", 20_900.0)], attempts)
+
+    def test_the_existing_name_bucket_also_crosses_the_process_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = pathlib.Path(directory) / "pacing.json"
+            first_clock, first_waits, first = self.injected_clock()
+            first_clock[0] = 30_000.0
+            frontier = tuple(f"sipx-{index}" for index in range(30))
+            release.publish_frontier(
+                frontier,
+                paced_dispatch(first_clock, [], {}),
+                new_crates=(),
+                budget_seconds=120.0,
+                carried_allowances=release.pacing_allowance_model(ledger),
+                record_allowances=lambda buckets: release.pacing_allowance_model_record(
+                    ledger, buckets
+                ),
+                **first,
+            )
+            self.assertEqual([], first_waits)
+
+            second_clock, second_waits, second = self.injected_clock()
+            second_clock[0] = 30_000.0
+            attempts: list[tuple[str, float]] = []
+            release.publish_frontier(
+                ("sipx-next-version",),
+                paced_dispatch(second_clock, attempts, {}),
+                new_crates=(),
+                budget_seconds=120.0,
+                carried_allowances=release.pacing_allowance_model(ledger),
+                **second,
+            )
+            self.assertEqual([60.0], second_waits)
+            self.assertEqual([("sipx-next-version", 30_060.0)], attempts)
+
+    def test_a_missing_or_unreadable_allowance_model_degrades_to_an_optimistic_start(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = pathlib.Path(directory) / "pacing.json"
+            release.pacing_ledger_record(ledger, 42.0)
+            model = release.pacing_allowance_model_path(ledger)
+            for label, damaged in (("missing", None), ("unreadable", "not json")):
+                with self.subTest(label=label):
+                    if damaged is None:
+                        model.unlink(missing_ok=True)
+                    else:
+                        model.write_text(damaged, encoding="utf-8")
+                    report: list[str] = []
+                    carried = release.pacing_allowance_model(ledger, report=report.append)
+                    self.assertEqual({}, carried)
+                    self.assertEqual(42.0, release.pacing_ledger_spent(ledger))
+
+                    clock, waits, injected = self.injected_clock()
+                    attempts: list[tuple[str, float]] = []
+                    self.assertEqual(
+                        ("sipx-core",),
+                        release.publish_frontier(
+                            ("sipx-core",),
+                            paced_dispatch(clock, attempts, {}),
+                            new_crates=("sipx-core",),
+                            budget_seconds=600.0,
+                            carried_allowances=carried,
+                            **injected,
+                        ),
+                    )
+                    self.assertEqual([("sipx-core", 0.0)], attempts)
+                    self.assertEqual([], waits)
+                    self.assertTrue(any("optimistic" in line for line in report), report)
 
     def test_an_ordinary_version_update_is_not_paced_by_the_new_crate_limit(self) -> None:
         clock, waits, injected = self.injected_clock()
@@ -2183,6 +2346,21 @@ class TheRegistryRateLimit(unittest.TestCase):
                 f"every {limit.refill_seconds:g} seconds",
                 REHEARSAL_SPEC,
             )
+
+    def test_the_specification_separates_the_strict_spend_from_the_optimistic_model(self) -> None:
+        self.assertIn(
+            "separate sibling allowance model at `<ledger>.allowances`",
+            REHEARSAL_SPEC,
+        )
+        self.assertIn(
+            "Unix timestamps from a wall clock, not process-local monotonic values",
+            REHEARSAL_SPEC,
+        )
+        self.assertIn(
+            "An absent, malformed or unreadable sibling is reported and starts both buckets at "
+            "their optimistic stated bursts",
+            REHEARSAL_SPEC,
+        )
 
 
 if __name__ == "__main__":

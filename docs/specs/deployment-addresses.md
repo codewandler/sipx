@@ -1,7 +1,8 @@
 # Spec: Deployment addresses and non-ICE media latching
 
-**Status:** normative for `M-42` · **Crates:** `sipx-transport`, `sipx-call`, `sipx-media`,
-`sipx-cli` · **Story:** [M-42](../stories/M-42-advertise-a-chosen-address-and-latch-rtp-without-ice.md)
+**Status:** normative for `M-42`, `M-123` · **Crates:** `sipx-transport`, `sipx-call`, `sipx-media`,
+`sipx-cli` · **Stories:** [M-42](../stories/M-42-advertise-a-chosen-address-and-latch-rtp-without-ice.md),
+[M-123](../stories/M-123-refuse-an-advertised-address-the-far-end-owns.md)
 
 ## 1. Normative references
 
@@ -116,3 +117,47 @@ packet from another source, and asserts that the destination cell remains the no
 The call API documents this precedence beside the explicit media bind option. The CLI exposes an
 advertised IP independently from its signalling bind socket and reports the chosen advertised and
 bound addresses in JSON diagnostics.
+
+## 7. Private-range collision refusal
+
+An outbound offerer validates its advertised media address against the connection address in the
+received SDP answer before exposing a confirmed `Call`. The signalling destination is not evidence
+of the peer's media realm and MUST NOT replace the answer in this check.
+
+The answer implies a collision realm only when its effective audio connection address belongs to
+one of these ranges:
+
+| Realm | Prefix |
+|---|---|
+| private IPv4 block 1 | `10.0.0.0/8` |
+| private IPv4 block 2 | `172.16.0.0/12` |
+| private IPv4 block 3 | `192.168.0.0/16` |
+| unique-local IPv6 | `fc00::/7` |
+
+If the offer's advertised address is in that same prefix, establishment returns a typed
+`MediaRangeCollision` naming the advertised address, answer address, and prefix. An answer outside
+those prefixes, different address families, or addresses in different prefixes supplies no proof
+of collision and passes this check. No broader reachability inference is made.
+
+`DialOptions::with_media_range_overlap(true)` explicitly bypasses this one refusal for an operator
+who arranged overlapping-range routing. False is the default. The option does not bypass any SDP,
+codec, ICE, keying, or unspecified-address validation.
+
+## 8. Split signalling and media routes
+
+The command adapter separately compares the operating system's selected local source address for
+the chosen signalling target with its selected local source address for the answer's effective
+audio destination. Different local addresses mean the two paths use different interfaces. The
+command terminates the newly answered dialog and reports `SplitMediaRoute`, naming the signalling
+and media source addresses. It does not report `MediaRangeCollision` for this condition.
+
+This route query remains in `sipx-cli`: it opens no socket in `sipx-sip` or `sipx-sdp`, and the call
+layer receives only the resulting address facts. An unavailable route observation is not treated as
+a collision and does not invent a diagnosis.
+
+| Vector | Advertised | Answer connection | Override / route sources | Expected |
+|---|---|---|---|---|
+| DA-1 | `10.99.0.3` | `10.43.2.8` | false | `MediaRangeCollision`, both addresses and `10.0.0.0/8` |
+| DA-2 | `192.168.1.8` | `10.43.2.8` | false | no collision refusal |
+| DA-3 | `10.99.0.3` | `10.43.2.8` | overlap allowed | no collision refusal |
+| DA-4 | any non-colliding pair | any | signalling source `10.99.0.3`, media source `192.168.1.50` | `SplitMediaRoute`, both source addresses |

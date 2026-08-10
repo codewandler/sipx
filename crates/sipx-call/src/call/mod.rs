@@ -25,7 +25,7 @@ use sipx_transport::{Handle, Incoming, Target, TransportKind};
 
 pub use sipx_sip::auth::Credentials;
 
-use crate::dialog::{Dialog, strip_header_params};
+use crate::dialog::{Dialog, cseq_number, strip_header_params};
 use crate::error::{
     CancellationCleanup, CancellationDisposition, Error, InvitationCancellation, Result,
 };
@@ -69,6 +69,10 @@ use timers::{SessionState, required_interval};
 /// inventing an error that can never happen — and the previous attempt reported it as "no
 /// final response to the INVITE", which would have been actively misleading.
 const OK: u16 = 200;
+
+/// RFC 3261's default T1 and the 64*T1 lifetime of a UAS 2xx awaiting ACK.
+const INVITE_T1: Duration = Duration::from_millis(500);
+const INVITE_ACK_LIFETIME: Duration = Duration::from_secs(32);
 
 pub(crate) fn ok_status() -> StatusCode {
     StatusCode::new(OK).unwrap_or_else(|| unreachable!("200 is a valid status code"))
@@ -261,6 +265,10 @@ pub struct Call {
     /// references to the bridge's own lifecycle, which is what lets this call tear the bridge down
     /// and tell its peer at the moment it ends. Cleared when the bridge ends by any route.
     bridge: Option<crate::bridge::Membership>,
+    /// Conference places this call's current media generation feeds. Each membership is a weak
+    /// conference reference plus its stable participant ID; neither shares this call or a mutable
+    /// media session.
+    conferences: Vec<crate::conference::Membership>,
 }
 
 /// One call's voice-activity detection while it is running (`M-58`).
@@ -500,6 +508,7 @@ impl Call {
             voice: None,
             metrics: None,
             bridge: None,
+            conferences: Vec::new(),
             events,
             events_rx: Some(events_rx),
             history: None,
@@ -539,6 +548,15 @@ impl Call {
         &self.media
     }
 
+    /// The effective peer RTP destination selected by the current offer/answer exchange.
+    ///
+    /// This is an address fact from SDP or ICE setup, not a route query. Applications that need
+    /// to compare operating-system routes do that outside this crate.
+    #[must_use]
+    pub fn peer_media_address(&self) -> SocketAddr {
+        self.current.remote
+    }
+
     /// A shared media handle for an owning actor that must move one operation into a bounded task.
     ///
     /// Most applications should use [`Self::media`]. This form exists for interactive owners that
@@ -550,9 +568,9 @@ impl Call {
 
     /// Whether this call's audio is currently crossing to another call (`C-6`).
     ///
-    /// The live answer rather than "a bridge was made": it goes false when the bridge is released,
-    /// when the other call ends, and when either call's media session is replaced by a
-    /// renegotiation — see [`crate::bridge`] for why that last one needs the bridge remade.
+    /// The live answer rather than "a bridge was made": it goes false when the bridge is released
+    /// or when the other call ends. Media replacement rebinds the existing bridge before the
+    /// retired session stops, so a successful renegotiation leaves this true.
     #[must_use]
     pub fn is_bridged(&self) -> bool {
         self.bridge
@@ -573,6 +591,24 @@ impl Call {
     pub(crate) fn release_bridge(&mut self) {
         if let Some(membership) = self.bridge.take() {
             membership.release();
+        }
+    }
+
+    /// Remember a conference participation so a later media generation follows the same ID.
+    pub(crate) fn attach_conference(&mut self, membership: crate::conference::Membership) {
+        self.conferences.push(membership);
+    }
+
+    /// Publish the current media handle to every call composition before retiring its predecessor.
+    pub(crate) async fn rebind_compositions(&self) {
+        let media = self.media_handle();
+        if let Some(bridge) = &self.bridge {
+            bridge.rebind(Arc::clone(&media));
+        }
+        for conference in &self.conferences {
+            // discard: closure means the conference is already releasing this participant; the
+            // call's successful media replacement remains authoritative.
+            let _ = conference.rebind(Arc::clone(&media)).await;
         }
     }
 
@@ -2069,9 +2105,17 @@ pub struct DialOptions {
     /// # Beta API migration
     ///
     /// Adding this public field deliberately breaks external `DialOptions` struct literals and
-    /// exhaustive patterns. Add `media_bind_address` (normally equal to `media_address`) or move
-    /// to [`Self::new`] and the builder methods. Constructor-based callers remain compatible.
+    /// exhaustive patterns. Add `media_bind_address` (normally equal to `media_address`) and
+    /// `allow_media_range_overlap: false`, or move to [`Self::new`] and the builder methods.
+    /// Constructor-based callers remain compatible.
     pub media_bind_address: IpAddr,
+    /// Whether a private-range collision implied by the peer's answer is known to be routable.
+    ///
+    /// False is fail-closed: when the effective peer media address and [`Self::media_address`]
+    /// occupy the same private realm, establishment returns
+    /// [`Error::MediaRangeCollision`]. Set this only when the
+    /// application has arranged routing for that overlap.
+    pub allow_media_range_overlap: bool,
     /// Direction advertised by the initial SDP offer.
     ///
     /// `SendRecv` is the ordinary endpoint default. A two-dialog owner uses this to map the
@@ -2146,6 +2190,7 @@ impl DialOptions {
             from: from.into(),
             media_address,
             media_bind_address: media_address,
+            allow_media_range_overlap: false,
             initial_direction: Direction::SendRecv,
             timeout: None,
             cancellation_timeout: Duration::from_secs(2),
@@ -2193,6 +2238,13 @@ impl DialOptions {
     #[must_use]
     pub const fn with_media_bind_address(mut self, address: IpAddr) -> Self {
         self.media_bind_address = address;
+        self
+    }
+
+    /// Permit a private-range overlap implied by the peer's SDP answer.
+    #[must_use]
+    pub const fn with_media_range_overlap(mut self, allow: bool) -> Self {
+        self.allow_media_range_overlap = allow;
         self
     }
 
@@ -3188,6 +3240,7 @@ async fn dial_with(
                 voice: None,
                 metrics: None,
                 bridge: None,
+                conferences: Vec::new(),
             })
         }
         Err(error) => {
@@ -3224,6 +3277,11 @@ fn establish(
         .map_err(|error| Error::Sdp(error.to_string()))?;
     validate_establishment_answer(options.media.profile, invite.body(), &answer)?;
     let settled = settle_answer(offered, &answer, options.media.codecs)?;
+    validate_media_range(
+        options.media_address,
+        settled.negotiated.remote.ip(),
+        options.allow_media_range_overlap,
+    )?;
     let dialog = Dialog::from_response(invite, response).ok_or(Error::NoDialog)?;
     let target = in_dialog_target(&dialog, fallback);
     let ice = match ice {
@@ -3240,6 +3298,57 @@ fn establish(
         None => None,
     };
     Ok((dialog, port, target, settled, ice, answer))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrivateRealm {
+    Ten,
+    OneSeventyTwo,
+    OneNinetyTwo,
+    UniqueLocal,
+}
+
+impl PrivateRealm {
+    const fn prefix(self) -> &'static str {
+        match self {
+            Self::Ten => "10.0.0.0/8",
+            Self::OneSeventyTwo => "172.16.0.0/12",
+            Self::OneNinetyTwo => "192.168.0.0/16",
+            Self::UniqueLocal => "fc00::/7",
+        }
+    }
+}
+
+fn private_realm(address: IpAddr) -> Option<PrivateRealm> {
+    match address {
+        IpAddr::V4(address) => match address.octets() {
+            [10, _, _, _] => Some(PrivateRealm::Ten),
+            [172, second, _, _] if (16..=31).contains(&second) => Some(PrivateRealm::OneSeventyTwo),
+            [192, 168, _, _] => Some(PrivateRealm::OneNinetyTwo),
+            _ => None,
+        },
+        IpAddr::V6(address) => match address.octets() {
+            [first, ..] if first & 0xfe == 0xfc => Some(PrivateRealm::UniqueLocal),
+            _ => None,
+        },
+    }
+}
+
+fn validate_media_range(advertised: IpAddr, peer: IpAddr, allow: bool) -> Result<()> {
+    if allow {
+        return Ok(());
+    }
+    let Some(advertised_realm) = private_realm(advertised) else {
+        return Ok(());
+    };
+    if private_realm(peer) != Some(advertised_realm) {
+        return Ok(());
+    }
+    Err(Error::MediaRangeCollision {
+        advertised,
+        peer,
+        range: advertised_realm.prefix(),
+    })
 }
 
 /// Hold the named profile boundary ahead of every stateful part of answer application.
@@ -3438,6 +3547,7 @@ pub async fn answer_at(
         None,
         MediaPolicy::default(),
         &[],
+        None,
     )
     .await
 }
@@ -3490,6 +3600,7 @@ pub async fn answer_with_policy_at(
         None,
         policy,
         &[],
+        None,
     )
     .await
 }
@@ -3528,6 +3639,7 @@ pub async fn answer_with_policy_and_headers_at(
         None,
         policy,
         headers,
+        None,
     )
     .await
 }
@@ -3540,6 +3652,10 @@ pub async fn answer_with_policy_and_headers_at(
 /// §9.2 asks for exactly that agreement ("the `To` tag of the response to the CANCEL and the `To`
 /// tag in the response to the original request SHOULD be the same"), and it can only be honoured
 /// by whoever owns both, which is the invitation.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the dispatched path adds its ACK inbox to the existing answer preparation inputs"
+)]
 pub(crate) async fn answer_tagged(
     endpoint: &Handle,
     incoming: &Incoming,
@@ -3548,7 +3664,23 @@ pub(crate) async fn answer_tagged(
     claim: Option<Claim<'_>>,
     policy: MediaPolicy,
     headers: &[sipx_sip::Header],
+    requests: Option<&mut tokio::sync::mpsc::Receiver<Incoming>>,
 ) -> Result<Call> {
+    if incoming.request.body().is_empty()
+        && let Some(requests) = requests
+    {
+        return Box::pin(answer_delayed(
+            endpoint,
+            incoming,
+            media_address,
+            tag,
+            claim,
+            policy,
+            headers,
+            requests,
+        ))
+        .await;
+    }
     let offer = match sipx_sdp::parse(&String::from_utf8_lossy(incoming.request.body())) {
         Ok(offer) => offer,
         Err(error) => {
@@ -3570,6 +3702,168 @@ pub(crate) async fn answer_tagged(
         headers,
     )
     .await
+}
+
+/// Answer an initial INVITE whose offer is delayed until the successful final response.
+///
+/// The dispatcher-owned inbox is essential here: unlike an ordinary answer, this operation is
+/// not complete when the 200 leaves. The ACK carries the answer and only a valid answer may
+/// create the media session returned to the application.
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the delayed answer remains in wire order from 2xx through ACK validation and Call construction"
+)]
+async fn answer_delayed(
+    endpoint: &Handle,
+    incoming: &Incoming,
+    media_address: MediaAddress,
+    tag: &str,
+    claim: Option<Claim<'_>>,
+    policy: MediaPolicy,
+    headers: &[sipx_sip::Header],
+    requests: &mut tokio::sync::mpsc::Receiver<Incoming>,
+) -> Result<Call> {
+    validate_profile_preflight(policy, incoming.transport)?;
+    let offer = EarlyOffer::bind(
+        media_address,
+        incoming.transport.is_secure(),
+        Direction::SendRecv,
+        policy,
+    )
+    .await?;
+    let agreed = negotiate_session(endpoint, incoming).await?;
+    let to_with_tag = {
+        let existing = incoming
+            .request
+            .headers
+            .value(&HeaderName::To)
+            .map(|value| String::from_utf8_lossy(&value).into_owned())
+            .unwrap_or_default();
+        format!("{};tag={tag}", strip_header_params(&existing))
+    };
+    let response = ok_with_answer(
+        endpoint,
+        incoming,
+        &to_with_tag,
+        offer.description(),
+        agreed,
+        headers,
+    )?;
+    let dialog = Dialog::from_request(&incoming.request, tag).ok_or(Error::NoDialog)?;
+    let target = in_dialog_target(&dialog, Target::new(incoming.source, incoming.transport));
+    let invite_cseq = cseq_number(&incoming.request.headers).unwrap_or(1);
+
+    // As on the ordinary answer path, every fallible preparation step precedes the claim. From
+    // here the successful final response may already have reached the caller even if the local
+    // transport reports an error, so the pending INVITE must not become cancellable again.
+    if let Some(claim) = claim {
+        claim()?;
+    }
+    endpoint.respond(&incoming.key, response.clone()).await?;
+
+    let ack_stop = CancellationToken::new();
+    let mut ack_retransmission = OwnedTask::new(tokio::spawn(retransmit_until_acked(
+        endpoint.clone(),
+        incoming.key.clone(),
+        response,
+        ack_stop.clone(),
+    )));
+    let deadline = Instant::now() + INVITE_ACK_LIFETIME;
+    let answer = loop {
+        tokio::select! {
+            message = requests.recv() => {
+                let Some(message) = message else {
+                    break Err(Error::NoResponse);
+                };
+                if message.request.method == Method::Ack
+                    && dialog.matches(&message.request)
+                    && cseq_number(&message.request.headers) == Some(invite_cseq)
+                {
+                    let parsed = sipx_sdp::parse(&String::from_utf8_lossy(message.request.body()))
+                        .map_err(|error| Error::Sdp(error.to_string()));
+                    break parsed.map(|answer| (answer, message.request.body().to_vec()));
+                }
+            }
+            () = tokio::time::sleep_until(deadline) => break Err(Error::NoResponse),
+        }
+    };
+    cancel_and_join(&ack_stop, &mut ack_retransmission).await;
+
+    let (answer, answer_bytes) = match answer {
+        Ok(answer) => answer,
+        Err(error) => {
+            end_failed_delayed_answer(endpoint, &dialog, target).await;
+            return Err(error);
+        }
+    };
+    let early = match offer.settle(&answer).await {
+        Ok(early) => early,
+        Err(error) => {
+            end_failed_delayed_answer(endpoint, &dialog, target).await;
+            return Err(error);
+        }
+    };
+
+    let encrypted = early.settled.is_encrypted();
+    let current = early.settled.negotiated;
+    let (events, events_rx) = EventSink::new();
+    emit_construction_events(&events, None);
+    Ok(Call {
+        dialog,
+        initial_status: OK,
+        media: Arc::new(early.media),
+        retired_media: Vec::new(),
+        endpoint: endpoint.clone(),
+        target,
+        ack_stop: None,
+        ack_retransmission: None,
+        delayed_offer: None,
+        ended: false,
+        media_address: early.media_address,
+        media_bind_address: early.media_bind_address,
+        codecs: early.codecs,
+        profile: policy.profile,
+        current,
+        peer_ice: peer_ice_credentials(&answer_bytes),
+        hold: Direction::SendRecv,
+        encrypted,
+        keying: early.keying,
+        referral: None,
+        transfer: None,
+        session: agreed.map(|accepted| {
+            SessionState::armed(session::Session {
+                interval: accepted.interval,
+                we_refresh: accepted.refresher == session::Refresher::Uas,
+            })
+        }),
+        negotiation: update::Negotiation::idle(),
+        peer_allows_update: update::peer_allows(&incoming.request.headers),
+        events,
+        events_rx: Some(events_rx),
+        history: HistoryInfo::from_headers(&incoming.request.headers)
+            .and_then(std::result::Result::ok),
+        dialog_credentials: None,
+        admitted_dialog_methods: Vec::new(),
+        voice: None,
+        metrics: None,
+        bridge: None,
+        conferences: Vec::new(),
+    })
+}
+
+/// End a dialog whose delayed answer could not create the session promised by its 200.
+async fn end_failed_delayed_answer(endpoint: &Handle, dialog: &Dialog, target: Target) {
+    if let Ok(bye) = bye_request(
+        dialog,
+        dialog.local_cseq.saturating_add(1),
+        &normal_clearing_reason(),
+    ) {
+        // discard: best effort on an already-failing path. `send` reports an unsent request
+        // through the transport's counters, and a BYE failure cannot replace the SDP or timeout
+        // error.
+        let _ = endpoint.send(bye, target).await;
+    }
 }
 
 /// The media an invitation has bound, and what the far end has said about it.
@@ -4469,6 +4763,11 @@ impl Dialing {
             self.options.media,
         )
         .await?;
+        validate_media_range(
+            self.options.media_address,
+            early.settled.negotiated.remote.ip(),
+            self.options.allow_media_range_overlap,
+        )?;
         self.media = Some(EarlyMedia::Answered(Box::new(early)));
         self.negotiation.sent_answer();
         if let Some(events) = self.events.as_ref() {
@@ -4528,6 +4827,11 @@ impl Dialing {
             return Err(Error::NoDialog);
         };
         let settled = settle_answer(&capabilities, &answer, self.options.media.codecs)?;
+        validate_media_range(
+            self.options.media_address,
+            settled.negotiated.remote.ip(),
+            self.options.allow_media_range_overlap,
+        )?;
         self.accept_remote_ice(&answer);
         let Some(EarlyMedia::Offered(port)) = self.media.take() else {
             return Ok(());
@@ -4693,6 +4997,7 @@ impl Dialing {
                     voice: None,
                     metrics: None,
                     bridge: None,
+                    conferences: Vec::new(),
                 })
             }
             Err(error) => {
@@ -4788,6 +5093,11 @@ impl Dialing {
             return Err(Error::NoEarlySession);
         };
         let settled = settle_answer(capabilities, &answer, self.options.media.codecs)?;
+        validate_media_range(
+            self.options.media_address,
+            settled.negotiated.remote.ip(),
+            self.options.allow_media_range_overlap,
+        )?;
         self.accept_remote_ice(&answer);
         // Our INVITE's offer is answered here rather than in a provisional, so the exchange
         // closes now. Without this the first UPDATE on the confirmed call would be refused as
@@ -5491,6 +5801,7 @@ pub async fn answer_early(
         voice: None,
         metrics: None,
         bridge: None,
+        conferences: Vec::new(),
     })
 }
 
@@ -5832,6 +6143,7 @@ async fn answer_negotiated(
         voice: None,
         metrics: None,
         bridge: None,
+        conferences: Vec::new(),
     })
 }
 
@@ -5842,10 +6154,9 @@ async fn retransmit_until_acked(
     response: Response,
     stop: CancellationToken,
 ) {
-    let t1 = Duration::from_millis(500);
-    let mut interval = t1;
+    let mut interval = INVITE_T1;
     let mut elapsed = Duration::ZERO;
-    let give_up = t1 * 64;
+    let give_up = INVITE_ACK_LIFETIME;
 
     loop {
         if until_cancelled(&stop, tokio::time::sleep(interval))
@@ -6070,6 +6381,16 @@ pub(crate) async fn reack_retransmitted_2xx(
 }
 
 pub(crate) fn build_ack(endpoint: &Handle, dialog: &Dialog, target: &Target) -> Result<Request> {
+    build_ack_with_body(endpoint, dialog, target, None)
+}
+
+/// Build a 2xx ACK, carrying the delayed answer when the INVITE itself offered nothing.
+pub(crate) fn build_ack_with_body(
+    endpoint: &Handle,
+    dialog: &Dialog,
+    target: &Target,
+    body: Option<&str>,
+) -> Result<Request> {
     let (local, remote) = dialog.local_and_remote();
     let (uri, routes) = dialog.request_target();
     let via = format!(
@@ -6078,7 +6399,7 @@ pub(crate) fn build_ack(endpoint: &Handle, dialog: &Dialog, target: &Target) -> 
         endpoint.sent_by_for(target.transport),
         sipx_transport::new_branch()
     );
-    let ack = RequestBuilder::new(Method::Ack, uri)
+    let mut ack = RequestBuilder::new(Method::Ack, uri)
         .header(HeaderName::Via, Bytes::from(via))?
         .header(HeaderName::To, Bytes::from(remote))?
         .header(HeaderName::From, Bytes::from(local))?
@@ -6087,6 +6408,14 @@ pub(crate) fn build_ack(endpoint: &Handle, dialog: &Dialog, target: &Target) -> 
         // acknowledges that request rather than being one of its own.
         .cseq(dialog.local_cseq, &Method::Ack)?
         .max_forwards(70);
+    if let Some(body) = body {
+        ack = ack
+            .header(
+                HeaderName::ContentType,
+                Bytes::from_static(b"application/sdp"),
+            )?
+            .body(Bytes::from(body.to_owned()));
+    }
     Ok(add_routes(ack, &routes)?.build())
 }
 
@@ -6164,6 +6493,49 @@ mod tests {
 
     use super::offer_answer::tests::offered;
     use super::*;
+
+    #[test]
+    fn a_peer_answer_in_the_same_private_realm_refuses_the_advertised_address() {
+        let advertised: IpAddr = "10.99.0.3".parse().expect("address");
+        let peer: IpAddr = "10.43.2.8".parse().expect("address");
+        let error = validate_media_range(advertised, peer, false).expect_err("collision");
+        assert!(matches!(
+            &error,
+            Error::MediaRangeCollision {
+                advertised: found_advertised,
+                peer: found_peer,
+                range: "10.0.0.0/8",
+            } if *found_advertised == advertised && *found_peer == peer
+        ));
+        let message = error.to_string();
+        assert!(message.contains("10.99.0.3"));
+        assert!(message.contains("10.43.2.8"));
+        assert!(message.contains("10.0.0.0/8"));
+    }
+
+    #[test]
+    fn different_private_realms_do_not_claim_a_collision() {
+        assert!(
+            validate_media_range(
+                "192.168.1.8".parse().expect("address"),
+                "10.43.2.8".parse().expect("address"),
+                false,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn an_explicit_operator_override_allows_the_overlap() {
+        assert!(
+            validate_media_range(
+                "10.99.0.3".parse().expect("address"),
+                "10.43.2.8".parse().expect("address"),
+                true,
+            )
+            .is_ok()
+        );
+    }
 
     #[tokio::test(start_paused = true)]
     async fn answer_events_must_precede_their_deadline() {

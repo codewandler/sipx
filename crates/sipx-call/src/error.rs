@@ -158,6 +158,16 @@ pub enum Error {
     /// SDP was asked to advertise an unspecified address which no peer can reach.
     #[error("the advertised media address must not be unspecified")]
     UnspecifiedMediaAddress,
+    /// The SDP answer places its peer in the same private realm as this side's advertised address.
+    #[error("advertised media address {advertised} collides with answer address {peer} in {range}")]
+    MediaRangeCollision {
+        /// Address this side wrote into its offer.
+        advertised: std::net::IpAddr,
+        /// Effective media connection address in the answer.
+        peer: std::net::IpAddr,
+        /// Private realm both addresses occupy.
+        range: &'static str,
+    },
     /// DTLS-SRTP was selected in a build that does not contain its handshake implementation.
     #[error("DTLS-SRTP was selected, but sipx-call was built without its `dtls` feature")]
     DtlsUnavailable,

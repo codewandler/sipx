@@ -19,10 +19,9 @@
 //! the source endpoint's PRACK. In every case both descriptions belong to the endpoints; this
 //! role still authors none, which is the whole of what it exists not to do.
 //!
-//! What it still refuses rather than half-does: an offerless re-INVITE, and an offerless initial
-//! INVITE from a source that does not offer `100rel`. The second is not a policy choice — with
-//! no reliable provisional the delayed offer has to travel in the `2xx` and its answer in the
-//! ACK, a carrier this stack does not implement on either side (`C-9`).
+//! An offerless re-INVITE is still refused rather than half-done. An offerless initial INVITE
+//! without `100rel`, however, uses the final carrier: the target offer is mapped into the source
+//! `2xx`, and the target ACK is held until the source ACK supplies the mapped answer (`C-10`).
 
 use std::collections::VecDeque;
 use std::net::IpAddr;
@@ -45,8 +44,8 @@ use super::{
     CouplingEnd, CouplingState, DEFERRED_CAPACITY, FailureAction, Leg, OfferAction, OfferAxis,
 };
 use crate::call::{
-    add_routes, build_ack, contact_for, in_dialog_target, normal_clearing_reason,
-    reack_retransmitted_2xx, sleep_until, withdraw,
+    add_routes, build_ack, build_ack_with_body, contact_for, in_dialog_target,
+    normal_clearing_reason, reack_retransmitted_2xx, sleep_until, withdraw,
 };
 use crate::dialog::Dialog;
 use crate::dispatch::CouplingInvitation;
@@ -82,7 +81,10 @@ pub struct OffMediaOptions {
     pub origin_address: IpAddr,
     /// How long to wait for the target's final response before withdrawing the invitation.
     pub timeout: Option<Duration>,
-    /// How long withdrawing that invitation may wait for its protocol completion events.
+    /// How long cleanup may wait for protocol completion events.
+    ///
+    /// This bounds both withdrawing the target invitation and, for a final-response delayed
+    /// offer, holding the target ACK for the source ACK answer.
     pub cancellation_timeout: Duration,
 }
 
@@ -275,10 +277,9 @@ impl OffMediaCoupling {
     /// a CANCEL that arrives while the target INVITE is outstanding withdraws that INVITE,
     /// including the case where its 2xx crossed the CANCEL.
     ///
-    /// An offerless source INVITE is relayed as one, and RFC 3262 §5's delayed offer is carried
-    /// back on the reliable-provisional axis. That axis is the only one there is here: with no
-    /// `100rel` on the source leg the offer would have to travel in the `2xx` and its answer in
-    /// the ACK, which this returns [`Error::Sdp`] for rather than half-relaying.
+    /// An offerless source INVITE is relayed as one. RFC 3262 §5 carries the delayed exchange on
+    /// the reliable-provisional axis when `100rel` was offered; otherwise the target offer is
+    /// mapped into the source `2xx` and its answer is mapped back in the held target ACK.
     #[allow(
         clippy::too_many_lines,
         reason = "the early carriers and the confirmation they lead to are one sequence"
@@ -293,7 +294,7 @@ impl OffMediaCoupling {
     ) -> Result<Self> {
         let reliability = Offered::in_request(&invitation.request().request);
         let mut two_relay = DescriptionRelay::new(fresh_origin(options.origin_address));
-        let relayed = match source_offer(invitation.request(), reliability).and_then(|offer| {
+        let relayed = match source_offer(invitation.request()).and_then(|offer| {
             offer
                 .map(|offer| two_relay.relay(offer).map_err(Error::Relay))
                 .transpose()
@@ -388,7 +389,8 @@ impl OffMediaCoupling {
             return Err(Error::Rejected { status, reason });
         }
 
-        let mut two = match confirm_target(
+        let hold_target_ack = !early.source_offered && !early.settled;
+        let (mut two, held_responses) = match confirm_target(
             endpoint,
             calls,
             &invite,
@@ -397,6 +399,7 @@ impl OffMediaCoupling {
             responses,
             two_relay,
             early.target_cseq(),
+            hold_target_ack,
         )
         .await
         {
@@ -409,15 +412,32 @@ impl OffMediaCoupling {
             }
         };
 
-        let one = accept_source(
-            endpoint,
-            invitation,
-            one_relay,
-            response.body(),
-            &mut early,
-            &mut two,
-        )
-        .await?;
+        let one = match held_responses {
+            Some(responses) => {
+                accept_delayed_source(
+                    endpoint,
+                    invitation,
+                    one_relay,
+                    response.body(),
+                    &mut early,
+                    &mut two,
+                    responses,
+                    options.cancellation_timeout,
+                )
+                .await?
+            }
+            None => {
+                accept_source(
+                    endpoint,
+                    invitation,
+                    one_relay,
+                    response.body(),
+                    &mut early,
+                    &mut two,
+                )
+                .await?
+            }
+        };
         // A no-op when a reliable provisional already settled the exchange, which is the point:
         // the early carriers use the same policy object rather than a second one.
         let _completed = state.complete(Leg::One);
@@ -923,29 +943,38 @@ async fn confirm_target(
     responses: sipx_transport::Responses,
     relay: DescriptionRelay,
     early_cseq: Option<u32>,
-) -> Result<OffMediaLeg> {
+    hold_ack: bool,
+) -> Result<(OffMediaLeg, Option<sipx_transport::Responses>)> {
     let mut dialog = Dialog::from_response(invite, response).ok_or(Error::NoDialog)?;
     let leg_target = in_dialog_target(&dialog, target);
     let inbox = calls.register(&dialog);
     // Built before the early numbering is carried across: the ACK for a 2xx repeats the INVITE's
     // own sequence number rather than taking a new one (RFC 3261 §13.2.2.4).
-    let ack = build_ack(endpoint, &dialog, &leg_target)?;
+    let ack = (!hold_ack)
+        .then(|| build_ack(endpoint, &dialog, &leg_target))
+        .transpose()?;
     // RFC 3261 §12.2.1.1: a PRACK sent while this dialog was early consumed a number in the same
     // sequence space, and a dialog rebuilt from the 2xx would hand that number out a second time
     // — putting the first in-dialog request behind one the peer has already seen.
     if let Some(early_cseq) = early_cseq {
         dialog.local_cseq = dialog.local_cseq.max(early_cseq);
     }
-    endpoint
-        .send_directly(ack.clone(), leg_target.clone())
-        .await?;
-    tokio::spawn(reack_retransmitted_2xx(
-        endpoint.clone(),
-        responses,
-        ack,
-        leg_target.clone(),
-    ));
-    Ok(OffMediaLeg {
+    let held_responses = match ack {
+        Some(ack) => {
+            endpoint
+                .send_directly(ack.clone(), leg_target.clone())
+                .await?;
+            tokio::spawn(reack_retransmitted_2xx(
+                endpoint.clone(),
+                responses,
+                ack,
+                leg_target.clone(),
+            ));
+            None
+        }
+        None => Some(responses),
+    };
+    let leg = OffMediaLeg {
         dialog,
         target: leg_target,
         inbox,
@@ -953,7 +982,8 @@ async fn confirm_target(
         acknowledging: None,
         deferred: VecDeque::new(),
         ended: false,
-    })
+    };
+    Ok((leg, held_responses))
 }
 
 /// Answer the source invitation with the target endpoint's own description.
@@ -1039,6 +1069,181 @@ async fn accept_source(
         deferred: early.take_deferred(),
         ended: false,
     })
+}
+
+/// Carry the final-response delayed offer across both dialogs.
+///
+/// The target's 2xx has established a dialog but its ACK is deliberately retained until the
+/// source ACK supplies the answer. No media session exists here: both descriptions pass through
+/// the per-leg relays before either far endpoint is told the exchange completed.
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the held ACK joins the two invitations, relays, inboxes and one explicit bound"
+)]
+async fn accept_delayed_source(
+    endpoint: &Handle,
+    invitation: CouplingInvitation,
+    mut relay: DescriptionRelay,
+    offer: &[u8],
+    early: &mut EarlyCarriers,
+    two: &mut OffMediaLeg,
+    responses: sipx_transport::Responses,
+    held_ack_timeout: Duration,
+) -> Result<OffMediaLeg> {
+    let tag = invitation.tag();
+    let prepared = description_or_none(offer)
+        .unwrap_or_else(|| {
+            Err(Error::Sdp(
+                "the target accepted an offerless INVITE without supplying an offer".to_owned(),
+            ))
+        })
+        .and_then(|offer| relay.relay(offer).map_err(Error::Relay))
+        .and_then(|offer| accept(endpoint, &invitation.incoming, &tag, Some(&offer)))
+        .and_then(|accepted| {
+            let mut dialog =
+                Dialog::from_request(&invitation.incoming.request, &tag).ok_or(Error::NoDialog)?;
+            dialog.remote_cseq = dialog.remote_cseq.max(early.remote_cseq);
+            let sequence = sequence_of(&invitation.incoming.request, &Method::Invite)
+                .ok_or(Error::NoDialog)?;
+            Ok((accepted, dialog, sequence))
+        });
+    let (accepted, dialog, sequence) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            abandon_delayed_exchange(endpoint, None, two, responses).await;
+            invitation
+                .refuse(endpoint, 488, "Not Acceptable Here")
+                .await?;
+            return Err(error);
+        }
+    };
+    if let Err(error) = invitation.claim_with_tag(&tag) {
+        abandon_delayed_exchange(endpoint, None, two, responses).await;
+        return Err(error);
+    }
+
+    let (incoming, inbox) = invitation.into_parts();
+    let target = in_dialog_target(&dialog, Target::new(incoming.source, incoming.transport));
+    let now = Instant::now();
+    let mut one = OffMediaLeg {
+        dialog,
+        target,
+        inbox,
+        relay,
+        acknowledging: Some(Acknowledging {
+            key: incoming.key.clone(),
+            response: accepted.clone(),
+            sequence,
+            interval: T1,
+            next: now + T1,
+            deadline: now + TIMER_H,
+        }),
+        deferred: early.take_deferred(),
+        ended: false,
+    };
+    if let Err(error) = endpoint.respond(&incoming.key, accepted).await {
+        abandon_delayed_exchange(endpoint, Some(&mut one), two, responses).await;
+        return Err(error.into());
+    }
+
+    let deadline = now + held_ack_timeout;
+    let answer = if held_ack_timeout.is_zero() {
+        Err(Error::NoResponse)
+    } else {
+        loop {
+            let retransmit = one.retransmit_at();
+            tokio::select! {
+                biased;
+                request = one.inbox.recv() => {
+                    let Some(request) = request else {
+                        break Err(Error::NoResponse);
+                    };
+                    if request.request.method == Method::Ack
+                        && one.dialog.matches(&request.request)
+                        && one.acknowledged_by(&request.request)
+                    {
+                        let mapped = description_or_none(request.request.body())
+                            .unwrap_or_else(|| {
+                                Err(Error::Sdp(
+                                    "the ACK answering the delayed offer carried no description"
+                                        .to_owned(),
+                                ))
+                            })
+                            .and_then(|answer| two.relay.relay(answer).map_err(Error::Relay));
+                        break mapped;
+                    }
+                    if request.request.method != Method::Ack
+                        && one.deferred.len() < DEFERRED_CAPACITY
+                    {
+                        one.deferred.push_back(request);
+                    }
+                }
+                () = sleep_until(retransmit), if retransmit.is_some() => {
+                    one.retransmit(endpoint).await?;
+                }
+                () = tokio::time::sleep_until(deadline) => break Err(Error::NoResponse),
+            }
+        }
+    };
+    let answer = match answer {
+        Ok(answer) => answer,
+        Err(error) => {
+            abandon_delayed_exchange(endpoint, Some(&mut one), two, responses).await;
+            return Err(error);
+        }
+    };
+
+    if let Err(error) = release_held_target_ack(endpoint, two, responses, Some(&answer)).await {
+        // The mapped ACK could not leave. A bodiless retry is still preferable to abandoning the
+        // target to its complete 2xx lifetime; either way both dialogs are ended best-effort.
+        if let Ok(ack) = build_ack(endpoint, &two.dialog, &two.target) {
+            // discard: this fallback ACK is best effort on an already-failing path; the endpoint
+            // counts a send failure, while the mapped ACK error remains the returned cause.
+            let _ = endpoint.send_directly(ack, two.target.clone()).await;
+        }
+        end_leg_without_wait(endpoint, two).await;
+        end_leg_without_wait(endpoint, &mut one).await;
+        return Err(error);
+    }
+    Ok(one)
+}
+
+/// Release a target 2xx with the mapped delayed answer, retaining the response stream so every
+/// retransmitted 2xx is acknowledged with the same bytes.
+async fn release_held_target_ack(
+    endpoint: &Handle,
+    two: &OffMediaLeg,
+    responses: sipx_transport::Responses,
+    answer: Option<&str>,
+) -> Result<()> {
+    let ack = build_ack_with_body(endpoint, &two.dialog, &two.target, answer)?;
+    endpoint
+        .send_directly(ack.clone(), two.target.clone())
+        .await?;
+    tokio::spawn(reack_retransmitted_2xx(
+        endpoint.clone(),
+        responses,
+        ack,
+        two.target.clone(),
+    ));
+    Ok(())
+}
+
+/// Stop a failed delayed exchange without leaving the target retransmitting its 2xx for Timer H.
+async fn abandon_delayed_exchange(
+    endpoint: &Handle,
+    one: Option<&mut OffMediaLeg>,
+    two: &mut OffMediaLeg,
+    responses: sipx_transport::Responses,
+) {
+    // The bodiless ACK deliberately cannot be mistaken for a valid answer. Its only job is to
+    // stop the target's 2xx lifetime before both confirmed dialogs are ended with BYE.
+    let _released = release_held_target_ack(endpoint, two, responses, None).await;
+    end_leg_without_wait(endpoint, two).await;
+    if let Some(one) = one {
+        end_leg_without_wait(endpoint, one).await;
+    }
 }
 
 /// Send the mapped offer on the far leg, answering a collision there while it is outstanding.
@@ -1127,20 +1332,11 @@ fn fresh_origin(address: IpAddr) -> Origin {
 
 /// The source INVITE's own offer, or `None` when it is a delayed one this role may relay.
 ///
-/// An offerless INVITE is a delayed offer, and relaying it needs somewhere for the target's own
-/// offer to come back: RFC 3262 §5's reliable provisional, which RFC 3262 §3 forbids unless the
-/// source said it supports the extension. Without that there is one carrier left — the offer in
-/// the `2xx` and its answer in the ACK — and this stack implements it on neither side, so it is
-/// refused here rather than begun and abandoned halfway.
-fn source_offer(incoming: &Incoming, reliability: Offered) -> Result<Option<&str>> {
+/// An offerless INVITE is a delayed offer. RFC 3262 §5 may carry it reliably before confirmation;
+/// without that extension the final response and ACK carry the same exchange.
+fn source_offer(incoming: &Incoming) -> Result<Option<&str>> {
     let Some(body) = description_or_none(incoming.request.body()) else {
-        if reliability.supported || reliability.required {
-            return Ok(None);
-        }
-        return Err(Error::Sdp(
-            "an offerless INVITE with no 100rel leaves no carrier for the target's own offer"
-                .to_owned(),
-        ));
+        return Ok(None);
     };
     body.map(Some)
 }
@@ -1445,8 +1641,32 @@ async fn respond(
 /// Failures are logged rather than returned: this runs on cleanup paths whose primary cause is
 /// already on its way to the caller, and the transport counts the unsent request.
 async fn end_leg(endpoint: &Handle, leg: &mut OffMediaLeg) {
-    if leg.ended {
+    let Some(request) = end_leg_request(endpoint, leg) else {
         return;
+    };
+    match endpoint.send(request, leg.target.clone()).await {
+        Ok(mut responses) => {
+            let _final = responses.final_response().await;
+        }
+        Err(error) => {
+            tracing::warn!(%error, "could not end an off-media coupled dialog");
+        }
+    }
+}
+
+/// Start ending a failed setup without waiting on a peer whose ACK exchange has already failed.
+async fn end_leg_without_wait(endpoint: &Handle, leg: &mut OffMediaLeg) {
+    let Some(request) = end_leg_request(endpoint, leg) else {
+        return;
+    };
+    if let Err(error) = endpoint.send(request, leg.target.clone()).await {
+        tracing::warn!(%error, "could not end a failed off-media coupled dialog");
+    }
+}
+
+fn end_leg_request(endpoint: &Handle, leg: &mut OffMediaLeg) -> Option<Request> {
+    if leg.ended {
+        return None;
     }
     leg.ended = true;
     let cseq = leg.dialog.next_cseq();
@@ -1475,14 +1695,7 @@ async fn end_leg(endpoint: &Handle, leg: &mut OffMediaLeg) {
         .and_then(|builder| add_routes(builder, &routes));
     let Ok(builder) = built else {
         tracing::warn!("could not build the BYE ending an off-media coupled dialog");
-        return;
+        return None;
     };
-    match endpoint.send(builder.build(), leg.target.clone()).await {
-        Ok(mut responses) => {
-            let _final = responses.final_response().await;
-        }
-        Err(error) => {
-            tracing::warn!(%error, "could not end an off-media coupled dialog");
-        }
-    }
+    Some(builder.build())
 }

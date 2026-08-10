@@ -21,11 +21,13 @@
 use std::net::IpAddr;
 use std::time::Duration;
 
+use bytes::Bytes;
 use sipx_call::{
     Call, CallBridge, CallConference, CallEvent, CallEvents, DialOptions, DtmfBridging,
     UnbridgeCause, answer, dial,
 };
-use sipx_sip::{Host, HostName, Uri};
+use sipx_media::{Config as MediaConfig, MediaPort, MediaSession};
+use sipx_sip::{HeaderName, Host, HostName, Method, Uri};
 use sipx_transport::{Config, Handle, Incoming, Target, bind};
 use tokio::sync::mpsc::Receiver;
 
@@ -80,6 +82,140 @@ async fn connected(identity: &'static str) -> (Call, Call) {
 
     let (callee, _incoming, _endpoint) = answering.await.expect("the answering side finishes");
     (caller, callee)
+}
+
+/// One connected pair whose answering endpoint remains driveable by this test.
+///
+/// The ordinary helper can discard both signalling receivers because most bridge tests never send
+/// another request. A renegotiation proof needs the answering call's receiver so the raw peer's
+/// re-INVITE reaches [`Call::handle`].
+async fn connected_for_reinvite(
+    identity: &'static str,
+) -> (Call, Call, Handle, Receiver<Incoming>, std::net::SocketAddr) {
+    let (callee_endpoint, mut callee_incoming) = endpoint().await;
+    let (caller_endpoint, _caller_incoming) = endpoint().await;
+    let callee_addr = callee_endpoint.local_addr();
+
+    let answering = tokio::spawn(async move {
+        let incoming = callee_incoming.recv().await.expect("an INVITE arrives");
+        let mut call = answer(&callee_endpoint, &incoming, loopback())
+            .await
+            .expect("answers");
+        let ack = tokio::time::timeout(EVENT_BOUND, callee_incoming.recv())
+            .await
+            .expect("the initial ACK arrival is bounded")
+            .expect("the initial ACK arrives");
+        assert_eq!(ack.request.method, Method::Ack);
+        assert!(call.handle(&ack).await.expect("the call handles its ACK"));
+        (call, callee_incoming)
+    });
+
+    let caller = dial(
+        &caller_endpoint,
+        Target::udp(callee_addr),
+        &callee_uri(),
+        &DialOptions::new(identity, loopback()),
+    )
+    .await
+    .expect("the call connects");
+    let (callee, callee_incoming) = answering.await.expect("the answering side finishes");
+    (
+        caller,
+        callee,
+        caller_endpoint,
+        callee_incoming,
+        callee_addr,
+    )
+}
+
+fn in_dialog(call: &Call, method: &Method, cseq: u32, body: Option<String>) -> sipx_sip::Request {
+    let (local, remote) = call.dialog.local_and_remote();
+    let mut request = sipx_sip::build::RequestBuilder::new(method.clone(), callee_uri())
+        // The raw peer originates this request, so the receiving call's local party is To.
+        .header(HeaderName::To, Bytes::from(local))
+        .expect("to")
+        .header(HeaderName::From, Bytes::from(remote))
+        .expect("from")
+        .header(
+            HeaderName::CallId,
+            Bytes::from(call.dialog.id.call_id.clone()),
+        )
+        .expect("call-id")
+        .cseq(cseq, method)
+        .expect("cseq")
+        .max_forwards(70);
+    if let Some(body) = body {
+        request = request
+            .header(
+                HeaderName::ContentType,
+                Bytes::from_static(b"application/sdp"),
+            )
+            .expect("content-type")
+            .body(Bytes::from(body));
+    }
+    request.build()
+}
+
+/// Move `call` to a newly bound far-end media session with an accepted in-dialog offer.
+///
+/// The returned session is the far end after the move. Assertions use only this session and the
+/// other call's far end; the stopped middle generation is never inspected.
+async fn move_far_end(
+    call: &mut Call,
+    peer: &Handle,
+    incoming: &mut Receiver<Incoming>,
+    call_address: std::net::SocketAddr,
+) -> MediaSession {
+    let port = MediaPort::bind("127.0.0.1:0".parse().expect("valid"))
+        .await
+        .expect("the replacement far-end port binds");
+    let cseq = call.dialog.remote_cseq.unwrap_or(1).saturating_add(1);
+    let rtcp = if call.media().rtcp_mode() == sipx_sdp::RtcpMode::Mux {
+        "a=rtcp-mux\r\n"
+    } else {
+        ""
+    };
+    let offer = format!(
+        "v=0\r\no=- 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n\
+         m=audio {} RTP/AVP 0 8 101\r\na=rtpmap:0 PCMU/8000\r\n\
+         a=rtpmap:8 PCMA/8000\r\na=rtpmap:101 telephone-event/8000\r\na=sendrecv\r\n{rtcp}",
+        port.local_addr().port(),
+    );
+    let request = in_dialog(call, &Method::Invite, cseq, Some(offer));
+    let mut responses = peer
+        .send(request, Target::udp(call_address))
+        .await
+        .expect("the re-INVITE leaves");
+    let arrived = tokio::time::timeout(EVENT_BOUND, incoming.recv())
+        .await
+        .expect("the re-INVITE arrival is bounded")
+        .expect("the re-INVITE arrives");
+    assert!(call.handle(&arrived).await.expect("the call handles it"));
+    let accepted = tokio::time::timeout(EVENT_BOUND, responses.final_response())
+        .await
+        .expect("the re-INVITE response is bounded")
+        .expect("the re-INVITE receives a final response");
+    assert_eq!(
+        accepted.status.code(),
+        200,
+        "the media move is accepted (codec {:?}, keying {:?}, RTCP {:?})",
+        call.media().codec(),
+        call.negotiated_keying(),
+        call.media().rtcp_mode()
+    );
+
+    peer.send_directly(
+        in_dialog(call, &Method::Ack, cseq, None),
+        Target::udp(call_address),
+    )
+    .await
+    .expect("the re-INVITE is acknowledged");
+
+    let mut config = MediaConfig::new(call.media().local_addr(), call.media().codec());
+    config.rtcp_interval = None;
+    config.rtcp_mode = call.media().rtcp_mode();
+    port.start(config)
+        .expect("the replacement far-end session starts")
 }
 
 /// The host's two calls, and the two far ends they reach.
@@ -390,5 +526,74 @@ async fn calls_join_and_leave_the_conference() {
     assert_eq!(conference.len().await, 1);
     conference.leave(two).await;
     assert!(conference.is_empty().await);
+    conference.close().await;
+}
+
+/// B1: replacing one bridged call's media generation keeps the same live bridge.
+#[tokio::test]
+async fn a_bridge_carries_audio_both_ways_after_a_reinvite_moves_one_leg() {
+    let (_alice, mut left, _original_peer, mut left_incoming, left_address) =
+        connected_for_reinvite("<sip:alice@example.net>").await;
+    let (peer, _peer_incoming) = endpoint().await;
+    let (bob, mut right) = connected("<sip:bob@example.net>").await;
+    let bridge = CallBridge::connect(&mut left, &mut right);
+
+    let moved_alice = move_far_end(&mut left, &peer, &mut left_incoming, left_address).await;
+    assert!(bridge.is_connected(), "the bridge follows the replacement");
+    assert!(left.is_bridged() && right.is_bridged());
+
+    let clip = tone(moved_alice.samples_per_packet() * 20);
+    let (_played, heard) = tokio::join!(moved_alice.play(&clip, 160), async {
+        bob.media()
+            .record_at_least(clip.len(), DELIVERY_BOUND)
+            .await
+    });
+    assert!(carries_audio(&heard), "Bob did not hear the moved far end");
+
+    let (_played, heard) = tokio::join!(bob.play(&clip), async {
+        moved_alice
+            .record_at_least(clip.len(), DELIVERY_BOUND)
+            .await
+    });
+    assert!(carries_audio(&heard), "the moved far end did not hear Bob");
+}
+
+/// C5: media replacement changes neither the conference identity nor either audio direction.
+#[tokio::test]
+async fn a_conference_participant_keeps_hearing_and_contributing_after_a_reinvite() {
+    let (_alice, mut left, _original_peer, mut left_incoming, left_address) =
+        connected_for_reinvite("<sip:alice@example.net>").await;
+    let (peer, _peer_incoming) = endpoint().await;
+    let (bob, mut right) = connected("<sip:bob@example.net>").await;
+    let conference = CallConference::narrowband().expect("a conference starts");
+    let alice_id = conference.join(&mut left).await;
+    let bob_id = conference.join(&mut right).await;
+
+    let moved_alice = move_far_end(&mut left, &peer, &mut left_incoming, left_address).await;
+    assert_eq!(conference.len().await, 2, "neither participant rejoined");
+
+    let clip = tone(moved_alice.samples_per_packet() * 30);
+    let (_played, heard) = tokio::join!(moved_alice.play(&clip, 160), async {
+        bob.media()
+            .record_at_least(clip.len(), DELIVERY_BOUND)
+            .await
+    });
+    assert!(
+        carries_audio(&heard),
+        "Bob did not hear the moved participant"
+    );
+
+    let (_played, heard) = tokio::join!(bob.play(&clip), async {
+        moved_alice
+            .record_at_least(clip.len(), DELIVERY_BOUND)
+            .await
+    });
+    assert!(
+        carries_audio(&heard),
+        "the moved participant did not hear the mix"
+    );
+
+    conference.leave(alice_id).await;
+    conference.leave(bob_id).await;
     conference.close().await;
 }

@@ -42,7 +42,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use sipx_audio::mix::mix_into;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
 use tokio::task::JoinHandle;
 
 use crate::session::{MediaSession, Stop};
@@ -68,6 +68,9 @@ const MOST_PENDING: usize = 4_000;
 
 struct Member {
     session: Arc<MediaSession>,
+    /// The collector's current input. Rebinding changes the handle over this channel instead of
+    /// sharing a mutable session with the call that owns it.
+    input: watch::Sender<Arc<MediaSession>>,
     /// What this participant has contributed since the last tick.
     pending: Vec<i16>,
 }
@@ -183,10 +186,12 @@ impl Conference {
         if workers.closed {
             return id;
         }
+        let (input, collector_input) = watch::channel(Arc::clone(&session));
         participants.insert(
             id,
             Member {
                 session: Arc::clone(&session),
+                input,
                 pending: Vec::new(),
             },
         );
@@ -195,32 +200,36 @@ impl Conference {
         // participant's channel and the mixer cannot afford to wait on any of them. Spawn and
         // handle insertion happen while the lifecycle lock is held: close either drains this
         // handle or marks the conference closed before this point, never between the two.
-        let members = Arc::clone(&self.members);
-        let stop = Arc::clone(&self.stop);
-        let collector = tokio::spawn(async move {
-            loop {
-                let samples = tokio::select! {
-                    () = stop.wait() => return,
-                    samples = session.recv() => samples,
-                };
-                let Some(samples) = samples else {
-                    return;
-                };
-                let mut members = members.lock().await;
-                let Some(member) = members.get_mut(&id) else {
-                    return;
-                };
-                member.pending.extend_from_slice(&samples);
-                if member.pending.len() > MOST_PENDING {
-                    let excess = member.pending.len() - MOST_PENDING;
-                    member.pending.drain(..excess);
-                }
-            }
-        });
+        let collector = collect(
+            id,
+            Arc::clone(&self.members),
+            collector_input,
+            Arc::clone(&self.stop),
+        );
         #[cfg(test)]
         self.pause_join_before_registration();
         workers.collectors.insert(id, collector);
         id
+    }
+
+    /// Replace one participant's media session without changing its identity or mixer place.
+    ///
+    /// The participant's pending samples belong to the retired media generation and are cleared.
+    /// The existing collector switches input over a watch channel, while the mixer immediately
+    /// sends to the replacement handle stored in the member map. Returns `false` when `id` is no
+    /// longer present, including after the conference has closed.
+    pub async fn rebind(&self, id: u64, session: Arc<MediaSession>) -> bool {
+        let mut participants = self.members.lock().await;
+        let Some(participant) = participants.get_mut(&id) else {
+            return false;
+        };
+        if Arc::ptr_eq(&participant.session, &session) {
+            return true;
+        }
+        participant.pending.clear();
+        participant.session = Arc::clone(&session);
+        participant.input.send_replace(session);
+        true
     }
 
     /// Remove a participant.
@@ -342,6 +351,50 @@ impl Conference {
         }));
         workers
     }
+}
+
+/// Collect one participant's samples, following session replacements over a bounded latest-value
+/// channel. The replacement notification is selected before a stopped old session, so a rebind
+/// published before retirement cannot lose its collector to the generation being retired.
+fn collect(
+    id: u64,
+    members: Members,
+    mut input: watch::Receiver<Arc<MediaSession>>,
+    stop: Arc<Stop>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let session = Arc::clone(&input.borrow_and_update());
+            let samples = tokio::select! {
+                biased;
+                () = stop.wait() => return,
+                changed = input.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    continue;
+                }
+                samples = session.recv() => samples,
+            };
+            let Some(samples) = samples else {
+                return;
+            };
+            let mut participants = members.lock().await;
+            let Some(participant) = participants.get_mut(&id) else {
+                return;
+            };
+            if !Arc::ptr_eq(&participant.session, &session) {
+                // This frame arrived before a rebind but waited behind its member-map update.
+                // Pending audio is generation-scoped, so it cannot enter the replacement's mix.
+                continue;
+            }
+            participant.pending.extend_from_slice(&samples);
+            if participant.pending.len() > MOST_PENDING {
+                let excess = participant.pending.len() - MOST_PENDING;
+                participant.pending.drain(..excess);
+            }
+        }
+    })
 }
 
 impl Drop for Conference {

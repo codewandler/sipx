@@ -1,6 +1,6 @@
 # Design: resolving cluster-internal SIP names
 
-**Status:** proposed · **Pillar:** Core · **Epic:** `cluster-names` · **Stories:** _unallocated_
+**Status:** accepted · **Pillar:** Core · **Epic:** `cluster-names` · **Stories:** `M-123`, `M-124`
 
 ## Why
 
@@ -65,6 +65,47 @@ operator's kubeconfig already reaches:
 EndpointSlices rather than the `Endpoints` resource: it is the current API, it carries readiness per
 address, and an endpoint that is not ready is one this dial should not choose.
 
+### Resolver contract
+
+The fallback is an application adapter around the ordinary resolver, not a second resolver inside
+`sipx-transport`. Its input is the original URI, the requested transport policy, the configured
+cluster suffix, and the ordinary resolver's result. It is invoked only for
+`NoUsableCandidate`; malformed input, resolver setup failure, lookup failure, and either timeout
+remain the ordinary resolver's error. An explicit next hop is also final: its name is operator
+policy and is never replaced by endpoints derived from the request URI.
+
+The hostname matches only when removing the configured suffix leaves exactly
+`<service>.<namespace>.svc`. Empty labels, IP literals, the two-label short form, and suffix-only
+matches do not qualify. Comparison is ASCII case-insensitive and a terminal root dot is ignored.
+The default suffix is `cluster.local`; `sipx dial --cluster-domain` replaces it.
+
+One invocation performs exactly one request:
+
+```text
+GET /apis/discovery.k8s.io/v1/namespaces/<namespace>/endpointslices
+    ?labelSelector=kubernetes.io%2Fservice-name%3D<service>
+```
+
+The service and namespace are percent-encoded as path or query components. The response is bounded
+by the command's remaining attempt budget and by a 1 MiB body limit. A non-success status, malformed
+document, missing current context, or unusable credentials is a resolution failure which names the
+cluster API boundary; it is not reported as a DNS failure.
+
+EndpointSlice items retain document order, as do endpoints and their address lists. An endpoint
+whose `conditions.ready` is explicitly false is excluded; absent readiness means ready, matching
+the API's compatibility contract. Invalid and duplicate addresses are excluded. The first port
+whose protocol matches the selected SIP transport supplies the port; when no port is published,
+the normal SIP or SIPS default applies. Each surviving address becomes an ordinary `Target`, with
+the URI hostname retained as the verification identity for a secure transport. The existing
+bounded candidate walker owns failover and its attempt accounting.
+
+Kubeconfig selection is `$KUBECONFIG`'s first path, otherwise `$HOME/.kube/config`. The current
+context selects the cluster and user; the namespace written in the dialled name is authoritative.
+The adapter accepts a bearer token or token file and a certificate-authority file or embedded
+certificate data. It neither writes configuration nor runs credential plugins. This is deliberately
+an HTTPS adapter built from the command crate's HTTP client, not a platform client dependency in a
+protocol crate.
+
 ## Where this stops, and why that matters more than the resolution
 
 **Resolving the signalling address does not make the call work, and an operator who is not told so
@@ -85,6 +126,40 @@ will conclude sipx is broken.** Two failures sit behind it, both observed:
 So the deliverable is not only resolution. It is resolution **plus** a dial-time check that the
 address sipx is about to advertise is not inside a range the far end will read as its own, and a
 failure message that names which of the two paths did not complete.
+
+### Media-address diagnostics
+
+The check uses the connection address in the received SDP answer; the signalling target is not a
+substitute for what the peer said about its media network. A peer address implies only one of the
+well-known private address realms containing it: `10.0.0.0/8`, `172.16.0.0/12`,
+`192.168.0.0/16`, or `fc00::/7`. If the address this side put in its offer belongs to that same
+realm, the answer is refused before the call is exposed to the application. The error names the
+advertised address, peer connection address, and CIDR. Public, link-local, loopback,
+documentation-only, and different private realms do not establish a collision from the answer and
+therefore do not trigger this refusal.
+
+`DialOptions::with_media_range_overlap` is the explicit escape hatch for an operator who has made
+the overlapping realm routable. Its default is false. It bypasses only this range check, not SDP,
+codec, keying, or address validation.
+
+A different route is a different diagnosis. After the answer identifies the remote media address,
+the command compares the local source address selected for that destination with the local source
+address selected for the signalling target. If they differ, the command ends the new dialog and
+reports a split signalling/media path naming both local addresses. It never labels that condition a
+range collision. Route selection belongs in `sipx-cli`, because it is an operating-system query;
+the sans-I/O SDP layer and the call policy receive only addresses as data.
+
+### Test vectors
+
+| Vector | Input | Result |
+|---|---|---|
+| CN-1 | DNS returns a target; cluster API fixture panics if called | DNS targets unchanged |
+| CN-2 | no DNS target for `echo.voice.svc.cluster.local`; two ready and one unready fixture endpoints | ready addresses, in fixture order |
+| CN-3 | no DNS target for `echo.voice` | ordinary no-candidate error; no API call |
+| CN-4 | offer advertises `10.99.0.3`; answer connects to `10.43.2.8` | refuse, naming both and `10.0.0.0/8` |
+| CN-5 | offer advertises `192.168.1.8`; answer connects to `10.43.2.8` | no collision |
+| CN-6 | CN-4 with the explicit overlap option | no collision refusal |
+| CN-7 | signalling source `10.99.0.3`; media route source `192.168.1.50` | split-path diagnosis naming both sources |
 
 ## What this does not do
 

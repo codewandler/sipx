@@ -12,7 +12,7 @@ members = ["crates/*"]
 exclude = ["fuzz", "wasm", "heap-probe"]
 
 [workspace.package]
-version = "1.0.0-rc.22"
+version = "1.0.0-rc.23"
 edition = "2024"
 # Raised from 1.85 by the DNS client needed to clear RUSTSEC-2026-0119. The alternative was
 # shipping a known denial of service in a parser that eats untrusted network data.
@@ -25,17 +25,17 @@ categories = ["network-programming", "multimedia"]
 
 [workspace.dependencies]
 # Internal crates
-sipx-sip = { path = "crates/sipx-sip", version = "1.0.0-rc.22" }
-sipx-sdp = { path = "crates/sipx-sdp", version = "1.0.0-rc.22" }
-sipx-rtp = { path = "crates/sipx-rtp", version = "1.0.0-rc.22" }
-sipx-audio = { path = "crates/sipx-audio", version = "1.0.0-rc.22" }
-sipx-media = { path = "crates/sipx-media", version = "1.0.0-rc.22" }
-sipx-transport = { path = "crates/sipx-transport", version = "1.0.0-rc.22" }
-sipx-ua = { path = "crates/sipx-ua", version = "1.0.0-rc.22", default-features = false }
-sipx-call = { path = "crates/sipx-call", version = "1.0.0-rc.22" }
-sipx-app = { path = "crates/sipx-app", version = "1.0.0-rc.22" }
-sipx-app-protocol = { path = "crates/sipx-app-protocol", version = "1.0.0-rc.22" }
-sipx-testkit = { path = "crates/sipx-testkit", version = "1.0.0-rc.22" }
+sipx-sip = { path = "crates/sipx-sip", version = "1.0.0-rc.23" }
+sipx-sdp = { path = "crates/sipx-sdp", version = "1.0.0-rc.23" }
+sipx-rtp = { path = "crates/sipx-rtp", version = "1.0.0-rc.23" }
+sipx-audio = { path = "crates/sipx-audio", version = "1.0.0-rc.23" }
+sipx-media = { path = "crates/sipx-media", version = "1.0.0-rc.23" }
+sipx-transport = { path = "crates/sipx-transport", version = "1.0.0-rc.23" }
+sipx-ua = { path = "crates/sipx-ua", version = "1.0.0-rc.23", default-features = false }
+sipx-call = { path = "crates/sipx-call", version = "1.0.0-rc.23" }
+sipx-app = { path = "crates/sipx-app", version = "1.0.0-rc.23" }
+sipx-app-protocol = { path = "crates/sipx-app-protocol", version = "1.0.0-rc.23" }
+sipx-testkit = { path = "crates/sipx-testkit", version = "1.0.0-rc.23" }
 
 # Core
 bytes = "1"
@@ -85,10 +85,12 @@ p256 = "0.13"
 base64 = "0.22"
 serde_json = "1"
 serde = "1"
+serde-saphyr = { version = "1", default-features = false, features = ["deserialize"] }
 quick-xml = "0.41.0"
 tracing = "0.1"
-# The document-mode application host is the only HTTP client in the workspace. Redirects and
-# serialization policy are deliberately selected by `sipx-app`, not hidden in a kernel crate.
+# HTTP remains in application adapters: the document host selects its own serialization policy,
+# while the CLI's one credential-bearing cluster request disables redirects. No kernel crate uses
+# this client.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 # Async runtime (never used by the sans-IO crates)

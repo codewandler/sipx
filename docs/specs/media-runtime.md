@@ -1,6 +1,6 @@
 # Media runtime construction and ownership
 
-**Status:** normative · **Stories:** M-32, M-35, M-36, M-37, M-45, P-15, M-71
+**Status:** normative · **Stories:** M-32, M-35, M-36, M-37, M-45, P-15, M-71, C-9
 
 ## 1. Scope
 
@@ -160,6 +160,7 @@ The state transitions are:
 | Event | Member map | Collector | Mixer |
 |---|---|---|---|
 | `join(session)` | insert | spawn and retain handle | unchanged |
+| `rebind(id, session)` | retain ID, replace session, clear pending audio | switch its channel-backed input to the replacement | unchanged |
 | `leave(id)` | remove | abort and remove handle | unchanged |
 | `close()` | clear | signal all, abort and remove all handles | signal and abort |
 | `Drop` | released with conference state | signal all and abort | signal and abort |
@@ -178,6 +179,25 @@ stopped flag, so a signal between those operations cannot be lost.
 member map leaves the conference running and unchanged. Once it owns the map, it marks the lifecycle
 closed, aborts and drains the worker registry, and clears every participant without another await;
 cancelling the subsequent completion wait therefore cannot strand a session in a closed conference.
+
+### 3.1 Call composition across media replacement
+
+A successful in-dialog renegotiation that replaces a `Call`'s `MediaSession` MUST publish the
+replacement to every bridge and conference participation before it stops and joins the retired
+session. This publication is part of the renegotiation's happens-before relation: once the 2xx is
+sent or accepted, `CallBridge::is_connected` and `Call::is_bridged` describe forwarding through the
+replacement rather than the existence of a stale bridge handle.
+
+A bridge rebind keeps the same bridge lifecycle. It constructs forwarding over the replacement and
+the other current leg before dropping the old forwarding. When encoded relay applies, it sets relay
+on the replacement before clearing it on the retired session. A conference rebind keeps the same
+participant ID and mixer membership, clears audio pending from the retired media generation, and
+switches the participant collector through a bounded channel; it is not a leave followed by a join.
+
+These transitions share no mutable `Call` or `MediaSession`. The bridge lifecycle and conference
+member registry may share session handles, but audio samples, encoded payloads, and a conference's
+session replacement notification move through bounded session channels. No composition worker
+holds a call lock or a `Mutex<MediaSession>`.
 
 ## 4. Discard counters
 
@@ -583,6 +603,8 @@ exists for.
 | C2 | leave, close twice, then drop | no retained participant and no panic |
 | C3 | race `join` against `close` while the participant is quiet | either join is refused or its registered collector is drained; no retained session |
 | C4 | cancel `close` while it waits for the member map | conference remains open and retryable; a later close releases every session |
+| C5 | rebind a call already in a conference after an accepted re-INVITE moves its far-end address | its participant ID and conference size do not change; its far end still contributes audio and still hears another participant's mix |
+| B1 | rebind one leg of a connected call bridge after an accepted re-INVITE moves its far-end address | both far ends still pass audio in both directions; `CallBridge::is_connected` and both calls' `is_bridged` remain true |
 | O1 | Opus encoder construction is refused | typed encoder setup error; no direct G.711 encoder exists in the resulting state |
 | O2 | Opus decoder construction is refused | typed decoder setup error; no direct G.711 decoder exists in the resulting state |
 | O3 | successful Opus on dynamic payload type 96 | emitted RTP names 96 and carries Opus bytes |

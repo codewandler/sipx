@@ -383,6 +383,12 @@ pub(crate) struct DialOptions {
     pub(crate) local: SocketAddr,
     #[arg(long)]
     pub(crate) advertise: Option<IpAddr>,
+    /// Permit an advertised address in the private range implied by the answer.
+    #[arg(long)]
+    pub(crate) allow_media_range_overlap: bool,
+    /// Cluster DNS suffix eligible for the post-DNS `EndpointSlice` fallback.
+    #[arg(long, default_value = "cluster.local", value_parser = parse_cluster_domain)]
+    pub(crate) cluster_domain: String,
     #[command(flatten)]
     pub(crate) signalling: SignallingOptions,
     #[command(flatten)]
@@ -627,6 +633,26 @@ fn parse_non_empty(raw: &str) -> Result<String, String> {
     }
 }
 
+fn parse_cluster_domain(raw: &str) -> Result<String, String> {
+    let domain = raw.trim_end_matches('.');
+    let valid = !domain.is_empty()
+        && domain.len() <= 253
+        && domain.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        });
+    if valid {
+        Ok(domain.to_ascii_lowercase())
+    } else {
+        Err(format!("invalid cluster domain: {raw:?}"))
+    }
+}
+
 fn parse_seconds(raw: &str) -> Result<u64, String> {
     let value = raw
         .parse::<u64>()
@@ -645,6 +671,39 @@ fn parse_seconds(raw: &str) -> Result<u64, String> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dial_cluster_domain_has_a_documented_default_and_validates_overrides() {
+        let parsed =
+            Cli::try_parse_from(["sipx", "dial", "sip:echo@example.test"]).expect("valid command");
+        let Some(Command::Dial(dial)) = parsed.command else {
+            panic!("dial command");
+        };
+        assert_eq!(dial.cluster_domain, "cluster.local");
+
+        let parsed = Cli::try_parse_from([
+            "sipx",
+            "dial",
+            "sip:echo@example.test",
+            "--cluster-domain",
+            "Internal.Example.",
+        ])
+        .expect("valid configured suffix");
+        let Some(Command::Dial(dial)) = parsed.command else {
+            panic!("dial command");
+        };
+        assert_eq!(dial.cluster_domain, "internal.example");
+        assert!(
+            Cli::try_parse_from([
+                "sipx",
+                "dial",
+                "sip:echo@example.test",
+                "--cluster-domain",
+                ".invalid",
+            ])
+            .is_err()
+        );
+    }
 
     #[test]
     fn repeated_codecs_keep_command_line_order() {

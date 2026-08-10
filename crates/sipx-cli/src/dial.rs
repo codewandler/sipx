@@ -66,7 +66,14 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
     let attempt = crate::budget::Attempt::new(Duration::from_secs(options.timeout));
     let resolver = crate::destination::Resolver::within(attempt.remaining());
     let candidates = match resolver
-        .resolve(&to, None, transport, &options.signalling)
+        .resolve_clustered(
+            &to,
+            None,
+            transport,
+            &options.signalling,
+            &options.cluster_domain,
+            &attempt,
+        )
         .await
     {
         Ok(candidates) => candidates,
@@ -167,6 +174,7 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
 
     let mut call_options = sipx_call::DialOptions::new(from, media_address)
         .with_media_bind_address(media_addresses.bind)
+        .with_media_range_overlap(options.allow_media_range_overlap)
         .with_media_policy(media.policy())
         .with_cancellation_timeout(cancellation);
     for header in headers {
@@ -363,6 +371,25 @@ pub(crate) async fn run(options: DialOptions, format: Format) -> Exit {
         (call, selected, Vec::new(), false)
     };
     let negotiated_transport = selected_target.transport;
+    if !media_addresses.bind.is_unspecified()
+        && let Some(media_source) = crate::advertise::route_source(call.peer_media_address().ip())
+        && let Some((signalling_source, media_source)) =
+            crate::advertise::split_route(media_addresses.bind, media_source)
+    {
+        // The dialog is confirmed already, so leave it explicitly before reporting the route
+        // finding. A dropped `Call` would strand the peer until its own timer noticed.
+        let _ = call.hang_up_observed(cancellation).await;
+        devices.stop();
+        handle.shutdown().await;
+        return fail(
+            format,
+            Exit::Failed,
+            &format!(
+                "split signalling/media path: signalling interface {signalling_source}, media interface {media_source} for {}",
+                call.peer_media_address()
+            ),
+        );
+    }
     progress.answered();
 
     let served = sipx_call::serve_until(

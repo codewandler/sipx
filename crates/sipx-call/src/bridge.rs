@@ -16,13 +16,6 @@
 //! shared mutable session, and no raw port — a host goes on owning both `Call`s outright and
 //! driving each one's signalling while they are bridged.
 //!
-//! # What a bridge does not survive
-//!
-//! A bridge is made over the media sessions the two calls have *at that moment*. Renegotiating
-//! either call — a re-INVITE, a hold and resume, an ICE restart — replaces that call's session,
-//! and the bridge goes on forwarding the one it was given, which has stopped. [`CallBridge::is_connected`]
-//! reports it; remaking the bridge is the remedy. `C-9` is the story that removes the manual step.
-
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use sipx_media::{Bridge, MediaSession};
@@ -133,6 +126,13 @@ struct PerSide<T> {
 }
 
 impl<T> PerSide<T> {
+    const fn get(&self, side: Side) -> &T {
+        match side {
+            Side::One => &self.one,
+            Side::Two => &self.two,
+        }
+    }
+
     const fn get_mut(&mut self, side: Side) -> &mut T {
         match side {
             Side::One => &mut self.one,
@@ -170,6 +170,11 @@ impl Membership {
     pub(crate) fn is_connected(&self) -> bool {
         self.link.is_connected()
     }
+
+    /// The call replaced its media generation. Keep this same bridge lifecycle over the new one.
+    pub(crate) fn rebind(&self, session: Arc<MediaSession>) {
+        self.link.rebind(self.side, session);
+    }
 }
 
 /// Everything one bridge owns, shared by the two calls in it and by the [`CallBridge`] handle.
@@ -181,12 +186,15 @@ impl Membership {
 /// stream even when both calls end at once, which no atomic flag on its own can promise.
 #[derive(Debug)]
 pub(crate) struct Link {
-    sessions: PerSide<Arc<MediaSession>>,
+    dtmf: DtmfBridging,
     state: Mutex<LinkState>,
 }
 
 #[derive(Debug)]
 struct LinkState {
+    /// The current media generation for each call. Rebinding changes only this bridge-owned
+    /// handle set; neither call nor either session becomes shared mutable state.
+    sessions: PerSide<Arc<MediaSession>>,
     /// The forwarding, while it runs. Dropping it aborts both directions.
     bridge: Option<Bridge>,
     /// The keypress forwarders, under [`DtmfBridging::PassThrough`].
@@ -214,16 +222,16 @@ impl Link {
         // This call's stream is about to close with `Ended`, and nothing may be queued behind it.
         // Dropping the reservation here also returns the slot the call's own events compete for.
         *state.reports.get_mut(side) = None;
-        self.tear_down(&mut state, UnbridgeCause::PeerEnded);
+        Self::tear_down(&mut state, UnbridgeCause::PeerEnded);
     }
 
     fn tear_down_now(&self, cause: UnbridgeCause) {
         let mut state = self.lock();
-        self.tear_down(&mut state, cause);
+        Self::tear_down(&mut state, cause);
     }
 
     /// Stop forwarding and tell whoever is still listening. Idempotent.
-    fn tear_down(&self, state: &mut LinkState, cause: UnbridgeCause) {
+    fn tear_down(state: &mut LinkState, cause: UnbridgeCause) {
         if state.closed {
             return;
         }
@@ -239,8 +247,8 @@ impl Link {
         // Leaving it set is what would make an unbridged call deaf: `Bridge` does not clear it,
         // deliberately, because replacing one bridge with another must not clear the flag the
         // replacement has already set.
-        self.sessions.one.set_relay(false);
-        self.sessions.two.set_relay(false);
+        state.sessions.one.set_relay(false);
+        state.sessions.two.set_relay(false);
         for report in state.reports.both_mut() {
             if let Some(report) = report.take() {
                 report.emit_reserved(CallEvent::Unbridged { cause });
@@ -251,6 +259,48 @@ impl Link {
     fn is_connected(&self) -> bool {
         let state = self.lock();
         state.bridge.as_ref().is_some_and(Bridge::is_connected)
+    }
+
+    fn is_transcoding(&self) -> bool {
+        let state = self.lock();
+        state.bridge.as_ref().is_some_and(Bridge::is_transcoding)
+    }
+
+    /// Replace one session while retaining this bridge's identity, reports, and lifecycle.
+    fn rebind(&self, side: Side, session: Arc<MediaSession>) {
+        let mut state = self.lock();
+        if state.closed || Arc::ptr_eq(state.sessions.get(side), &session) {
+            return;
+        }
+
+        let retired = std::mem::replace(state.sessions.get_mut(side), session);
+        let replacement = Bridge::connect(
+            Arc::clone(&state.sessions.one),
+            Arc::clone(&state.sessions.two),
+        );
+        let digits = match self.dtmf {
+            DtmfBridging::Deliver => Vec::new(),
+            DtmfBridging::PassThrough => vec![
+                forward_keypresses(
+                    Arc::clone(&state.sessions.one),
+                    Arc::clone(&state.sessions.two),
+                ),
+                forward_keypresses(
+                    Arc::clone(&state.sessions.two),
+                    Arc::clone(&state.sessions.one),
+                ),
+            ],
+        };
+
+        // The replacement establishes relay on both current sessions first. Clearing it on the
+        // retired generation any earlier creates a gap in which neither bridge can forward.
+        let previous = state.bridge.replace(replacement);
+        let previous_digits = std::mem::replace(&mut state.digits, digits);
+        retired.set_relay(false);
+        drop(previous);
+        for forwarder in previous_digits {
+            forwarder.abort();
+        }
     }
 }
 
@@ -266,7 +316,6 @@ impl Link {
 pub struct CallBridge {
     link: Arc<Link>,
     dtmf: DtmfBridging,
-    transcoding: bool,
 }
 
 impl CallBridge {
@@ -313,7 +362,6 @@ impl CallBridge {
 
         let bridge =
             live.then(|| Bridge::connect(Arc::clone(&sessions.one), Arc::clone(&sessions.two)));
-        let transcoding = bridge.as_ref().is_some_and(Bridge::is_transcoding);
         let digits = match (live, options.dtmf()) {
             (true, DtmfBridging::PassThrough) => vec![
                 forward_keypresses(Arc::clone(&sessions.one), Arc::clone(&sessions.two)),
@@ -334,8 +382,9 @@ impl CallBridge {
         };
 
         let link = Arc::new(Link {
-            sessions,
+            dtmf: options.dtmf(),
             state: Mutex::new(LinkState {
+                sessions,
                 bridge,
                 digits,
                 reports,
@@ -353,7 +402,6 @@ impl CallBridge {
         Self {
             link,
             dtmf: options.dtmf(),
-            transcoding,
         }
     }
 
@@ -364,7 +412,7 @@ impl CallBridge {
     /// legs.
     #[must_use]
     pub fn is_transcoding(&self) -> bool {
-        self.transcoding
+        self.link.is_transcoding()
     }
 
     /// What this bridge does with a keypress.
@@ -375,9 +423,9 @@ impl CallBridge {
 
     /// Whether audio is still crossing in both directions.
     ///
-    /// `false` once either call has ended, once the bridge has been released, and also once either
-    /// call has renegotiated its media — see the module documentation for why that last one is a
-    /// remake rather than a repair.
+    /// `false` once either call has ended or once the bridge has been released. A successful media
+    /// renegotiation rebinds this bridge before retiring the old session, so it remains truthful
+    /// across that transition.
     #[must_use]
     pub fn is_connected(&self) -> bool {
         self.link.is_connected()

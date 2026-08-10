@@ -22,24 +22,43 @@ carried by the ACK, so that RFC 3264 §5's delayed offer works for a peer that d
 
 ## Acceptance
 
-- [ ] `answer` on an offerless INVITE originates the offer in the `2xx` instead of refusing `400`,
+- [x] `answer` on an offerless INVITE originates the offer in the `2xx` instead of refusing `400`,
       and the answer arriving in the ACK settles the session, with a failing-first test that plays
       audio to the port that answer named.
-- [ ] A malformed or unnegotiable answer in the ACK ends the dialog rather than leaving a
+- [x] A malformed or unnegotiable answer in the ACK ends the dialog rather than leaving a
       confirmed call with no agreed session — the ACK has no response with which to refuse one.
-- [ ] `OffMediaCoupling` relays that shape: an offerless source INVITE with no `100rel` is relayed
+- [x] `OffMediaCoupling` relays that shape: an offerless source INVITE with no `100rel` is relayed
       as an offerless target INVITE, the target's `2xx` offer is mapped onto the source `2xx`, the
       target ACK is held until the source ACK supplies the answer, and that answer is mapped onto
       it. The `C-7` invariants hold unchanged: no `MediaSession`, no RTP bound, no sipx address,
       and an unmappable description refused before the peer leg is told.
-- [ ] The held target ACK has a bound: a source that never ACKs must not leave the target
+- [x] The held target ACK has a bound: a source that never ACKs must not leave the target
       retransmitting its `2xx` for the full 32 seconds and then tearing down a dialog this side
       already reported.
-- [ ] `docs/specs/call-coupling.md` §6.3 is replaced by the specification of the carrier, and
+- [x] `docs/specs/call-coupling.md` §6.3 is replaced by the specification of the carrier, and
       `docs/rfc/registry.toml`'s RFC 7092 note stops naming it as the §3.1.3 gap.
-- [ ] `./scripts/gate.py` green.
+- [x] `./scripts/gate.py` green.
 
 ## Progress
+
+- 2026-08-10: delivered endpoint vectors IOF-5 through IOF-7 and coupling vectors T9 through T11.
+  A dispatcher-owned answer now retains its routed ACK inbox, starts media only after a valid ACK
+  answer, and sends BYE on malformed or unnegotiable answers. The off-media role maps the target
+  final offer into the source 2xx, holds the target ACK for the mapped source answer, and bounds
+  that hold with deterministic ACK-and-BYE cleanup. Focused integration suites passed (34 call
+  vectors and 12 off-media coupling vectors), as did strict clippy for the library and both
+  changed test targets.
+- 2026-08-10: the complete local acceptance gate passed all 51 steps on the rc.23 candidate.
+
+- 2026-08-10: failing-first endpoint vector `IOF-5` reached `answer` with an empty initial INVITE.
+  The answering future returned `Error::Sdp("missing the o= line")`, the peer received **400**,
+  and the assertion requiring the delayed-offer **200** failed. This pins the existing reversal:
+  the empty body is parsed as a broken offer instead of causing this UAS to originate one.
+
+- 2026-08-10: failing-first off-media vector `T9` returned immediately with
+  `Error::Sdp("an offerless INVITE with no 100rel leaves no carrier for the target's own offer")`;
+  no target invitation appeared in the ten-second failure bound. This pins §6.3's old refusal
+  before the final-response carrier exists.
 
 - 2026-08-08: filed from `C-8`, which relays every early carrier that RFC 3262 makes available and
   found this one unreachable. `C-8` mirrors `100rel` onto the target INVITE rather than asserting

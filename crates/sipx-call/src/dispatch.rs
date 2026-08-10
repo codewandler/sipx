@@ -54,7 +54,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex as StdMutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -64,7 +64,7 @@ use sipx_sip::headers::CSeq;
 use sipx_sip::transaction::TransactionKey;
 use sipx_sip::{HeaderName, Method, Request, StatusCode};
 use sipx_transport::{Handle, Incoming};
-use tokio::sync::{Notify, mpsc, watch};
+use tokio::sync::{Mutex, Notify, mpsc, watch};
 
 use crate::call::{Call, token};
 use crate::dialog::{Dialog, cseq_number, from_tag, to_tag};
@@ -139,7 +139,7 @@ pub enum Dispatched {
 #[derive(Debug)]
 pub struct Invitation {
     incoming: Incoming,
-    requests: mpsc::Receiver<Incoming>,
+    requests: Mutex<mpsc::Receiver<Incoming>>,
     /// Shared with the dispatcher's table: the INVITE server transaction a CANCEL names.
     pending: Arc<Pending>,
     /// Handed out once by [`Self::events`], as [`Call::events`](crate::Call::events) does.
@@ -244,6 +244,7 @@ impl Invitation {
         policy: MediaPolicy,
     ) -> Result<Call> {
         let tag = self.pending.tag();
+        let mut requests = self.requests.lock().await;
         // Handed down rather than taken here, so that the invitation is taken immediately before
         // the `200` leaves rather than before the work that builds it — every step of which can
         // fail with nothing sent, and an invitation taken by one of those is one no CANCEL can
@@ -256,6 +257,7 @@ impl Invitation {
             Some(&|| self.pending.claim()),
             policy,
             &[],
+            Some(&mut *requests),
         )
         .await
     }
@@ -317,7 +319,13 @@ impl Invitation {
         // Contact or dialog cannot consume an invitation that a later CANCEL could still end.
         let prepared = crate::signalling::prepare(endpoint, &self.incoming, &tag, contact)?;
         self.pending.claim_with_tag(&tag)?;
-        crate::signalling::establish(endpoint.clone(), self.incoming, self.requests, prepared).await
+        crate::signalling::establish(
+            endpoint.clone(),
+            self.incoming,
+            self.requests.into_inner(),
+            prepared,
+        )
+        .await
     }
 
     /// Refuse this pending invitation with a final response.
@@ -344,14 +352,14 @@ impl Invitation {
     /// is why this is the call to make *after* answering rather than instead of it.
     #[must_use]
     pub fn into_parts(self) -> (Incoming, mpsc::Receiver<Incoming>) {
-        (self.incoming, self.requests)
+        (self.incoming, self.requests.into_inner())
     }
 
     /// Transfer this pending invitation to the two-dialog coupling driver.
     pub(crate) fn into_coupling(self) -> CouplingInvitation {
         CouplingInvitation {
             incoming: self.incoming,
-            requests: self.requests,
+            requests: self.requests.into_inner(),
             pending: self.pending,
         }
     }
@@ -454,7 +462,7 @@ struct Pending {
     /// A transaction whose call has dropped its inbox is gone as far as anything here is
     /// concerned, and the table would otherwise hold its INVITE for the life of the dispatcher.
     route: mpsc::Sender<Incoming>,
-    state: Mutex<State>,
+    state: StdMutex<State>,
     cancelled: Notify,
 }
 
@@ -681,9 +689,9 @@ struct Route {
 /// The routing table, and the counters that describe what missed it.
 #[derive(Debug)]
 struct Table {
-    routes: Mutex<Routing>,
+    routes: StdMutex<Routing>,
     counts: Counters,
-    responses: Mutex<BTreeMap<u16, u64>>,
+    responses: StdMutex<BTreeMap<u16, u64>>,
     queue: usize,
     /// Changes to route identity; receiver closure is awaited from each snapshot directly.
     route_generation: watch::Sender<u64>,
@@ -899,7 +907,7 @@ impl Calls {
             transaction: incoming.key.clone(),
             request: incoming.request.clone(),
             route: tx,
-            state: Mutex::new(State {
+            state: StdMutex::new(State {
                 phase: Phase::Ringing,
                 events,
                 tag: token(),
@@ -1051,9 +1059,9 @@ impl Dispatcher {
             endpoint,
             incoming,
             calls: Calls(Arc::new(Table {
-                routes: Mutex::new(Routing::default()),
+                routes: StdMutex::new(Routing::default()),
                 counts: Counters::default(),
-                responses: Mutex::new(BTreeMap::new()),
+                responses: StdMutex::new(BTreeMap::new()),
                 queue: queue.max(1),
                 route_generation,
             })),
@@ -1429,7 +1437,7 @@ impl Dispatcher {
         let (requests, pending, events) = self.calls.reserve(key, &incoming);
         Some(Dispatched::Invitation(Invitation {
             incoming,
-            requests,
+            requests: Mutex::new(requests),
             pending,
             events: Some(events),
         }))
@@ -1722,9 +1730,9 @@ mod tests {
     fn calls_for_test() -> Calls {
         let (route_generation, _) = watch::channel(0);
         Calls(Arc::new(Table {
-            routes: Mutex::new(Routing::default()),
+            routes: StdMutex::new(Routing::default()),
             counts: Counters::default(),
-            responses: Mutex::new(BTreeMap::new()),
+            responses: StdMutex::new(BTreeMap::new()),
             queue: 1,
             route_generation,
         }))

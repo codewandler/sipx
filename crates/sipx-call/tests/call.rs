@@ -21,12 +21,12 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use sipx_audio::{Wav, g711, read_wav, write_wav};
-use sipx_call::{Call, Codecs, Credentials, answer, answer_with, dial};
+use sipx_call::{Call, Codecs, Credentials, Dispatched, Dispatcher, answer, answer_with, dial};
 use sipx_media::RtcpQualityHook;
 use sipx_sip::{CSeq, HeaderName, Host, HostName, Limits, Message, Method, Response, Uri};
 use sipx_transport::{Config, Handle, Incoming, Target, bind};
 use sipx_ua::{Authenticator, Presented, Verdict};
-use tokio::sync::mpsc::Receiver;
+use tokio::sync::mpsc::{self, Receiver};
 
 fn loopback() -> IpAddr {
     "127.0.0.1".parse().expect("valid")
@@ -112,6 +112,135 @@ fn initial_offer(
         .max_forwards(70)
         .body(Bytes::from_static(body.as_bytes()))
         .build()
+}
+
+fn offerless_invite(
+    source: &Handle,
+    destination: std::net::SocketAddr,
+    call_id: &'static str,
+) -> sipx_sip::Request {
+    sipx_sip::build::RequestBuilder::new(
+        Method::Invite,
+        Uri::parse(Bytes::from(format!("sip:answer@{destination}"))).expect("request URI"),
+    )
+    .header(
+        HeaderName::Via,
+        Bytes::from(format!(
+            "SIP/2.0/UDP {};branch={};rport",
+            source.sent_by_for(sipx_transport::TransportKind::Udp),
+            sipx_transport::new_branch()
+        )),
+    )
+    .expect("Via")
+    .header(
+        HeaderName::From,
+        Bytes::from_static(b"<sip:caller@example.test>;tag=from-delayed"),
+    )
+    .expect("From")
+    .header(
+        HeaderName::To,
+        Bytes::from_static(b"<sip:answer@example.test>"),
+    )
+    .expect("To")
+    .header(HeaderName::CallId, Bytes::from_static(call_id.as_bytes()))
+    .expect("Call-ID")
+    .cseq(1, &Method::Invite)
+    .expect("CSeq")
+    .header(
+        HeaderName::Contact,
+        Bytes::from(format!("<sip:caller@{}>", source.local_addr())),
+    )
+    .expect("Contact")
+    .max_forwards(70)
+    .build()
+}
+
+fn delayed_answer_ack(
+    source: &Handle,
+    invite: &sipx_sip::Request,
+    accepted: &Response,
+    answer: &[u8],
+) -> sipx_sip::Request {
+    let header = |message: &sipx_sip::Request, name: &HeaderName| {
+        Bytes::from(
+            message
+                .headers
+                .value(name)
+                .unwrap_or_else(|| panic!("the INVITE carries {name:?}"))
+                .into_owned(),
+        )
+    };
+    let contact = accepted
+        .headers
+        .value(&HeaderName::Contact)
+        .expect("the 2xx carries Contact");
+    let uri = String::from_utf8_lossy(&contact)
+        .trim_matches(['<', '>'])
+        .to_owned();
+    let mut builder = sipx_sip::build::RequestBuilder::new(
+        Method::Ack,
+        Uri::parse(Bytes::from(uri)).expect("dialog target"),
+    )
+    .header(
+        HeaderName::Via,
+        Bytes::from(format!(
+            "SIP/2.0/UDP {};branch={};rport",
+            source.sent_by_for(sipx_transport::TransportKind::Udp),
+            sipx_transport::new_branch()
+        )),
+    )
+    .expect("Via")
+    .header(
+        HeaderName::To,
+        Bytes::from(
+            accepted
+                .headers
+                .value(&HeaderName::To)
+                .expect("the 2xx carries To")
+                .into_owned(),
+        ),
+    )
+    .expect("To")
+    .header(HeaderName::From, header(invite, &HeaderName::From))
+    .expect("From")
+    .header(HeaderName::CallId, header(invite, &HeaderName::CallId))
+    .expect("Call-ID")
+    .cseq(1, &Method::Ack)
+    .expect("CSeq")
+    .max_forwards(70);
+    if !answer.is_empty() {
+        builder = builder
+            .header(
+                HeaderName::ContentType,
+                Bytes::from_static(b"application/sdp"),
+            )
+            .expect("Content-Type")
+            .body(Bytes::copy_from_slice(answer));
+    }
+    builder.build()
+}
+
+async fn dispatched_invitation(
+    endpoint: &Handle,
+    incoming: Receiver<Incoming>,
+) -> sipx_call::Invitation {
+    let mut dispatcher = Dispatcher::new(endpoint.clone(), incoming);
+    let (tx, mut surfaced) = mpsc::channel(1);
+    tokio::spawn(async move {
+        while let Some(dispatched) = dispatcher.next().await {
+            if tx.send(dispatched).await.is_err() {
+                return;
+            }
+        }
+    });
+    match tokio::time::timeout(SIGNALLING_BOUND, surfaced.recv())
+        .await
+        .expect("the invitation is bounded")
+        .expect("the dispatcher stays attached")
+    {
+        Dispatched::Invitation(invitation) => invitation,
+        other => panic!("expected an invitation, got {other:?}"),
+    }
 }
 
 async fn raw_response(socket: &tokio::net::UdpSocket) -> (Vec<u8>, Response) {
@@ -882,6 +1011,158 @@ async fn an_unsent_initial_offer_refusal_stays_observable_and_uncounted() {
         socket.try_recv_from(&mut byte).is_err(),
         "a failed response handoff emitted bytes"
     );
+}
+
+/// `C-10` / IOF-5: an offerless initial INVITE is answered by offering in the 2xx and adopting
+/// the ACK's answer. Audio is the causal proof: it reaches the endpoint-owned port that answer
+/// named, so neither a merely parsed ACK nor a session aimed at some provisional destination can
+/// satisfy the vector.
+#[tokio::test]
+async fn an_offerless_initial_invite_is_offered_in_the_2xx_and_settled_by_the_ack() {
+    let (answerer, answerer_incoming) = endpoint().await;
+    let (caller, _caller_incoming) = endpoint().await;
+    let invite = offerless_invite(
+        &caller,
+        answerer.local_addr(),
+        "initial-delayed-answer@sipx",
+    );
+    let mut responses = caller
+        .send(invite.clone(), Target::udp(answerer.local_addr()))
+        .await
+        .expect("the offerless INVITE leaves");
+    let invitation = dispatched_invitation(&answerer, answerer_incoming).await;
+    let answering_endpoint = answerer.clone();
+    let answering = tokio::spawn(async move {
+        let call = invitation
+            .answer(&answering_endpoint, loopback())
+            .await
+            .expect("the ACK answer establishes the call");
+        let (_invite, inbox) = invitation.into_parts();
+        (call, inbox)
+    });
+
+    let accepted = tokio::time::timeout(SIGNALLING_BOUND, responses.final_response())
+        .await
+        .expect("the final response is bounded")
+        .expect("the INVITE receives a final response");
+    assert_eq!(
+        accepted.status.code(),
+        200,
+        "an empty INVITE requests an offer; it is not malformed"
+    );
+    let offer = sipx_sdp::parse(&String::from_utf8_lossy(accepted.body()))
+        .expect("the 2xx carries the answerer's offer");
+    let media = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("the caller owns its media port");
+    let answer = sipx_sdp::answer(
+        &offer,
+        &sipx_sdp::Capabilities::g711(loopback(), media.local_addr().expect("bound").port()),
+    );
+    caller
+        .send_directly(
+            delayed_answer_ack(
+                &caller,
+                &invite,
+                &accepted,
+                answer.to_string_sdp().as_bytes(),
+            ),
+            Target::udp(answerer.local_addr()),
+        )
+        .await
+        .expect("the ACK carries the delayed answer");
+
+    let (call, _inbox) = tokio::time::timeout(SIGNALLING_BOUND, answering)
+        .await
+        .expect("answer returns after the ACK")
+        .expect("the answering task joins");
+    let samples = clip(100).samples;
+    let mut datagram = vec![0_u8; 2048];
+    let (played, received) = tokio::join!(
+        call.media().play(&samples, 160),
+        tokio::time::timeout(SIGNALLING_BOUND, media.recv_from(&mut datagram)),
+    );
+    assert!(played, "the established session plays the clip");
+    let (length, _) = received
+        .expect("audio reaches the answer's port")
+        .expect("the caller's media socket stays readable");
+    let packet = sipx_rtp::Packet::decode(&Bytes::copy_from_slice(&datagram[..length]))
+        .expect("the call sends RTP");
+    assert_eq!(packet.payload_type, 0);
+}
+
+/// `C-10` / IOF-6 and IOF-7: ACK cannot be refused, so a delayed answer that is malformed or
+/// selects no offered format ends the confirmed dialog with BYE and never produces a `Call`.
+#[tokio::test]
+async fn an_invalid_initial_delayed_answer_ends_the_dialog() {
+    for (call_id, answer, expected) in [
+        (
+            "malformed-initial-delayed-answer@sipx",
+            "v=not-a-session\r\n".to_owned(),
+            "malformed",
+        ),
+        (
+            "unnegotiable-initial-delayed-answer@sipx",
+            "v=0\r\no=- 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\n\
+             t=0 0\r\nm=audio 49000 RTP/AVP 9\r\na=rtpmap:9 G722/8000\r\n"
+                .to_owned(),
+            "unnegotiable",
+        ),
+    ] {
+        let (answerer, answerer_incoming) = endpoint().await;
+        let (caller, mut caller_incoming) = endpoint().await;
+        let invite = offerless_invite(&caller, answerer.local_addr(), call_id);
+        let mut responses = caller
+            .send(invite.clone(), Target::udp(answerer.local_addr()))
+            .await
+            .expect("the offerless INVITE leaves");
+        let invitation = dispatched_invitation(&answerer, answerer_incoming).await;
+        let answering_endpoint = answerer.clone();
+        let answering =
+            tokio::spawn(async move { invitation.answer(&answering_endpoint, loopback()).await });
+        let accepted = tokio::time::timeout(SIGNALLING_BOUND, responses.final_response())
+            .await
+            .expect("the final response is bounded")
+            .expect("the INVITE receives a final response");
+        assert_eq!(accepted.status.code(), 200);
+        caller
+            .send_directly(
+                delayed_answer_ack(&caller, &invite, &accepted, answer.as_bytes()),
+                Target::udp(answerer.local_addr()),
+            )
+            .await
+            .expect("the invalid ACK answer leaves");
+
+        let error = tokio::time::timeout(SIGNALLING_BOUND, answering)
+            .await
+            .expect("the invalid answer is bounded")
+            .expect("the answering task joins")
+            .expect_err("an invalid answer cannot create a call");
+        assert!(
+            matches!(
+                (expected, &error),
+                ("malformed", sipx_call::Error::Sdp(_))
+                    | ("unnegotiable", sipx_call::Error::NoCommonCodec)
+            ),
+            "{expected} answer returned {error:?}"
+        );
+        let bye = tokio::time::timeout(SIGNALLING_BOUND, caller_incoming.recv())
+            .await
+            .expect("dialog teardown is bounded")
+            .expect("the caller remains reachable");
+        assert_eq!(bye.request.method, Method::Bye);
+        let ok = sipx_sip::build::ResponseBuilder::to_request(
+            &bye.request,
+            sipx_sip::StatusCode::new(200).expect("valid"),
+            "OK",
+        )
+        .expect("the BYE response builds")
+        .build();
+        caller
+            .respond(&bye.key, ok)
+            .await
+            .expect("the BYE is answered");
+    }
 }
 
 /// The `Contact` must carry the endpoint's advertised address, not its socket's local one. An

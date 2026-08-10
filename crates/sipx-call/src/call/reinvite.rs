@@ -375,6 +375,12 @@ impl Call {
     /// Restarting an unchanged session would drop packets for no reason on every re-INVITE, and
     /// some peers send one every thirty seconds as a keep-alive.
     pub(super) async fn move_media_if_changed(&mut self, to: Negotiated) -> Result<()> {
+        // A caller cancelled after a prior replacement was installed but while a conference
+        // registry was contended. Republish before retiring that generation: the retained old Arc
+        // keeps the transition retryable instead of letting cancellation strand a stale member.
+        if !self.retired_media.is_empty() {
+            self.rebind_compositions().await;
+        }
         self.reap_retired_media().await;
         // The payload type is the codec's number on the wire: a re-offer can move Opus from
         // 111 to 96 and leave the codec unchanged, and a session not rebuilt for that goes on
@@ -403,6 +409,10 @@ impl Call {
             replacement.set_rtcp_quality_hook(self.media.rtcp_quality_hook());
             let previous = std::mem::replace(&mut self.media, Arc::new(replacement));
             self.retired_media.push(previous);
+            // The bridge and conference see the replacement before the old session is stopped.
+            // Their forwarding stays channel-backed; this publishes only session handles into
+            // composition-owned lifecycle state.
+            self.rebind_compositions().await;
             self.reap_retired_media().await;
             // Voice-activity detection is call-owned policy too (`M-58`). The retired session's
             // seam attachments do not migrate, so the watcher is stopped and joined — reporting its

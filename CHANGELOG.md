@@ -7,6 +7,45 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0-rc.23] — 2026-08-10
+
+Five stories close in this candidate. Delayed offer/answer now covers the final-response carrier,
+live media compositions follow renegotiated sessions, cluster deployments gain a bounded DNS-last
+resolver, silent private-range media collisions become explicit refusals, and release publication
+keeps its rate model across helper invocations.
+
+### Added
+
+- **Offerless incoming calls can complete through a `2xx` offer and ACK answer.** The answering
+  endpoint originates the offer, validates the ACK answer before starting media, and tears down a
+  confirmed dialog whose answer is malformed or cannot be negotiated. Off-media coupling relays
+  the same carrier without binding RTP and bounds the interval for which it holds the target ACK.
+
+- **`sipx dial` can resolve exact cluster service names after ordinary SIP DNS returns no usable
+  candidate.** The configurable four-label form is looked up with one bounded, authenticated HTTPS
+  request; ready addresses preserve source order and enter the existing target-selection and
+  failover path. Ordinary DNS answers, short names and explicit next hops never consult the
+  fallback.
+
+### Changed
+
+- **Bridges and conferences follow a call across media renegotiation.** A replacement session is
+  published through bounded channel-backed membership state before the retired session is stopped,
+  preserving bidirectional audio, keypress policy and truthful connection state without sharing a
+  mutable media session.
+
+- **Release publication carries both registry pacing buckets across frontier invocations.** The
+  optional allowance sidecar uses process-comparable time, charges before dispatch and preserves a
+  registry-stated retry deadline. Missing or malformed advisory state degrades to an optimistic
+  start without changing package visibility or checksum decisions.
+
+### Fixed
+
+- **Private-range media collisions fail loudly.** Outbound settlement compares the advertised
+  address with the peer's negotiated media address and returns a typed, overridable refusal naming
+  both addresses and the overlapping range. The CLI separately diagnoses a signalling/media route
+  split, tears down the confirmed dialog and names both selected local interfaces.
+
 ## [1.0.0-rc.22] — 2026-08-10
 
 Five stories close in this candidate. The application contract gains the last live DSP control the

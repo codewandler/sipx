@@ -1,6 +1,6 @@
 # Spec: bounded SIP target resolution
 
-**Status:** normative · **Crate:** `sipx-transport` · **Stories:** T-38, T-39 · **Design:**
+**Status:** normative · **Crate:** `sipx-transport`, `sipx-cli` · **Stories:** T-38, T-39, M-124 · **Design:**
 [bounded endpoint resolution](../designs/endpoint-resolution.md)
 
 ## 1. Normative references
@@ -252,3 +252,49 @@ ordered candidate result. Unmentioned answer maps are authoritative negative ans
 R3 and R5 pin mixed-family behavior at the value boundary. The adapter proof separately requires
 both A and AAAA questions on a dual-stack resolver and passes the resulting per-host order into the
 same vectors.
+
+## 10. Cluster-name fallback
+
+The command adapter MAY derive candidates from a cluster API after ordinary RFC 3263 resolution,
+subject to all of these conditions:
+
+1. ordinary resolution ended specifically in `NoUsableCandidate`;
+2. there is no explicit next hop;
+3. the URI host is a name of the exact form `<service>.<namespace>.svc.<cluster-suffix>`; and
+4. the cluster suffix is the configured value, `cluster.local` by default.
+
+Every other resolution result is final. In particular, the adapter MUST NOT contact the cluster API
+after DNS produced a candidate, after a lookup or overall deadline, after resolver setup failed, or
+for the ambiguous short form `<service>.<namespace>`. The comparison ignores ASCII case and one
+terminal root dot but accepts no empty label.
+
+The fallback performs one bounded HTTPS request for the service's EndpointSlices:
+
+```text
+GET /apis/discovery.k8s.io/v1/namespaces/<namespace>/endpointslices
+    ?labelSelector=kubernetes.io%2Fservice-name%3D<service>
+```
+
+It reads the first path in `$KUBECONFIG`, otherwise `$HOME/.kube/config`, selects the current
+context, and uses that context's cluster and user. The namespace in the dialled name wins over the
+context namespace. Supported authentication is a bearer token or token file; supported trust is a
+certificate-authority file or embedded PEM data. The adapter does not run credential plugins,
+write kubeconfig, discover in-cluster credentials, or add a platform client library to a protocol
+crate. A non-success response or unusable configuration is a typed cluster-resolution failure, not
+a DNS result. The response body limit is 1 MiB and the command's remaining operation deadline is
+the request deadline.
+
+Items, endpoints, and address lists preserve response order. An endpoint with
+`conditions.ready=false` is omitted; absent readiness is accepted. Invalid and duplicate addresses
+are omitted. A published port whose protocol matches the selected SIP transport is preferred,
+otherwise the selected transport's standard port is used. Each result becomes the existing
+`Target` value and therefore enters §6's existing bounded serial attempt pass. Secure results keep
+the original URI name as their verification identity.
+
+| # | Input and injected results | Expected |
+|---|---|---|
+| K1 | DNS returns one target; API fixture fails if called | DNS target unchanged; zero API calls |
+| K2 | DNS has no target for `echo.voice.svc.cluster.local`; fixture has two ready addresses around one unready address | two targets in fixture order; unready address absent |
+| K3 | DNS has no target for `echo.voice` | `NoUsableCandidate`; zero API calls |
+| K4 | K2 with configured suffix `internal.example` | no fallback |
+| K5 | no DNS target for `echo.voice.svc.internal.example` and suffix `internal.example` | fixture targets |

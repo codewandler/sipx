@@ -61,6 +61,35 @@ impl Resolver {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|message| Error::Input { message })
     }
+
+    /// Resolve normally, then consult the configured cluster only for an authoritative empty
+    /// answer and an exact namespaced service name.
+    pub(crate) async fn resolve_clustered(
+        &self,
+        uri: &Uri,
+        next_hop: Option<&str>,
+        selection: crate::signalling::Selection,
+        options: &crate::cli::SignallingOptions,
+        cluster_domain: &str,
+        attempt: &crate::budget::Attempt,
+    ) -> Result<Vec<Target>, Error> {
+        let identity = uri.host().map(ToString::to_string).unwrap_or_default();
+        let ordinary = self.0.resolve(uri, next_hop, selection.requested()).await;
+        let candidates = crate::cluster::after_ordinary(
+            ordinary,
+            uri,
+            next_hop,
+            selection.requested(),
+            cluster_domain,
+            attempt.remaining(),
+        )
+        .await?;
+        candidates
+            .into_iter()
+            .map(|target| selection.resolved_target(options, target, &identity))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|message| Error::Input { message })
+    }
 }
 
 /// Say how far the serial pass got, when the failure being reported came from one.
@@ -117,8 +146,13 @@ mod tests {
             ("peers", include_str!("peers.rs")),
             ("scenario", include_str!("scenario.rs")),
         ] {
+            let resolver_call = if name == "dial" {
+                ".resolve_clustered("
+            } else {
+                ".resolve("
+            };
             assert!(
-                source.contains(".resolve("),
+                source.contains(resolver_call),
                 "outbound command {name} bypasses destination::Resolver"
             );
             // `P-26`: the budget is not optional at the call site. `system()` is private for this

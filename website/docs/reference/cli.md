@@ -179,6 +179,8 @@ Place a call: `sipx dial sip:bob@pbx.example`
 | `--password <P>` | Digest password; prefer `SIPX_PASSWORD` because argv is world-readable |
 | `--local <ADDR>` | Local address to bind (default `0.0.0.0:0`) |
 | `--advertise <IP>` | Address written consistently into Via, Contact, and SDP; independent of `--local` |
+| `--allow-media-range-overlap` | Permit an advertised address in the private range implied by the SDP answer; off by default |
+| `--cluster-domain <NAME>` | Suffix eligible for EndpointSlice fallback after ordinary DNS has no candidate (default `cluster.local`) |
 | `--transport <T>` | Use `udp`, `tcp`, `tls`, `ws`, or `wss` (default `udp`) |
 | `--tcp` | Legacy alias for `--transport tcp` |
 | `--tls-server-name <N>` | Certificate identity to verify (default URI host) |
@@ -196,6 +198,14 @@ Place a call: `sipx dial sip:bob@pbx.example`
 | `--stats` | Report call quality on exit: loss, jitter, round trip, MOS estimate |
 | `--capture <FILE>` | Record the signalling to this [pcapng](https://en.wikipedia.org/wiki/Pcap) file for a bug report. Credentials are redacted — digest responses and opaque `Bearer`/`Basic` tokens, SRTP keys (`a=crypto`, `k=`), push tokens, instance URNs. **TLS and WSS are recorded decrypted**, because capturing ciphertext from inside the process would be worse than capturing outside it. What redaction cannot remove is identity: the file still says who called whom, when, and from where, so treat it as sensitive |
 | `--counters <FILE>` | Write flattened signalling counters as JSON; `--capture` implies `<capture>.counters.json` |
+
+Cluster fallback applies only to the full
+`<service>.<namespace>.svc.<cluster-domain>` form and only after ordinary SIP DNS resolution returns
+no candidate. It never overrides a DNS answer or an explicit next hop, and it does not recognise the
+ambiguous `<service>.<namespace>` short form. The command reads the first `$KUBECONFIG` path,
+otherwise `$HOME/.kube/config`, and supports bearer-token credentials plus file or embedded
+certificate-authority data. It performs one bounded HTTPS EndpointSlice request and puts ready
+addresses into the same ordered candidate pass as DNS results.
 
 Report fields: `status`, `ended_by`, `peer`, `media_advertised`, `media_bound`, `duration_ms`, `samples_recorded`, `heard_audio` — plus
 `recording` when `--record` was given, and `loss`, `packets_lost`, `jitter_ms`, `mos`,

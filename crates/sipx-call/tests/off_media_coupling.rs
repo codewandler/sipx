@@ -1707,3 +1707,264 @@ async fn an_unmappable_provisional_never_reaches_the_peer_leg() {
     );
     withdrawing.await.expect("the withdrawal completes");
 }
+
+/// `C-10` / T9: without `100rel`, an offerless source INVITE carries the target endpoint's offer
+/// in the source 2xx and the source endpoint's answer back in the held target ACK. The target's RTP
+/// reaches the port that answer named, proving the ACK was not merely released bodiless and that
+/// the coupling still owns no media endpoint of its own.
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the final-response offer, held ACK answer, and causal media proof are one vector"
+)]
+async fn an_offerless_invite_without_100rel_relays_the_final_offer_and_ack_answer() {
+    let (edge, edge_incoming) = endpoint().await;
+    let edge_addr = edge.local_addr();
+    let mut pumped = pump(&edge, edge_incoming);
+
+    let source_media = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("the source endpoint owns its media port");
+    let source_port = source_media.local_addr().expect("bound").port();
+    let (source, _source_incoming) = endpoint().await;
+    let invite = source_invite(&source, "off-media-final-delayed@sipx", "");
+    let mut source_responses = source
+        .send(invite.clone(), Target::udp(edge_addr))
+        .await
+        .expect("the offerless source INVITE leaves");
+    let invitation = pumped.invitation().await;
+
+    let (target_endpoint, target_incoming) = endpoint().await;
+    let mut target_pumped = pump(&target_endpoint, target_incoming);
+    let calls = pumped.calls.clone();
+    let edge_for_coupling = edge.clone();
+    let target = Target::udp(target_endpoint.local_addr());
+    let to = Uri::sip(Host::Name(HostName::new("callee.example").expect("valid")));
+    let coupling_task = tokio::spawn(async move {
+        Box::pin(OffMediaCoupling::dial(
+            invitation,
+            &calls,
+            &edge_for_coupling,
+            target,
+            &to,
+            &OffMediaOptions::new("<sip:edge@example.net>", loopback()),
+        ))
+        .await
+        .expect("the final delayed offer is relayed")
+    });
+
+    let target_invitation = target_pumped.invitation().await;
+    assert!(
+        target_invitation.request().request.body().is_empty(),
+        "the offerless source INVITE stays offerless on the target leg"
+    );
+    assert!(
+        !offers_100rel(target_invitation.request()),
+        "the coupling does not invent 100rel support the source did not offer"
+    );
+    let answering_endpoint = target_endpoint.clone();
+    let target_answer = tokio::spawn(async move {
+        let call = target_invitation
+            .answer(&answering_endpoint, loopback())
+            .await
+            .expect("the relayed ACK answer establishes the target call");
+        let (_invite, inbox) = target_invitation.into_parts();
+        (call, inbox)
+    });
+
+    let accepted = final_response(&mut source_responses, "the source delayed INVITE").await;
+    assert_eq!(accepted.status.code(), 200);
+    let relayed_offer = String::from_utf8_lossy(accepted.body()).into_owned();
+    let offer = sipx_sdp::parse(&relayed_offer).expect("the target offer maps onto the source 2xx");
+    let answer = sipx_sdp::answer(
+        &offer,
+        &sipx_sdp::Capabilities::g711(loopback(), source_port),
+    )
+    .to_string_sdp();
+    source
+        .send_directly(
+            in_dialog(&source, &invite, &accepted, &Method::Ack, 1, Some(&answer)),
+            Target::udp(edge_addr),
+        )
+        .await
+        .expect("the source ACK carries its endpoint-owned answer");
+
+    let coupling = tokio::time::timeout(BOUND, coupling_task)
+        .await
+        .expect("the source ACK releases the target ACK")
+        .expect("the coupling task joins");
+    let (target_call, _target_inbox) = tokio::time::timeout(BOUND, target_answer)
+        .await
+        .expect("the target receives its ACK answer")
+        .expect("the target answering task joins");
+    assert!(
+        relayed_offer.contains(&format!(
+            "m=audio {}",
+            target_call.media().local_addr().port()
+        )),
+        "the mapped offer retains the target endpoint's own media port: {relayed_offer}"
+    );
+    let (_one, _two) = coupling.dialogs();
+
+    let samples = vec![8_000_i16; 1_600];
+    let (played, heard) = tokio::join!(
+        target_call.media().play(&samples, 160),
+        first_rtp(
+            &source_media,
+            "the target's audio reaches the source ACK answer port directly"
+        ),
+    );
+    assert!(played, "the target endpoint finishes its audio");
+    assert_eq!(heard.payload_type, 0);
+}
+
+/// `C-10` / T10: an ACK body that cannot be mapped is never released onto the target leg as an
+/// answer. A bodiless ACK stops the target's 2xx lifetime and both confirmed dialogs receive BYE.
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the invalid answer and both deterministic teardown signals are one vector"
+)]
+async fn an_unmappable_final_delayed_answer_acks_and_ends_both_dialogs() {
+    let (edge, edge_incoming) = endpoint().await;
+    let edge_addr = edge.local_addr();
+    let mut pumped = pump(&edge, edge_incoming);
+
+    let (source, mut source_incoming) = endpoint().await;
+    let invite = source_invite(&source, "off-media-bad-final-answer@sipx", "");
+    let mut source_responses = source
+        .send(invite.clone(), Target::udp(edge_addr))
+        .await
+        .expect("the offerless source INVITE leaves");
+    let invitation = pumped.invitation().await;
+
+    let (target_endpoint, target_incoming) = endpoint().await;
+    let mut target_pumped = pump(&target_endpoint, target_incoming);
+    let calls = pumped.calls.clone();
+    let edge_for_coupling = edge.clone();
+    let target = Target::udp(target_endpoint.local_addr());
+    let to = Uri::sip(Host::Name(HostName::new("callee.example").expect("valid")));
+    let coupling_task = tokio::spawn(async move {
+        Box::pin(OffMediaCoupling::dial(
+            invitation,
+            &calls,
+            &edge_for_coupling,
+            target,
+            &to,
+            &OffMediaOptions::new("<sip:edge@example.net>", loopback()),
+        ))
+        .await
+    });
+
+    let target_invitation = target_pumped.invitation().await;
+    let answering_endpoint = target_endpoint.clone();
+    let target_answer = tokio::spawn(async move {
+        let result = target_invitation
+            .answer(&answering_endpoint, loopback())
+            .await;
+        let (_invite, inbox) = target_invitation.into_parts();
+        (result, inbox)
+    });
+
+    let accepted = final_response(&mut source_responses, "the source delayed INVITE").await;
+    assert_eq!(accepted.status.code(), 200);
+    source
+        .send_directly(
+            in_dialog(
+                &source,
+                &invite,
+                &accepted,
+                &Method::Ack,
+                1,
+                Some("v=0\r\nthis is not a session description\r\n"),
+            ),
+            Target::udp(edge_addr),
+        )
+        .await
+        .expect("the invalid ACK answer leaves");
+
+    let outcome = tokio::time::timeout(BOUND, coupling_task)
+        .await
+        .expect("the invalid answer ends the coupling")
+        .expect("the coupling task joins");
+    assert!(matches!(outcome, Err(sipx_call::Error::Relay(_))));
+    let (target_result, mut target_inbox) = tokio::time::timeout(BOUND, target_answer)
+        .await
+        .expect("the target's held 2xx is acknowledged")
+        .expect("the target answering task joins");
+    assert!(matches!(target_result, Err(sipx_call::Error::Sdp(_))));
+
+    let source_bye = next_request(&mut source_incoming, "the source-leg BYE").await;
+    assert_eq!(source_bye.request.method, Method::Bye);
+    let target_bye = next_request(&mut target_inbox, "the target-leg BYE").await;
+    assert_eq!(target_bye.request.method, Method::Bye);
+}
+
+/// `C-10` / T11: the target ACK is held for the configured cleanup allowance, not for the full
+/// 64*T1 lifetime. Expiry releases a bodiless ACK and ends both dialogs.
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the bounded hold and both teardown signals are one protocol timer vector"
+)]
+async fn a_missing_final_delayed_answer_has_a_bounded_held_target_ack() {
+    let (edge, edge_incoming) = endpoint().await;
+    let edge_addr = edge.local_addr();
+    let mut pumped = pump(&edge, edge_incoming);
+
+    let (source, mut source_incoming) = endpoint().await;
+    let invite = source_invite(&source, "off-media-missing-final-answer@sipx", "");
+    let mut source_responses = source
+        .send(invite, Target::udp(edge_addr))
+        .await
+        .expect("the offerless source INVITE leaves");
+    let invitation = pumped.invitation().await;
+
+    let (target_endpoint, target_incoming) = endpoint().await;
+    let mut target_pumped = pump(&target_endpoint, target_incoming);
+    let calls = pumped.calls.clone();
+    let edge_for_coupling = edge.clone();
+    let target = Target::udp(target_endpoint.local_addr());
+    let to = Uri::sip(Host::Name(HostName::new("callee.example").expect("valid")));
+    let mut options = OffMediaOptions::new("<sip:edge@example.net>", loopback());
+    options.cancellation_timeout = Duration::from_millis(50);
+    let coupling_task = tokio::spawn(async move {
+        Box::pin(OffMediaCoupling::dial(
+            invitation,
+            &calls,
+            &edge_for_coupling,
+            target,
+            &to,
+            &options,
+        ))
+        .await
+    });
+
+    let target_invitation = target_pumped.invitation().await;
+    let answering_endpoint = target_endpoint.clone();
+    let target_answer = tokio::spawn(async move {
+        let result = target_invitation
+            .answer(&answering_endpoint, loopback())
+            .await;
+        let (_invite, inbox) = target_invitation.into_parts();
+        (result, inbox)
+    });
+    let accepted = final_response(&mut source_responses, "the source delayed INVITE").await;
+    assert_eq!(accepted.status.code(), 200);
+
+    let outcome = tokio::time::timeout(Duration::from_secs(2), coupling_task)
+        .await
+        .expect("the configured held-ACK bound expires before Timer H")
+        .expect("the coupling task joins");
+    assert!(matches!(outcome, Err(sipx_call::Error::NoResponse)));
+    let (target_result, mut target_inbox) = tokio::time::timeout(BOUND, target_answer)
+        .await
+        .expect("the target 2xx receives the cleanup ACK")
+        .expect("the target answering task joins");
+    assert!(matches!(target_result, Err(sipx_call::Error::Sdp(_))));
+
+    let source_bye = next_request(&mut source_incoming, "the timed-out source-leg BYE").await;
+    assert_eq!(source_bye.request.method, Method::Bye);
+    let target_bye = next_request(&mut target_inbox, "the timed-out target-leg BYE").await;
+    assert_eq!(target_bye.request.method, Method::Bye);
+}

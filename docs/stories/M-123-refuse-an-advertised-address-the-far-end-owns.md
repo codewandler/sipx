@@ -49,20 +49,27 @@ makes the silent case loud.
 
 ## Acceptance
 
-- [ ] A dial whose advertised media address falls inside a range the answer's own connection address
+- [x] A dial whose advertised media address falls inside a range the answer's own connection address
       implies is refused before the call is placed, naming both addresses and the range.
-- [ ] The check is on the *answer*, not a guess: it compares what this side is about to advertise
+- [x] The check is on the *answer*, not a guess: it compares what this side is about to advertise
       against what the far end said about itself, and does nothing when the two cannot collide.
-- [ ] A caller that means it can proceed — the refusal is overridable by an explicit option, because
+- [x] A caller that means it can proceed — the refusal is overridable by an explicit option, because
       an operator who has arranged routing for an overlapping range is not making this mistake.
-- [ ] A one-way media path that is *not* a collision is diagnosed separately and not conflated with
+- [x] A one-way media path that is *not* a collision is diagnosed separately and not conflated with
       it: signalling on one interface and media on another has its own message naming both.
-- [ ] Failing-first tests cover a colliding pair, a non-colliding pair, the override, and the
+- [x] Failing-first tests cover a colliding pair, a non-colliding pair, the override, and the
       split-interface case; none of them needs a second host.
-- [ ] The gate is green.
+- [x] The gate is green.
 
 ## Progress
 
 - Filed 2026-08-10 from a live diagnosis. `website/docs/guides/troubleshooting.md` and
   `website/docs/guides/hear-a-call.md` document both failures for a human; this is the half a
   machine can catch.
+- `DialOptions` now refuses a same-private-realm SDP answer by default, returns a typed error which
+  names both addresses and the CIDR, and exposes an explicit overlap builder. The full call vector
+  proves the failed 2xx is still ACKed and torn down with BYE.
+- The command compares the selected signalling source with the route source for the negotiated
+  media destination, tears down a split dialog, and reports both local interface addresses under a
+  separate diagnostic. Pure vectors cover non-collision, override, and same/split route pairs.
+- The complete local acceptance gate passed all 51 steps on the rc.23 candidate on 2026-08-10.

@@ -60,8 +60,8 @@
 //! two `Call`s so each hears the other, and [`CallConference`] mixes several of them (`C-6`). Both
 //! are the *media* coupling only; owning two dialogs as one call, with the offer relayed on every
 //! axis, is [`Coupling`]. Neither hands out a `MediaSession` or a port, and neither takes ownership
-//! of a call: a host holds its `Call`s and drives their signalling throughout. A bridge does not
-//! survive a renegotiation of either call's media and has to be remade; see [`bridge`].
+//! of a call: a host holds its `Call`s and drives their signalling throughout. Both keep their
+//! composition identity when an in-dialog renegotiation replaces one call's media session.
 //!
 //! [`Error`] is `#[non_exhaustive]`: additive diagnostics stay additive for downstream callers, so
 //! a `match` over it carries a `_` arm.

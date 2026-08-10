@@ -54,12 +54,26 @@ pub(crate) fn reachable_ip(local: SocketAddr, peer: IpAddr) -> IpAddr {
 /// Asking the routing table by opening a UDP socket towards the peer — no packet is sent, but
 /// the kernel picks the source address it would use, which is the one to advertise.
 fn local_address_towards(peer: IpAddr) -> IpAddr {
+    route_source(peer).unwrap_or_else(|| "127.0.0.1".parse().unwrap_or(peer))
+}
+
+/// Ask the operating system which local address would source traffic to `peer`.
+///
+/// Unlike [`reachable_ip`], this retains failure as `None`: a route diagnosis must not turn an
+/// unavailable observation into a claim about an interface.
+pub(crate) fn route_source(peer: IpAddr) -> Option<IpAddr> {
     std::net::UdpSocket::bind("0.0.0.0:0")
         .and_then(|socket| {
             socket.connect(std::net::SocketAddr::new(peer, 9))?;
             socket.local_addr()
         })
-        .map_or_else(|_| "127.0.0.1".parse().unwrap_or(peer), |addr| addr.ip())
+        .ok()
+        .map(|addr| addr.ip())
+}
+
+/// Return the two local sources when signalling and media select different interfaces.
+pub(crate) fn split_route(signalling: IpAddr, media: IpAddr) -> Option<(IpAddr, IpAddr)> {
+    (signalling != media).then_some((signalling, media))
 }
 
 #[cfg(test)]
@@ -111,5 +125,13 @@ mod tests {
         let addresses = media_addresses(local, "192.0.2.1".parse().unwrap(), Some(advertised));
         assert_eq!(addresses.advertised, advertised);
         assert_eq!(addresses.bind, local.ip());
+    }
+
+    #[test]
+    fn split_interfaces_are_a_distinct_diagnosis() {
+        let signalling: IpAddr = "10.99.0.3".parse().unwrap();
+        let media: IpAddr = "192.168.1.50".parse().unwrap();
+        assert_eq!(split_route(signalling, media), Some((signalling, media)));
+        assert_eq!(split_route(signalling, signalling), None);
     }
 }

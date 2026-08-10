@@ -1,13 +1,40 @@
 ---
 title: What's new
-description: Release highlights and adoption notes for the sipx 1.0.0-rc.22 release candidate.
+description: Release highlights and adoption notes for the sipx 1.0.0-rc.23 release candidate.
 ---
 
 # What's new
 
 <!-- BEGIN generated:release-heading -->
-## 1.0.0-rc.22 — 2026-08-10
+## 1.0.0-rc.23 — 2026-08-10
 <!-- END generated:release-heading -->
+
+RC.23 closes five stories: final-response delayed offer/answer, renegotiation-safe bridges and
+conferences, explicit media-address collision diagnostics, DNS-last cluster service resolution,
+and publication pacing that survives frontier invocations.
+
+```bash
+cargo install --locked --version =1.0.0-rc.23 sipx-cli
+```
+
+- **Offerless incoming calls can complete without reliable provisional responses.** The endpoint
+  offers in the successful final response, adopts the answer from ACK and closes an unusable
+  confirmed dialog. An off-media coupling relays the same carrier without opening RTP and bounds a
+  missing source ACK.
+- **Bridges and conferences survive media renegotiation.** Existing memberships follow the new
+  media generation before the old one retires, preserving audio, keypress handling, participant
+  identity and truthful connection state.
+- **Silent deployment mistakes become explicit.** A private-range collision between the advertised
+  and peer media addresses is a typed, overridable refusal. A signalling/media route split has its
+  own command diagnostic naming both selected interfaces.
+- **Exact cluster service names gain a bounded DNS-last fallback.** Ordinary SIP resolution remains
+  authoritative; only its no-candidate result can trigger one authenticated EndpointSlice request,
+  whose ready addresses enter the existing failover path.
+- **Registry pacing crosses publication helper processes.** A sidecar carries both token buckets
+  with a comparable clock and registry-stated deadlines, while package visibility and checksums
+  remain the only facts that decide what is uploaded.
+
+## 1.0.0-rc.22 — 2026-08-10
 
 RC.22 closes five stories: application-controlled live-stage bypass, clean registrar cancellation,
 an expanded at-rest diagnostic boundary, an exact SDK event inventory, and a fuzz harness that no
@@ -908,5 +935,5 @@ answer calls, but application callback bindings are not implemented.
 This website is built from `main`, so a page or API link may describe work newer than the tagged
 release. Use the exact crates.io version when reproducibility matters, and consult the
 [complete changelog](https://github.com/codewandler/sipx/blob/main/CHANGELOG.md) before updating a
-Git revision. Unreleased behavior is not part of `1.0.0-rc.22` merely because it appears on this
+Git revision. Unreleased behavior is not part of `1.0.0-rc.23` merely because it appears on this
 site.

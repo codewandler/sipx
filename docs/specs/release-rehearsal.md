@@ -251,6 +251,23 @@ An invocation given no ledger is bounded on its own, which is all a local releas
 about. Whoever drives the frontier loop states both the budget and the ledger, so the total cost of
 a publication is readable in the file that runs it rather than left at a helper default.
 
+The same ledger path anchors a separate sibling allowance model at `<ledger>.allowances`. It carries
+the remaining level and the last registry-stated deadline for both the new-name and new-version
+token buckets. Its timestamps are Unix timestamps from a wall clock, not process-local monotonic
+values, so a later helper process can refill the allowance only by the time that actually elapsed
+between invocations. Each attempted upload is charged to the model before it is dispatched, and a
+`429` restatement replaces and persists that class's model before another wait. Thus a process lost
+after dispatch cannot give the next invocation a burst it has not earned, while the registry's own
+deadline still replaces the transcribed model.
+
+The allowance model is pacing advice rather than publication evidence. An absent, malformed or
+unreadable sibling is reported and starts both buckets at their optimistic stated bursts; it never
+refuses an invocation and never changes which packages are ready. The spend ledger remains strict
+and separate because losing its running total would lose the whole-publication bound. With no
+`--registry-retry-ledger`, both the spend and allowance model retain their single-invocation
+behaviour. In every case registry visibility and checksum-proven bytes alone decide what is skipped
+or uploaded, so degrading the model can provoke a `429` but cannot lose or republish a crate.
+
 ## 5. Test vectors
 
 | Vector | Workspace shape or invocation | Required result |
@@ -280,3 +297,4 @@ a publication is readable in the file that runs it rather than left at a helper 
 | R23 | a `429` deadline beyond the remaining retry budget, or a fourth rate-limited attempt | report the registry's own `429` and the packages already published, and dispatch no further upload; a rerun resumes the remaining frontier without republishing |
 | R24 | name probe times out or reports anything except exact not-found | pace that name under the stated new-crate limit and report it as unread; never refuse the invocation |
 | R25 | successive invocations of one publication share a pacing ledger | the total wait is bounded across them; an absent ledger starts a publication and an unreadable one refuses it; exhaustion stops before an upload and no already-published crate is lost |
+| R26 | one invocation spends a token-bucket burst and a later process shares its ledger; its allowance sibling is then absent or unreadable | the later process waits for the carried refill; a registry `429` still replaces that model; without a readable model it starts optimistically while registry visibility and checksum proof still prevent a skipped or repeated upload |

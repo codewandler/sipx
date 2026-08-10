@@ -1,6 +1,6 @@
 # Two-dialog call coupling
 
-**Status:** normative · **Stories:** C-1, C-7, C-8 · **Crates:** `sipx-call`, `sipx-sdp`, `sipx-media` ·
+**Status:** normative · **Stories:** C-1, C-7, C-8, C-10 · **Crates:** `sipx-call`, `sipx-sdp`, `sipx-media` ·
 **RFCs:** 3261, 3264, 3262, 3311, 7092
 
 ## 1. Scope
@@ -162,7 +162,7 @@ dialogs exactly as they were:
 | description carries no `m=` line | `488`, `RelayError::NoMedia` |
 | an accepted `m=` line has no address at either level | `488`, `RelayError::NoConnection` |
 | offerless re-INVITE | `488`. Answering one means originating a description, which is the one thing this role has nothing to describe |
-| offerless initial INVITE whose source does not offer `100rel` | `488`, `Error::Sdp`. Not a policy choice — see §6.3 |
+| offerless initial INVITE whose source does not offer `100rel` | Relay it offerless; §6.3 carries the target's final-response offer and the source ACK answer |
 
 The lifecycle is the same `CouplingState`, not a second one: glare is refused **491** before
 anything is forwarded, a BYE on either leg is answered and then sent on the peer, a target final
@@ -212,14 +212,38 @@ on the target leg while its dialog was early consumes a number in this side's se
 the confirmed dialog inherits that number rather than restarting at the INVITE's (RFC 3261
 §12.2.1.1) — and the same for the source leg's record of the peer's numbering.
 
-### 6.3 Still refused
+### 6.3 Delayed offer in the final response and ACK
 
-An offerless initial INVITE whose source does not offer `100rel` is refused `488`. With no
-reliable provisional available, RFC 3264 leaves exactly one carrier for the delayed offer — the
-description in the `2xx` and its answer in the ACK — and this stack implements that shape on
-neither the answering nor the offering side, so there is nothing to relay it between. Relaying it
-would mean holding the target ACK across an unproven path; refusing it keeps the rule that this
-role never half-delivers a carrier. `C-9` is the story for the missing shape.
+An offerless initial INVITE whose source does not offer `100rel` is relayed as an offerless target
+INVITE. The target's successful final response MUST carry a mappable description; that description
+is the delayed offer, not an answer. It is mapped onto the source 2xx before the source invitation
+is claimed or answered. A missing or unmappable target offer is therefore refused on the source leg
+before that leg is told it has a dialog.
+
+The target 2xx establishes a dialog, but its ACK is held. The source 2xx is retransmitted while the
+coupling waits for the matching source ACK. That ACK MUST carry a mappable answer. The answer is
+mapped with the target leg's `DescriptionRelay`, placed in the held target ACK, and handed directly
+to the target transport before `OffMediaCoupling::dial` returns. Repeated target 2xx responses are
+answered with the same answer-carrying ACK. Only then are both dialogs confirmed in
+`CouplingState`.
+
+Mapping remains ordered before peer effect on both halves: the target offer is mapped before the
+source receives it, and the source answer is mapped before the target ACK leaves. The descriptions'
+media addresses, ports, profiles, formats, keying, ICE and directions remain the endpoints' own;
+only each leg's `o=` line changes under §6.1. The owner still constructs no `MediaSession`, binds no
+RTP socket and advertises no sipx media address.
+
+ACK has no response. A source ACK with no description or one that cannot be mapped causes both
+confirmed dialogs to be ended: the target first receives a bodiless ACK so it stops retransmitting
+its 2xx, then both live legs receive best-effort BYE. The coupling returns the typed mapping error;
+it never releases the malformed description onto the target leg.
+
+The held ACK wait is bounded by `OffMediaOptions::cancellation_timeout`, whose default is two
+seconds and whose zero value performs no timed wait. If no source ACK arrives by that deadline, the
+same bodiless-target-ACK and two-BYE cleanup runs and `dial` returns `NoResponse`. This bound is
+deliberately shorter than the target UAS's 64·T1 retransmission lifetime: the coupling does not
+report a source dialog and then leave the target retransmitting for thirty-two seconds before it
+learns there was never an answer.
 
 ## 7. Test vectors
 
@@ -253,3 +277,6 @@ role never half-delivers a carrier. `C-9` is the story for the missing shape.
 | T6 | off-media leg: source INVITE offers and supports `100rel`; target answers it in a reliable 183 | the target INVITE carries `Supported: 100rel`; the source receives a reliable 183 naming the target endpoint's own port; the target PRACK carries no body; the source PRACK receives 200; the target's early session reaches the source endpoint's own socket before either leg is answered |
 | T7 | off-media leg: source offerless INVITE supporting `100rel`; target reliable 183 carries its own offer | the target INVITE is offerless; the source receives that offer in a reliable 183; no target PRACK leaves before the source PRACK; the target PRACK carries the source's answer with only `o=` replaced; the target's early session reaches the source endpoint's own socket |
 | T8 | off-media leg: target reliable 183 carries an unmappable description | no provisional carrying it reaches the source leg; the target invitation receives CANCEL; the source INVITE receives 488 with `Error::Relay` |
+| T9 | off-media leg: source offerless INVITE without `100rel`; target 2xx carries an offer | target ACK is held; source 2xx carries the mapped offer; source ACK carries an answer; target ACK carries the mapped answer; RTP sent by the target reaches the source answer's own port; no sipx media socket exists |
+| T10 | T9 with a missing or unmappable source ACK answer | target receives a bodiless ACK and then BYE; source receives BYE; target never receives the bad description; coupling returns the typed error |
+| T11 | T9 but the source sends no ACK before `cancellation_timeout` | before the target's 64·T1 lifetime, target receives a bodiless ACK and BYE, source receives BYE, and coupling returns `NoResponse` with no retained task or dialog |

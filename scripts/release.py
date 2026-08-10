@@ -12,6 +12,7 @@ import datetime
 import email.utils
 import hashlib
 import json
+import math
 import os
 import pathlib
 import re
@@ -1320,6 +1321,99 @@ def pacing_ledger_record(path: pathlib.Path, seconds: float) -> None:
     staging.replace(path)
 
 
+def pacing_allowance_model_path(ledger: pathlib.Path) -> pathlib.Path:
+    """The optional token-bucket model paired with one strict spend ledger."""
+
+    return ledger.with_name(f"{ledger.name}.allowances")
+
+
+def pacing_allowance_model(
+    ledger: pathlib.Path, *, report: Callable[[str], None] = print
+) -> dict[str, RateLimitBucket]:
+    """Read cross-process token buckets, or start optimistically when the model is unreadable.
+
+    Unlike the spend ledger, this model is advice: registry visibility and checksum evidence decide
+    the frontier. Losing model state can therefore provoke a `429`, but refusing here would not
+    protect package bytes or the whole-publication budget.
+    """
+
+    path = pacing_allowance_model_path(ledger)
+    if not path.exists():
+        report(
+            f"registry pacing allowance model {path} is absent; starting with optimistic "
+            "stated bursts"
+        )
+        return {}
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(record, dict) or record.get("schema") != 1:
+            raise ValueError("unsupported or absent schema")
+        raw_buckets = record.get("buckets")
+        if not isinstance(raw_buckets, dict):
+            raise ValueError("buckets is not an object")
+        buckets: dict[str, RateLimitBucket] = {}
+        for kind, limit in (
+            (NEW_CRATE, NEW_CRATE_RATE_LIMIT),
+            (NEW_VERSION, NEW_VERSION_RATE_LIMIT),
+        ):
+            raw = raw_buckets.get(kind)
+            if not isinstance(raw, dict):
+                raise ValueError(f"{kind} bucket is absent or not an object")
+            values = (raw.get("level"), raw.get("updated_at"), raw.get("not_before"))
+            if any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                for value in values
+            ):
+                raise ValueError(f"{kind} bucket does not contain finite numeric state")
+            level, updated, not_before = (float(value) for value in values)
+            if not 0.0 <= level <= float(limit.burst):
+                raise ValueError(f"{kind} level is outside the stated burst")
+            if updated < 0.0 or not_before < 0.0:
+                raise ValueError(f"{kind} timestamps are negative")
+            buckets[kind] = RateLimitBucket(limit, level, updated, not_before)
+        return buckets
+    except (OSError, json.JSONDecodeError, TypeError, ValueError) as error:
+        report(
+            f"registry pacing allowance model {path} is unreadable; starting with optimistic "
+            f"stated bursts: {error}"
+        )
+        return {}
+
+
+def pacing_allowance_model_record(
+    ledger: pathlib.Path,
+    buckets: Mapping[str, RateLimitBucket],
+    *,
+    report: Callable[[str], None] = print,
+) -> None:
+    """Atomically persist both comparable-clock buckets without making pacing advice a gate."""
+
+    path = pacing_allowance_model_path(ledger)
+    try:
+        model = {
+            "schema": 1,
+            "buckets": {
+                kind: {
+                    "level": buckets[kind].level,
+                    "updated_at": buckets[kind].updated,
+                    "not_before": buckets[kind].not_before,
+                }
+                for kind in (NEW_CRATE, NEW_VERSION)
+            },
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        staging = path.with_name(f"{path.name}.partial")
+        staging.write_text(json.dumps(model, sort_keys=True) + "\n", encoding="utf-8")
+        staging.replace(path)
+    except (KeyError, OSError) as error:
+        report(
+            f"registry pacing allowance model {path} could not be recorded; a later invocation "
+            f"will start optimistically: {error}"
+        )
+
+
 def publish_frontier(
     frontier: Sequence[str],
     dispatch: Callable[[str], subprocess.CompletedProcess[str]],
@@ -1328,7 +1422,9 @@ def publish_frontier(
     budget_seconds: float,
     spent_seconds: float = 0.0,
     record_wait: Callable[[float], None] = lambda _seconds: None,
-    monotonic: Callable[[], float] = time.monotonic,
+    carried_allowances: Mapping[str, RateLimitBucket] | None = None,
+    record_allowances: Callable[[Mapping[str, RateLimitBucket]], None] = lambda _buckets: None,
+    clock: Callable[[], float] = time.time,
     pause: Callable[[float], None] = time.sleep,
     now: Callable[[], float] = time.time,
     report: Callable[[str], None] = print,
@@ -1342,17 +1438,26 @@ def publish_frontier(
 
     `budget_seconds` bounds the publication and not this invocation: `spent_seconds` is what
     earlier invocations of the same publication already waited, and `record_wait` is told each
-    wait as it is taken so a later invocation can be given it. A caller that passes neither gets
-    the single-invocation bound, which is all a local release has to reason about.
+    wait as it is taken so a later invocation can be given it. `carried_allowances` does the same
+    for the model itself. Its `clock` must be comparable between processes; the default Unix clock
+    is, whereas a process-local monotonic origin is not. A caller that carries neither gets the
+    single-invocation bound and optimistic bursts, which is all a local release has to reason about.
     """
 
     if budget_seconds <= 0:
         raise ReleaseError("registry rate-limit budget must be greater than zero")
     names = set(new_crates)
-    buckets = {
-        NEW_CRATE: rate_limit_bucket(NEW_CRATE_RATE_LIMIT, monotonic()),
-        NEW_VERSION: rate_limit_bucket(NEW_VERSION_RATE_LIMIT, monotonic()),
-    }
+    at = clock()
+    carried = {} if carried_allowances is None else carried_allowances
+    buckets = {}
+    for kind, limit in (
+        (NEW_CRATE, NEW_CRATE_RATE_LIMIT),
+        (NEW_VERSION, NEW_VERSION_RATE_LIMIT),
+    ):
+        bucket = carried.get(kind)
+        buckets[kind] = (
+            bucket if bucket is not None and bucket.limit == limit else rate_limit_bucket(limit, at)
+        )
     already = max(0.0, float(spent_seconds))
     remaining = float(budget_seconds) - already
     published: list[str] = []
@@ -1360,7 +1465,7 @@ def publish_frontier(
         kind = NEW_CRATE if package in names else NEW_VERSION
         refusal = None
         for _attempt in range(RATE_LIMIT_RETRY_ATTEMPTS):
-            wait = rate_limit_wait(buckets[kind], monotonic())
+            wait = rate_limit_wait(buckets[kind], clock())
             if wait > 0.0:
                 if wait > remaining:
                     stated = "" if refusal is None else f": {refusal.detail}"
@@ -1381,7 +1486,10 @@ def publish_frontier(
                 record_wait(wait)
                 pause(wait)
                 remaining -= wait
-            buckets[kind] = rate_limit_consume(buckets[kind], monotonic())
+            buckets[kind] = rate_limit_consume(buckets[kind], clock())
+            # Charge the model before dispatch for the same reason the spend ledger is charged
+            # before pausing: a killed process may become conservative, never invent capacity.
+            record_allowances(buckets)
             result = dispatch(package)
             if result.returncode == 0:
                 published.append(package)
@@ -1395,11 +1503,13 @@ def publish_frontier(
             report(f"{package}: {refusal.detail}")
             buckets[kind] = rate_limit_restate(
                 buckets[kind],
-                monotonic(),
+                clock(),
                 buckets[kind].limit.refill_seconds
                 if refusal.retry_seconds is None
                 else refusal.retry_seconds,
             )
+            # The registry's own deadline replaces the model across process boundaries too.
+            record_allowances(buckets)
         else:
             detail = "" if refusal is None else f": {refusal.detail}"
             raise ReleaseError(
@@ -1985,8 +2095,8 @@ def _parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help=(
             "file carrying the rate-limit wait earlier invocations of this publication already "
-            "spent, so the budget bounds the whole frontier loop rather than each invocation of "
-            "it (publish mode only)"
+            "spent and anchoring their sibling allowance model, so the budget and token buckets "
+            "span the whole frontier loop (publish mode only)"
         ),
     )
     parser.add_argument(
@@ -2225,6 +2335,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 else None
             )
             spent = 0.0 if ledger is None else pacing_ledger_spent(ledger)
+            carried_allowances = (
+                {} if ledger is None else pacing_allowance_model(ledger, report=print)
+            )
             print(
                 f"registry pacing budget: {args.registry_retry_budget_seconds:g}s for this "
                 f"publication, {spent:g}s spent by earlier invocations"
@@ -2236,6 +2349,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if ledger is not None:
                     pacing_ledger_record(ledger, seconds)
 
+            def remember_allowances(buckets: Mapping[str, RateLimitBucket]) -> None:
+                """Persist pacing advice without turning its loss into publication state."""
+
+                if ledger is not None:
+                    pacing_allowance_model_record(ledger, buckets, report=print)
+
             publish_frontier(
                 frontier,
                 lambda package: _dispatch(
@@ -2245,6 +2364,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 budget_seconds=args.registry_retry_budget_seconds,
                 spent_seconds=spent,
                 record_wait=charge,
+                carried_allowances=carried_allowances,
+                record_allowances=remember_allowances,
             )
         else:
             excluded = tuple(package.name for package in packages if not package.public)

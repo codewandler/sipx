@@ -220,6 +220,47 @@ async fn participants_join_and_leave_without_disturbing_the_others() {
     conference.close().await;
 }
 
+/// C5's media-layer identity: switching one participant's session is not leave plus join.
+#[tokio::test]
+async fn rebinding_keeps_the_participant_and_moves_both_audio_directions() {
+    let original = party().await;
+    let replacement = party().await;
+    let bob = party().await;
+    let conference = Conference::narrowband().expect("valid conference timing");
+    let participant = conference.join(Arc::clone(&original.near)).await;
+    conference.join(Arc::clone(&bob.near)).await;
+
+    assert!(
+        conference
+            .rebind(participant, Arc::clone(&replacement.near))
+            .await
+    );
+    assert_eq!(conference.len().await, 2, "rebind does not rejoin");
+
+    let voice = tone(440.0, 600, 10_000.0);
+    let (_played, heard) = tokio::join!(
+        replacement.far.play(&voice, 160),
+        record_mixed(&bob.far, voice.len()),
+    );
+    assert!(
+        peak(&heard) > 3_000,
+        "the replacement contributes to the same participant: peak {}",
+        peak(&heard)
+    );
+
+    let (_played, heard) = tokio::join!(
+        bob.far.play(&voice, 160),
+        record_mixed(&replacement.far, voice.len()),
+    );
+    assert!(
+        peak(&heard) > 3_000,
+        "the replacement hears the same mix: peak {}",
+        peak(&heard)
+    );
+
+    conference.close().await;
+}
+
 /// A participant who has left stops being heard. Without this, "leave" would be cosmetic.
 #[tokio::test]
 async fn someone_who_has_left_is_no_longer_mixed_in() {
