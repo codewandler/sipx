@@ -549,6 +549,10 @@ class BrowserAudioProofTest(unittest.TestCase):
             changed = browser(role)
             changed["security"]["srtp_profile"] = value
             target.write_text(json.dumps(changed), encoding="utf-8")
+        compatibility_path = self.directory / "unused-rtcp-candidate/browser.json"
+        compatibility = unused_rtcp_candidate_browser()
+        compatibility["security"]["srtp_profile"] = "SRTP_AES128_CM_HMAC_SHA1_80"
+        compatibility_path.write_text(json.dumps(compatibility), encoding="utf-8")
         self.rebind_negatives()
 
         result = DRIVER.validate_proof(self.directory, PIN)
@@ -557,6 +561,10 @@ class BrowserAudioProofTest(unittest.TestCase):
         self.assertEqual(reported, summary["reported_profiles_by_role"])
         for role, value in reported.items():
             self.assertEqual(value, result["roles"][role]["browser"]["security"]["srtp_profile"])
+        self.assertEqual(
+            "SRTP_AES128_CM_HMAC_SHA1_80",
+            result["unused_rtcp_candidate"]["browser"]["security"]["srtp_profile"],
+        )
 
     def test_the_peer_and_its_exact_revision_are_recorded(self) -> None:
         """Evidence a stranger can audit has to say which build agreed with us.
