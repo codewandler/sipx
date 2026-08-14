@@ -84,7 +84,10 @@ A role succeeds only when all of these are observed in that same run:
 2. one audio transceiver negotiated Opus at 48 kHz;
 3. ICE reached `connected` or `completed`, and the statistics-selected candidate pair is nominated;
 4. DTLS is connected, the answer selected `active` or `passive`, and the reported SRTP profile is
-   one the registry carries (`KNOWN_SRTP_PROFILES`) rather than merely non-empty;
+   one the registry carries rather than merely non-empty. Browser statistics may use either the
+   media-suite spelling (`AEAD_AES_128_GCM`) or RFC 7714 §14.2's DTLS-SRTP spelling
+   (`SRTP_AEAD_AES_128_GCM`); the harness accepts only its closed alias table, compares the
+   normalized media-suite name, and retains the browser's exact reported spelling in evidence;
 5. inbound and outbound RTP packet and byte counts are nonzero;
 6. the synthetic outbound track produced frames and the inbound track reports nonzero audio energy;
 7. INVITE, final response, ACK and BYE occurred in the role-correct order; and
@@ -99,7 +102,9 @@ role, or compatibility evidence not containing both offered components, is failu
 
 **Each ordinary role requires one exact AEAD-GCM profile** (`M-72`): `browser-offerer` requires
 `AEAD_AES_128_GCM` and `browser-answerer` requires `AEAD_AES_256_GCM`. The browser transport
-statistics, sipx call policy and installed sipx SRTP context MUST all name that role's profile. RFC
+statistics, after the closed spelling normalization above, sipx call policy and installed sipx
+SRTP context MUST all name that role's profile. The proof summary also records the unmodified
+browser spelling beside the normalized profile. RFC
 7714 publishes no key-derivation vector, so the placement of its 96-bit master salt in the PRF
 input block rests on a reading of the spec; two sipx endpoints sharing a wrong reading interoperate
 with each other and with nobody else. DTLS-SRTP hands both sides only a master key and salt, so each

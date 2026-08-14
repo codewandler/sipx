@@ -302,6 +302,11 @@ PROOF_ASSERTIONS: tuple[Audited, ...] = (
         ("the negotiated SRTP profile is not a name the registry carries",),
     ),
     Audited(
+        "test_dtls_registry_spelling_is_normalized_without_losing_raw_evidence",
+        "the closed DTLS-SRTP alias map preserves the browser's reported profile",
+        (),
+    ),
+    Audited(
         "test_the_peer_and_its_exact_revision_are_recorded",
         "the peer browser and its revision are recorded",
         (
@@ -533,6 +538,25 @@ class BrowserAudioProofTest(unittest.TestCase):
             changed["security"]["srtp_profile"] = value
             target.write_text(json.dumps(changed), encoding="utf-8")
             self.assert_refused()
+
+    def test_dtls_registry_spelling_is_normalized_without_losing_raw_evidence(self) -> None:
+        reported = {
+            "browser-offerer": "SRTP_AEAD_AES_128_GCM",
+            "browser-answerer": "SRTP_AEAD_AES_256_GCM",
+        }
+        for role, value in reported.items():
+            target = self.directory / role / "browser.json"
+            changed = browser(role)
+            changed["security"]["srtp_profile"] = value
+            target.write_text(json.dumps(changed), encoding="utf-8")
+        self.rebind_negatives()
+
+        result = DRIVER.validate_proof(self.directory, PIN)
+        summary = result["aead_key_derivation"]
+        self.assertEqual(DRIVER.EXACT_AEAD_PROFILE_BY_ROLE, summary["profiles_by_role"])
+        self.assertEqual(reported, summary["reported_profiles_by_role"])
+        for role, value in reported.items():
+            self.assertEqual(value, result["roles"][role]["browser"]["security"]["srtp_profile"])
 
     def test_the_peer_and_its_exact_revision_are_recorded(self) -> None:
         """Evidence a stranger can audit has to say which build agreed with us.

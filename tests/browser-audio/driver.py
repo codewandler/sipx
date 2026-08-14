@@ -45,6 +45,20 @@ AEAD_SRTP_PROFILES = frozenset({"AEAD_AES_128_GCM", "AEAD_AES_256_GCM"})
 
 KNOWN_SRTP_PROFILES = COUNTER_MODE_SRTP_PROFILES | AEAD_SRTP_PROFILES
 
+# Browser statistics have used both the media-suite spellings above and the DTLS-SRTP protection
+# profile spellings registered by RFC 5764 §4.1.2 and RFC 7714 §14.2. Keep the accepted aliases
+# closed: normalization must not turn an arbitrary non-empty string into negotiation evidence.
+REPORTED_SRTP_PROFILE_NAMES = {
+    "AES_CM_128_HMAC_SHA1_80": "AES_CM_128_HMAC_SHA1_80",
+    "AES_CM_128_HMAC_SHA1_32": "AES_CM_128_HMAC_SHA1_32",
+    "AEAD_AES_128_GCM": "AEAD_AES_128_GCM",
+    "AEAD_AES_256_GCM": "AEAD_AES_256_GCM",
+    "SRTP_AES128_CM_SHA1_80": "AES_CM_128_HMAC_SHA1_80",
+    "SRTP_AES128_CM_SHA1_32": "AES_CM_128_HMAC_SHA1_32",
+    "SRTP_AEAD_AES_128_GCM": "AEAD_AES_128_GCM",
+    "SRTP_AEAD_AES_256_GCM": "AEAD_AES_256_GCM",
+}
+
 #: Exact call-level requirements used by the two ordinary roles. Covering one key size by each
 #: role makes both KDFs independent-peer facts without changing the native peer's implementation.
 EXACT_AEAD_PROFILE_BY_ROLE = {
@@ -60,6 +74,13 @@ class ProofError(RuntimeError):
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise ProofError(message)
+
+
+def registry_srtp_profile(value: Any) -> str | None:
+    """Translate a closed set of browser-reported names to the media-suite registry spelling."""
+    if not isinstance(value, str):
+        return None
+    return REPORTED_SRTP_PROFILE_NAMES.get(value)
 
 
 def bounded_run(command: list[str], stdout_path: pathlib.Path, stderr_path: pathlib.Path, limit: int) -> int:
@@ -324,13 +345,15 @@ def validate_browser_result(
     require(security.get("wss_spki_sha256") == expected_pin, "browser did not report the pinned WSS identity")
     require(security.get("dtls_state") == "connected", "DTLS is not connected")
     require(security.get("setup_role") in ("active", "passive"), "DTLS setup role is unresolved")
+    reported_profile = security.get("srtp_profile")
+    profile = registry_srtp_profile(reported_profile)
     require(
-        security.get("srtp_profile") in KNOWN_SRTP_PROFILES,
+        profile in KNOWN_SRTP_PROFILES,
         "the negotiated SRTP profile is not a name the registry carries",
     )
     if expected_profile is not None:
         require(
-            security.get("srtp_profile") == expected_profile,
+            profile == expected_profile,
             f"{role} did not negotiate its exact SRTP suite {expected_profile}",
         )
 
@@ -573,9 +596,10 @@ def validate_proof(directory: pathlib.Path, expected_pin: str) -> dict[str, Any]
     # fallback nor proving the 256-bit KDF twice can satisfy the evidence. This is the one SRTP
     # parameter no published vector pins; the native peer derives independently in both roles.
     aead = {
-        role: evidence["browser"]["security"]["srtp_profile"]
+        role: profile
         for role, evidence in roles.items()
-        if evidence["browser"]["security"]["srtp_profile"] in AEAD_SRTP_PROFILES
+        if (profile := registry_srtp_profile(evidence["browser"]["security"]["srtp_profile"]))
+        in AEAD_SRTP_PROFILES
     }
     witness = sorted(aead)[0]
     peer = roles[witness]["browser"]["peer"]
@@ -593,11 +617,16 @@ def validate_proof(directory: pathlib.Path, expected_pin: str) -> dict[str, Any]
             "witnesses": {
                 role: {
                     "srtp_profile": profile,
+                    "reported_srtp_profile": roles[role]["browser"]["security"]["srtp_profile"],
                     "peer": roles[role]["browser"]["peer"],
                 }
                 for role, profile in sorted(aead.items())
             },
             "profiles_by_role": {
+                role: registry_srtp_profile(evidence["browser"]["security"]["srtp_profile"])
+                for role, evidence in roles.items()
+            },
+            "reported_profiles_by_role": {
                 role: evidence["browser"]["security"]["srtp_profile"]
                 for role, evidence in roles.items()
             },
