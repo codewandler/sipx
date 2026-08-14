@@ -827,16 +827,24 @@ class BaselineVersionVectors(unittest.TestCase):
 
 
 class CiToolchainVectors(unittest.TestCase):
-    def workflow(self, installer: str, *, separate: bool = False) -> str:
+    def workflow(
+        self, installer: str, *, toolchain: str | None = None, separate: bool = False
+    ) -> str:
         first = "" if separate else "\n      - run: ./scripts/check-packaged-endpoint-consumer.py --check"
         second = (
             "\n  package:\n    steps:\n      - run: ./scripts/check-packaged-endpoint-consumer.py --check"
             if separate
             else ""
         )
+        selection = (
+            f"        with:\n          toolchain: {toolchain}\n"
+            if toolchain is not None
+            else ""
+        )
         return (
             "jobs:\n  test:\n    steps:\n"
             f"      - uses: dtolnay/rust-toolchain@{installer}\n"
+            f"{selection}"
             "      - run: ./scripts/check-api-compat.py --check"
             f"{first}{second}\n"
         )
@@ -844,13 +852,17 @@ class CiToolchainVectors(unittest.TestCase):
     def test_pin_must_be_in_the_job_running_both_checks(self) -> None:
         self.assertIsNone(
             api_compat.ci_toolchain_problem(
-                self.workflow("nightly-2026-07-28"), "nightly-2026-07-28"
+                self.workflow("nightly", toolchain="nightly-2026-07-28"),
+                "nightly-2026-07-28",
             )
         )
         self.assertIn(
             "run together",
             api_compat.ci_toolchain_problem(
-                self.workflow("nightly-2026-07-28", separate=True), "nightly-2026-07-28"
+                self.workflow(
+                    "nightly", toolchain="nightly-2026-07-28", separate=True
+                ),
+                "nightly-2026-07-28",
             )
             or "",
         )
@@ -868,7 +880,7 @@ class CiToolchainVectors(unittest.TestCase):
         workflow = self.workflow("nightly").replace(
             "      - uses: dtolnay/rust-toolchain@nightly\n",
             "      - uses: dtolnay/rust-toolchain@nightly\n"
-            "      # - uses: dtolnay/rust-toolchain@nightly-2026-07-28\n",
+            "      # toolchain: nightly-2026-07-28\n",
         )
         self.assertIn(
             "does not install exact toolchain",

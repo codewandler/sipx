@@ -130,9 +130,21 @@ def ci_toolchain_problem(text: str, channel: str) -> str | None:
     if len(owners) != 1:
         return "both API compatibility checks must run together in exactly one CI job"
     block = jobs[owners[0]]
-    installer = f"dtolnay/rust-toolchain@{channel}"
+    installer = "dtolnay/rust-toolchain@nightly"
     installer_match = active_step(block, "uses", installer)
     if installer_match is None:
+        return f"CI job `{owners[0]}` does not use the nightly toolchain installer"
+    next_step = re.search(r"(?m)^\s*-\s+", block[installer_match.end() :])
+    installer_end = (
+        installer_match.end() + next_step.start()
+        if next_step is not None
+        else len(block)
+    )
+    installer_step = block[installer_match.start() : installer_end]
+    if re.search(
+        rf"(?m)^\s+toolchain:\s*{re.escape(channel)}(?:\s*(?:#.*)?)?$",
+        installer_step,
+    ) is None:
         return f"CI job `{owners[0]}` does not install exact toolchain `{channel}`"
     command_positions = [active_step(block, "run", command) for command in commands]
     if any(

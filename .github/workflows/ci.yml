@@ -69,7 +69,9 @@ jobs:
       # X-149: dependencies are already present from the stable workspace build above. Switch only
       # for rustdoc JSON, whose unstable schema is pinned by docs/api/toolchain.toml; both checks
       # themselves stay locked and offline, and the package proof compiles extracted archives.
-      - uses: dtolnay/rust-toolchain@nightly-2026-07-28
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-07-28
       - run: python3 scripts/test-api-compat.py
       - run: ./scripts/check-api-compat.py --check
       - run: ./scripts/check-packaged-endpoint-consumer.py --check
