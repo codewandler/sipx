@@ -3,6 +3,7 @@
 
 import copy
 import hashlib
+import importlib.util
 import json
 import pathlib
 import sys
@@ -13,6 +14,13 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import api_compat  # noqa: E402
+
+PACKAGED_SPEC = importlib.util.spec_from_file_location(
+    "packaged_endpoint_consumer", ROOT / "scripts" / "check-packaged-endpoint-consumer.py"
+)
+assert PACKAGED_SPEC is not None and PACKAGED_SPEC.loader is not None
+packaged_endpoint_consumer = importlib.util.module_from_spec(PACKAGED_SPEC)
+PACKAGED_SPEC.loader.exec_module(packaged_endpoint_consumer)
 
 
 class CompatibilityVectors(unittest.TestCase):
@@ -824,6 +832,53 @@ class BaselineVersionVectors(unittest.TestCase):
             self.document("2.0.0-rc.1"), self.document("2.0.0")
         )
         self.assertIn("v1 baseline selector", "\n".join(problems))
+
+
+class PackagedConsumerLockVectors(unittest.TestCase):
+    def test_offline_rehearsal_uses_the_release_candidates_committed_lock(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="sipx-package-lock-") as temporary:
+            root = pathlib.Path(temporary)
+            consumer = root / "consumer"
+            consumer.mkdir()
+            workspace_lock = root / "Cargo.lock"
+            workspace_lock.write_text("release candidate graph\n", encoding="utf-8")
+            (consumer / "Cargo.lock").write_text("fresh resolver graph\n", encoding="utf-8")
+
+            packaged_endpoint_consumer.seed_consumer_lockfile(consumer, workspace_lock)
+
+            self.assertEqual(
+                "release candidate graph\n",
+                (consumer / "Cargo.lock").read_text(encoding="utf-8"),
+            )
+
+    def test_pruned_consumer_lock_cannot_introduce_a_new_registry_identity(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="sipx-package-lock-") as temporary:
+            root = pathlib.Path(temporary)
+            workspace_lock = root / "workspace.lock"
+            consumer_lock = root / "consumer.lock"
+            workspace_lock.write_text(
+                'version = 4\n\n[[package]]\nname = "dependency"\nversion = "1.2.3"\n'
+                'source = "registry+https://example.com/index"\nchecksum = "released"\n',
+                encoding="utf-8",
+            )
+            consumer_lock.write_text(workspace_lock.read_text(encoding="utf-8"), encoding="utf-8")
+            self.assertIsNone(
+                packaged_endpoint_consumer.lockfile_resolution_problem(
+                    workspace_lock, consumer_lock
+                )
+            )
+
+            consumer_lock.write_text(
+                workspace_lock.read_text(encoding="utf-8").replace("1.2.3", "1.2.4"),
+                encoding="utf-8",
+            )
+            self.assertIn(
+                "outside the workspace lock",
+                packaged_endpoint_consumer.lockfile_resolution_problem(
+                    workspace_lock, consumer_lock
+                )
+                or "",
+            )
 
 
 class CiToolchainVectors(unittest.TestCase):

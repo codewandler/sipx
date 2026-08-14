@@ -227,6 +227,48 @@ def append_archive_patches(manifest: pathlib.Path, paths: dict[str, pathlib.Path
     manifest.write_text(text, encoding="utf-8")
 
 
+def seed_consumer_lockfile(
+    consumer: pathlib.Path, workspace_lock: pathlib.Path = ROOT / "Cargo.lock"
+) -> None:
+    """Give the offline rehearsal the exact dependency graph of the release candidate."""
+    if not workspace_lock.is_file():
+        raise RehearsalError(f"workspace lockfile is absent: {workspace_lock}")
+    shutil.copy2(workspace_lock, consumer / "Cargo.lock")
+
+
+def lockfile_resolution_problem(
+    workspace_lock: pathlib.Path, consumer_lock: pathlib.Path
+) -> str | None:
+    """Refuse any resolved package identity absent from the committed release graph."""
+    try:
+        workspace = tomllib.loads(workspace_lock.read_text(encoding="utf-8"))
+        consumer = tomllib.loads(consumer_lock.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        return f"cannot compare release and consumer lockfiles: {error}"
+
+    def identity(package: dict[str, Any]) -> tuple[str, str, str, str]:
+        return (
+            str(package.get("name", "")),
+            str(package.get("version", "")),
+            str(package.get("source", "")),
+            str(package.get("checksum", "")),
+        )
+
+    released = {identity(package) for package in workspace.get("package", [])}
+    unexpected = sorted(
+        identity(package)
+        for package in consumer.get("package", [])
+        if package.get("name") != "sipx-v1-endpoint-consumer"
+        and identity(package) not in released
+    )
+    if unexpected:
+        rendered = ", ".join(
+            f"{name} {version} ({source or 'path'})" for name, version, source, _ in unexpected
+        )
+        return f"consumer resolved package identities outside the workspace lock: {rendered}"
+    return None
+
+
 def check() -> None:
     if not (FIXTURE / "Cargo.toml").is_file() or not (FIXTURE / "src" / "main.rs").is_file():
         raise RehearsalError(
@@ -257,12 +299,23 @@ def check() -> None:
         shutil.rmtree(consumer)
     shutil.copytree(FIXTURE, consumer)
     append_archive_patches(consumer / "Cargo.toml", paths)
-    copied_lock = consumer / "Cargo.lock"
-    if copied_lock.exists():
-        copied_lock.unlink()
+    # A fresh offline resolution can see a newly published version in the cached index without
+    # having that version's archive cached. More importantly, it would no longer compile the exact
+    # dependency graph whose lockfile accompanies this release candidate.
+    seed_consumer_lockfile(consumer)
     environment = os.environ.copy()
     environment["CARGO_TARGET_DIR"] = str(SCRATCH / "consumer-target")
-    run(["cargo", "generate-lockfile", "--offline"], cwd=consumer, env=environment)
+    # Cargo prunes workspace-only packages when the lock is used by the smaller consumer. Permit
+    # that mechanical rewrite once, then prove every retained identity came from the release lock
+    # before compiling and inspecting the result under `--locked --offline`.
+    run(
+        ["cargo", "metadata", "--format-version=1", "--offline"],
+        cwd=consumer,
+        env=environment,
+    )
+    lock_problem = lockfile_resolution_problem(ROOT / "Cargo.lock", consumer / "Cargo.lock")
+    if lock_problem is not None:
+        raise RehearsalError(lock_problem)
     run(
         ["cargo", "check", "--all-targets", "--locked", "--offline"],
         cwd=consumer,
