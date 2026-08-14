@@ -17,9 +17,9 @@ test client, dialler, or voice application. It is not a proxy, registrar, or PBX
 - **A registered endpoint.** Digest authentication, automatic lease refresh, `Path`,
   `Service-Route`, GRUU, RFC 5626 Outbound on a client-opened flow, and push-assisted binding
   refresh are available — see [Register against a PBX](register.md).
-- **Telephony audio.** G.711 µ-law and A-law are the default. Mono L16 is selectable at its static
-  44.1 kHz assignment or dynamic 8 kHz mapping. Opus is selectable through `sipx-call`'s `opus`
-  feature and links a C library.
+- **Telephony audio.** G.711 µ-law and A-law are the default, and G.722 is selectable. Mono L16 is
+  selectable at its static 44.1 kHz assignment or dynamic 8 kHz mapping. Opus is selectable through
+  `sipx-call`'s `opus` feature and links a C library.
 - **SIP building blocks.** Use the parser, transaction and dialog machines, or SDP offer/answer
   without bringing in an async runtime, socket, or clock — see
   [Use sipx as a library](as-a-library.md).
@@ -30,8 +30,8 @@ test client, dialler, or voice application. It is not a proxy, registrar, or PBX
   codes, and moves audio through WAV files for repeatable automation. Its optional `device-audio`
   feature also opens an explicitly selected microphone or speaker through a bounded leaf-only
   driver.
-- **NAT traversal without a relay.** Calls can gather host candidates and use a configured STUN
-  server to select a server-reflexive ICE path.
+- **NAT traversal.** Calls can gather host candidates, use a configured STUN server to select a
+  server-reflexive path, or use a caller-supplied TURN service for a relayed path.
 - **A two-leg call controller.** `sipx-call::EarlyCoupling` and `Coupling` own both dialogs, relay
   offer/answer changes and termination, and can attach the bounded media bridge — see
   [Couple two calls](couple-two-calls.md).
@@ -60,12 +60,12 @@ claim and the places sipx loses stated plainly — see [How sipx compares](../re
   add itself to a route set, store registrations for other endpoints, or provide dial plans.
 - **A desktop phone interface.** The optional device driver can open an exact microphone or speaker,
   but sipx has no graphical call controls, headset integration, or sound-device mixer.
-- **A general NAT traversal service.** ICE connectivity checks and STUN-derived server-reflexive
-  candidates are available, but TURN and relayed candidates are not. Some NAT pairs therefore have
-  no working media path.
+- **A general NAT traversal service.** The Rust call policy can gather host, STUN-derived and
+  configured TURN-relayed candidates, but sipx does not operate a TURN server and its client does
+  not implement ChannelData or TURN over TCP/TLS.
 - **A general browser media endpoint.** sipx has one named, fail-closed browser-audio composition
   over WSS, ICE, DTLS-SRTP and Opus. It deliberately does not ship browser APIs, video, data
-  channels, multiple media sections, incremental candidate trickling, TURN, or the complete WebRTC
+  channels, multiple media sections, incremental candidate trickling, relayed ICE, or the complete WebRTC
   protocol surface. The [native-browser proof](../reference/browser-audio-proof.md) covers that
   exact profile in both SIP roles; selecting the profile alone is not an interoperability claim.
 - **Video or additional codecs.** The media stack is for telephony audio. Calls support G.711,
@@ -99,8 +99,8 @@ See [Security](../reference/security.md) for the CLI-versus-library matrix,
 The `sipx-host` binary reads configuration, binds listeners, and serves real calls to document-mode
 webhooks, authenticated full-duplex sessions, or a configured realtime audio binding. A granted
 session can originate a call; a realtime binding carries one routed G.711 call to one authenticated
-WebSocket session. The Rust host surfaces are Supported under the pre-1.0 policy, while the
-language-neutral `sipx.app.v1` wire contract remains Experimental. The deterministic peer proof is
+WebSocket session. The Supported Rust host surfaces are frozen for compatible v1 evolution, while
+the language-neutral `sipx.app.v1` wire contract remains Experimental. The deterministic peer proof is
 part of the default test matrix, but the credentialed live-endpoint interoperability proof has not
 yet been recorded. There is no embedded runtime or TypeScript SDK, so do not select it when either
 is a requirement. The [application host overview](../sdk/overview.md) gives the binding and trust

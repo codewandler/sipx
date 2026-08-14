@@ -18,6 +18,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import shutil
 import signal
 import sys
 import tempfile
@@ -2532,6 +2533,13 @@ class TheRealDataset(unittest.TestCase):
             [], report.load_problems(dataset, runs, stacks, datetime.date.today())
         )
 
+    def test_the_interop_dataset_has_no_outstanding_problems(self) -> None:
+        dataset = report.interop_dataset()
+        _, stacks, _ = report.dataset()
+        self.assertEqual(
+            [], report.interop_problems(dataset, stacks, datetime.date.today())
+        )
+
     def test_the_report_is_current(self) -> None:
         dimensions, stacks, observations = report.dataset()
         load = report.load_dataset()
@@ -2542,6 +2550,7 @@ class TheRealDataset(unittest.TestCase):
             report.generated_values(),
             report.capability_ledgers(),
             load=(load, report.load_runs(load)),
+            interop=report.interop_dataset(),
         )
         self.assertEqual(
             report.REPORT.read_text(encoding="utf-8"),
@@ -2557,6 +2566,99 @@ class TheRealDataset(unittest.TestCase):
             self.assertEqual(
                 "https://json-schema.org/draft/2020-12/schema", loaded.get("$schema"), path.name
             )
+
+
+class TheInteropEvidence(unittest.TestCase):
+    """Exact-suite wire facts remain falsifiable without running containers or the network."""
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.base = pathlib.Path(temporary.name) / "interop"
+        shutil.copytree(report.INTEROP, self.base)
+        self.dataset = report.interop_dataset(self.base)
+        _, self.stacks, _ = report.dataset()
+
+    def problems(self):
+        return report.interop_problems(
+            self.dataset, self.stacks, datetime.date(2026, 8, 14), self.base
+        )
+
+    def manifest_path(self):
+        return self.base / self.dataset["cases"][0]["run"] / "manifest.json"
+
+    def result_path(self, suite="AEAD_AES_128_GCM"):
+        case = self.dataset["cases"][0]
+        manifest = json.loads(self.manifest_path().read_text(encoding="utf-8"))
+        return self.base / case["id"] / manifest["positive"][suite]["result"]
+
+    @staticmethod
+    def rewrite(path, value):
+        path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    def test_unknown_dataset_key_is_rejected(self) -> None:
+        self.dataset["verdict"] = "passed"
+        self.assertTrue(any("unknown key 'verdict'" in p for p in self.problems()))
+
+    def test_mutable_subject_reference_is_rejected(self) -> None:
+        path = self.base / self.dataset["cases"][0]["subject_descriptor"]
+        subject = json.loads(path.read_text(encoding="utf-8"))
+        subject["artifact"]["reference"] = subject["artifact"]["reference"].split("@")[0] + ":latest"
+        self.rewrite(path, subject)
+        self.assertTrue(any("reference is mutable" in p for p in self.problems()))
+
+    def test_path_traversal_is_rejected(self) -> None:
+        self.dataset["cases"][0]["subject_descriptor"] = "../subject.json"
+        self.assertTrue(any("escapes" in p for p in self.problems()))
+
+    def test_missing_exact_suite_is_rejected(self) -> None:
+        manifest = json.loads(self.manifest_path().read_text(encoding="utf-8"))
+        manifest["positive"].pop("AEAD_AES_256_GCM")
+        self.rewrite(self.manifest_path(), manifest)
+        self.assertTrue(any("exactly both RFC 7714" in p for p in self.problems()))
+
+    def test_profile_fallback_is_rejected(self) -> None:
+        path = self.result_path()
+        result = json.loads(path.read_text(encoding="utf-8"))
+        result["negotiated_profile"] = "fixture-fallback"
+        self.rewrite(path, result)
+        self.assertTrue(any("fell back" in p for p in self.problems()))
+
+    def test_silent_positive_is_rejected(self) -> None:
+        path = self.result_path()
+        result = json.loads(path.read_text(encoding="utf-8"))
+        result["peer_audio_peak"] = 0
+        self.rewrite(path, result)
+        self.assertTrue(any("silent or one-way" in p for p in self.problems()))
+
+    def test_vacuous_negative_is_rejected(self) -> None:
+        case = self.dataset["cases"][0]
+        manifest = json.loads(self.manifest_path().read_text(encoding="utf-8"))
+        path = self.base / case["id"] / manifest["negative"]["result"]
+        result = json.loads(path.read_text(encoding="utf-8"))
+        result["packets_received"] = 1
+        self.rewrite(path, result)
+        self.assertTrue(any("does not isolate" in p for p in self.problems()))
+
+    def test_peer_rejection_count_must_match_log(self) -> None:
+        manifest = json.loads(self.manifest_path().read_text(encoding="utf-8"))
+        manifest["negative"]["peer_srtp_rejections"] += 1
+        self.rewrite(self.manifest_path(), manifest)
+        self.assertTrue(any("rejection count" in p for p in self.problems()))
+
+    def test_tampered_evidence_hash_is_rejected(self) -> None:
+        manifest = json.loads(self.manifest_path().read_text(encoding="utf-8"))
+        first = next(iter(manifest["sha256"]))
+        manifest["sha256"][first] = "0" * 64
+        self.rewrite(self.manifest_path(), manifest)
+        self.assertTrue(any("hash mismatch" in p for p in self.problems()))
+
+    def test_render_names_exact_suites_and_limitations(self) -> None:
+        rendered = "\n".join(report.render_interop_section(self.dataset, self.stacks, self.base))
+        self.assertIn("AEAD_AES_128_GCM", rendered)
+        self.assertIn("AEAD_AES_256_GCM", rendered)
+        self.assertIn("Not inferred", rendered)
+        self.assertIn("Negative control", rendered)
 
 
 class TheScriptItself(unittest.TestCase):

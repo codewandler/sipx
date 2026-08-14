@@ -10,7 +10,8 @@ selectable signalling, media policy, device audio, interactive control, custom h
 load generation.
 
 It does not define a graphical interface, transcription, text-to-speech, a dial plan, a registrar,
-or a proxy. ICE restart and relayed endpoint candidates remain `M-23` and `M-24`.
+or a proxy. The Rust call library supports ICE restart and configured relayed candidates; this
+diagnostic-phone contract exposes only initial host/STUN selection and no TURN credential flags.
 
 Normative words **MUST**, **MUST NOT**, **SHOULD** and **MAY** are used as in RFC 2119 and RFC 8174.
 
@@ -395,6 +396,14 @@ reported on the caller's schedule instead of RFC 3261 §17.1.2.2's, which can ou
 being renewed. A zero deadline delegates the refreshes to the transaction layer exactly as it
 delegates the first attempt. `--wake` sends RFC 8599 §4.1.3's binding-refresh REGISTER as a second
 attempt, bounded by the same stated deadline measured from when that exchange begins.
+
+With `--outbound`, `--keep-alive` transfers the already granted lease and its one `reg-id` into the
+bounded lifetime owner in [`sip-transport.md`](sip-transport.md) §10.5; it MUST NOT send another
+REGISTER during that transfer. The owner selects STUN for UDP and CRLF for connection-oriented
+flows, reports `flow_id` and `keepalive`, and retains a flow-local failure while recovering that
+same number. SIGINT or SIGTERM cancels all generations, closes the endpoint and joins the flow task
+before the terminal report states its cleanup counts. No password, digest response, STUN transaction
+identifier or configured credential value appears in either progress or terminal output.
 
 ## 4. Interactive protocol
 

@@ -454,7 +454,7 @@ pub async fn ring_offer_early_with_policy_at(
         media_address,
         incoming.transport.is_secure(),
         direction,
-        policy,
+        &policy,
     )
     .await?;
     ring_with(
@@ -576,7 +576,7 @@ pub async fn ring_early_with_policy_at(
         media_address,
         incoming.transport.is_secure(),
         &offer,
-        policy,
+        &policy,
     )
     .await?;
     ring_with(

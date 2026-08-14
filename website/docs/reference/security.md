@@ -18,7 +18,7 @@ selects a call path that provides both.
 | Certificate verification | Mandatory. Platform roots, additional PEM roots, service identity and optional mutual-TLS identity are configurable; verification cannot be disabled | Mandatory for outgoing TLS and WSS; there is no skip-verification option |
 | SDES-keyed SRTP | Yes. A CLI call over TLS or WSS selects the call layer's protected-signalling path | Yes. `sipx-call` negotiates SDES-keyed SRTP when the selected signalling transport is secure |
 | DTLS-SRTP | Yes, with `--media-security dtls-srtp` when the off-by-default `dtls` feature is enabled | Yes, through explicit `sipx-call::Keying::DtlsSrtp` policy with the same feature |
-| ICE | Host candidates or a configured STUN server with `--ice`; disabled by default | Host and server-reflexive candidates through `sipx-call::IcePolicy`; no TURN relay |
+| ICE | Host candidates or a configured STUN server with `--ice`; disabled by default | Host, server-reflexive and configured TURN-relayed candidates through `sipx-call::IcePolicy` |
 | Signalling capture | `--capture <FILE>` writes a redacted pcapng file | `sipx-transport::CaptureConfig` enables capture; redaction is on by default, and the same redacted records can be exported to a HEP3 collector |
 
 For a protected command-line call, select TLS or WSS and provide any private trust root explicitly;
@@ -47,11 +47,12 @@ uses TLS or WSS. A TLS-terminating intermediary can still read that SDP key. Thi
 SDES's threat model, not end-to-end media keying; see
 [RFC 4568 §7.1](https://www.rfc-editor.org/rfc/rfc4568#section-7.1).
 
-The implemented SRTP transform is AES counter mode with a 128-bit key and HMAC-SHA1 with an 80-bit
-authentication tag. Receiving SRTP and SRTCP keep separate 64-packet replay windows: an authenticated
-packet is accepted once, and authentication succeeds before either window or rollover state changes.
-Packets older than the window are refused rather than accepted after waiting. Rekeying and the other
-SRTP transforms are not implemented. The
+The implemented SRTP transforms are AES counter mode with a 128-bit key and HMAC-SHA1 with an
+80-bit authentication tag, plus AEAD AES-GCM with exact 128-bit and 256-bit key policies. Receiving
+SRTP and SRTCP keep separate 64-packet replay windows: an authenticated packet is accepted once,
+and authentication succeeds before either window or rollover state changes. Packets older than the
+window are refused rather than accepted after waiting. Rekeying and header-extension encryption are
+not implemented. The
 [RFC compliance table](compliance.md) records these limits alongside the supported portions of
 RFC 3711 and RFC 4568.
 

@@ -7,6 +7,78 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-08-14
+
+Eight content stories close at the stable boundary. The bounded v1 endpoint-library contract is now
+implemented across ICE and TURN reachability, AEAD-SRTP proof, long-lived Outbound registration,
+high-level endpoint configuration and a mechanically guarded Supported Rust API.
+
+### Added
+
+- **The production endpoint path has one Supported call configuration for both SIP roles.**
+  `CallConfig` carries the local media address, codec/security/ICE policy and initial direction to
+  both dialing and answering. TURN credentials are validated before I/O, registration leases gain
+  an opaque builder-based configuration, and a registry-shaped downstream consumer holds the
+  complete registration, call-lifecycle, transfer, relay and encrypted-media surface.
+
+- **Supported Rust APIs now have a mechanical v1 compatibility boundary.** A pinned, offline
+  rustdoc extraction covers every publishable package and rejects removals, signature changes and
+  lost source-compatibility reservations. A separate locked consumer compiles against extracted
+  package archives and proves the release surface does not accidentally depend on live workspace
+  source.
+
+- **Configured TURN relay is available through the call API in both SIP roles.** The client owns
+  Allocate, Refresh, CreatePermission and Send/Data lifetimes, negotiates modern long-term
+  authentication, carries selected relayed media, and preserves viable host candidates when the
+  configured relay cannot be used.
+
+- **Outbound registrations now own their complete flow lifetime.** Registration refresh,
+  negotiated UDP or stream keepalives, independent flow recovery, cancellation, socket closure and
+  task joining are one bounded operation reached by both the library and diagnostic phone.
+
+- **Completed controlling ICE sessions generate `remote-candidates` on later offers.** The value is
+  derived only from nominated remote paths and is omitted by answers, controlled agents, incomplete
+  checklists and restart generations.
+
+- **Both AEAD-SRTP key sizes now carry independently reproducible key-derivation evidence.** Exact
+  DTLS-SRTP and SDES profiles carry non-silent media, while deliberately perturbed KDF builds keep
+  negotiating the requested suite and fail media authentication.
+
+### Changed
+
+- **Stable promotion is bounded by a normative endpoint-library content contract.** The v1 promise
+  is a production audio UAC/UAS library with its exact call, registration, transport, security,
+  reachability and Supported Rust API requirements; server roles and separate products remain
+  explicit exclusions rather than an open-ended “all SIP” promise.
+
+- **Stable readiness is now generated from five evidence predicates.** Post-alpha integrity and
+  caller reachability are derived; story-owned records bind contract-shaping, two-profile transport
+  interoperability and adoption by a separately governed downstream product. Private-product
+  identity and proprietary evidence remain confidential.
+
+- **Current documentation now states the v1 compatibility promise.** Supported Rust APIs and CLI
+  contracts evolve compatibly throughout major version 1, while explicitly Experimental roots
+  remain unfrozen and outside that baseline.
+
+### Fixed
+
+- **Supervised-worker process proofs no longer assume an operating-system scheduling order.** Crash,
+  process-identity and malformed-result checks wait for their observable runtime events while
+  treating an intervening non-blocking deadline miss as the specified pass-through behavior.
+
+- **Every changelog release heading now has a mechanically checked comparison link.** The public
+  documentation check follows the actual dated release order, including skipped candidate numbers,
+  and rejects a stale `Unreleased` base, a missing or duplicate definition, or a broken historical
+  chain.
+
+- **Partial-publication recovery now handles stable releases correctly.** It authenticates the
+  current ordinary workflow jobs, selects stable or prerelease GitHub metadata from the immutable
+  version, and verifies an existing record has the same kind.
+
+- **Public-document guards now derive release policy from the workspace version.** Stable content
+  cannot satisfy the checker with stale prerelease wording, and prerelease content cannot claim a
+  stable release; shared capability and Experimental-surface guards remain active in both modes.
+
 ## [1.0.0-rc.23] — 2026-08-10
 
 Five stories close in this candidate. Delayed offer/answer now covers the final-response carrier,
@@ -4611,7 +4683,13 @@ Stated so nobody has to discover it from a stack trace:
 - **Interop is verified against Kamailio only.** A second implementation with different
   opinions — Asterisk, as a B2BUA rather than a proxy — has not been tried.
 
-[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.17...HEAD
+[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.23...v1.0.0
+[1.0.0-rc.23]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.22...v1.0.0-rc.23
+[1.0.0-rc.22]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.21...v1.0.0-rc.22
+[1.0.0-rc.21]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.19...v1.0.0-rc.21
+[1.0.0-rc.19]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.18...v1.0.0-rc.19
+[1.0.0-rc.18]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.17...v1.0.0-rc.18
 [1.0.0-rc.17]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.16...v1.0.0-rc.17
 [1.0.0-rc.16]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.15...v1.0.0-rc.16
 [1.0.0-rc.15]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.14...v1.0.0-rc.15
@@ -4647,4 +4725,11 @@ Stated so nobody has to discover it from a stack trace:
 [0.10.0]: https://github.com/codewandler/sipx/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/codewandler/sipx/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/codewandler/sipx/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/codewandler/sipx/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/codewandler/sipx/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/codewandler/sipx/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/codewandler/sipx/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/codewandler/sipx/compare/v0.2.1...v0.3.0
+[0.2.1]: https://github.com/codewandler/sipx/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/codewandler/sipx/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/codewandler/sipx/releases/tag/v0.1.0

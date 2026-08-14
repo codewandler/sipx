@@ -243,6 +243,114 @@ class TheAnnouncementPredicateRule(unittest.TestCase):
         )
 
 
+class TheStablePredicateRule(unittest.TestCase):
+    """Stable promotion is generated without making private product identity public."""
+
+    def test_an_open_adoption_story_holds_stable_predicate_three_open(self):
+        predicate = maturity.STABLE[2]
+        found = {"X-152": {"status": "in-progress", "promotion": "3"}}
+        state, waiting = maturity.predicate_row(
+            predicate,
+            found,
+            predicates=maturity.STABLE,
+            field=maturity.PROMOTION_FIELD,
+            gate="stable-promotion",
+        )
+        self.assertEqual(state, "open")
+        self.assertEqual(waiting, "`X-152`")
+
+        found["X-152"]["status"] = "done"
+        state, waiting = maturity.predicate_row(
+            predicate,
+            found,
+            predicates=maturity.STABLE,
+            field=maturity.PROMOTION_FIELD,
+            gate="stable-promotion",
+        )
+        self.assertEqual((state, waiting), ("met (recorded)", "—"))
+
+    def test_a_missing_stable_declaration_is_unknown_not_met(self):
+        predicate = maturity.STABLE[2]
+        state, waiting = maturity.predicate_row(
+            predicate,
+            {},
+            predicates=maturity.STABLE,
+            field=maturity.PROMOTION_FIELD,
+            gate="stable-promotion",
+        )
+        self.assertEqual(state, "**unknown**")
+        self.assertIn("promotion: 3", waiting)
+
+    def test_an_invalid_stable_predicate_number_is_an_error(self):
+        with self.assertRaises(SystemExit) as caught:
+            maturity.predicate_stories(
+                {"X-1": {"status": "done", "promotion": "6"}},
+                predicates=maturity.STABLE,
+                field=maturity.PROMOTION_FIELD,
+                gate="stable-promotion",
+            )
+        self.assertIn("no stable-promotion predicate 6", str(caught.exception))
+
+    def test_current_alpha_failure_reopens_stable_integrity_even_with_release_evidence(self):
+        alpha = (maturity.Predicate(1, "Alpha integrity", "computed"),)
+        found = {"X-1": {"status": "ready", "predicate": "1"}}
+        state, waiting = maturity.stable_predicate_row(
+            maturity.STABLE[0],
+            found,
+            [],
+            alpha=alpha,
+            preserved_release="v1.0.0-beta.1",
+        )
+        self.assertEqual(state, "open")
+        self.assertIn("alpha predicate 1", waiting)
+
+    def test_stable_integrity_needs_a_post_alpha_release(self):
+        alpha = (maturity.Predicate(1, "Alpha integrity", "computed"),)
+        found = {"X-1": {"status": "done", "predicate": "1"}}
+        state, waiting = maturity.stable_predicate_row(
+            maturity.STABLE[0],
+            found,
+            [],
+            alpha=alpha,
+            preserved_release=None,
+        )
+        self.assertEqual(state, "open")
+        self.assertIn("later release", waiting)
+
+    def test_the_real_board_declares_every_story_backed_stable_predicate(self):
+        declared = maturity.predicate_stories(
+            maturity.stories(),
+            predicates=maturity.STABLE,
+            field=maturity.PROMOTION_FIELD,
+            gate="stable-promotion",
+        )
+        for predicate in maturity.STABLE:
+            if predicate.kind in {"computed", "recorded"}:
+                self.assertTrue(
+                    declared.get(predicate.number),
+                    f"no story declares `promotion: {predicate.number}`",
+                )
+
+    def test_the_generated_stable_table_names_the_separate_content_gate(self):
+        report = maturity.render()
+        self.assertIn("Stable `1.0.0` promotion readiness", report)
+        self.assertIn("bounded v1 content contract", report)
+        found = maturity.stories()
+        rows = maturity.registry()
+        evidence = maturity.release_preserving_alpha_integrity()
+        expected = sum(
+            maturity.stable_predicate_row(
+                predicate,
+                found,
+                rows,
+                preserved_release=evidence,
+            )[0].startswith("met")
+            for predicate in maturity.STABLE
+        )
+        self.assertIn(f"**{expected} of {len(maturity.STABLE)} evidence predicates met", report)
+        self.assertNotIn("private downstream product", report)
+
+
 class APredicateSeesEveryStoryFiledAgainstIt(unittest.TestCase):
     """`X-42`: the association is declared by the story, so filing one cannot be forgotten.
 

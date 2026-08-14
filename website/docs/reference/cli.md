@@ -54,7 +54,7 @@ remove the binding. `load-responder` refuses zero for `--cleanup` and
 
 `--help` is answered before any of this, so it still prints when the rest of the line is wrong.
 
-The long-running `dial`, `answer`, `load`, and `load-responder` commands handle Ctrl-C/SIGINT and,
+The long-running `dial`, `answer`, `register --keep-alive`, `load`, and `load-responder` commands handle Ctrl-C/SIGINT and,
 on Unix, supervisor SIGTERM through the same graceful stop path. The first signal is reported as
 `stop_signal: "interrupt"` or `"terminate"`; repeated supported signals do not shorten the
 command's documented cleanup bound or produce another terminal record. A clean signal stop exits
@@ -451,7 +451,7 @@ Register with a registrar: `sipx register sip:alice@example.com`
 | `--tls-cert <FILE>` | Mutual-TLS client certificate chain; requires `--tls-key` |
 | `--tls-key <FILE>` | Mutual-TLS client private key; requires `--tls-cert` |
 | `--header <H>` | Add an application-owned REGISTER field; repeat `Name: value` |
-| `--keep-alive` | Keep refreshing until interrupted |
+| `--keep-alive` | Keep refreshing until interrupted; with `--outbound`, also drive the accepted flow's STUN or CRLF keepalive and independent recovery |
 | `--outbound` | Register as one Outbound flow (RFC 5626): `reg-id` and `+sip.instance` on the Contact, the `outbound` option tag offered |
 | `--instance <URN>` | With `--outbound`: present this device identity rather than a freshly generated one — §4.1 wants it stable across restarts, and the CLI keeps no state, so persisting one is the caller's job |
 | `--push-provider <P>` | Push notification service this device can be woken through (RFC 8599). Requires `--push-prid` |
@@ -461,8 +461,9 @@ Register with a registrar: `sipx register sip:alice@example.com`
 | `--counters <FILE>` | Write flattened signalling counters as JSON; `--capture` implies `<capture>.counters.json` |
 | `--wake` | Act as though a push arrived once registered: send §4.1.3's binding-refresh REGISTER and report what it learned. Requires the push flags |
 
-Report fields: `status`, `aor`, `expires`, `refresh_in` — plus `flow` under `--outbound`
-(whether the registrar reported an Outbound registration, RFC 5626 §6) and `push` under the push
+Report fields: `status`, `aor`, `expires`, `refresh_in` — plus `flow`, stable `flow_id`, and
+`keepalive` (`stun`, `crlf`, or `none`) under `--outbound` (whether and how the registrar reported an
+Outbound registration, RFC 5626 §6) and `push` under the push
 flags (whether the registrar named the same push service, RFC 8599 §8.2). `--wake` adds a second
 report line with `status: "woken"` and, when the registrar assigned one, `purr`. Explicit transport
 selection adds `requested_transport` and `negotiated_transport` to the registration result.
@@ -476,14 +477,19 @@ exits `rejected` (3) or `unauthorized` (4) with its SIP status, and a connection
 exits `failed` (1) with the transport cause, neither of them waiting for the deadline. `--keep-alive`
 refreshes after a bounded attempt succeeds — the deadline bounds each attempt, not the lifetime of a
 registration being kept, so every refresh is bounded by it too and one invocation registers once
-rather than twice — and `--wake`'s binding refresh is a second attempt bounded the same way.
+rather than twice. With `--outbound`, the same bounded owner drives the selected flow's registered
+keepalive kind, reports a flow-local failure and its `retry_in` interval without ending peer flows,
+and keeps the stable `flow_id`; `--wake`'s binding refresh is a second attempt bounded the same way.
 
 Whichever way it ends, the record that ends a command is written after the work behind it has been
 joined: the endpoint is shut down, its transactions and timers are cancelled and waited on, and only
 then is the result printed. So a script that reads `--counters`, closes a `--capture` or reuses the
 `--local` port the moment it has the result is not racing anything this invocation left running.
 Under `--keep-alive` and `--wake` the registration line is progress rather than the last word, and
-the barrier belongs to the line that ends the run.
+the barrier belongs to the line that ends the run. An interrupted Outbound lifetime ends with
+`flow_tasks`, `flow_tasks_joined`, `flow_events_dropped`, measured `cleanup_ms`, and `stop_signal`;
+that line is emitted only after the owned endpoint and every flow task have joined. A retained
+`flow_failure` is an error message only, never credentials or a STUN transaction identifier.
 
 Combinations that cannot work are usage errors (exit 2), never parsed and dropped: half a push
 pair, `--push-param` alone, `--wake` without the push flags, `--instance` without `--outbound`,

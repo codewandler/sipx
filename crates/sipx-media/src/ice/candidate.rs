@@ -183,6 +183,13 @@ pub struct Gathered {
     /// The candidate's transport address. Equal to `base_address` for a host candidate; the
     /// address a STUN or TURN server reported otherwise.
     pub address: SocketAddr,
+    /// The address signalled as `raddr`/`rport` for a reflexive or relayed candidate.
+    ///
+    /// A server-reflexive candidate relates to its bound base; a relayed candidate relates to the
+    /// mapped address in the Allocate response. Keeping this separate from `base_address` is what
+    /// lets checks still leave the bound socket while SDP reports the address RFC 8839 §5.1
+    /// requires.
+    pub related_address: Option<SocketAddr>,
     /// How it was obtained.
     pub kind: CandidateType,
     /// Which component of the stream it is for.
@@ -214,6 +221,10 @@ impl Gathered {
             base,
             base_address,
             address,
+            related_address: match kind {
+                CandidateType::ServerReflexive | CandidateType::PeerReflexive => Some(base_address),
+                _ => None,
+            },
             kind,
             component,
             server,
@@ -661,6 +672,7 @@ mod tests {
             base: LocalBase(0),
             base_address: SocketAddr::new(ip.parse().unwrap(), port),
             address: SocketAddr::new(ip.parse().unwrap(), port),
+            related_address: None,
             kind: CandidateType::Host,
             component: component(1),
             server: None,
@@ -711,6 +723,7 @@ mod tests {
             base: LocalBase(0),
             base_address: SocketAddr::new(ip.parse().unwrap(), 5000),
             address: SocketAddr::new(ip.parse().unwrap(), 5000),
+            related_address: None,
             kind: CandidateType::Host,
             component: component(1),
             server: None,
@@ -751,6 +764,7 @@ mod tests {
             base: LocalBase(0),
             base_address: SocketAddr::new("192.0.2.1".parse().unwrap(), 5000 + component_id),
             address: SocketAddr::new("192.0.2.1".parse().unwrap(), 5000 + component_id),
+            related_address: None,
             kind: CandidateType::Host,
             component: component(component_id),
             server: None,

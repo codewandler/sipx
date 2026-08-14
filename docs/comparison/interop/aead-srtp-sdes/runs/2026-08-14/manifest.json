@@ -1,0 +1,61 @@
+{
+  "case": "aead-srtp-sdes",
+  "evaluated_at": "2026-08-14",
+  "negative": {
+    "build_manifest": "runs/2026-08-14/KdfPerturbationSdes.json",
+    "mutation": "right-align-aead-master-salt-in-14-octet-x",
+    "peer_log": "runs/2026-08-14/peer-KdfPerturbationSdes.log",
+    "peer_srtp_rejections": 50,
+    "result": "runs/2026-08-14/KdfPerturbationSdes-result.json",
+    "suite": "AEAD_AES_256_GCM"
+  },
+  "positive": {
+    "AEAD_AES_128_GCM": {
+      "peer_log": "runs/2026-08-14/peer-AEAD_AES_128_GCM.log",
+      "result": "runs/2026-08-14/AEAD_AES_128_GCM.json"
+    },
+    "AEAD_AES_256_GCM": {
+      "peer_log": "runs/2026-08-14/peer-AEAD_AES_256_GCM.log",
+      "result": "runs/2026-08-14/AEAD_AES_256_GCM.json"
+    }
+  },
+  "protocol": {
+    "codec": "PCMU/8000/1",
+    "keying": "SDES",
+    "media": "RTP/SAVP",
+    "signalling": "TLS"
+  },
+  "schema": "sipx.comparison.interop.run.v1",
+  "sha256": {
+    "adapter/Cargo.lock": "5501494cb2e266c9d4d63db8c53d80016058deac139b2b762446d67d0864496c",
+    "adapter/Cargo.toml": "e75a2df05015a86f83c2fbbf02f16f097e2daf39c2ee4fa98b2614bf4d7113fe",
+    "adapter/src/main.rs": "67870c669f8abfd61b3e682effe8ccfc903c13f323b31bd7652fd9265206d665",
+    "bounded.py": "adde36c76b7711edaf6525e2b4a78815290e5cbad62494ea05565254dfbd67cd",
+    "build-negative.py": "44a375a8bb0232da4437e4dd49fb66bb209ecca963e3276b23ffa918f355fed7",
+    "peer/accounts": "34b14fadb3e962afa64509907974c31b53b46b18c740e8b8e489afc769ff892f",
+    "peer/config": "5f4f7085c8aa51fe774a5e55a64d724cac114503451e59011294287e4d61b20c",
+    "reproduce.sh": "43e1471c2ab3050e48a80875af2143bddf4d2f81481c399597f55256ff13393b",
+    "runs/2026-08-14/AEAD_AES_128_GCM.json": "029cfb8daffc6aed5e5f22ff06ad93cf031ad029a1668a3eb17af16909b91d78",
+    "runs/2026-08-14/AEAD_AES_256_GCM.json": "e586282ac36ce1cb9ac2c0f8adf70b08a6582afd4e7024327e45760f46d9f827",
+    "runs/2026-08-14/KdfPerturbationSdes-result.json": "0303a2158105da069665de413a87844f823a03ed180ba1db39f44f046a5c353c",
+    "runs/2026-08-14/KdfPerturbationSdes.json": "a3cc6472c8125fd599df464179e5e54adc60273437f8b0d05b3bd6d33098d110",
+    "runs/2026-08-14/peer-AEAD_AES_128_GCM.log": "6ee8fc234786d2529432a31fe5f3a1da393a05a046db2f359da9f581a455927d",
+    "runs/2026-08-14/peer-AEAD_AES_256_GCM.log": "022079a57bbdfccad59eadf402337c183f430981611aadf46216dccabcaca6fd",
+    "runs/2026-08-14/peer-KdfPerturbationSdes.log": "a8a6bfa03903c095ae676c6e37e158f06548c79ef03c3409527ef427e7b94173",
+    "seal.py": "db511a5c7a23eaa9730e2f48401dbcdadc98151172067eb16ea821bbfa1a3bc2"
+  },
+  "source_under_test": {
+    "files": {
+      "crates/sipx-call/src/call/mod.rs": "06820fa6a50968d688e24071ef21b074ea1cd3dc9524275c95b7259a0542cfd9",
+      "crates/sipx-call/src/call/offer_answer.rs": "6318a1b76e82dd06d0dfb46f729716d0f48db63eb8e1428e4aebacc352b06b59",
+      "crates/sipx-call/src/media_policy.rs": "f3992ef75f02464322b74f60390683b605f4a1c186076379f2bb17325b966f1a",
+      "crates/sipx-media/src/lib.rs": "0a64bbed035e0a51f4d3a844503b66f26742b7bae9a75109c69867abaead6ffc",
+      "crates/sipx-media/src/session.rs": "07c70ae51a1893794170e4533c272c266a8204bfbc7f60f5c1b49a3ccfddde27",
+      "crates/sipx-rtp/src/srtp/mod.rs": "5c0fa7528b83b7e90802fcf1b3bb343cd32d63763beeb923a28d215edb26e631",
+      "crates/sipx-sdp/src/crypto.rs": "6a6d53bd9f821f11e0150e5f54bec9c114ff7e5ea724e283ca1a8d02bccdcddd"
+    },
+    "normal_binary_sha256": "fa5fe7773e628ee01e531d75f051f953128e98bd6dd6cd2ce2aedff9e391f197",
+    "perturbed_binary_sha256": "29b4e983ee09fdfa790d406b1cfc9b0d0a0f75b29193ce64149f18e081c047ca"
+  },
+  "subject": "baresip-v1"
+}

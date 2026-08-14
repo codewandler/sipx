@@ -114,6 +114,9 @@ pub enum Input {
         from: SocketAddr,
         /// The socket it arrived on.
         on: LocalBase,
+        /// How the datagram reached this base. A TURN Data indication is unwrapped before this
+        /// input and names `Relayed`; a direct datagram names `Host` even if NAT mapped it.
+        via: CandidateType,
         /// The bytes.
         bytes: Vec<u8>,
     },
@@ -145,6 +148,9 @@ pub enum Output {
     Send {
         /// Which socket to send from.
         on: LocalBase,
+        /// How to leave the base. Relayed sends are wrapped in a TURN Send indication by the
+        /// driver; every other kind is a direct UDP datagram.
+        kind: CandidateType,
         /// Where to send them.
         to: SocketAddr,
         /// The datagram.
@@ -211,6 +217,7 @@ struct Transaction {
     id: TransactionId,
     pair: PairId,
     on: LocalBase,
+    kind: CandidateType,
     /// The local address the request went out from — half of §7.2.5.2.1's symmetry test.
     from: SocketAddr,
     /// The address it was sent to — the other half.
@@ -281,6 +288,7 @@ enum Stopping {
 struct Selection {
     component: ComponentId,
     local: LocalBase,
+    local_kind: CandidateType,
     remote: SocketAddr,
     priority: u64,
 }
@@ -326,6 +334,12 @@ pub struct Agent {
     stopping: Stopping,
     selected: Vec<Selection>,
     failed: Vec<ComponentId>,
+    /// New local credentials have been drawn for a restart whose peer description has not arrived.
+    ///
+    /// The old selected pair deliberately keeps carrying media during that interval, but RFC 8839
+    /// §5.2's `remote-candidates` describes the completed *current* generation. Without this bit a
+    /// locally initiated restart offer would publish the previous generation's selected addresses.
+    local_restart_pending: bool,
 }
 
 impl Agent {
@@ -365,6 +379,7 @@ impl Agent {
             stopping: Stopping::Idle,
             selected: Vec::new(),
             failed: Vec::new(),
+            local_restart_pending: false,
         }
     }
 
@@ -425,6 +440,37 @@ impl Agent {
             .map(|selection| (selection.local, selection.remote))
     }
 
+    /// The selected peer addresses a subsequent offer must put in `a=remote-candidates`.
+    ///
+    /// RFC 8839 §5.2 permits the value only from the controlling agent after the checklist has
+    /// completed. Selected addresses are read from the agent rather than reconstructed from the
+    /// signalled candidates because a peer-reflexive winner need not occur in the peer's SDP.
+    #[must_use]
+    pub fn selected_remote_candidates(&self) -> Vec<sipx_sdp::ice::RemoteCandidate> {
+        if !self.role.is_controlling()
+            || self.local_restart_pending
+            || self.set.checklists().is_empty()
+            || self
+                .set
+                .checklists()
+                .iter()
+                .any(|checklist| checklist.state() != ChecklistState::Completed)
+        {
+            return Vec::new();
+        }
+        let mut selected: Vec<_> = self
+            .selected
+            .iter()
+            .map(|selection| sipx_sdp::ice::RemoteCandidate {
+                component: selection.component,
+                address: selection.remote.ip(),
+                port: selection.remote.port(),
+            })
+            .collect();
+        selected.sort_unstable_by_key(|candidate| candidate.component);
+        selected
+    }
+
     /// Feed the agent an event and get back what the driver must do.
     pub fn handle(&mut self, input: Input) -> Vec<Output> {
         let mut out = Vec::new();
@@ -440,13 +486,19 @@ impl Agent {
             } => {
                 self.credentials = credentials;
                 self.tiebreaker = tiebreaker;
+                self.local_restart_pending = true;
             }
             Input::LocalCandidate(gathered) => self.local_candidate(gathered),
             Input::GatheringDone => {
                 self.phase = self.phase.max(Phase::Gathered);
                 self.start(&mut out);
             }
-            Input::Datagram { from, on, bytes } => self.datagram(from, on, &bytes, &mut out),
+            Input::Datagram {
+                from,
+                on,
+                via,
+                bytes,
+            } => self.datagram(from, on, via, &bytes, &mut out),
             Input::DataSent { component } => {
                 if self.selected(component).is_some() {
                     out.push(Output::SetTimer {
@@ -496,6 +548,7 @@ impl Agent {
         if restart {
             self.restart(out);
         }
+        self.local_restart_pending = false;
         let added = self.merge_remote_candidates(candidates);
         if self.phase == Phase::Checking {
             if added > 0 {
@@ -790,13 +843,19 @@ impl Agent {
         if transaction.attempt < self.config.timers.rc {
             transaction.attempt = transaction.attempt.saturating_add(1);
             transaction.rto = self.config.timers.double(transaction.rto);
-            let (on, to, bytes, after) = (
+            let (on, kind, to, bytes, after) = (
                 transaction.on,
+                transaction.kind,
                 transaction.to,
                 transaction.bytes.clone(),
                 transaction.rto,
             );
-            out.push(Output::Send { on, to, bytes });
+            out.push(Output::Send {
+                on,
+                kind,
+                to,
+                bytes,
+            });
             out.push(Output::SetTimer {
                 timer: Timer::Retransmit(pair),
                 after,
@@ -824,6 +883,7 @@ impl Agent {
             if let Ok(bytes) = stun::keepalive(stun::new_transaction_id()) {
                 out.push(Output::Send {
                     on: selection.local,
+                    kind: selection.local_kind,
                     to: selection.remote,
                     bytes,
                 });
@@ -892,6 +952,7 @@ impl Agent {
 
         out.push(Output::Send {
             on,
+            kind: local.gathered.kind,
             to,
             bytes: bytes.clone(),
         });
@@ -905,6 +966,7 @@ impl Agent {
             id: transaction_id,
             pair: id,
             on,
+            kind: local.gathered.kind,
             from,
             to,
             bytes,
@@ -921,14 +983,23 @@ impl Agent {
 
     // ----------------------------------------------------------------------- inbound  datagrams
 
-    fn datagram(&mut self, from: SocketAddr, on: LocalBase, bytes: &[u8], out: &mut Vec<Output>) {
+    fn datagram(
+        &mut self,
+        from: SocketAddr,
+        on: LocalBase,
+        via: CandidateType,
+        bytes: &[u8],
+        out: &mut Vec<Output>,
+    ) {
         let Ok(message) = Message::decode(bytes) else {
             // [spec] §11.3: a malformed datagram is a dropped datagram, never a state change.
             return;
         };
         match message.class() {
-            Class::Request => self.inbound_check(from, on, &message, out),
-            Class::Success | Class::Error => self.inbound_response(from, on, &message, out),
+            Class::Request => self.inbound_check(from, on, via, &message, out),
+            Class::Success | Class::Error => {
+                self.inbound_response(from, on, via, &message, out);
+            }
             // §11's keepalive draws no response and means nothing to the state machine.
             Class::Indication => {}
         }
@@ -939,6 +1010,7 @@ impl Agent {
         &mut self,
         from: SocketAddr,
         on: LocalBase,
+        via: CandidateType,
         message: &Message,
         out: &mut Vec<Output>,
     ) {
@@ -960,6 +1032,7 @@ impl Agent {
                 if let Ok(bytes) = stun::role_conflict(message.transaction(), &peering) {
                     out.push(Output::Send {
                         on,
+                        kind: via,
                         to: from,
                         bytes,
                     });
@@ -974,6 +1047,7 @@ impl Agent {
         if let Ok(bytes) = stun::check_success(message.transaction(), &peering, from) {
             out.push(Output::Send {
                 on,
+                kind: via,
                 to: from,
                 bytes,
             });
@@ -984,7 +1058,7 @@ impl Agent {
             return;
         }
 
-        let Some(local_id) = self.base_candidate(on) else {
+        let Some(local_id) = self.base_candidate(on, via) else {
             return;
         };
         let Some(component) =
@@ -1155,11 +1229,14 @@ impl Agent {
         ))
     }
 
-    fn base_candidate(&self, on: LocalBase) -> Option<LocalId> {
+    fn base_candidate(&self, on: LocalBase, via: CandidateType) -> Option<LocalId> {
         self.local
             .iter()
-            .find(|candidate| {
-                candidate.gathered.base == on && candidate.gathered.kind == CandidateType::Host
+            .find(|candidate| candidate.gathered.base == on && candidate.gathered.kind == via)
+            .or_else(|| {
+                self.local.iter().find(|candidate| {
+                    candidate.gathered.base == on && candidate.gathered.kind == CandidateType::Host
+                })
             })
             .map(|candidate| candidate.id)
     }
@@ -1170,6 +1247,7 @@ impl Agent {
         &mut self,
         from: SocketAddr,
         on: LocalBase,
+        via: CandidateType,
         message: &Message,
         out: &mut Vec<Output>,
     ) {
@@ -1189,6 +1267,12 @@ impl Agent {
         // [spec] §11.3: an unauthenticated message moves nothing, including into Failed — or an
         // off-path attacker could fail every pair by answering the checks it can see.
         if !message.verify_integrity(peering.outbound_key()) {
+            return;
+        }
+        if (transaction.kind == CandidateType::Relayed) != (via == CandidateType::Relayed) {
+            // A response on the direct base does not prove that the relayed path worked, and a
+            // Data indication does not prove a direct pair. Leave the transaction live for the
+            // response on the route the request actually used.
             return;
         }
         // §7.2.5.2.1's symmetry test, before anything else is read: a response whose source is
@@ -1299,6 +1383,7 @@ impl Agent {
             base: base.gathered.base,
             base_address: base.gathered.base_address,
             address: mapped,
+            related_address: Some(base.gathered.base_address),
             kind: CandidateType::PeerReflexive,
             component: pair.component,
             server: None,
@@ -1534,6 +1619,7 @@ impl Agent {
             let selection = Selection {
                 component: *component,
                 local: base,
+                local_kind,
                 remote: *remote,
                 priority: *priority,
             };
@@ -1688,6 +1774,7 @@ mod tests {
             base: LocalBase(0),
             base_address: address,
             address,
+            related_address: None,
             kind: CandidateType::Host,
             component: ComponentId::RTP,
             server: None,
@@ -1819,6 +1906,7 @@ mod tests {
                     let outputs = target.handle(Input::Datagram {
                         from,
                         on: LocalBase(0),
+                        via: CandidateType::Host,
                         bytes,
                     });
                     driver.absorb(&outputs);
@@ -1900,6 +1988,7 @@ mod tests {
         agent.handle(Input::Datagram {
             from,
             on: LocalBase(0),
+            via: CandidateType::Host,
             bytes,
         })
     }
@@ -2084,6 +2173,7 @@ mod tests {
         subject.handle(Input::Datagram {
             from: address(BOB),
             on: LocalBase(0),
+            via: CandidateType::Host,
             bytes: rejection,
         });
 
@@ -2290,6 +2380,52 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_direct_response_cannot_complete_a_relayed_check() {
+        let mut subject = Agent::new(Config::default(), true, credentials("aaaa"), 100);
+        subject.handle(Input::LocalCandidate(Gathered {
+            base: LocalBase(0),
+            base_address: address(ALICE),
+            address: address("192.0.2.44:49152"),
+            related_address: Some(address(ALICE)),
+            kind: CandidateType::Relayed,
+            component: ComponentId::RTP,
+            server: Some("192.0.2.10".parse().unwrap()),
+        }));
+        subject.handle(Input::RemoteDescription {
+            credentials: credentials("bbbb"),
+            candidates: vec![host_line(address(BOB), "1")],
+            lite: false,
+        });
+        subject.handle(Input::GatheringDone);
+        let outputs = subject.handle(Input::TimerFired(Timer::Ta));
+        let transaction = requests(&outputs)[0].transaction();
+        let pair = subject.checklists().checklists()[0].pairs()[0].id;
+        let response = stun::check_success(transaction, &peer(), address(ALICE)).unwrap();
+
+        subject.handle(Input::Datagram {
+            from: address(BOB),
+            on: LocalBase(0),
+            via: CandidateType::Host,
+            bytes: response.clone(),
+        });
+        assert_eq!(
+            subject.checklists().pair(pair).unwrap().state,
+            PairState::InProgress
+        );
+
+        subject.handle(Input::Datagram {
+            from: address(BOB),
+            on: LocalBase(0),
+            via: CandidateType::Relayed,
+            bytes: response,
+        });
+        assert_eq!(
+            subject.checklists().pair(pair).unwrap().state,
+            PairState::Succeeded
+        );
+    }
+
     // ------------------------------------------------------------------------------- §14.3
 
     /// §14.3: "the RTO will be different for each transaction as the number of checks in the
@@ -2380,6 +2516,8 @@ mod tests {
         let (mut alice, mut bob, mut left, mut right) = two_agents((true, false), (900, 100));
         assert_eq!(alice.role(), Role::Controlling);
         assert_eq!(bob.role(), Role::Controlled);
+        assert!(alice.selected_remote_candidates().is_empty());
+        assert!(bob.selected_remote_candidates().is_empty());
 
         exchange(&mut alice, &mut bob, &mut left, &mut right, 6);
 
@@ -2394,6 +2532,26 @@ mod tests {
         assert_eq!(
             alice.checklists().checklists()[0].state(),
             ChecklistState::Completed
+        );
+        assert_eq!(
+            alice.selected_remote_candidates(),
+            vec![sipx_sdp::ice::RemoteCandidate {
+                component: ComponentId::RTP,
+                address: bob_address.ip(),
+                port: bob_address.port(),
+            }]
+        );
+        assert!(
+            bob.selected_remote_candidates().is_empty(),
+            "the controlled agent never emits remote-candidates"
+        );
+        alice.handle(Input::LocalCredentials {
+            credentials: credentials("cccc"),
+            tiebreaker: 901,
+        });
+        assert!(
+            alice.selected_remote_candidates().is_empty(),
+            "drawing restart credentials immediately retires the previous generation"
         );
         // And both ends fall quiet. §8.1.2 stops an agent generating triggered checks for a
         // concluded pair, without which each end's redundant check finds the other's pair
@@ -2432,6 +2590,7 @@ mod tests {
         let outputs = bob.handle(Input::Datagram {
             from: surprise,
             on: LocalBase(0),
+            via: CandidateType::Host,
             bytes: check,
         });
         right.absorb(&outputs);
@@ -2486,12 +2645,14 @@ mod tests {
                     for answer in bob.handle(Input::Datagram {
                         from: alice_address,
                         on: LocalBase(0),
+                        via: CandidateType::Host,
                         bytes,
                     }) {
                         if let Output::Send { bytes, .. } = answer {
                             alice.handle(Input::Datagram {
                                 from: bob_address,
                                 on: LocalBase(0),
+                                via: CandidateType::Host,
                                 bytes,
                             });
                         }

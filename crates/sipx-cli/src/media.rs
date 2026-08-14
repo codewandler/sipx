@@ -14,7 +14,7 @@ use crate::cli::{CodecChoice, IceChoice, MediaOptions, MediaProfileChoice, Media
 use crate::output::Report;
 
 /// A validated media selection and the result vocabulary associated with it.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct Selection {
     policy: MediaPolicy,
     security: Security,
@@ -231,27 +231,27 @@ impl Selection {
 
     /// The exact public call policy to pass to dial or answer.
     #[must_use]
-    pub(crate) const fn policy(self) -> MediaPolicy {
-        self.policy
+    pub(crate) fn policy(&self) -> MediaPolicy {
+        self.policy.clone()
     }
 
     /// Add requested values to a listener announcement or terminal result.
     #[must_use]
-    pub(crate) fn requested_report(self, report: Report) -> Report {
+    pub(crate) fn requested_report(&self, report: Report) -> Report {
         if !self.report {
             return report;
         }
         report
-            .text("media_profile", profile_name(self.policy.profile))
-            .text("requested_codecs", codec_names(self.policy.codecs))
+            .text("media_profile", profile_name(self.policy.profile()))
+            .text("requested_codecs", codec_names(self.policy.codecs()))
             .text("requested_media_security", self.security.name())
-            .text("requested_ice", ice_name(self.policy.ice))
+            .text("requested_ice", ice_name(self.policy.ice()))
     }
 
     /// Add values read from the established call, not inferred from the offer.
     #[must_use]
     pub(crate) fn negotiated_report(
-        self,
+        &self,
         report: Report,
         call: &sipx_call::Call,
         browser_role: &str,
@@ -368,11 +368,12 @@ const fn codec_name(codec: Codec) -> &'static str {
     }
 }
 
-const fn ice_name(ice: IcePolicy) -> &'static str {
+const fn ice_name(ice: &IcePolicy) -> &'static str {
     match ice {
         IcePolicy::Disabled => "disabled",
         IcePolicy::Host => "host",
         IcePolicy::Stun(_) => "stun",
+        IcePolicy::Turn(_) => "turn",
         // See `profile_name`: an unknown policy is named as unknown, not approximated.
         _ => "unknown",
     }
@@ -437,7 +438,7 @@ mod tests {
         ]);
         let selected = selection(&raw, TransportKind::Udp).unwrap();
         assert_eq!(
-            selected.policy().codecs.preferences().collect::<Vec<_>>(),
+            selected.policy().codecs().preferences().collect::<Vec<_>>(),
             [CodecPreference::Pcma, CodecPreference::Pcmu]
         );
     }
@@ -446,7 +447,7 @@ mod tests {
     fn l16_reaches_the_exact_call_policy() {
         let raw = raw(&["dial", "sip:bob@192.0.2.1", "--codec", "l16"]);
         let selected = selection(&raw, TransportKind::Udp).unwrap();
-        assert_eq!(selected.policy().codecs, Codecs::L16);
+        assert_eq!(selected.policy().codecs(), Codecs::L16);
     }
 
     /// M-44: `--codec g722` is a first-class ordered selection in every build — unlike Opus it
@@ -456,7 +457,7 @@ mod tests {
         let alone = raw(&["dial", "sip:bob@192.0.2.1", "--codec", "g722"]);
         let selected = selection(&alone, TransportKind::Udp).unwrap();
         assert_eq!(
-            selected.policy().codecs.preferences().collect::<Vec<_>>(),
+            selected.policy().codecs().preferences().collect::<Vec<_>>(),
             [CodecPreference::G722]
         );
 
@@ -470,7 +471,7 @@ mod tests {
         ]);
         let selected = selection(&ordered, TransportKind::Udp).unwrap();
         assert_eq!(
-            selected.policy().codecs.preferences().collect::<Vec<_>>(),
+            selected.policy().codecs().preferences().collect::<Vec<_>>(),
             [CodecPreference::G722, CodecPreference::Pcmu]
         );
     }

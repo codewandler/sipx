@@ -8,8 +8,8 @@
 //! Together they are what a busy-lamp field on a desk phone subscribes to: `dialog` says whether a
 //! line is ringing or in a call, `reg` says whether the phone is registered at all.
 //! **Supported** (`S-35`): [`sipx_call::Notifier`](https://docs.rs/sipx-call/latest/sipx_call/struct.Notifier.html)
-//! selects these package documents through the live endpoint dispatcher. Breaking changes receive
-//! migration guidance while sipx remains pre-1.0.
+//! selects these package documents through the live endpoint dispatcher. The Supported surface is
+//! frozen for compatible v1 evolution.
 //!
 
 use std::fmt::Write as _;

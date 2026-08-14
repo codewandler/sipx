@@ -728,6 +728,7 @@ pub(crate) async fn prepare(
     identity: crate::dtls::openssl::Identity,
     role: crate::dtls::Role,
     fingerprint: sipx_sdp::fingerprint::Fingerprint,
+    profile: Option<crate::dtls::Profile>,
     timeout: Duration,
     stop: Arc<crate::session::Stop>,
     discards: Arc<crate::counters::DiscardMeters>,
@@ -749,6 +750,7 @@ pub(crate) async fn prepare(
             identity,
             role,
             fingerprint,
+            profile,
             timeout,
             stop,
             discards,
@@ -797,6 +799,7 @@ async fn prepare_inner(
     identity: crate::dtls::openssl::Identity,
     role: crate::dtls::Role,
     fingerprint: sipx_sdp::fingerprint::Fingerprint,
+    profile: Option<crate::dtls::Profile>,
     timeout: Duration,
     stop: Arc<crate::session::Stop>,
     discards: Arc<crate::counters::DiscardMeters>,
@@ -815,7 +818,7 @@ async fn prepare_inner(
         rtp: Arc::new(Mutex::new(placeholder)),
         rtcp: Arc::new(Mutex::new(None)),
     };
-    let (agent, pending) = local.into_driver_parts();
+    let (agent, pending, allocations) = local.into_driver_parts();
     let peering = agent.peering().cloned();
     let crate::ice::driver::OwnedDriver {
         handle: ice,
@@ -823,7 +826,7 @@ async fn prepare_inner(
     } = crate::ice::driver::spawn_owned(
         agent,
         pending,
-        vec![Arc::clone(&socket)],
+        crate::ice::driver::BoundSockets::new(vec![Arc::clone(&socket)], allocations),
         destinations,
         Arc::clone(&stop),
         discards,
@@ -891,8 +894,13 @@ async fn prepare_inner(
     let dtls_tasks = Arc::clone(&profile_tasks);
     tasks.dtls = Some(tokio::task::spawn_blocking(move || {
         let _permit = dtls_tasks.enter();
-        let mut handshake = crate::dtls::openssl::Session::with_io(adapter, &identity)
-            .map_err(|error| crate::dtls::Error::Dtls(error.to_string()))?;
+        let mut handshake = match profile {
+            Some(profile) => {
+                crate::dtls::openssl::Session::with_io_profile(adapter, &identity, profile)
+            }
+            None => crate::dtls::openssl::Session::with_io(adapter, &identity),
+        }
+        .map_err(|error| crate::dtls::Error::Dtls(error.to_string()))?;
         crate::dtls::establish_verified(&mut handshake, role, Some(&fingerprint))
     }));
     let handshake = if let Some(worker) = tasks.dtls.as_mut() {
@@ -1071,10 +1079,13 @@ async fn owner_loop(
                     continue;
                 };
                 let peer = lock_ingress(&ingress).snapshot().selected.map(|pair| pair.remote);
-                if let Some(peer) = peer
-                    && socket.send_to(&bytes, peer).await.is_err()
-                {
-                    return;
+                if let Some(peer) = peer {
+                    let (destination, datagram) = ice
+                        .relay_datagram(sipx_sdp::ice::ComponentId::RTP, peer, &bytes)
+                        .unwrap_or((peer, bytes));
+                    if socket.send_to(&datagram, destination).await.is_err() {
+                        return;
+                    }
                 }
                 continue;
             }
@@ -1083,7 +1094,19 @@ async fn owner_loop(
         let Ok((length, source)) = received else {
             return;
         };
-        let bytes = datagram.get(..length).unwrap_or_default();
+        let wire = datagram.get(..length).unwrap_or_default();
+        let (source, bytes, via) = ice
+            .relayed_data(source, crate::ice::LocalBase(0), wire)
+            .map_or(
+                (source, wire, sipx_sdp::ice::CandidateType::Host),
+                |relayed| {
+                    (
+                        relayed.peer,
+                        relayed.data,
+                        sipx_sdp::ice::CandidateType::Relayed,
+                    )
+                },
+            );
         let disposition = lock_ingress(&ingress).admit(source, bytes);
         let IngressDisposition::Accepted(class) = disposition else {
             continue;
@@ -1102,7 +1125,9 @@ async fn owner_loop(
             }
         }
         let admitted = match class {
-            IngressClass::Stun => ice.datagram(source, crate::ice::LocalBase(0), bytes.to_vec()),
+            IngressClass::Stun => {
+                ice.datagram(source, crate::ice::LocalBase(0), via, bytes.to_vec())
+            }
             IngressClass::Dtls => dtls.try_send(bytes.to_vec()).is_ok(),
             IngressClass::Srtp => audio_packets
                 .try_send(Datagram {

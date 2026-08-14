@@ -167,7 +167,7 @@ mod tests {
 
         let attempt = running_for(Duration::from_secs(2), Duration::from_secs(5));
         let bounded = funded(&options, attempt.remaining());
-        let timeout = bounded.timeout.expect("the candidate is bounded");
+        let timeout = bounded.timeout().expect("the candidate is bounded");
         assert!(
             timeout <= Duration::from_secs(3) && timeout > Duration::from_millis(2_900),
             "each candidate is bounded by the remainder, not by the stated deadline: {timeout:?}"
@@ -178,7 +178,7 @@ mod tests {
                 &options,
                 running_for(Duration::from_secs(6), Duration::ZERO).remaining()
             )
-            .timeout
+            .timeout()
             .is_none(),
             "a caller that stated no deadline still gets none"
         );

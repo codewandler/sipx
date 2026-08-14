@@ -12,7 +12,7 @@ members = ["crates/*"]
 exclude = ["fuzz", "wasm", "heap-probe"]
 
 [workspace.package]
-version = "1.0.0-rc.23"
+version = "1.0.0"
 edition = "2024"
 # Raised from 1.85 by the DNS client needed to clear RUSTSEC-2026-0119. The alternative was
 # shipping a known denial of service in a parser that eats untrusted network data.
@@ -25,17 +25,17 @@ categories = ["network-programming", "multimedia"]
 
 [workspace.dependencies]
 # Internal crates
-sipx-sip = { path = "crates/sipx-sip", version = "1.0.0-rc.23" }
-sipx-sdp = { path = "crates/sipx-sdp", version = "1.0.0-rc.23" }
-sipx-rtp = { path = "crates/sipx-rtp", version = "1.0.0-rc.23" }
-sipx-audio = { path = "crates/sipx-audio", version = "1.0.0-rc.23" }
-sipx-media = { path = "crates/sipx-media", version = "1.0.0-rc.23" }
-sipx-transport = { path = "crates/sipx-transport", version = "1.0.0-rc.23" }
-sipx-ua = { path = "crates/sipx-ua", version = "1.0.0-rc.23", default-features = false }
-sipx-call = { path = "crates/sipx-call", version = "1.0.0-rc.23" }
-sipx-app = { path = "crates/sipx-app", version = "1.0.0-rc.23" }
-sipx-app-protocol = { path = "crates/sipx-app-protocol", version = "1.0.0-rc.23" }
-sipx-testkit = { path = "crates/sipx-testkit", version = "1.0.0-rc.23" }
+sipx-sip = { path = "crates/sipx-sip", version = "1.0.0" }
+sipx-sdp = { path = "crates/sipx-sdp", version = "1.0.0" }
+sipx-rtp = { path = "crates/sipx-rtp", version = "1.0.0" }
+sipx-audio = { path = "crates/sipx-audio", version = "1.0.0" }
+sipx-media = { path = "crates/sipx-media", version = "1.0.0" }
+sipx-transport = { path = "crates/sipx-transport", version = "1.0.0" }
+sipx-ua = { path = "crates/sipx-ua", version = "1.0.0", default-features = false }
+sipx-call = { path = "crates/sipx-call", version = "1.0.0" }
+sipx-app = { path = "crates/sipx-app", version = "1.0.0" }
+sipx-app-protocol = { path = "crates/sipx-app-protocol", version = "1.0.0" }
+sipx-testkit = { path = "crates/sipx-testkit", version = "1.0.0" }
 
 # Core
 bytes = "1"
@@ -80,6 +80,7 @@ hmac = "0.12"
 sha1 = "0.10"
 subtle = "2"
 md-5 = "0.10"
+precis-profiles = { version = "0.1.13", default-features = false }
 sha2 = "0.10"
 p256 = "0.13"
 base64 = "0.22"

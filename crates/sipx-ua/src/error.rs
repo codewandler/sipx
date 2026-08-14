@@ -78,6 +78,21 @@ pub enum Error {
     /// More flows were added than `reg-id` can number (RFC 5626 §4.2 caps it at 2^31 - 1).
     #[error("too many flows: reg-id cannot number more than 2^31 - 1 of them")]
     TooManyFlows,
+    /// A lifetime owner was configured with no room for even one flow.
+    #[error("the outbound flow limit must be non-zero")]
+    InvalidFlowLimit,
+    /// Adding this flow would exceed the caller's retained-state bound.
+    #[error("the outbound flow limit of {limit} has been reached")]
+    FlowLimitReached {
+        /// The configured maximum number of retained flows.
+        limit: usize,
+    },
+    /// A flow lifetime was started without a Tokio runtime to own its bounded tasks.
+    #[error("starting an outbound flow lifetime requires a Tokio runtime")]
+    RuntimeUnavailable,
+    /// An already registered agent without Outbound identity was offered to the flow owner.
+    #[error("the registered agent is not configured as an outbound flow")]
+    NotOutboundFlow,
     /// The registrar answered 555: it does not support the push notification service the
     /// `Contact` named (RFC 8599 §8.1).
     ///

@@ -9,14 +9,14 @@ The example below is a real file that CI compiles
 ([`crates/sipx-call/examples/answer_a_call.rs`](https://github.com/codewandler/sipx/blob/main/crates/sipx-call/examples/answer_a_call.rs)):
 
 Create a binary package with this complete dependency table; every directly imported sipx crate is
-pinned to the same exact prerelease:
+pinned to the same exact stable release:
 
 <!-- BEGIN generated:answer-consumer-dependencies -->
 ```toml
 [dependencies]
-sipx-call = "=1.0.0-rc.23"
-sipx-sip = "=1.0.0-rc.23"
-sipx-transport = "=1.0.0-rc.23"
+sipx-call = "=1.0.0"
+sipx-sip = "=1.0.0"
+sipx-transport = "=1.0.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 <!-- END generated:answer-consumer-dependencies -->

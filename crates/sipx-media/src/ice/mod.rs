@@ -10,8 +10,8 @@
 //!
 //! [`docs/specs/ice.md`]: https://github.com/codewandler/sipx/blob/main/docs/specs/ice.md
 //! **Supported** (`A-8`): calls reach the gathering and selected-pair driver through
-//! `sipx_call::MediaPolicy`. Breaking changes therefore carry a migration note even while sipx is
-//! pre-1.0; new enum variants and fields may still be added.
+//! `sipx_call::MediaPolicy`. The Supported surface is frozen for compatible v1 evolution;
+//! compatible additions use the reservations documented on their types.
 //!
 
 pub mod agent;
@@ -22,6 +22,7 @@ pub mod gather;
 pub mod negotiate;
 pub mod stun;
 pub mod timing;
+mod turn;
 
 pub use agent::{Agent, Config, Input, Output, Timer};
 pub use candidate::{Gathered, LocalBase, LocalCandidate, RemoteCandidate};
@@ -30,3 +31,4 @@ pub use driver::{IcePath, Local};
 pub use gather::{Gathering, LocalDescription};
 pub use negotiate::{ICE_MISMATCH, Negotiation, negotiate};
 pub use timing::Timers;
+pub use turn::{Relay, RelayCredentialError};

@@ -56,14 +56,14 @@
 //!
 //! # Stability
 //!
-//! sipx is pre-1.0, so **neither word below means frozen**. `1.0.0` is what freezes an API, and its
-//! predicates are in `docs/roadmap.md`. Until then:
+//! The Supported Rust API is frozen for compatible v1 evolution. Existing Supported paths and
+//! signatures remain source-compatible throughout major version 1; compatible additions use the
+//! reservations documented on their types.
 //!
-//! - **Supported** — meant to be depended on. Breaking changes get a `CHANGELOG.md` entry saying what
-//!   to do instead. New enum variants and new struct fields may still appear in a minor release, so a
-//!   downstream `match` should carry a `_` arm.
-//! - **Experimental** — may change shape or be removed without a migration note. Depend on it only if
-//!   you are prepared to follow it.
+//! - **Supported** — covered by the v1 compatibility contract. A breaking change waits for the next
+//!   major version.
+//! - **Experimental** — remains unfrozen and may change shape or be removed without a migration
+//!   note. Depend on it only if you are prepared to follow it.
 //!
 //!
 //! **Supported.** G.711, G.722 and L16 both ways, linear PCM conversion/resampling, mixing and WAV. Opus is behind the off-by-default `opus` feature
@@ -72,6 +72,12 @@
 //! normalized package manifests are checked with the feature off and on, including a clean packaged
 //! CLI build and run. `M-39` supplies rate-correct bidirectional CLI audio and independent-peer
 //! evidence in both SIP roles. Optional RFC 7587 `fmtp` controls are not implemented.
+//!
+//! <!-- BEGIN sipx-api-classification -->
+//! **Experimental Rust API roots:**
+//!
+//! - [`sipx_audio::opus`](crate::opus)
+//! <!-- END sipx-api-classification -->
 
 // This crate's inline test modules opt out of coverage instrumentation, so the
 // published figure measures the code rather than the tests measuring it. Never set outside

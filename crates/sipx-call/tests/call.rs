@@ -21,7 +21,10 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use sipx_audio::{Wav, g711, read_wav, write_wav};
-use sipx_call::{Call, Codecs, Credentials, Dispatched, Dispatcher, answer, answer_with, dial};
+use sipx_call::{
+    Call, CallConfig, Codecs, Credentials, Direction, Dispatched, Dispatcher, MediaAddress, answer,
+    answer_with, dial,
+};
 use sipx_media::RtcpQualityHook;
 use sipx_sip::{CSeq, HeaderName, Host, HostName, Limits, Message, Method, Response, Uri};
 use sipx_transport::{Config, Handle, Incoming, Target, bind};
@@ -241,6 +244,56 @@ async fn dispatched_invitation(
         Dispatched::Invitation(invitation) => invitation,
         other => panic!("expected an invitation, got {other:?}"),
     }
+}
+
+/// A-41: the answer role consumes the same opaque initial-direction configuration as dialing.
+#[tokio::test]
+async fn shared_call_config_applies_initial_direction_to_the_answer() {
+    const PCMU_OFFER: &str = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\n\
+                               c=IN IP4 127.0.0.1\r\nt=0 0\r\n\
+                               m=audio 40000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
+    let (answerer, answerer_incoming) = endpoint().await;
+    let (caller, _caller_incoming) = endpoint().await;
+    let invite = initial_offer(
+        caller.local_addr(),
+        answerer.local_addr(),
+        "z9hG4bK-a41-direction",
+        "a41-direction@example.test",
+        PCMU_OFFER,
+    );
+    let mut responses = caller
+        .send(invite.clone(), Target::udp(answerer.local_addr()))
+        .await
+        .expect("the configured INVITE leaves");
+    let invitation = dispatched_invitation(&answerer, answerer_incoming).await;
+    let configured =
+        CallConfig::new(MediaAddress::new(loopback())).with_initial_direction(Direction::RecvOnly);
+    let answering_endpoint = answerer.clone();
+    let answering = tokio::spawn(async move {
+        invitation
+            .answer_with_config(&answering_endpoint, configured)
+            .await
+            .expect("the configured answer succeeds")
+    });
+
+    let accepted = tokio::time::timeout(SIGNALLING_BOUND, responses.final_response())
+        .await
+        .expect("the configured answer is bounded")
+        .expect("the INVITE receives a final response");
+    let answer_body = String::from_utf8_lossy(accepted.body());
+    assert!(
+        answer_body.lines().any(|line| line == "a=recvonly"),
+        "the answer ignored CallConfig's initial direction: {answer_body}"
+    );
+    caller
+        .send_directly(
+            delayed_answer_ack(&caller, &invite, &accepted, &[]),
+            Target::udp(answerer.local_addr()),
+        )
+        .await
+        .expect("the answer is acknowledged");
+    let call = answering.await.expect("answer task joins");
+    drop(call);
 }
 
 async fn raw_response(socket: &tokio::net::UdpSocket) -> (Vec<u8>, Response) {

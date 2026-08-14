@@ -679,8 +679,8 @@ being confused with validation.
 
 This contract does not include, and completion MUST NOT imply:
 
-- TURN allocation or a relayed candidate. [ice.md](ice.md) and `M-24` own that future widening;
-  relay-required networks remain unsupported by the first profile.
+- TURN allocation or a relayed candidate. The general Rust call policy has that capability, but it
+  is not selected or claimed by this first browser profile.
 - video SDP, video RTP payloads, frame capture/rendering, congestion policy for video, or combined
   audio/video sessions.
 - data channels, SCTP, browser JavaScript APIs, DOM integration, a browser media engine, or a GUI.

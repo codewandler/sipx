@@ -1,13 +1,50 @@
 ---
 title: What's new
-description: Release highlights and adoption notes for the sipx 1.0.0-rc.23 release candidate.
+description: Release highlights and adoption notes for the stable sipx 1.0.0 release.
 ---
 
 # What's new
 
 <!-- BEGIN generated:release-heading -->
-## 1.0.0-rc.23 — 2026-08-10
+## 1.0.0 — 2026-08-14
 <!-- END generated:release-heading -->
+
+Stable 1.0 closes the bounded endpoint-library contract and freezes Supported Rust APIs and CLI
+contracts for compatible v1 evolution. Explicitly Experimental roots remain unfrozen. The release
+carries one high-level configuration for both SIP roles, complete Outbound flow ownership,
+configured TURN relay, completed-ICE `remote-candidates`, independent AEAD key-derivation evidence
+and a mechanical compatibility baseline.
+
+```bash
+cargo install --locked --version =1.0.0 sipx-cli
+```
+
+- **Supported means source-compatible throughout v1.** The checked baseline covers every
+  publishable library crate; the documented CLI contract protects existing commands, flags,
+  environment variables, output shapes and exit codes. Compatible additions remain possible
+  through explicit extension points.
+- **Dialing and answering share one production endpoint configuration.** Codec, media-security,
+  ICE, identity and initial-direction policy cross the Supported call boundary without dropping
+  defaults, and invalid relay or registration choices fail before network I/O.
+- **Configured TURN relay is part of the call path.** Allocation, refresh, permission and relayed
+  media lifetimes are owned and bounded; a failed relay leaves viable direct candidates available.
+- **Outbound registration owns its flows until cancellation.** Refreshes, negotiated keepalives,
+  independent recovery, socket closure and task joining are one operation reached by both the
+  library and diagnostic phone.
+- **ICE state survives into later offers.** A completed controlling generation emits only its
+  nominated remote components, while answers, incomplete checks, controlled agents and restarts
+  omit stale state.
+- **Both AEAD-GCM key sizes have independent positive and negative proof.** Exact SDES and
+  DTLS-SRTP calls carry non-silent media, while deliberately perturbed derivations still negotiate
+  the suite and then fail authentication.
+- **The v1 boundary is explicit and mechanically guarded.** The content contract states what the
+  production UAC/UAS audio library includes and excludes. A pinned Supported-API baseline plus a
+  package-only consumer reject accidental breaking changes and live-workspace dependencies.
+- **Separate-product adoption is recorded without exposing the product.** An authorized review
+  verified a non-test production integration against immutable public sipx source. The product's
+  identity, repository and proprietary details remain confidential.
+
+## 1.0.0-rc.23 — 2026-08-10
 
 RC.23 closes five stories: final-response delayed offer/answer, renegotiation-safe bridges and
 conferences, explicit media-address collision diagnostics, DNS-last cluster service resolution,
@@ -935,5 +972,5 @@ answer calls, but application callback bindings are not implemented.
 This website is built from `main`, so a page or API link may describe work newer than the tagged
 release. Use the exact crates.io version when reproducibility matters, and consult the
 [complete changelog](https://github.com/codewandler/sipx/blob/main/CHANGELOG.md) before updating a
-Git revision. Unreleased behavior is not part of `1.0.0-rc.23` merely because it appears on this
+Git revision. Unreleased behavior is not part of `1.0.0` merely because it appears on this
 site.

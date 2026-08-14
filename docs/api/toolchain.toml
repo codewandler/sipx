@@ -1,0 +1,5 @@
+# Rustdoc JSON is unstable, so both the compiler identity and its schema are release inputs.
+channel = "nightly-2026-07-28"
+commit = "09ee43b2d6055539771bee8ac30a6e56eb4db773"
+target = "x86_64-unknown-linux-gnu"
+rustdoc_format = 60

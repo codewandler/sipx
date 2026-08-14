@@ -10,10 +10,10 @@ sipx is a SIP and VoIP stack in Rust for engineers building telephony systems. U
 `sipx` command for repeatable calls from a shell, or embed the crates for control over
 signalling, registration, calls, and media.
 
-The current public prerelease is **`1.0.0-rc.23`**. The latest `main` branch can move ahead of
-that release, and this website documents the branch. Public APIs are not frozen before 1.0:
-Supported APIs receive migration notes when they break, while Experimental APIs may change or be
-removed without one. For a reproducible installation, use the tagged release in
+The current stable release is **`1.0.0`**. The latest `main` branch can move ahead of that release,
+and this website documents the branch. Supported Rust APIs remain source-compatible throughout the
+v1 line. Experimental APIs may change or be removed without migration guidance and remain
+unfrozen throughout v1. For a reproducible installation, use the tagged release in
 [Getting started](getting-started.md).
 
 ## Choose a path
@@ -24,7 +24,7 @@ Place or answer a call, register an address, play and record WAV audio, send DTM
 machine-readable results:
 
 ```bash
-cargo install --locked --version =1.0.0-rc.23 sipx-cli
+cargo install --locked --version =1.0.0 sipx-cli
 sipx version
 ```
 
@@ -49,8 +49,8 @@ supports UDP, TCP, TLS, WebSocket, and secure WebSocket.
 |---|---|
 | Calls | Place and answer, hold and resume, blind and attended transfer, session timers, bounded confirmed-dialog snapshots |
 | Registration | Digest authentication, lease refresh, Outbound flows, `Path`, `Service-Route`, GRUU, push-assisted refresh |
-| Audio | G.711, L16, DTMF, rate-converting PCM/WAV playback and recording; selectable Opus behind a Cargo feature |
-| Media | RTP/RTCP, jitter buffering, quality statistics, ICE, SDES-keyed SRTP, optional DTLS-SRTP |
+| Audio | G.711, G.722, L16, DTMF, rate-converting PCM/WAV playback and recording; selectable Opus behind a Cargo feature |
+| Media | RTP/RTCP, jitter buffering, quality statistics, host/STUN/TURN ICE, SDES-keyed SRTP, optional DTLS-SRTP |
 | Transports | UDP, TCP, TLS, WebSocket, secure WebSocket; live server-identity rotation and bounded endpoint policy/observation |
 | SIP events | Inbound and outbound subscriptions, registration discovery, conditional presence publication, application-owned in-dialog requests |
 | Operations and tests | Quiet-by-default libraries, deterministic call and realtime peers, finite RTP echo, bounded signalling load responder |
@@ -59,7 +59,8 @@ supports UDP, TCP, TLS, WebSocket, and secure WebSocket.
 sipx is a **user agent**, not a proxy, registrar, or configuration-driven PBX. It does not
 route calls or store registrations for other endpoints. One narrow
 [browser-audio profile](reference/browser-audio-proof.md) composes WSS, ICE, DTLS-SRTP and Opus;
-TURN relay, video, and a general browser media stack remain outside the shipped surface. See
+that profile does not add relayed ICE, and sipx does not operate a TURN service. Video and a general
+browser media stack remain outside the shipped surface. See
 [Does sipx fit?](guides/does-this-fit.md) for the boundary and the
 [RFC compliance table](reference/compliance.md) for protocol-level detail.
 
@@ -68,8 +69,8 @@ TURN relay, video, and a general browser media stack remain outside the shipped 
 The workspace includes the `sipx-host` process. Document-mode webhooks can drive real calls,
 authenticated full-duplex sessions can replace call programs and originate calls, and a configured
 realtime binding can carry one routed G.711 call to one authenticated realtime WebSocket session.
-The Rust host surfaces are Supported under the pre-1.0 policy; the language-neutral `sipx.app.v1`
-wire contract remains Experimental. The realtime contract is proven against a deterministic peer,
+The Rust host surfaces are Supported by the v1 source-compatibility promise; the language-neutral
+`sipx.app.v1` wire contract remains Experimental. The realtime contract is proven against a deterministic peer,
 but its credentialed live-endpoint interoperability proof has not yet been recorded. There is no
 embedded runtime or TypeScript SDK. See the
 [Application host overview](sdk/overview.md) for that boundary.

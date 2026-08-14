@@ -15,23 +15,24 @@ use crate::registrar::{self, Lease, Outcome, Registration, RegistrationObservati
 
 /// How a user agent is configured.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Config {
     /// The address of record, as it appears in `To` and `From`.
-    pub aor: String,
+    pub(crate) aor: String,
     /// Where to reach this agent.
-    pub contact: String,
+    pub(crate) contact: String,
     /// The registrar's URI.
-    pub registrar: Uri,
+    pub(crate) registrar: Uri,
     /// Where to send registrations.
-    pub target: Target,
+    pub(crate) target: Target,
     /// Credentials, if the registrar wants them.
-    pub credentials: Option<Credentials>,
+    pub(crate) credentials: Option<Credentials>,
     /// The lease to ask for.
-    pub expires: Duration,
+    pub(crate) expires: Duration,
     /// What to put in `User-Agent`.
-    pub user_agent: String,
+    pub(crate) user_agent: String,
     /// Validated application-owned fields preserved on every REGISTER attempt and refresh.
-    pub headers: Vec<sipx_sip::Header>,
+    pub(crate) headers: Vec<sipx_sip::Header>,
     /// The device identity this agent registers under (RFC 5626 §4.1, RFC 5627 §4.1).
     ///
     /// One field for both mechanisms, because both name the instance with the same
@@ -41,22 +42,22 @@ pub struct Config {
     ///
     /// `None` registers the ordinary way: a `Contact` naming an address and nothing naming the
     /// device behind it, so every restart looks to the registrar like a new phone.
-    pub instance: Option<InstanceId>,
+    pub(crate) instance: Option<InstanceId>,
     /// Which Outbound flow this registration is, when Outbound is in use (RFC 5626 §4.2).
     ///
     /// `None` registers the ordinary way: a binding that is only as durable as the NAT mapping
     /// behind it.
-    pub reg_id: Option<RegId>,
+    pub(crate) reg_id: Option<RegId>,
     /// Which GRUU this agent uses, when it is asking for one (RFC 5627 §4.4).
     ///
     /// `None` does not ask. See [`gruu::Kind`] for why the choice is the application's.
-    pub gruu: Option<gruu::Kind>,
+    pub(crate) gruu: Option<gruu::Kind>,
     /// How a push notification service can wake this device (RFC 8599 §4.1.2).
     ///
     /// `None` registers without push, which is every client that holds a connection of its
     /// own. Set it with [`Config::with_push`]; the values come from the application's push
     /// service, behind [`crate::push::PushService`].
-    pub push: Option<sipx_sip::push::Device>,
+    pub(crate) push: Option<sipx_sip::push::Device>,
     /// How long a keep-alive may go unanswered before the flow is failed (RFC 5626 §4.4).
     ///
     /// Defaults to §4.4.1's ten seconds. It is configurable because the RFC gives *two* rules and
@@ -64,7 +65,7 @@ pub struct Config {
     /// bounds the STUN case by 7 retransmissions of an RTO estimate instead. Ten seconds is the
     /// conservative reading of both, and a deployment that knows its round-trip times — or a test
     /// that does not want to wait — is entitled to a shorter one.
-    pub keepalive_timeout: Duration,
+    pub(crate) keepalive_timeout: Duration,
 }
 
 pub use crate::outbound::Flow;
@@ -128,6 +129,29 @@ impl Config {
         let candidates = resolver.resolve(&registrar, None, None).await?;
         let target = sipx_transport::destination::first(&candidates)?.clone();
         Ok(Self::new(aor, contact, registrar, target))
+    }
+
+    /// Request this registration lifetime.
+    ///
+    /// The registrar may grant a shorter lease; [`UserAgent::register`] returns the granted
+    /// [`Lease`] and the lifetime owner refreshes from that value rather than this request.
+    #[must_use]
+    pub const fn with_expires(mut self, expires: Duration) -> Self {
+        self.expires = expires;
+        self
+    }
+
+    /// Set the product token sent on registration attempts.
+    #[must_use]
+    pub fn with_user_agent(mut self, user_agent: impl Into<String>) -> Self {
+        self.user_agent = user_agent.into();
+        self
+    }
+
+    /// The resolved transport destination used for registration attempts.
+    #[must_use]
+    pub const fn target(&self) -> &Target {
+        &self.target
     }
 
     /// Fail a flow whose keep-alive is unanswered for this long (RFC 5626 §4.4).
@@ -808,6 +832,22 @@ impl UserAgent {
                 }
             }
         }
+    }
+
+    /// Close this agent's owned endpoint and wait for its durable cleanup barrier.
+    ///
+    /// Kept crate-private because a standalone caller already owns the [`Handle`] it supplied;
+    /// the Outbound lifetime owner needs this seam after consuming several agents.
+    pub(crate) async fn shutdown(self) {
+        self.endpoint.shutdown().await;
+    }
+
+    /// The configured Outbound identity, for transferring an existing lease to its owner.
+    pub(crate) fn outbound_identity(&self) -> Option<Flow> {
+        Some(Flow {
+            instance: self.config.instance.clone()?,
+            reg_id: self.config.reg_id?,
+        })
     }
 
     /// One binding refresh, under whatever deadline the caller stated over its attempts.

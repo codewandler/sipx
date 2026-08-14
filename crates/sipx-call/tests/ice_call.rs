@@ -11,14 +11,23 @@
 // would make the test harder to read, not easier. Same allow, same reason, as `call.rs`.
 #![allow(clippy::similar_names)]
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use sipx_call::{DialOptions, IcePolicy, MediaPolicy, answer_with_policy, dial};
-use sipx_media::{Interrupt, RtcpQualityHook};
+use hmac::{Hmac, Mac as _};
+use sha2::{Digest as _, Sha256};
+use sipx_call::{
+    CallConfig, DialOptions, Dispatched, Dispatcher, IcePolicy, MediaAddress, MediaPolicy,
+    TurnPolicy, answer_with_policy, dial,
+};
+use sipx_media::{IcePath, Interrupt, RtcpQualityHook};
 use sipx_sip::{Host, HostName, Uri};
 use sipx_transport::{Config, Target, bind};
 use tokio::net::UdpSocket;
+use tokio::sync::{mpsc, oneshot};
+use tokio::task::{JoinHandle, JoinSet};
 
 fn loopback() -> IpAddr {
     "127.0.0.1".parse().expect("loopback")
@@ -157,6 +166,515 @@ fn behind_nat(message: &[u8], dead: std::net::SocketAddr) -> Vec<u8> {
     format!("{headers}\r\n\r\n{body}").into_bytes()
 }
 
+const STUN_COOKIE: u32 = 0x2112_a442;
+const TURN_ALLOCATE: u16 = 0x0003;
+const TURN_SEND: u16 = 0x0006;
+const TURN_DATA: u16 = 0x0007;
+const TURN_CREATE_PERMISSION: u16 = 0x0008;
+const TURN_USERNAME: u16 = 0x0006;
+const TURN_ERROR_CODE: u16 = 0x0009;
+const TURN_LIFETIME: u16 = 0x000d;
+const TURN_XOR_PEER: u16 = 0x0012;
+const TURN_DATA_ATTRIBUTE: u16 = 0x0013;
+const TURN_REALM: u16 = 0x0014;
+const TURN_NONCE: u16 = 0x0015;
+const TURN_XOR_RELAYED: u16 = 0x0016;
+const TURN_MESSAGE_INTEGRITY_SHA256: u16 = 0x001c;
+const TURN_PASSWORD_ALGORITHM: u16 = 0x001d;
+const TURN_XOR_MAPPED: u16 = 0x0020;
+const TURN_PASSWORD_ALGORITHMS: u16 = 0x8002;
+const TURN_SHA256_NONCE: &str = "obMatJos2AAABcall-layer";
+const TURN_REALM_VALUE: &str = "example.com";
+const TURN_CREDENTIAL_MATERIAL: &[u8] = b"1000:example.com:relay-password";
+
+type HmacSha256 = Hmac<Sha256>;
+
+/// Rewrite only signalling facts: host/default destinations go silent, while component one's
+/// relayed candidate remains reachable. Both roles receive this treatment, so no host-to-host
+/// pair can succeed. Traffic addressed to the retained candidate enters an actual allocation
+/// socket and returns to its client as a TURN Data indication.
+fn behind_relay(message: &[u8], dead: SocketAddr) -> Vec<u8> {
+    let text = String::from_utf8_lossy(message);
+    let (headers, body) = text.split_once("\r\n\r\n").expect("SIP message has a body");
+    let mut rewritten = Vec::new();
+    let mut relay_seen = false;
+    for line in body.lines() {
+        if line.starts_with("c=IN IP") {
+            rewritten.push(format!("c=IN IP4 {}", dead.ip()));
+        } else if let Some(rest) = line.strip_prefix("m=audio ") {
+            let (_, tail) = rest.split_once(' ').expect("media line fields");
+            rewritten.push(format!("m=audio {} {tail}", dead.port()));
+        } else if let Some(value) = line.strip_prefix("a=candidate:") {
+            let fields: Vec<&str> = value.split_whitespace().collect();
+            if fields.get(1) == Some(&"1") && fields.get(7) == Some(&"relay") {
+                rewritten.push(line.to_owned());
+                relay_seen = true;
+            }
+        } else if !line.is_empty() {
+            rewritten.push(line.to_owned());
+        }
+    }
+    assert!(
+        relay_seen,
+        "TURN gathering did not produce a relayed candidate: {body}"
+    );
+    rewritten.push(format!(
+        "a=candidate:dead 1 UDP 2130706431 {} {} typ host",
+        dead.ip(),
+        dead.port()
+    ));
+    let body = format!("{}\r\n", rewritten.join("\r\n"));
+    let headers = headers
+        .lines()
+        .map(|line| {
+            if line
+                .split_once(':')
+                .is_some_and(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+            {
+                format!("Content-Length: {}", body.len())
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    format!("{headers}\r\n\r\n{body}").into_bytes()
+}
+
+fn turn_message_type(class: u16, method: u16) -> u16 {
+    (method & 0x000f)
+        | ((method & 0x0070) << 1)
+        | ((method & 0x0f80) << 2)
+        | ((class & 0x1) << 4)
+        | ((class & 0x2) << 7)
+}
+
+fn turn_class_and_method(raw: u16) -> (u16, u16) {
+    let class = ((raw & 0x0100) >> 7) | ((raw & 0x0010) >> 4);
+    let method = (raw & 0x000f) | ((raw & 0x00e0) >> 1) | ((raw & 0x3e00) >> 2);
+    (class, method)
+}
+
+fn turn_transaction(datagram: &[u8]) -> Option<[u8; 12]> {
+    datagram.get(8..20)?.try_into().ok()
+}
+
+fn turn_kind(datagram: &[u8]) -> Option<(u16, u16)> {
+    let raw = u16::from_be_bytes(datagram.get(..2)?.try_into().ok()?);
+    Some(turn_class_and_method(raw))
+}
+
+fn turn_attribute(datagram: &[u8], expected: u16) -> Option<&[u8]> {
+    let stated = usize::from(u16::from_be_bytes(datagram.get(2..4)?.try_into().ok()?));
+    let body = datagram.get(20..20usize.checked_add(stated)?)?;
+    let mut offset = 0usize;
+    while offset < body.len() {
+        let kind = u16::from_be_bytes(body.get(offset..offset.checked_add(2)?)?.try_into().ok()?);
+        let length_at = offset.checked_add(2)?;
+        let length = usize::from(u16::from_be_bytes(
+            body.get(length_at..length_at.checked_add(2)?)?
+                .try_into()
+                .ok()?,
+        ));
+        let start = offset.checked_add(4)?;
+        let value = body.get(start..start.checked_add(length)?)?;
+        if kind == expected {
+            return Some(value);
+        }
+        offset = start.checked_add(length.checked_add(3)? & !3)?;
+    }
+    None
+}
+
+fn turn_header(class: u16, method: u16, transaction: [u8; 12]) -> Vec<u8> {
+    let mut message = Vec::with_capacity(160);
+    message.extend_from_slice(&turn_message_type(class, method).to_be_bytes());
+    message.extend_from_slice(&0u16.to_be_bytes());
+    message.extend_from_slice(&STUN_COOKIE.to_be_bytes());
+    message.extend_from_slice(&transaction);
+    message
+}
+
+fn turn_push_attribute(message: &mut Vec<u8>, kind: u16, value: &[u8]) {
+    message.extend_from_slice(&kind.to_be_bytes());
+    message.extend_from_slice(
+        &u16::try_from(value.len())
+            .expect("fixture attribute fits")
+            .to_be_bytes(),
+    );
+    message.extend_from_slice(value);
+    message.extend(std::iter::repeat_n(0, (4 - value.len() % 4) % 4));
+}
+
+fn turn_set_length(message: &mut [u8], extra: usize) {
+    let body = message.len().checked_sub(20).expect("fixture header");
+    let length = u16::try_from(body.checked_add(extra).expect("fixture length")).expect("fits");
+    message[2..4].copy_from_slice(&length.to_be_bytes());
+}
+
+fn turn_xor_address(address: SocketAddr, transaction: [u8; 12]) -> Vec<u8> {
+    let port = address.port() ^ u16::try_from(STUN_COOKIE >> 16).expect("cookie prefix");
+    match address {
+        SocketAddr::V4(address) => {
+            let mut value = vec![0, 0x01];
+            value.extend_from_slice(&port.to_be_bytes());
+            value.extend_from_slice(&(u32::from(*address.ip()) ^ STUN_COOKIE).to_be_bytes());
+            value
+        }
+        SocketAddr::V6(address) => {
+            let mut value = vec![0, 0x02];
+            value.extend_from_slice(&port.to_be_bytes());
+            let mask: [u8; 16] = [
+                STUN_COOKIE.to_be_bytes()[0],
+                STUN_COOKIE.to_be_bytes()[1],
+                STUN_COOKIE.to_be_bytes()[2],
+                STUN_COOKIE.to_be_bytes()[3],
+                transaction[0],
+                transaction[1],
+                transaction[2],
+                transaction[3],
+                transaction[4],
+                transaction[5],
+                transaction[6],
+                transaction[7],
+                transaction[8],
+                transaction[9],
+                transaction[10],
+                transaction[11],
+            ];
+            value.extend(
+                address
+                    .ip()
+                    .octets()
+                    .iter()
+                    .zip(mask)
+                    .map(|(byte, mask)| byte ^ mask),
+            );
+            value
+        }
+    }
+}
+
+fn turn_decode_xor_address(value: &[u8], transaction: [u8; 12]) -> Option<SocketAddr> {
+    let port = u16::from_be_bytes(value.get(2..4)?.try_into().ok()?)
+        ^ u16::try_from(STUN_COOKIE >> 16).ok()?;
+    match *value.get(1)? {
+        0x01 => {
+            let address = u32::from_be_bytes(value.get(4..8)?.try_into().ok()?) ^ STUN_COOKIE;
+            Some(SocketAddr::new(
+                std::net::Ipv4Addr::from(address).into(),
+                port,
+            ))
+        }
+        0x02 => {
+            let encoded: [u8; 16] = value.get(4..20)?.try_into().ok()?;
+            let cookie = STUN_COOKIE.to_be_bytes();
+            let mut mask = [0u8; 16];
+            mask[..4].copy_from_slice(&cookie);
+            mask[4..].copy_from_slice(&transaction);
+            let mut address = [0u8; 16];
+            for (decoded, (byte, mask)) in address.iter_mut().zip(encoded.into_iter().zip(mask)) {
+                *decoded = byte ^ mask;
+            }
+            Some(SocketAddr::new(address.into(), port))
+        }
+        _ => None,
+    }
+}
+
+fn turn_finish_sha256(message: &mut Vec<u8>) {
+    turn_set_length(message, 36);
+    let key = Sha256::digest(TURN_CREDENTIAL_MATERIAL);
+    let mut mac = <HmacSha256 as hmac::Mac>::new_from_slice(&key).expect("HMAC accepts SHA-256");
+    mac.update(message);
+    let tag = mac.finalize().into_bytes();
+    turn_push_attribute(message, TURN_MESSAGE_INTEGRITY_SHA256, &tag);
+}
+
+fn turn_challenge(transaction: [u8; 12], code: u16) -> Vec<u8> {
+    let mut message = turn_header(3, TURN_ALLOCATE, transaction);
+    turn_push_attribute(
+        &mut message,
+        TURN_ERROR_CODE,
+        &[
+            0,
+            0,
+            u8::try_from(code / 100).expect("class"),
+            u8::try_from(code % 100).expect("code"),
+        ],
+    );
+    turn_push_attribute(&mut message, TURN_REALM, TURN_REALM_VALUE.as_bytes());
+    turn_push_attribute(&mut message, TURN_NONCE, TURN_SHA256_NONCE.as_bytes());
+    // SHA-256 first, MD5 second: RFC 8489's PASSWORD-ALGORITHMS entries have empty parameters.
+    turn_push_attribute(
+        &mut message,
+        TURN_PASSWORD_ALGORITHMS,
+        &[0, 2, 0, 0, 0, 1, 0, 0],
+    );
+    turn_set_length(&mut message, 0);
+    message
+}
+
+fn turn_allocation_success(
+    transaction: [u8; 12],
+    relayed: SocketAddr,
+    mapped: SocketAddr,
+) -> Vec<u8> {
+    let mut message = turn_header(2, TURN_ALLOCATE, transaction);
+    turn_push_attribute(
+        &mut message,
+        TURN_XOR_RELAYED,
+        &turn_xor_address(relayed, transaction),
+    );
+    turn_push_attribute(
+        &mut message,
+        TURN_XOR_MAPPED,
+        &turn_xor_address(mapped, transaction),
+    );
+    turn_push_attribute(&mut message, TURN_LIFETIME, &600u32.to_be_bytes());
+    turn_finish_sha256(&mut message);
+    message
+}
+
+fn turn_permission_success(transaction: [u8; 12]) -> Vec<u8> {
+    let mut message = turn_header(2, TURN_CREATE_PERMISSION, transaction);
+    turn_finish_sha256(&mut message);
+    message
+}
+
+fn turn_data_indication(peer: SocketAddr, data: &[u8]) -> Vec<u8> {
+    let transaction = [0xa5; 12];
+    let mut message = turn_header(1, TURN_DATA, transaction);
+    turn_push_attribute(
+        &mut message,
+        TURN_XOR_PEER,
+        &turn_xor_address(peer, transaction),
+    );
+    turn_push_attribute(&mut message, TURN_DATA_ATTRIBUTE, data);
+    turn_set_length(&mut message, 0);
+    message
+}
+
+struct RelayedDatagram {
+    allocation: usize,
+    from: SocketAddr,
+    bytes: Vec<u8>,
+}
+
+#[derive(Default)]
+struct TurnCounters {
+    send_indications: AtomicUsize,
+    data_indications: AtomicUsize,
+}
+
+struct TurnFixture {
+    address: SocketAddr,
+    counters: Arc<TurnCounters>,
+    shutdown: oneshot::Sender<()>,
+    task: JoinHandle<()>,
+}
+
+impl TurnFixture {
+    async fn shutdown(self) {
+        let _ = self.shutdown.send(());
+        self.task.await.expect("TURN fixture joins");
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the bounded fixture loop is the complete Allocate, permission, Send and Data peer"
+)]
+async fn serve_turn_fixture(
+    control: UdpSocket,
+    relays: Vec<Arc<UdpSocket>>,
+    counters: Arc<TurnCounters>,
+    mut shutdown: oneshot::Receiver<()>,
+) {
+    let (relayed, mut received) = mpsc::channel::<RelayedDatagram>(64);
+    let mut readers = JoinSet::new();
+    for (allocation, relay) in relays.iter().cloned().enumerate() {
+        let relayed = relayed.clone();
+        readers.spawn(async move {
+            let mut datagram = vec![0u8; 65_535];
+            loop {
+                let Ok((length, from)) = relay.recv_from(&mut datagram).await else {
+                    break;
+                };
+                if relayed
+                    .send(RelayedDatagram {
+                        allocation,
+                        from,
+                        bytes: datagram[..length].to_vec(),
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+    }
+    drop(relayed);
+
+    let mut clients = vec![None; relays.len()];
+    let mut control_datagram = vec![0u8; 65_535];
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => break,
+            incoming = control.recv_from(&mut control_datagram) => {
+                let (length, from) = incoming.expect("TURN control socket receives");
+                let datagram = &control_datagram[..length];
+                let Some((class, method)) = turn_kind(datagram) else { continue };
+                let Some(transaction) = turn_transaction(datagram) else { continue };
+                match (class, method) {
+                    (0, TURN_ALLOCATE) => {
+                        let allocation = clients
+                            .iter()
+                            .position(|client| *client == Some(from))
+                            .or_else(|| clients.iter().position(Option::is_none))
+                            .expect("the fixture has one allocation socket per component");
+                        clients[allocation] = Some(from);
+                        let response = if turn_attribute(datagram, TURN_MESSAGE_INTEGRITY_SHA256).is_some() {
+                            assert!(turn_attribute(datagram, TURN_USERNAME).is_some());
+                            assert!(turn_attribute(datagram, TURN_PASSWORD_ALGORITHMS).is_some());
+                            assert!(turn_attribute(datagram, TURN_PASSWORD_ALGORITHM).is_some());
+                            turn_allocation_success(
+                                transaction,
+                                relays[allocation].local_addr().expect("relay address"),
+                                from,
+                            )
+                        } else {
+                            turn_challenge(transaction, 401)
+                        };
+                        control.send_to(&response, from).await.expect("TURN Allocate response sends");
+                    }
+                    (0, TURN_CREATE_PERMISSION) => {
+                        assert!(turn_attribute(datagram, TURN_MESSAGE_INTEGRITY_SHA256).is_some());
+                        let _peer = turn_attribute(datagram, TURN_XOR_PEER)
+                            .and_then(|value| turn_decode_xor_address(value, transaction))
+                            .expect("permission peer");
+                        control
+                            .send_to(&turn_permission_success(transaction), from)
+                            .await
+                            .expect("TURN permission response sends");
+                    }
+                    (1, TURN_SEND) => {
+                        let Some(allocation) = clients.iter().position(|client| *client == Some(from)) else {
+                            continue;
+                        };
+                        let peer = turn_attribute(datagram, TURN_XOR_PEER)
+                            .and_then(|value| turn_decode_xor_address(value, transaction))
+                            .expect("Send peer");
+                        let data = turn_attribute(datagram, TURN_DATA_ATTRIBUTE).expect("Send data");
+                        if data.first().is_some_and(|first| first & 0xc0 == 0x80) {
+                            counters.send_indications.fetch_add(1, Ordering::Relaxed);
+                        }
+                        relays[allocation]
+                            .send_to(data, peer)
+                            .await
+                            .expect("relayed payload sends");
+                    }
+                    _ => {}
+                }
+            }
+            Some(datagram) = received.recv() => {
+                if let Some(client) = clients.get(datagram.allocation).copied().flatten() {
+                    if datagram.bytes.first().is_some_and(|first| first & 0xc0 == 0x80) {
+                        counters.data_indications.fetch_add(1, Ordering::Relaxed);
+                    }
+                    control
+                        .send_to(&turn_data_indication(datagram.from, &datagram.bytes), client)
+                        .await
+                        .expect("TURN Data indication sends");
+                }
+            }
+        }
+    }
+    readers.abort_all();
+    while readers.join_next().await.is_some() {}
+}
+
+async fn turn_fixture_pair() -> (TurnFixture, TurnFixture) {
+    let caller_control = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("TURN control binds");
+    let callee_control = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("TURN control binds");
+    let caller_relays = vec![
+        Arc::new(UdpSocket::bind("127.0.0.1:0").await.expect("relay binds")),
+        Arc::new(UdpSocket::bind("127.0.0.1:0").await.expect("relay binds")),
+    ];
+    let callee_relays = vec![
+        Arc::new(UdpSocket::bind("127.0.0.1:0").await.expect("relay binds")),
+        Arc::new(UdpSocket::bind("127.0.0.1:0").await.expect("relay binds")),
+    ];
+    let caller_address = caller_control.local_addr().expect("TURN address");
+    let callee_address = callee_control.local_addr().expect("TURN address");
+    let caller_counters = Arc::new(TurnCounters::default());
+    let callee_counters = Arc::new(TurnCounters::default());
+    let (caller_shutdown, caller_cancelled) = oneshot::channel();
+    let (callee_shutdown, callee_cancelled) = oneshot::channel();
+    let caller_task = tokio::spawn(serve_turn_fixture(
+        caller_control,
+        caller_relays,
+        Arc::clone(&caller_counters),
+        caller_cancelled,
+    ));
+    let callee_task = tokio::spawn(serve_turn_fixture(
+        callee_control,
+        callee_relays,
+        Arc::clone(&callee_counters),
+        callee_cancelled,
+    ));
+    (
+        TurnFixture {
+            address: caller_address,
+            counters: caller_counters,
+            shutdown: caller_shutdown,
+            task: caller_task,
+        },
+        TurnFixture {
+            address: callee_address,
+            counters: callee_counters,
+            shutdown: callee_shutdown,
+            task: callee_task,
+        },
+    )
+}
+
+async fn refusing_turn_fixture() -> TurnFixture {
+    let socket = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("TURN refusal binds");
+    let address = socket.local_addr().expect("TURN address");
+    let counters = Arc::new(TurnCounters::default());
+    let (shutdown, mut cancelled) = oneshot::channel();
+    let task = tokio::spawn(async move {
+        let mut datagram = vec![0u8; 65_535];
+        loop {
+            tokio::select! {
+                _ = &mut cancelled => break,
+                incoming = socket.recv_from(&mut datagram) => {
+                    let (length, from) = incoming.expect("refusing TURN receives");
+                    let Some(transaction) = turn_transaction(&datagram[..length]) else { continue };
+                    socket
+                        .send_to(&turn_challenge(transaction, 486), from)
+                        .await
+                        .expect("TURN refusal sends");
+                }
+            }
+        }
+    });
+    TurnFixture {
+        address,
+        counters,
+        shutdown,
+        task,
+    }
+}
+
 /// The first failing-first witness: before M-27 there is no call-level ICE policy, the INVITE
 /// carries no candidate, and neither side can hand the negotiated description to the media port.
 #[tokio::test(flavor = "multi_thread")]
@@ -283,6 +801,10 @@ async fn a_reoffer_that_changes_both_ufrag_and_pwd_restarts_ice_without_dropping
         reoffer.contains("a=candidate:"),
         "a restart re-offers its candidates (RFC 8839 §4.4):\n{reoffer}"
     );
+    assert!(
+        !reoffer.contains("a=remote-candidates:"),
+        "a restart cannot claim the previous generation's selected pair: {reoffer}"
+    );
 
     let heard = callee
         .media()
@@ -333,6 +855,15 @@ async fn holding_an_ice_call_re_signals_ice_and_does_not_restart_it() {
     let (mut callee, mut callee_incoming, invite) = answering.await.expect("answer task");
     let before = credentials_in(&invite);
 
+    // Nomination, observed through media on the selected pair rather than through a sleep. The
+    // subsequent offer is eligible for RFC 8839 §5.2 only after this generation is Completed.
+    let tone = vec![8_000i16; 16_000];
+    let (_played, heard) = tokio::join!(
+        caller.media().play(&tone, 160),
+        callee.media().record_at_least(REQUIRED, DELIVERY_BOUND),
+    );
+    assert_eq!(heard.len(), REQUIRED, "ICE completed before the re-offer");
+
     let serving = serve_until_reoffer(&mut callee, &mut callee_incoming);
     let ((held, answered), reinvited) =
         tokio::join!(serving, caller.reinvite(sipx_sdp::Direction::SendOnly));
@@ -355,6 +886,17 @@ async fn holding_an_ice_call_re_signals_ice_and_does_not_restart_it() {
         credentials_in(&held),
         before,
         "hold is not a restart, so neither credential moves:\n{held}"
+    );
+    let held_description = sipx_sdp::parse(&held).expect("the held offer is SDP");
+    let remote_candidates = held_description.media[0].ice_remote_candidates();
+    assert_eq!(
+        remote_candidates.len(),
+        1,
+        "a completed controlling stream names its selected RTP peer: {held}"
+    );
+    assert_eq!(
+        remote_candidates[0].component,
+        sipx_sdp::ice::ComponentId::RTP
     );
 }
 
@@ -530,4 +1072,230 @@ async fn an_unavailable_stun_server_degrades_to_host_candidates() {
         callee.media().record_at_least(REQUIRED, DELIVERY_BOUND),
     );
     assert_eq!(heard.len(), REQUIRED, "host ICE still carries audio");
+}
+
+fn turn_media_counts(caller: &TurnFixture, callee: &TurnFixture) -> (usize, usize) {
+    (
+        caller.counters.send_indications.load(Ordering::Relaxed)
+            + callee.counters.send_indications.load(Ordering::Relaxed),
+        caller.counters.data_indications.load(Ordering::Relaxed)
+            + callee.counters.data_indications.load(Ordering::Relaxed),
+    )
+}
+
+async fn assert_bidirectional_relay_audio(
+    caller: &sipx_call::Call,
+    callee: &sipx_call::Call,
+    caller_turn: &TurnFixture,
+    callee_turn: &TurnFixture,
+) {
+    let (sends_before, data_before) = turn_media_counts(caller_turn, callee_turn);
+    let caller_tone = vec![9_000i16; 24_000];
+    let (_played, heard_by_callee) = tokio::join!(
+        caller.media().play(&caller_tone, 160),
+        callee.media().record_at_least(REQUIRED, DELIVERY_BOUND),
+    );
+    assert_eq!(
+        heard_by_callee.len(),
+        REQUIRED,
+        "caller audio crossed the nominated relay"
+    );
+    let (sends_after_caller, data_after_caller) = turn_media_counts(caller_turn, callee_turn);
+    assert!(
+        sends_after_caller + data_after_caller > sends_before + data_before,
+        "caller RTP never entered a TURN Send or Data indication"
+    );
+
+    let callee_tone = vec![-7_000i16; 24_000];
+    let (_played, heard_by_caller) = tokio::join!(
+        callee.media().play(&callee_tone, 160),
+        caller.media().record_at_least(REQUIRED, DELIVERY_BOUND),
+    );
+    assert_eq!(
+        heard_by_caller.len(),
+        REQUIRED,
+        "callee audio crossed the nominated relay"
+    );
+    let (sends_after, data_after) = turn_media_counts(caller_turn, callee_turn);
+    assert!(
+        sends_after + data_after > sends_after_caller + data_after_caller,
+        "callee RTP never entered a TURN Send or Data indication"
+    );
+    assert!(
+        sends_after > sends_before,
+        "selected relay never carried a Send indication"
+    );
+    assert!(
+        data_after > data_before,
+        "selected relay never carried a Data indication"
+    );
+}
+
+/// M-24/A-41's call contract: the selected pair, not merely the gathered SDP, is relayed. Both
+/// descriptions retain relay candidates but point their host candidates at silent sockets. Each
+/// retained relay address is an actual fixture allocation socket, so bidirectional audio and the
+/// fixture counters witness the Send/Data path in both directions.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_selects_a_sha256_authenticated_relay_and_carries_audio_both_ways() {
+    let (caller_turn, callee_turn) = turn_fixture_pair().await;
+    let caller_turn_policy =
+        TurnPolicy::new(caller_turn.address, "1000", "relay-password").expect("caller TURN policy");
+    let callee_turn_policy =
+        TurnPolicy::new(callee_turn.address, "1000", "relay-password").expect("callee TURN policy");
+
+    let (callee_endpoint, callee_incoming) =
+        bind(Config::new("127.0.0.1:0".parse().expect("address")))
+            .await
+            .expect("callee binds");
+    let (caller_endpoint, _caller_incoming) =
+        bind(Config::new("127.0.0.1:0".parse().expect("address")))
+            .await
+            .expect("caller binds");
+    let callee_address = callee_endpoint.local_addr();
+    let proxy = UdpSocket::bind("127.0.0.1:0").await.expect("proxy binds");
+    let proxy_address = proxy.local_addr().expect("proxy address");
+    let (_caller_dead_socket, caller_dead) = dead_end().await;
+    let (_callee_dead_socket, callee_dead) = dead_end().await;
+
+    let forwarding = tokio::spawn(async move {
+        let mut datagram = vec![0u8; 65_535];
+        let (length, caller_address) = proxy.recv_from(&mut datagram).await.expect("INVITE");
+        let offer = behind_relay(&datagram[..length], caller_dead);
+        proxy
+            .send_to(&offer, callee_address)
+            .await
+            .expect("forwards relay-only INVITE");
+
+        let (length, _) = proxy.recv_from(&mut datagram).await.expect("200 answer");
+        let answer = behind_relay(&datagram[..length], callee_dead);
+        proxy
+            .send_to(&answer, caller_address)
+            .await
+            .expect("forwards relay-only answer");
+    });
+
+    let answering = tokio::spawn(async move {
+        let mut dispatcher = Dispatcher::new(callee_endpoint.clone(), callee_incoming);
+        let Dispatched::Invitation(invitation) = dispatcher.next().await.expect("an invitation")
+        else {
+            panic!("expected an invitation");
+        };
+        let config = CallConfig::new(MediaAddress::new(loopback())).with_media_policy(
+            MediaPolicy::default().with_ice(IcePolicy::Turn(callee_turn_policy)),
+        );
+        invitation
+            .answer_with_config(&callee_endpoint, config)
+            .await
+            .expect("answers with TURN")
+    });
+
+    let to = Uri::sip(Host::Name(
+        HostName::new("callee.example").expect("hostname"),
+    ));
+    let caller_config = CallConfig::new(MediaAddress::new(loopback()))
+        .with_media_policy(MediaPolicy::default().with_ice(IcePolicy::Turn(caller_turn_policy)));
+    let caller = tokio::time::timeout(
+        Duration::from_secs(15),
+        dial(
+            &caller_endpoint,
+            Target::udp(proxy_address),
+            &to,
+            &DialOptions::new("<sip:caller@example.net>", loopback())
+                .with_call_config(caller_config),
+        ),
+    )
+    .await
+    .expect("relayed ICE converges within the failure bound")
+    .expect("caller connects through TURN");
+    let callee = answering.await.expect("answer task");
+    forwarding.await.expect("proxy task");
+
+    assert_bidirectional_relay_audio(&caller, &callee, &caller_turn, &callee_turn).await;
+    assert_eq!(caller.media().ice_path(), IcePath::Relayed);
+    assert_eq!(callee.media().ice_path(), IcePath::Relayed);
+
+    drop(caller);
+    drop(callee);
+    let ((), ()) = tokio::join!(caller_turn.shutdown(), callee_turn.shutdown());
+}
+
+/// A relay is path diversity. A prompt TURN refusal contributes no relay candidate, but it cannot
+/// erase the direct candidates already gathered by either role or turn a working direct call into
+/// a signalling failure.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_relay_still_selects_the_direct_path() {
+    let refusing_turn = refusing_turn_fixture().await;
+    let turn =
+        TurnPolicy::new(refusing_turn.address, "1000", "relay-password").expect("TURN policy");
+    let (callee_endpoint, callee_incoming) =
+        bind(Config::new("127.0.0.1:0".parse().expect("address")))
+            .await
+            .expect("callee binds");
+    let (caller_endpoint, _caller_incoming) =
+        bind(Config::new("127.0.0.1:0".parse().expect("address")))
+            .await
+            .expect("caller binds");
+    let callee_address = callee_endpoint.local_addr();
+
+    let answering = tokio::spawn(async move {
+        let mut dispatcher = Dispatcher::new(callee_endpoint.clone(), callee_incoming);
+        let Dispatched::Invitation(invitation) = dispatcher.next().await.expect("an invitation")
+        else {
+            panic!("expected an invitation");
+        };
+        invitation
+            .answer_with_config(
+                &callee_endpoint,
+                CallConfig::new(MediaAddress::new(loopback())).with_media_policy(ice()),
+            )
+            .await
+            .expect("answers with direct ICE")
+    });
+
+    let to = Uri::sip(Host::Name(
+        HostName::new("callee.example").expect("hostname"),
+    ));
+    let caller_config = CallConfig::new(MediaAddress::new(loopback()))
+        .with_media_policy(MediaPolicy::default().with_ice(IcePolicy::Turn(turn)));
+    let caller = tokio::time::timeout(
+        Duration::from_secs(8),
+        dial(
+            &caller_endpoint,
+            Target::udp(callee_address),
+            &to,
+            &DialOptions::new("<sip:caller@example.net>", loopback())
+                .with_call_config(caller_config),
+        ),
+    )
+    .await
+    .expect("relay refusal and direct nomination are bounded")
+    .expect("direct candidates connect the call");
+    let callee = answering.await.expect("answer task");
+
+    let caller_tone = vec![6_000i16; 8_000];
+    let (_played, heard_by_callee) = tokio::join!(
+        caller.media().play(&caller_tone, 160),
+        callee.media().record_at_least(REQUIRED, DELIVERY_BOUND),
+    );
+    assert_eq!(
+        heard_by_callee.len(),
+        REQUIRED,
+        "direct caller audio arrives"
+    );
+    let callee_tone = vec![-6_000i16; 8_000];
+    let (_played, heard_by_caller) = tokio::join!(
+        callee.media().play(&callee_tone, 160),
+        caller.media().record_at_least(REQUIRED, DELIVERY_BOUND),
+    );
+    assert_eq!(
+        heard_by_caller.len(),
+        REQUIRED,
+        "direct callee audio arrives"
+    );
+    assert_eq!(caller.media().ice_path(), IcePath::Host);
+    assert_eq!(callee.media().ice_path(), IcePath::Host);
+
+    drop(caller);
+    drop(callee);
+    refusing_turn.shutdown().await;
 }

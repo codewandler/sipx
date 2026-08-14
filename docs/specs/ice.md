@@ -1,14 +1,18 @@
 # Spec: ICE
 
-**Status:** normative, and **partly implemented**. The SDP grammar (§13) is
+**Status:** normative, and **implemented within the explicit exclusions below**. The SDP grammar (§13) is
 [`sipx_sdp::ice`](../../crates/sipx-sdp/src/ice.rs) via `M-19`; the STUN profile (§11) is
 [`sipx_media::ice::stun`](../../crates/sipx-media/src/ice/stun.rs) via `M-20`; the agent (§2, §4 …
 §10, §14) is [`sipx_media::ice`](../../crates/sipx-media/src/ice/mod.rs) via `M-21`; the driver on
 the media port (§2, §6.1, §11, §13.2, §13.3) is
 [`sipx_media::ice::gather`](../../crates/sipx-media/src/ice/gather.rs),
 [`negotiate`](../../crates/sipx-media/src/ice/negotiate.rs) and
-[`driver`](../../crates/sipx-media/src/ice/driver.rs) via `M-22`. Still unbuilt: restart (`M-23`)
-and the relayed candidate (`M-24`).
+[`driver`](../../crates/sipx-media/src/ice/driver.rs) via `M-22`; the TURN codec, relayed gathering
+and running allocation path are [`turn`](../../crates/sipx-media/src/ice/turn.rs),
+[`gather`](../../crates/sipx-media/src/ice/gather.rs) and
+[`driver`](../../crates/sipx-media/src/ice/driver.rs) via `M-24`. Restart (`M-23`) is implemented
+through the retained call/media generation, and `A-41` supplies validated relay credentials through
+the shared call configuration.
 `M-16` was cut as one story, stopped at this spec, and asked to be split; its `## Progress` records
 why and along which of these section boundaries. **Four sections have since been corrected by the
 stories implementing against them** — §6.2 by `M-19`, §11.1 by `M-20`, §6.5 by `M-21`, §2 by
@@ -27,6 +31,16 @@ and driver) · **Story:** [M-16](../stories/M-16-ice.md) · **Design:** [media](
   (`FINGERPRINT`), §15.6 (`ERROR-CODE`), §15.2 (`XOR-MAPPED-ADDRESS`), §7.2.1 (retransmission).
   RFC 8445 references RFC 5389, not RFC 8489, so `MESSAGE-INTEGRITY` here is HMAC-SHA1 and there is
   no `MESSAGE-INTEGRITY-SHA256`.
+- **RFC 8489** — STUN. §9.2 (long-term credentials and downgrade resistance), §14.4
+  (`USERHASH`), §14.5 (`MESSAGE-INTEGRITY`), §14.6 (`MESSAGE-INTEGRITY-SHA256`), §14.10
+  (`NONCE`), §14.11 (`PASSWORD-ALGORITHMS`), §14.12 (`PASSWORD-ALGORITHM`), §18.1 plus
+  verified erratum 6290 (nonce security-feature bit numbering), and §18.5.1 (MD5 and SHA-256
+  password algorithms). Appendix B.1 plus verified erratum 6268 supplies the independent USERHASH
+  and HMAC-SHA256 bytes. TURN uses this current STUN long-term-credential mechanism; the ICE
+  connectivity-check profile above remains anchored to RFC 5389 as RFC 8445 requires.
+- **RFC 8656** — TURN. §3 and §6 (allocations), §7 (Allocate), §8 (Refresh), §9 (permissions),
+  §10 (CreatePermission), §11 (Send/Data indications), and §18 (`LIFETIME`,
+  `XOR-PEER-ADDRESS`, `DATA`, `XOR-RELAYED-ADDRESS`, and `REQUESTED-TRANSPORT`).
 - **RFC 5769** — STUN test vectors. §2.1 and §2.2 are the byte-level vectors §13 derives tests
   from; §2.1's sample request is itself an ICE connectivity check.
 - **RFC 5764 §5.1.2** — telling STUN from DTLS from RTP on one port. Already implemented as
@@ -64,7 +78,7 @@ enum Input {
     /// Gathering will produce nothing further.
     GatheringDone,
     /// A datagram that `dtls::classify` called `Stun`, and where it came from.
-    Datagram { from: SocketAddr, on: LocalBase, bytes: Vec<u8> },
+    Datagram { from: SocketAddr, on: LocalBase, via: CandidateType, bytes: Vec<u8> },
     /// Media went out on a component's selected pair; resets the keepalive timer (§11).
     DataSent { component: ComponentId },
     TimerFired(Timer),
@@ -72,11 +86,12 @@ enum Input {
 
 enum Output {
     /// Send these bytes from this local base to this address. The driver owns the socket.
-    Send { on: LocalBase, to: SocketAddr, bytes: Vec<u8> },
+    Send { on: LocalBase, kind: CandidateType, to: SocketAddr, bytes: Vec<u8> },
     SetTimer { timer: Timer, after: Duration },
     ClearTimer(Timer),
     /// A component has a selected pair: media goes here now, in both directions.
-    Selected { component: ComponentId, local: LocalBase, remote: SocketAddr },
+    Selected { component: ComponentId, local: LocalBase, local_kind: CandidateType,
+               remote: SocketAddr, remote_kind: CandidateType },
     /// ICE failed for a component. The call layer decides what that means.
     Failed { component: ComponentId },
 }
@@ -126,6 +141,9 @@ and are assigned by the agent, not by whoever gathered one.
 | `PairState` | `Frozen`, `Waiting`, `InProgress`, `Succeeded`, `Failed` | §6.1.2.6 |
 | `ChecklistState` | `Running`, `Completed`, `Failed` | §6.1.2.1, §7.2.5.4 |
 | `Role` | `Controlling`, `Controlled` | §6.1.1 |
+| `Relay` | `server`, `username`, `password` | RFC 8656 §7.1, RFC 8489 §9.2 |
+| `Allocation` | `base`, `server`, `relayed`, `mapped`, `realm`, `nonce`, `password_algorithm`, `lifetime` | RFC 8656 §3, §7.3; RFC 8489 §9.2 |
+| `TurnTransaction` | `id`, `operation`, `attempt`, `rto` | RFC 8656 §7.1, RFC 8489 §6.2.1 |
 
 Only `transport = UDP` exists. RFC 8839 §5.1's grammar permits a `transport-extension` token, so
 the parser must **accept and discard** a candidate naming any other transport rather than reject
@@ -471,6 +489,99 @@ and a dropped datagram, never a panic and never a state change. An unauthenticat
 move a pair's state — that is what stops an off-path attacker steering the media path by spraying
 Binding requests.
 
+### 11.4 TURN client profile (RFC 8656)
+
+TURN uses the same UDP socket the candidate belongs to. A second socket would create an allocation
+whose five-tuple media never uses, so gathering runs before the media receive owner starts and the
+ICE driver retains the resulting allocation once that owner exists. Operating a TURN server
+remains out of scope.
+
+`Relay` is configured with a server address and long-term username/password. Secrets are never
+included in `Debug`. The client sends an unauthenticated Allocate request with
+`REQUESTED-TRANSPORT = UDP`; RFC 8489 §9.2.3.1 forbids credentials, password-algorithm attributes,
+and integrity attributes on that first request. A `401` carrying both `REALM` and `NONCE` moves it
+to the authenticated request only after the following bounded negotiation:
+
+1. Decode `PASSWORD-ALGORITHMS` as a list of 16-bit algorithm and 16-bit parameter-length entries,
+   including each entry's 32-bit padding. Preserve at most the message-bounded raw attribute value
+   so the retry can echo it byte for byte. MD5 (`0x0001`) and SHA-256 (`0x0002`) are supported only
+   with their specified empty parameters; unknown algorithms and known algorithms with parameters
+   are not supported.
+2. If the list is present, select the first supported entry in server order, echo the complete list
+   as `PASSWORD-ALGORITHMS`, and send the selection in `PASSWORD-ALGORITHM`. No supported entry is
+   a terminal authentication refusal, not permission to fall back to MD5. The key is respectively
+   MD5 or SHA-256 of `username ":" realm ":" password`; the request and every later transaction use
+   `MESSAGE-INTEGRITY-SHA256`, because RFC 8489 §9.2.5 requires that form after a response contains
+   `PASSWORD-ALGORITHMS`.
+3. If the list is absent, legacy compatibility is allowed only when the nonce cookie does not claim
+   the password-algorithms security feature. That path derives the MD5 key and uses
+   `MESSAGE-INTEGRITY`; MD5 is not selected when the server offered a stronger mechanism.
+4. A nonce beginning with `obMatJos2` has a four-character base64 security-feature field. Feature
+   bits use the least-significant numbering fixed by RFC 8489 verified erratum 6290: bit 0 announces
+   password algorithms and bit 1 requires username anonymity. A set bit 0 without
+   `PASSWORD-ALGORITHMS`, an invalid nonce-cookie encoding, or an unsupported list refuses the
+   retry. When bit 1 is set, the authenticated request sends `USERHASH =
+   SHA-256(username ":" realm)` instead of `USERNAME`. Before either key derivation or USERHASH,
+   username, realm, and password are enforced through RFC 8265's OpaqueString profile: non-ASCII
+   spaces are mapped to ASCII space, the result is NFC-normalised, and disallowed or empty values
+   refuse the authenticated retry. The prepared values—not the unprepared input—are cached and
+   used consistently in the attribute and digest.
+
+A challenge missing either `REALM` or `NONCE`, a success missing `XOR-RELAYED-ADDRESS`,
+`XOR-MAPPED-ADDRESS` or `LIFETIME`, a response from another address, or a response for another
+transaction is ignored. An authenticated success and an authenticated `438 Stale Nonce` MUST pass
+the integrity form negotiated above; a SHA-1 tag cannot authenticate a SHA-256 transaction. Only
+then may 438 replace the nonce and algorithm offer and retry within the same bounded transaction
+deadline. A new cookie that requires anonymity changes the retry to `USERHASH`; a cookie claiming
+password algorithms without the matching list is a terminal downgrade refusal. RFC 8489 §9.2.5
+names the new nonce—not a new realm—as the value a 438 replaces, so the required returned `REALM`
+is OpaqueString-enforced and must equal the cached realm; even an integrity-valid 438 changing it is
+refused instead of silently changing the key identity. Attributes after the first integrity
+attribute cannot change authenticated state, while a following `MESSAGE-INTEGRITY-SHA256` remains
+available for the negotiated check. Any other error ends this relay attempt.
+
+One allocation is made per bound component socket. The success response produces one gathered
+candidate with `address = XOR-RELAYED-ADDRESS`, `related = XOR-MAPPED-ADDRESS`, the bound socket as
+its base, the configured server IP in its foundation, and type preference 0 through §4's existing
+table. The mapped value becomes SDP `raddr`/`rport`; it is not the socket's local address. An
+allocation failure produces no relayed candidate and does not remove host or server-reflexive
+candidates. Gathering is bounded by the configured relay timeout and concludes with whatever other
+candidates exist.
+
+Before relayed pairs are checked, the driver sends an authenticated CreatePermission request for
+each peer IP. Permissions are keyed by IP, never port, and refreshed after 240 seconds (before
+RFC 8656 §9's 300-second lifetime). Relayed checks wait in a 100-entry queue until the matching
+authenticated CreatePermission success; permission requests and allocation refreshes use an
+initial 500 ms RTO and at most six retransmissions with a doubling RTO. Outstanding transactions
+are bounded at 202 and correlate by local base, transaction ID and operation. A check sent from a
+relayed local candidate is carried in a Send indication containing `XOR-PEER-ADDRESS` and `DATA`; a
+Data indication received from the configured server is unwrapped to the peer address and embedded
+datagram before ICE/RTP demultiplexing. A Data indication from any other source is dropped. Send
+and Data indications carry no long-term integrity because RFC 8489 §9.2 cannot challenge an
+indication; RFC 8656 §11 authenticates the allocation's requests, not its indications.
+
+The driver refreshes an allocation at half its granted lifetime, clamped to at least one second,
+and keeps doing so while the media session can use it. A selected relay therefore remains alive for
+media, and every unselected allocation remains alive through checklist completion. Session shutdown
+sends one authenticated Refresh with `LIFETIME = 0` as a best-effort deletion and does not wait for
+a response. All retransmission ladders and queues are bounded; cancellation drops their state with
+the owning media session.
+
+| Allocation state | Input | Next state | Effect |
+|---|---|---|---|
+| `New` | start | `Challenging` | send unauthenticated Allocate; set RTO |
+| `Challenging` | valid 401 with realm + nonce and supported authentication offer | `Authenticating` | select/echo password algorithm, choose username or userhash, send authenticated Allocate; reset RTO |
+| `Challenging` | downgrade cookie, malformed algorithm list, unsupported list, or invalid OpaqueString credential text | `Failed` | retain other candidate types; send no authenticated retry |
+| either pending | RTO before deadline | same | retransmit; double RTO |
+| `Authenticating` | integrity-valid 438 with valid nonce negotiation | `Authenticating` | replace nonce/algorithm offer; retry authenticated Allocate |
+| `Authenticating` | success with required attributes | `Allocated` | gather candidate; arm half-lifetime refresh |
+| either pending | terminal error or deadline | `Failed` | retain other candidate types |
+| `Allocated` | refresh deadline | `Allocated` | authenticated Refresh with granted lifetime |
+| `Allocated` | shutdown | `Deleting` | best-effort Refresh with lifetime zero |
+
+TURN messages are hostile network input under §11.3's rule: checked length arithmetic only, typed
+errors, bounded attribute/data allocation, and no state change from a malformed packet.
+
 ## 12. ICE-lite — deferred, with the reason
 
 **Deferred.** sipx does not implement the lite role (§2.2, §6.2, §8.2) and does not send
@@ -537,7 +648,10 @@ Rules the grammar does not state and a parser gets wrong:
   lines already; this is the same discipline one level down.
 - `ice-ufrag` MUST NOT be sent longer than 32 characters, but up to 256 MUST be accepted.
 - `remote-candidates` is included by a controlling agent in an offer **only** for a stream that is
-  Completed, and MUST NOT appear otherwise.
+  Completed, and MUST NOT appear otherwise. It contains the peer address of the selected pair for
+  every selected component, sorted by ascending component ID. It is derived from the running agent,
+  never from the last SDP candidate list: a peer-reflexive selected address might never have
+  appeared in that list.
 
 ### 13.2 Offer, answer, restart
 
@@ -571,13 +685,19 @@ pass unchanged, with no ICE attributes offered unless ICE is switched on.
 ### 13.4 Call-layer selection
 
 The application selects ICE through `sipx_call::MediaPolicy`, not by constructing an agent or
-editing SDP. `IcePolicy` is a closed choice:
+editing SDP. `IcePolicy` is a non-exhaustive public choice:
 
 | Policy | Offerer | Answerer |
 |---|---|---|
 | `Disabled` (default) | gather nothing; emit no ICE attributes | ignore ICE for local selection and retain the pre-ICE answer path |
 | `Host` | gather host candidates before sending the initial offer | when the offer carries usable ICE, gather host candidates before answering |
 | `Stun(server)` | gather host and server-reflexive candidates using `server` | when the offer carries usable ICE, gather host and server-reflexive candidates using `server` |
+| `Turn(policy)` | gather host and relayed candidates using the configured server and prepared long-term credentials | when the offer carries usable ICE, gather host and relayed candidates through the same policy before answering |
+
+`TurnPolicy::new` applies the OpaqueString profile and protocol byte bounds before any socket is
+bound. An invalid username or password is therefore a typed configuration error, not a delayed
+Allocate failure. A silent or refusing relay preserves the host candidates gathered by the same
+operation, so a viable direct pair can still complete the call.
 
 The call layer generates a fresh credential pair and tiebreaker for every enabled initial exchange.
 They are not application inputs: reusing either across calls makes one call's authenticated checks
@@ -612,6 +732,14 @@ determines its peer supports ICE by the presence of `candidate` attributes, so a
 omits them says the peer has *stopped* doing ICE, and the receiver would be right to fall back to
 symmetric RTP on a call that had already agreed to checks. Hold, resume, a codec change and a
 session refresh are all subsequent offers, and none of them is a restart.
+
+When this side is controlling and the running checklist is `Completed`, each such **offer** also
+carries one `a=remote-candidates` value built from the selected pairs. Answers never carry it, nor
+does a controlled, Running or Failed agent. A locally initiated restart suppresses it as soon as
+the new local credentials are drawn, before the peer's answer arrives: the old selected pair keeps
+carrying media during the restart, but it belongs to the previous ICE generation and MUST NOT be
+advertised as the result of the new one. The value becomes eligible again only after the rebuilt
+checklist completes.
 
 **Both credentials changing, and only both, is a restart** (§4.4.1.1.1, restated from §13.2). One
 alone is not. The same value moving between the session level and the media level is not. The
@@ -663,6 +791,36 @@ Tests are derived from these, not from the implementation.
 9. **Call-layer reachability** — two calls select ICE through `MediaPolicy`; their advertised host
    candidates terminate at silent sockets and only their server-reflexive candidates reach the
    bound media ports. Audio arrives only after a nominated pair replaces the unusable defaults.
+10. **TURN Allocate challenges** — transaction `00 01 02 03 04 05 06 07 08 09 0a 0b`, username
+    `1000`, realm `example.com`, password `relay-password`. A legacy nonce `nonce` produces an
+    authenticated Allocate containing `REQUESTED-TRANSPORT = 11 00 00 00`, `USERNAME`, `REALM`,
+    `NONCE`, and `MESSAGE-INTEGRITY`. A current nonce whose cookie advertises password algorithms,
+    with the server list `[unknown, SHA-256, MD5]`, echoes that byte-exact list, selects SHA-256 in
+    `PASSWORD-ALGORITHM`, and carries `MESSAGE-INTEGRITY-SHA256`; a SHA-1 success is rejected.
+    A nonce requiring anonymity carries `USERHASH` and no `USERNAME`. A cookie claiming password
+    algorithms with the list stripped, and a list with no supported algorithm, each produce no
+    retry. Decoding the paired SHA-256 success yields relayed `192.0.2.44:49152`, mapped
+    `198.51.100.20:50000`, and lifetime 600 seconds.
+11. **RFC 8489 Appendix B.1 USERHASH** — OpaqueString leaves username `マトリックス` unchanged;
+    with realm `example.org`, its SHA-256 USERHASH is
+    `4a 3c f3 8f ef 69 92 bd a9 52 c6 78 04 17 da 0f 24 81 94 15 56 9e 60 b2 05 c4 6e 41 40 7f 17 04`.
+    The full message shape follows verified erratum 6268.
+12. **TURN data path** — a Send indication for peer `203.0.113.9:40000` and data
+    `80 00 00 01` decodes to exactly that address and those four bytes; the corresponding Data
+    indication does the same in the reverse direction. Truncated address/data attributes are typed
+    errors.
+13. **Relayed candidate integration** — a configured loopback TURN fixture challenges Allocate,
+    validates the authenticated retry, and returns vector 10. The offered candidate is `relay`,
+    has priority `16777215` (type preference 0, local preference 65535, component 1), and signals
+    the mapped address as `raddr`/`rport`. Refusal and silence each leave the host candidate.
+14. **Call-layer relay selection** — two loopback endpoint roles gather host and relayed
+    candidates from bounded TURN fixtures. The fixtures' `401` challenges carry
+    `PASSWORD-ALGORITHMS` with SHA-256 first and a security-feature nonce that requires that
+    negotiation. Rewritten signalling makes every host-to-host pair unusable, while every retained
+    relay candidate names an actual fixture allocation socket. Both sessions reach `Relayed`, and
+    real audio crosses a TURN Send/Data path in both directions. In the paired failure case a relay
+    refusal leaves the direct host pair usable; the call reaches `Host` and carries audio without a
+    relayed candidate.
 
 ## 15. Where the code goes
 
@@ -673,7 +831,8 @@ Tests are derived from these, not from the implementation.
 | The agent (§2–§9) | `sipx-media`, sans-IO module | A state machine over events, like the transaction machines |
 | The driver (sockets, timers, gathering) | `sipx-media` | Where the media socket already is |
 | Reflexive gathering | `sipx-media`, over `sipx_transport::stun` | The Binding client already exists; a second one would be a second thing to get wrong |
-| Relayed gathering (TURN) | its own story | RFC 8656 is a protocol, not an attribute |
+| TURN codec and allocation state | `sipx-media::ice::turn` | Pure bytes and bounded client state beside the ICE STUN profile |
+| Relayed gathering and data path | `sipx-media::ice::{gather,driver}` | The bound media socket is the allocation's five-tuple and has one owner |
 
 **Settled by `M-20`.** `MESSAGE-INTEGRITY` needs HMAC-SHA1, and the question was which crate should
 carry it. The codec lives in `sipx-media`, which names `hmac`, `sha1` and `subtle` directly — all
@@ -684,3 +843,8 @@ public API, and it would have put the codec a crate below its only caller. `sipx
 `default-features = false` edge on `sipx-transport` to reuse the STUN header constants without
 inheriting a TLS stack, a WebSocket stack and a DNS client; `scripts/check-features.sh` asserts that
 on the resolved graph.
+
+`M-24` names `md-5` and `sha2` directly for RFC 8489's two registered long-term credential key
+algorithms and takes a no-default-feature dependency implementing RFC 8265's OpaqueString profile.
+The hash packages were already in the resolved graph; the profile adds only Unicode preparation
+tables and no runtime, socket, or clock edge to the media core.

@@ -8,6 +8,7 @@ design: docs/designs/phone.md
 epic: phone
 areas: [sipx-cli, interop, docs]
 announcement: [2, 3, 5]
+promotion: 5
 note: executable proof complete; combined full gate green
 ---
 

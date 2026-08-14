@@ -141,6 +141,9 @@ def gate_steps(msrv: str) -> list[Step]:
     return [
         Step("gate consistency", "gate", (ENTRY_POINT, "--check")),
         Step("gate tests", "gate", ("python3", "scripts/test-gate.py")),
+        # X-149: reverse the compatibility relation independently of rustdoc extraction, so a
+        # checker that stops rejecting a removal cannot bless its own baseline.
+        Step("api compatibility tests", "test", ("python3", "scripts/test-api-compat.py")),
         # X-115: the checker's whole product is one distinction — implemented-but-unclosed
         # versus being-implemented — and a checker that got that wrong would be silent,
         # which is indistinguishable from a clean board. Milliseconds, no toolchain.
@@ -351,6 +354,27 @@ def gate_steps(msrv: str) -> list[Step]:
         ),
         Step("test", "test", ("cargo", "test", "--workspace", "--all-features")),
         Step("examples", "test", ("cargo", "build", "--workspace", "--all-features", "--examples")),
+        # A-41: this disposable consumer is intentionally outside the workspace and names only
+        # exact registry versions. Local patches provide candidate bytes without weakening the
+        # manifest assertion; two negative fixtures pin the asymmetry/lower-layer regressions.
+        Step(
+            "v1 endpoint consumer",
+            "test",
+            ("./scripts/check-v1-endpoint-consumer.py",),
+        ),
+        # X-149: the first check freezes the complete Supported rustdoc surface. The second is a
+        # separate boundary: it packages the endpoint dependency set together, extracts those
+        # archives, and compiles the registry-shaped consumer against only those extracted bytes.
+        Step(
+            "api compatibility",
+            "test",
+            ("./scripts/check-api-compat.py", "--check"),
+        ),
+        Step(
+            "packaged endpoint consumer",
+            "test",
+            ("./scripts/check-packaged-endpoint-consumer.py", "--check"),
+        ),
         # P-13: execute the built binary's root and subcommand help, then hold the versioned JSON
         # producers against the public contract table. After the workspace builds so this observes
         # the candidate command rather than a parsed copy of its help constants.

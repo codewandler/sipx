@@ -10,22 +10,27 @@
 //!
 //! # Stability
 //!
-//! sipx is pre-1.0, so **neither word below means frozen**. `1.0.0` is what freezes an API, and its
-//! predicates are in `docs/roadmap.md`. Until then:
+//! The Supported Rust API is frozen for compatible v1 evolution. Existing Supported paths and
+//! signatures remain source-compatible throughout major version 1; compatible additions use the
+//! reservations documented on their types.
 //!
-//! - **Supported** — meant to be depended on. Breaking changes get a `CHANGELOG.md` entry saying what
-//!   to do instead. New enum variants and new struct fields may still appear in a minor release, and
-//!   the types that can grow say so: they carry `#[non_exhaustive]`, so a downstream `match` needs a
-//!   `_` arm and a downstream value is built with the type's constructor rather than a struct
-//!   literal. That is this reservation made checkable instead of merely stated — `M-80` settled it
-//!   for [`Packet`] and `sipx_media::Encoded` together, and `scripts/check-audio-claims.py` holds
-//!   the rest of this crate's constructor-bearing public types to it.
-//! - **Experimental** — may change shape or be removed without a migration note. Depend on it only if
-//!   you are prepared to follow it.
+//! - **Supported** — covered by the v1 compatibility contract. The types that can grow carry
+//!   `#[non_exhaustive]`, so downstream matches retain a `_` arm and downstream values use their
+//!   constructors. `M-80` made that reservation checkable for [`Packet`] and
+//!   `sipx_media::Encoded`; `scripts/check-audio-claims.py` holds the rest of this crate's
+//!   constructor-bearing public types to it.
+//! - **Experimental** — remains unfrozen and may change shape or be removed without a migration
+//!   note. Depend on it only if you are prepared to follow it.
 //!
 //!
 //! **Supported.** RTP, RTCP, the jitter buffer, quality statistics, SRTP and RFC 4733 DTMF are all
 //! reachable from a call and exercised by it.
+//!
+//! <!-- BEGIN sipx-api-classification -->
+//! **Experimental Rust API roots:**
+//!
+//! - None.
+//! <!-- END sipx-api-classification -->
 
 // This crate's inline test modules opt out of coverage instrumentation, so the
 // published figure measures the code rather than the tests measuring it. Never set outside

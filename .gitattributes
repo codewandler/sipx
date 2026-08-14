@@ -7,3 +7,8 @@ crates/sipx-testkit/corpus/rfc4475/*.dat -text
 # Same reasoning for any future protocol fixture.
 *.dat -text
 *.sip -text
+
+# Reproducible interoperability captures are sealed byte-for-byte in their run manifest. Peer
+# diagnostics can carry meaningful trailing spaces, so preserve those bytes and do not report them
+# as source whitespace errors.
+docs/comparison/interop/**/runs/**/*.log -text whitespace=-blank-at-eol

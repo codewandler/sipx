@@ -240,8 +240,14 @@ async fn a_supervised_worker_runs_in_its_own_operating_system_process() {
 
     let graph = session
         .attach_dsp(
-            GraphPlan::new(AudioDirection::Outbound, GraphBounds::new())
-                .with_supervised(worker("reports-its-pid", "pid")),
+            GraphPlan::new(AudioDirection::Outbound, GraphBounds::new()).with_supervised(failing(
+                "reports-its-pid",
+                "pid",
+                // A process scheduling miss is permitted by §7.1 and cannot erase the process
+                // boundary this test is waiting to observe.
+                64,
+                FailureAction::BypassOpen,
+            )),
         )
         .expect("activates");
 
@@ -260,31 +266,29 @@ async fn a_supervised_worker_runs_in_its_own_operating_system_process() {
         .attach_processor(Processing::new(AudioDirection::Outbound, narrowband()))
         .expect("attaches");
 
-    for _ in 0..3 {
-        assert!(session.send(tone()).await);
-    }
-    // The first frame fills the pipeline and passes through unprocessed; the second carries the
-    // worker's own answer, and that answer says which process wrote it.
-    let mut frames = Vec::new();
-    for _ in 0..2 {
-        let sent = tokio::time::timeout(ARRIVAL_BOUND, transmitted.recv())
-            .await
-            .expect("arrives")
-            .expect("a frame");
-        frames.push(signed(sent.pcm().samples()).to_vec());
-    }
-    assert_eq!(
-        frames[0],
-        tone(),
-        "the pipeline's first frame is unprocessed"
-    );
-    let low = u16::from_ne_bytes(frames[1][0].to_ne_bytes());
-    let high = u16::from_ne_bytes(frames[1][1].to_ne_bytes());
-    assert_eq!(
-        u32::from(low) | (u32::from(high) << 16),
-        pid,
-        "the process the runtime reports is the process the DSP ran in"
-    );
+    // Drive one real media-frame event at a time until the worker's result is observable. A
+    // deadline miss remains valid pass-through audio; the result itself is the happens-before
+    // event, and ARRIVAL_BOUND only bounds failure if the process never supplies one.
+    tokio::time::timeout(ARRIVAL_BOUND, async {
+        loop {
+            assert!(session.send(tone()).await);
+            let sent = transmitted.recv().await.expect("a frame");
+            let samples = signed(sent.pcm().samples());
+            if samples == tone().as_slice() {
+                continue;
+            }
+            let low = u16::from_ne_bytes(samples[0].to_ne_bytes());
+            let high = u16::from_ne_bytes(samples[1].to_ne_bytes());
+            assert_eq!(
+                u32::from(low) | (u32::from(high) << 16),
+                pid,
+                "the process the runtime reports is the process the DSP ran in"
+            );
+            break;
+        }
+    })
+    .await
+    .expect("the worker process supplies an answer before the failure bound");
 
     let barrier = tokio::time::timeout(ARRIVAL_BOUND, graph.detach())
         .await
@@ -465,9 +469,9 @@ async fn a_worker_answering_with_the_wrong_position_count_is_malformed() {
             GraphPlan::new(AudioDirection::Outbound, GraphBounds::new()).with_supervised(failing(
                 "one-sample-short",
                 "short",
-                // Two, so the pipeline-filling miss of the first frame is not itself the budget:
-                // what must trip this is the malformed answer, not the frame before it (§7.1).
-                2,
+                // Scheduling misses are allowed by §7.1. Keep the stage alive until its own
+                // malformed result is the event this test observes.
+                64,
                 FailureAction::BypassOpen,
             )),
         )
@@ -477,32 +481,22 @@ async fn a_worker_answering_with_the_wrong_position_count_is_malformed() {
         .attach_processor(Processing::new(AudioDirection::Outbound, narrowband()))
         .expect("attaches");
 
-    for _ in 0..4 {
-        assert!(session.send(tone()).await);
-    }
-    for _ in 0..4 {
-        let sent = tokio::time::timeout(ARRIVAL_BOUND, transmitted.recv())
-            .await
-            .expect("arrives")
-            .expect("a frame");
-        assert_eq!(
-            signed(sent.pcm().samples()),
-            tone().as_slice(),
-            "a short answer is a miss, never a short frame on the wire"
-        );
-    }
-
-    let transitions = graph.transitions();
-    assert!(
-        transitions.iter().any(|transition| matches!(
-            transition,
-            GraphTransition::Bypassed {
-                cause: BypassCause::MalformedResult,
-                ..
-            }
-        )),
-        "{transitions:?}"
-    );
+    // The counter is the runtime's direct classification event. Waiting for it avoids turning an
+    // unrelated scheduling miss into a claim about the malformed answer's arrival order.
+    tokio::time::timeout(ARRIVAL_BOUND, async {
+        while graph.counters().malformed_results() == 0 {
+            assert!(session.send(tone()).await);
+            let sent = transmitted.recv().await.expect("a frame");
+            assert_eq!(
+                signed(sent.pcm().samples()),
+                tone().as_slice(),
+                "a short answer is a miss, never a short frame on the wire"
+            );
+        }
+    })
+    .await
+    .expect("the worker's short result is classified before the failure bound");
+    assert!(graph.counters().malformed_results() > 0);
 
     let barrier = tokio::time::timeout(ARRIVAL_BOUND, graph.detach())
         .await
@@ -525,7 +519,7 @@ async fn a_crashing_worker_is_an_ending_the_media_process_survives() {
     let graph = session
         .attach_dsp(
             GraphPlan::new(AudioDirection::Outbound, GraphBounds::new()).with_supervised(
-                failing("crashes", "crash", 3, FailureAction::BypassOpen)
+                failing("crashes", "crash", 4, FailureAction::BypassOpen)
                     .arg("--after")
                     .arg("1"),
             ),
@@ -537,17 +531,27 @@ async fn a_crashing_worker_is_an_ending_the_media_process_survives() {
         .attach_processor(Processing::new(AudioDirection::Outbound, narrowband()))
         .expect("attaches");
 
-    // The worker gains the first frame and crashes inside the second.
+    // The worker gains request zero and crashes inside request one. The gained result may still
+    // miss its non-blocking media-frame deadline when the operating system schedules the process
+    // late, so both §6.1 histories are valid before the closed channel reports §7.2's WorkerLost.
     for _ in 0..2 {
         assert!(session.send(tone()).await);
     }
-    for expected in [tone(), doubled()] {
-        let sent = tokio::time::timeout(ARRIVAL_BOUND, transmitted.recv())
-            .await
-            .expect("arrives")
-            .expect("a frame");
-        assert_eq!(signed(sent.pcm().samples()), expected.as_slice());
-    }
+    let first = tokio::time::timeout(ARRIVAL_BOUND, transmitted.recv())
+        .await
+        .expect("arrives")
+        .expect("a frame");
+    assert_eq!(signed(first.pcm().samples()), tone().as_slice());
+
+    let second = tokio::time::timeout(ARRIVAL_BOUND, transmitted.recv())
+        .await
+        .expect("arrives")
+        .expect("a frame");
+    let drained = signed(second.pcm().samples());
+    assert!(
+        drained == tone().as_slice() || drained == doubled().as_slice(),
+        "the due gain may be ready or may have missed its non-blocking frame deadline: {drained:?}"
+    );
     tokio::time::timeout(ARRIVAL_BOUND, reaped(pid))
         .await
         .expect("a crashed worker is reaped by the runtime that spawned it, and not left a zombie");

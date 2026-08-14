@@ -10,8 +10,8 @@
 //! publisher whose state has expired is told to start again rather than allowed to resurrect a
 //! document the server has already forgotten.
 //! **Supported** (`S-35`, `S-39`): `sipx-call` selects [`Pidf`] for its live notifier and carries
-//! this exact compositor through live inbound PUBLISH. Breaking changes receive migration guidance
-//! while sipx remains pre-1.0. No CLI command publishes, and projection from this store into later
+//! this exact compositor through live inbound PUBLISH. The Supported surface is frozen for
+//! compatible v1 evolution. No CLI command publishes, and projection from this store into later
 //! presence NOTIFY documents remains an application policy.
 //!
 

@@ -170,6 +170,15 @@ under them. A key that is never derived cannot leak.
 to it, so an SDES crypto-suite and a DTLS-SRTP profile naming the same transform cannot be ranked
 differently. §7 rule 8 states what the order is *for*.
 
+**An application may require one exact profile for a call.** `sipx_call::SrtpSuite` names the same
+three transforms at the application boundary, and `MediaPolicy::with_srtp_suite` narrows whichever
+explicit SRTP keying the call selected to that one value. Under SDES, the offer contains exactly one
+`a=crypto` line and an answer offering another suite is declined. Under DTLS-SRTP, the `use_srtp`
+extension contains exactly one profile and a handshake with no match fails. The selector is invalid
+with `Keying::Auto` or `Keying::Plain`: an exact cipher requirement cannot resolve to clear RTP, so
+that combination is refused before media binding or SIP I/O rather than treating the selector as a
+preference. Omitting the selector preserves the strongest-first list above.
+
 **`AES_CM_128_HMAC_SHA1_80` is never dropped.** RFC 5764 §4.1.2 makes its DTLS-SRTP counterpart
 mandatory to implement, and it is what most of the telephone network can do. It is the floor, not
 the default: it is offered last and selected only when nothing better is common.
@@ -271,9 +280,10 @@ exclusive-ors into octet **7**, `r` into octets 8..14, and octets 14 and 15 are 
 reading that changes one thing at a time when the salt shortens. It is the only value in §4 with no
 external check behind it; `the_256_bit_kdf_reads_the_whole_master_key` pins the half of it that
 *can* be checked without a vector — that both 128-bit halves of a 256-bit master key reach the key
-schedule. The alignment itself is settled for `AEAD_AES_256_GCM` by an interoperability run against
-an implementation that derived its own session keys, not by anything in this repository; §12.10
-records that evidence, its deliberate negative, and the two combinations still unmeasured.
+schedule. The alignment itself is settled for both AEAD key sizes over DTLS-SRTP by interoperability
+runs against implementations that derived their own session keys, not by anything in this
+repository; §12.10 records the DTLS-SRTP and SDES evidence for both key sizes and their deliberate
+negatives.
 
 Three details, each of which produces keys that are self-consistent and interoperate with nothing:
 
@@ -1292,7 +1302,7 @@ No `pub const` describing one profile's lengths is load-bearing any more. `MASTE
 `AES_CM_128_HMAC_SHA1_80` specifically, with the profile accessor named as the thing to prefer;
 `MAX_TAG_LEN` is new, for a caller sizing a buffer that must hold any profile's packet.
 
-### 12.10 The AEAD key derivation has no published vector — settled for one profile by `M-72`
+### 12.10 The AEAD key derivation has no published vector — settled by `M-72`
 
 RFC 7714 §16 publishes *session* keys, so §11's KDF is the one part of the AEAD profiles nothing
 external pins. §4.3 states exactly what sipx does — master salt left-aligned in the 16-octet PRF
@@ -1303,35 +1313,46 @@ same failure shape §12.1 describes and is invisible to every round-trip test.
 
 What is checked in this repository: `the_256_bit_kdf_reads_the_whole_master_key` proves both halves
 of a 256-bit master key reach the key schedule, which rules out an AES-128 PRF silently applied to
-the first sixteen octets. It does not touch the salt alignment, and nothing here can — `M-72`
-measured that directly, and under a salt right-aligned against octet 14 instead of left-aligned at
-octet 0 the whole of `sipx-rtp` and `sipx-media` still passes: **448 tests, zero failures**.
+the first sixteen octets. It does not touch the salt alignment, and no self-round-trip can.
 
-**What settles the alignment is `AEAD_AES_256_GCM` over DTLS-SRTP against a native browser**, in
-the `browser-answerer` role of the proof harness in `tests/browser-audio/`. sipx is the DTLS server
-there, so it selects from the profiles it offers and selects its strongest; in the `browser-offerer`
-role the browser selects and selects counter mode. Neither side is asked to prefer anything for the
-test's benefit, and the asymmetry is what makes one role the witness and the other a control.
+**What settles the alignment over DTLS-SRTP is one exact AEAD suite in each native-browser role.**
+The `browser-offerer` role requires `AEAD_AES_128_GCM`; the `browser-answerer` role requires
+`AEAD_AES_256_GCM`. `MediaPolicy::with_srtp_suite` narrows the offer and the DTLS `use_srtp` list,
+so a counter-mode fallback or proving one key size twice cannot satisfy the run. Both roles must
+carry non-silent Opus in both directions. The browser evidence, requested call policy and installed
+SRTP context must all name the role's exact profile, and the run artifact captures the independent
+peer's reported revision.
 
 The derivation is what is under test because DTLS-SRTP supplies only the master key and salt, in
 RFC 5764 §4.2's exporter block: each side then derives its own session keys by its own reading of
 RFC 7714 §11. A wrong salt offset on one side yields different session keys and no packet
-authenticates. `driver.py` therefore requires that some role negotiated a profile in
-`AEAD_SRTP_PROFILES`, and records the peer, its exact revision and the negotiated profile under
+authenticates. `driver.py` therefore requires both exact AEAD witnesses and records them under
 `aead_key_derivation` in the run's evidence.
 
-The negative is not a matter of opinion: perturbing `derive` to right-align the salt leaves RFC
-3711 §B.3's published counter-mode vector passing — the 14-octet salt is unmoved — leaves every
-RFC 7714 transform vector passing, leaves the whole in-tree suite passing, and **fails the browser
-run in the `AEAD_AES_256_GCM` role alone**, with the counter-mode role still green in the same run.
+The negative is executable without leaving broken crypto in the published crate.
+`tests/browser-audio/build-perturbed-kdf.py` copies the checkout to an owned disposable directory,
+verifies one exact `derive` fragment, changes only the copy to right-align the salt in RFC 3711's
+14-octet `x` value, and builds a separate endpoint under a finite bound. The helper terminates and
+waits for the build's whole process group before deleting that copy. Its manifest binds the normal
+source hash, perturbed source hash and executable hash to the run. A 14-octet counter-mode salt is
+unmoved; a 12-octet AEAD salt moves from octets `0..12` to `2..14`. The negative is accepted only
+after ICE nomination and connected DTLS, with outbound SRTP observed at both peers, zero accepted
+packets, and a positive SRTP authentication-failure count.
 
-**Still open, and narrower than it was.** Two of the four combinations are unmeasured:
-`AEAD_AES_128_GCM` in either keying, because sipx picks its strongest profile as DTLS server and a
-browser offers no SDES at all; and **both AEAD profiles over SDES**, which reaches `derive` by the
-other path — an RFC 4568 `inline` key rather than an exporter block. The arithmetic is shared and
-the risk is materially reduced, not eliminated: SDES carries a 12-octet salt to the same function.
-Closing them needs a peer that speaks AEAD-GCM over SIP, which the pinned interop peer does not —
-see `tests/interop/README.md`.
+**The SDES half is settled by a separately implemented endpoint and the same deliberate
+negative.** The comparison-owned [wire-evidence registry](../comparison/interop/dataset.json) pins
+the subject and executable artifact inside the only repository scope allowed to name them. Its
+offline checker requires one exact `a=crypto` suite per call, the matching installed SRTP profile,
+outbound and accepted packets, non-silent returned PCMU audio, a bit-exact echoed span and the
+independent endpoint's exact-suite log. Both `AEAD_AES_128_GCM` and `AEAD_AES_256_GCM` passed.
+
+The retained negative used the same RFC 4568 path with a disposable build that right-aligns the
+12-octet AEAD master salt. It still negotiated `AEAD_AES_256_GCM` and sent 50 packets, while sipx
+accepted none and recorded authentication failures; the other endpoint independently rejected all
+50. The manifest binds the current KDF source, mutation, normal and perturbed binaries, adapter,
+configuration, results and logs by SHA-256. This closes the ambiguity that a signalling failure or
+suite fallback could otherwise turn into a vacuous negative. It does **not** claim SRTCP
+interoperability, rollover, re-keying or behavior outside the pinned loopback profile.
 
 ### 12.11 The MTU refusal was re-derived and is not affected — `M-41`
 

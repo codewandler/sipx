@@ -1606,6 +1606,38 @@ impl MediaPort {
         fingerprint: sipx_sdp::fingerprint::Fingerprint,
         timeout: Duration,
     ) -> Result<(Self, SrtpKeys), DtlsStartError> {
+        self.key_with_dtls_selected(identity, peer, role, fingerprint, None, timeout)
+            .await
+    }
+
+    /// Run DTLS on this port while requiring one exact SRTP protection profile.
+    ///
+    /// The peer cannot negotiate a fallback profile: the DTLS `use_srtp` list contains this one
+    /// value. A peer without it fails keying and no media session starts.
+    #[cfg(feature = "dtls")]
+    pub async fn key_with_dtls_profile(
+        self,
+        identity: crate::dtls::openssl::Identity,
+        peer: SocketAddr,
+        role: crate::dtls::Role,
+        fingerprint: sipx_sdp::fingerprint::Fingerprint,
+        profile: crate::dtls::Profile,
+        timeout: Duration,
+    ) -> Result<(Self, SrtpKeys), DtlsStartError> {
+        self.key_with_dtls_selected(identity, peer, role, fingerprint, Some(profile), timeout)
+            .await
+    }
+
+    #[cfg(feature = "dtls")]
+    async fn key_with_dtls_selected(
+        self,
+        identity: crate::dtls::openssl::Identity,
+        peer: SocketAddr,
+        role: crate::dtls::Role,
+        fingerprint: sipx_sdp::fingerprint::Fingerprint,
+        profile: Option<crate::dtls::Profile>,
+        timeout: Duration,
+    ) -> Result<(Self, SrtpKeys), DtlsStartError> {
         let Self {
             socket,
             rtcp,
@@ -1618,9 +1650,19 @@ impl MediaPort {
         let handshake_socket = socket.try_clone()?;
 
         let keys = tokio::task::spawn_blocking(move || {
-            let mut handshake =
-                crate::dtls::openssl::Session::new(handshake_socket, peer, &identity, timeout)
-                    .map_err(|error| crate::dtls::Error::Dtls(error.to_string()))?;
+            let mut handshake = match profile {
+                Some(profile) => crate::dtls::openssl::Session::new_with_profile(
+                    handshake_socket,
+                    peer,
+                    &identity,
+                    profile,
+                    timeout,
+                ),
+                None => {
+                    crate::dtls::openssl::Session::new(handshake_socket, peer, &identity, timeout)
+                }
+            }
+            .map_err(|error| crate::dtls::Error::Dtls(error.to_string()))?;
             crate::dtls::establish(&mut handshake, role, Some(&fingerprint))
         })
         .await
@@ -1752,12 +1794,67 @@ impl MediaPort {
     #[allow(clippy::too_many_arguments)]
     pub async fn start_browser_audio(
         self,
+        config: Config,
+        local_ice: ice::LocalDescription,
+        ice_generation: u64,
+        identity: crate::dtls::openssl::Identity,
+        role: crate::dtls::Role,
+        peer_fingerprint: sipx_sdp::fingerprint::Fingerprint,
+        timeout: Duration,
+    ) -> Result<MediaSession, crate::browser::BrowserStartError> {
+        self.start_browser_audio_selected(
+            config,
+            local_ice,
+            ice_generation,
+            identity,
+            role,
+            peer_fingerprint,
+            None,
+            timeout,
+        )
+        .await
+    }
+
+    /// Start browser-audio while requiring one exact DTLS-SRTP protection profile.
+    ///
+    /// ICE and fingerprint verification are unchanged; only the `use_srtp` list is narrowed.
+    #[cfg(feature = "dtls")]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn start_browser_audio_with_profile(
+        self,
+        config: Config,
+        local_ice: ice::LocalDescription,
+        ice_generation: u64,
+        identity: crate::dtls::openssl::Identity,
+        role: crate::dtls::Role,
+        peer_fingerprint: sipx_sdp::fingerprint::Fingerprint,
+        profile: crate::dtls::Profile,
+        timeout: Duration,
+    ) -> Result<MediaSession, crate::browser::BrowserStartError> {
+        self.start_browser_audio_selected(
+            config,
+            local_ice,
+            ice_generation,
+            identity,
+            role,
+            peer_fingerprint,
+            Some(profile),
+            timeout,
+        )
+        .await
+    }
+
+    #[cfg(feature = "dtls")]
+    #[allow(clippy::too_many_arguments)]
+    async fn start_browser_audio_selected(
+        self,
         mut config: Config,
         local_ice: ice::LocalDescription,
         ice_generation: u64,
         identity: crate::dtls::openssl::Identity,
         role: crate::dtls::Role,
         peer_fingerprint: sipx_sdp::fingerprint::Fingerprint,
+        profile: Option<crate::dtls::Profile>,
         timeout: Duration,
     ) -> Result<MediaSession, crate::browser::BrowserStartError> {
         if config.rtcp_mode != sipx_sdp::RtcpMode::Mux {
@@ -1772,6 +1869,7 @@ impl MediaPort {
             identity,
             role,
             peer_fingerprint,
+            profile,
             timeout,
             Arc::clone(&stop),
             Arc::clone(&self.discards),
@@ -3616,7 +3714,15 @@ async fn send_loop(socket: Arc<UdpSocket>, mut outgoing: mpsc::Receiver<Frame>, 
             },
             None => encoded,
         };
-        if socket.send_to(&datagram, destination).await.is_err() {
+        let (wire_destination, wire_datagram) = ice
+            .as_ref()
+            .and_then(|handle| handle.relay_datagram(ComponentId::RTP, destination, &datagram))
+            .unwrap_or_else(|| (destination, datagram.to_vec()));
+        if socket
+            .send_to(&wire_datagram, wire_destination)
+            .await
+            .is_err()
+        {
             return;
         }
         // §11: a keepalive goes out only when nothing has been sent on the selected pair for Tr,
@@ -3912,12 +4018,32 @@ fn demultiplex<'a>(
     from: SocketAddr,
     on: ice::LocalBase,
     ice: Option<&ice::driver::Handle>,
-) -> Option<&'a [u8]> {
+) -> Option<(SocketAddr, &'a [u8])> {
     match crate::dtls::classify(datagram) {
-        crate::dtls::Arriving::Rtp => Some(datagram),
+        crate::dtls::Arriving::Rtp => Some((from, datagram)),
         crate::dtls::Arriving::Stun => {
             if let Some(handle) = ice {
-                handle.datagram(from, on, datagram.to_vec());
+                if let Some(relayed) = handle.relayed_data(from, on, datagram) {
+                    return match crate::dtls::classify(relayed.data) {
+                        crate::dtls::Arriving::Rtp => Some((relayed.peer, relayed.data)),
+                        crate::dtls::Arriving::Stun => {
+                            handle.datagram(
+                                relayed.peer,
+                                on,
+                                sipx_sdp::ice::CandidateType::Relayed,
+                                relayed.data.to_vec(),
+                            );
+                            None
+                        }
+                        crate::dtls::Arriving::Dtls | crate::dtls::Arriving::Unknown => None,
+                    };
+                }
+                handle.datagram(
+                    from,
+                    on,
+                    sipx_sdp::ice::CandidateType::Host,
+                    datagram.to_vec(),
+                );
             }
             None
         }
@@ -3983,6 +4109,7 @@ fn spawn_control(control: Control) -> Vec<tokio::task::JoinHandle<()>> {
             control.outbound,
             Arc::clone(&control.rtcp_observation.feedback),
             control.srtp.clone(),
+            control.ice.clone(),
             Arc::clone(&control.stop),
         );
         #[cfg(feature = "dtls")]
@@ -4034,7 +4161,7 @@ fn spawn_ice(
     stop: &Arc<Stop>,
     discards: &Arc<DiscardMeters>,
 ) -> (ice::driver::Handle, tokio::task::JoinHandle<()>) {
-    let (agent, pending) = local.into_driver_parts();
+    let (agent, pending, allocations) = local.into_driver_parts();
     let mut sockets = vec![Arc::clone(socket)];
     if let Some(control) = rtcp {
         sockets.push(Arc::clone(control));
@@ -4042,7 +4169,7 @@ fn spawn_ice(
     ice::driver::spawn(
         agent,
         pending,
-        sockets,
+        ice::driver::BoundSockets::new(sockets, allocations),
         destinations.clone(),
         Arc::clone(stop),
         Arc::clone(discards),
@@ -4145,7 +4272,8 @@ impl ReceiveInput {
                         Err(_elapsed) => return ReceivedDatagram::Silence,
                     };
                     let arrived = datagram.get(..length).unwrap_or_default();
-                    let Some(media) = demultiplex(arrived, source, crate::ice::LocalBase(0), ice)
+                    let Some((source, media)) =
+                        demultiplex(arrived, source, crate::ice::LocalBase(0), ice)
                     else {
                         continue;
                     };
@@ -4531,6 +4659,7 @@ async fn rtcp_loop(
     outbound: Arc<Outbound>,
     feedback: Arc<Mutex<Feedback>>,
     srtp: Option<SrtpKeys>,
+    ice: Option<crate::ice::driver::Handle>,
     stop: Arc<Stop>,
 ) {
     // Owned by this loop, like the RTP contexts: SRTCP keeps its own index, and one task sends.
@@ -4638,7 +4767,20 @@ async fn rtcp_loop(
                 SocketAddr::new(destination.ip(), destination.port().saturating_add(1))
             })
         };
-        if socket.send_to(&datagram, rtcp_to).await.is_err() {
+        let component = if mode == sipx_sdp::RtcpMode::Mux {
+            ComponentId::RTP
+        } else {
+            ComponentId::RTCP
+        };
+        let (wire_destination, wire_datagram) = ice
+            .as_ref()
+            .and_then(|handle| handle.relay_datagram(component, rtcp_to, &datagram))
+            .unwrap_or_else(|| (rtcp_to, datagram.to_vec()));
+        if socket
+            .send_to(&wire_datagram, wire_destination)
+            .await
+            .is_err()
+        {
             return;
         }
     }
@@ -4676,7 +4818,9 @@ async fn rtcp_receive_loop(
         // The control port carries the same three protocols the media port does, because ICE
         // checks component 2 over it.
         let arrived = datagram.get(..len).unwrap_or(&[]);
-        let Some(control) = demultiplex(arrived, source, ice::LocalBase(1), ice.as_ref()) else {
+        let Some((_source, control)) =
+            demultiplex(arrived, source, ice::LocalBase(1), ice.as_ref())
+        else {
             continue;
         };
 

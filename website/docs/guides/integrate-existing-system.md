@@ -95,9 +95,9 @@ complete paths:
 Set the bound and advertised addresses explicitly. `sipx dial` and `sipx answer` take
 `--local` and `--advertise` separately; the terminal JSON reports `media_bound` and
 `media_advertised` so a deployment can verify the choice. Behind NAT, sipx can use symmetric RTP or
-gather host and STUN-derived server-reflexive ICE candidates. TURN and relayed candidates are not
-available, so some NAT pairs still have no working media path. Validate from the network where the
-endpoint will actually run, not only on loopback.
+gather host and STUN-derived server-reflexive ICE candidates. A library application can additionally
+supply `sipx_call::TurnPolicy` for a configured relay; sipx does not operate that relay service.
+Validate from the network where the endpoint will actually run, not only on loopback.
 
 ## Name a destination instead of addressing one
 
@@ -143,8 +143,9 @@ off-media relay role, and routing policy remains application work.
 
 `sipx-host` can bind a SIP listener and serve calls to document-mode webhooks, authenticated
 full-duplex sessions, or a configured realtime audio bridge; a granted session can also originate
-a call. Those Rust host surfaces are Supported under the pre-1.0 policy. The language-neutral wire
-contract remains Experimental, and there is no embedded runtime or TypeScript SDK. Its precise status is on the
+a call. Those Supported Rust host surfaces are frozen for compatible v1 evolution. The
+language-neutral wire contract remains Experimental, and there is no embedded runtime or
+TypeScript SDK. Its precise status is on the
 [application host overview](../sdk/overview.md).
 
 ## Validate before expanding

@@ -6,27 +6,27 @@ description: The crates are useful separately — a parser and transaction machi
 # Use sipx as a library
 
 The crates are useful separately. Take the pure protocol core, the async transport and user-agent
-layers, or the complete call framework. The current public prerelease is on crates.io; `main` can move
+layers, or the complete call framework. The current stable release is on crates.io; `main` can move
 ahead of it.
 
 ## Stability policy
 
-Public APIs are not frozen before 1.0. Each crate-level API page labels its surface Supported or
-Experimental. Breaking Supported APIs receive a changelog entry and migration guidance;
-Experimental APIs may change shape or be removed without a migration note. The labels describe
-support intent, not semantic-version stability.
+Supported Rust APIs remain source-compatible throughout the v1 line. Each crate-level API page
+labels its surface Supported or Experimental. Compatible additions follow the reservations in the
+v1 contract; Experimental APIs may change shape or be removed without migration guidance and remain
+unfrozen throughout v1.
 
 ## Add a dependency
 
-Pin every directly imported sipx crate to the exact public prerelease. This complete minimal block
+Pin every directly imported sipx crate to the exact stable release. This complete minimal block
 compiles the [answer-a-call example](answer-a-call.md):
 
 <!-- BEGIN generated:answer-consumer-dependencies -->
 ```toml
 [dependencies]
-sipx-call = "=1.0.0-rc.23"
-sipx-sip = "=1.0.0-rc.23"
-sipx-transport = "=1.0.0-rc.23"
+sipx-call = "=1.0.0"
+sipx-sip = "=1.0.0"
+sipx-transport = "=1.0.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 <!-- END generated:answer-consumer-dependencies -->
@@ -45,7 +45,7 @@ Optional behavior is opt-in. For example, make Opus selectable by `sipx-call` li
 
 ```toml
 [dependencies]
-sipx-call = { version = "=1.0.0-rc.23", features = ["opus"] }
+sipx-call = { version = "=1.0.0", features = ["opus"] }
 ```
 
 Opus links a C library. Enabling the feature makes `Codecs::Opus` available; it does not silently
@@ -56,7 +56,7 @@ selected explicitly:
 
 ```toml
 [dependencies]
-sipx-call = { version = "=1.0.0-rc.23", features = ["opus", "dtls"] }
+sipx-call = { version = "=1.0.0", features = ["opus", "dtls"] }
 ```
 
 ### Opus packaging policy

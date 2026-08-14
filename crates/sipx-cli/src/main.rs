@@ -6,8 +6,9 @@
 //!
 //! # Stability
 //!
-//! sipx is pre-1.0, so this does not mean frozen; `1.0.0` is what freezes an interface and its
-//! predicates are in `docs/roadmap.md`.
+//! The Supported command-line contract is frozen for compatible v1 evolution. Existing commands,
+//! flags, environment variables, output shapes and exit codes remain compatible throughout major
+//! version 1; compatible commands and options may still be added.
 //!
 //! **This crate's promise is its command-line surface, not its Rust API.** Nothing here is `pub`, it
 //! ships no library target, and `cargo doc -p sipx-cli` renders under the binary name — so a reader

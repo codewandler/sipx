@@ -29,6 +29,7 @@ use sipx_sdp::ice::{
 use super::agent::{Agent, Config, Input, Output};
 use super::candidate::{Gathered, LocalBase, LocalCandidate};
 use super::negotiate::Negotiation;
+use super::turn::{self, Allocation, Relay};
 use crate::counters::DiscardMeters;
 
 /// How long to wait for one Binding Response before trying again (RFC 5389 §7.2.1's initial RTO).
@@ -62,6 +63,13 @@ pub struct Gathering {
     /// not a retry count: whatever has been gathered when it expires is what is offered, and a
     /// STUN server that is down costs one call setup this long and nothing else.
     pub stun_timeout: Duration,
+    /// A TURN server from which to gather one relayed candidate per component socket.
+    ///
+    /// `None` keeps TURN entirely off the wire. A configured relay is optional path diversity:
+    /// refusal or silence leaves every host and server-reflexive candidate intact.
+    pub relay: Option<Relay>,
+    /// The bounded deadline for one allocation, including its long-term credential challenge.
+    pub relay_timeout: Duration,
     /// The agent's own configuration — §14's timers and §6.1.2.5's pair limit.
     pub agent: Config,
 }
@@ -80,6 +88,8 @@ impl Gathering {
             tiebreaker: rand::random(),
             stun_server: None,
             stun_timeout: Duration::from_secs(2),
+            relay: None,
+            relay_timeout: Duration::from_secs(3),
             agent: Config::default(),
         }
     }
@@ -115,6 +125,7 @@ pub struct LocalDescription {
     credentials: Credentials,
     candidates: Vec<Candidate>,
     defaults: Vec<(ComponentId, SocketAddr)>,
+    allocations: Vec<Allocation>,
 }
 
 impl LocalDescription {
@@ -198,8 +209,8 @@ impl LocalDescription {
     }
 
     /// Take the agent and whatever it has already asked for, for the driver to run.
-    pub(crate) fn into_driver_parts(self) -> (Agent, Vec<Output>) {
-        (self.agent, self.pending)
+    pub(crate) fn into_driver_parts(self) -> (Agent, Vec<Output>, Vec<Allocation>) {
+        (self.agent, self.pending, self.allocations)
     }
 }
 
@@ -220,6 +231,7 @@ pub(crate) async fn gather(
         config.tiebreaker,
     );
     let mut pending = Vec::new();
+    let mut allocations = Vec::new();
 
     for base in bases {
         let Ok(address) = base.socket.local_addr() else {
@@ -238,35 +250,56 @@ pub(crate) async fn gather(
             base: base.index,
             base_address: address,
             address,
+            related_address: None,
             kind: CandidateType::Host,
             component: base.component,
             server: None,
         })));
 
-        let Some(server) = config.stun_server else {
-            continue;
-        };
-        let Some(mapped) = reflexive(base.socket, server, config.stun_timeout, &discards).await
-        else {
-            continue;
-        };
-        if mapped == address {
-            // §5.1.3: a server-reflexive candidate whose address is one of our host candidates is
-            // redundant and is discarded. On a network with no NAT that is every one of them.
-            discards
-                .ice_redundant_candidates
-                .fetch_add(1, Ordering::Relaxed);
-            tracing::debug!(%address, "no nat: the reflexive candidate is the host one");
-            continue;
+        if let Some(server) = config.stun_server
+            && let Some(mapped) =
+                reflexive(base.socket, server, config.stun_timeout, &discards).await
+        {
+            if mapped == address {
+                // §5.1.3: a server-reflexive candidate whose address is one of our host candidates is
+                // redundant and is discarded. On a network with no NAT that is every one of them.
+                discards
+                    .ice_redundant_candidates
+                    .fetch_add(1, Ordering::Relaxed);
+                tracing::debug!(%address, "no nat: the reflexive candidate is the host one");
+            } else {
+                pending.extend(agent.handle(Input::LocalCandidate(Gathered {
+                    base: base.index,
+                    base_address: address,
+                    address: mapped,
+                    related_address: Some(address),
+                    kind: CandidateType::ServerReflexive,
+                    component: base.component,
+                    server: Some(server.ip()),
+                })));
+            }
         }
-        pending.extend(agent.handle(Input::LocalCandidate(Gathered {
-            base: base.index,
-            base_address: address,
-            address: mapped,
-            kind: CandidateType::ServerReflexive,
-            component: base.component,
-            server: Some(server.ip()),
-        })));
+        if let Some(relay) = &config.relay
+            && let Some(allocation) = allocate(
+                base.socket,
+                base.index,
+                relay,
+                config.relay_timeout,
+                &discards,
+            )
+            .await
+        {
+            pending.extend(agent.handle(Input::LocalCandidate(Gathered {
+                base: base.index,
+                base_address: address,
+                address: allocation.relayed,
+                related_address: Some(allocation.mapped),
+                kind: CandidateType::Relayed,
+                component: base.component,
+                server: Some(allocation.server.ip()),
+            })));
+            allocations.push(allocation);
+        }
     }
 
     pending.extend(agent.handle(Input::GatheringDone));
@@ -279,7 +312,103 @@ pub(crate) async fn gather(
         credentials: config.credentials.clone(),
         candidates,
         defaults,
+        allocations,
     }
+}
+
+/// Allocate one relayed transport address over the socket whose five-tuple it extends.
+async fn allocate(
+    socket: &UdpSocket,
+    base: LocalBase,
+    relay: &Relay,
+    within: Duration,
+    discards: &DiscardMeters,
+) -> Option<Allocation> {
+    let deadline = tokio::time::Instant::now().checked_add(within)?;
+    let mut auth: Option<turn::Auth> = None;
+    let mut transaction = turn::new_transaction_id();
+    let mut request = turn::allocate(transaction, None).ok()?;
+    let mut rto = STUN_RTO;
+    let mut datagram = vec![0u8; u16::MAX as usize + 20];
+
+    while tokio::time::Instant::now() < deadline {
+        if socket.send_to(&request, relay.server()).await.is_err() {
+            return None;
+        }
+        let wait = deadline
+            .saturating_duration_since(tokio::time::Instant::now())
+            .min(rto);
+        let until = tokio::time::Instant::now().checked_add(wait)?;
+        loop {
+            let read = tokio::time::timeout_at(until, socket.recv_from(&mut datagram)).await;
+            let Ok(Ok((length, from))) = read else {
+                break;
+            };
+            if from != relay.server() {
+                discards
+                    .ice_gathering_foreign_datagrams
+                    .fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+            let Ok(response) = turn::response(datagram.get(..length)?) else {
+                continue;
+            };
+            if response.transaction() != transaction {
+                continue;
+            }
+            let authenticated = auth.as_ref().is_some_and(|auth| response.verify(auth));
+            match response {
+                turn::Response::Challenge {
+                    code: 401,
+                    realm: Some(realm),
+                    nonce: Some(nonce),
+                    password_algorithms,
+                    ..
+                } if auth.is_none() => {
+                    auth = Some(
+                        turn::Auth::challenged(relay, &realm, nonce, password_algorithms).ok()?,
+                    );
+                    transaction = turn::new_transaction_id();
+                    request = turn::allocate(transaction, auth.as_ref()).ok()?;
+                    rto = STUN_RTO;
+                    break;
+                }
+                turn::Response::Challenge {
+                    code: 438,
+                    realm: Some(realm),
+                    nonce: Some(nonce),
+                    password_algorithms,
+                    ..
+                } if authenticated => {
+                    auth.as_mut()?
+                        .replace_challenge(&realm, nonce, password_algorithms)
+                        .ok()?;
+                    transaction = turn::new_transaction_id();
+                    request = turn::allocate(transaction, auth.as_ref()).ok()?;
+                    rto = STUN_RTO;
+                    break;
+                }
+                turn::Response::Allocated {
+                    relayed,
+                    mapped,
+                    lifetime,
+                    ..
+                } if authenticated => {
+                    return Some(Allocation {
+                        base,
+                        server: relay.server(),
+                        relayed,
+                        mapped,
+                        lifetime,
+                        auth: auth?,
+                    });
+                }
+                _ => return None,
+            }
+        }
+        rto = rto.saturating_mul(2);
+    }
+    None
 }
 
 /// Ask a STUN server what address it sees, over [`sipx_transport::stun`] (§5.1.1.2).
@@ -389,9 +518,10 @@ pub(crate) fn lines(candidates: &[LocalCandidate]) -> Vec<Candidate> {
 fn related(candidate: &LocalCandidate) -> Option<RelatedAddress> {
     match candidate.gathered.kind {
         CandidateType::ServerReflexive | CandidateType::PeerReflexive | CandidateType::Relayed => {
+            let related = candidate.gathered.related_address?;
             Some(RelatedAddress {
-                address: candidate.gathered.base_address.ip(),
-                port: candidate.gathered.base_address.port(),
+                address: related.ip(),
+                port: related.port(),
             })
         }
         // Host, which has no address behind it, and any type with no rule here.
@@ -422,7 +552,8 @@ fn defaults(candidates: &[Candidate]) -> Vec<(ComponentId, SocketAddr)> {
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    clippy::too_many_lines
 )]
 mod tests {
     use super::*;
@@ -597,6 +728,256 @@ mod tests {
             Arc::new(DiscardMeters::default()),
         )
         .await;
+        assert_eq!(description.candidates().len(), 1);
+        assert_eq!(description.candidates()[0].kind, CandidateType::Host);
+    }
+
+    /// `M-24` / [spec] vector 12: a configured relay challenges with long-term credentials and
+    /// the authenticated Allocate success becomes the last-resort candidate in the offer.
+    ///
+    /// [spec]: https://github.com/codewandler/sipx/blob/main/docs/specs/ice.md
+    #[tokio::test]
+    async fn a_relayed_candidate_is_offered_when_a_relay_is_configured() {
+        let server = bound().await;
+        let server_address = server.local_addr().unwrap();
+        let relayed: SocketAddr = "192.0.2.44:49152".parse().unwrap();
+        let mapped: SocketAddr = "198.51.100.20:50000".parse().unwrap();
+        let relay = Relay::new(server_address, "1000", "relay-password").unwrap();
+        let fixture_relay = relay.clone();
+        tokio::spawn(async move {
+            let mut datagram = vec![0u8; 1500];
+            let (length, from) = server
+                .recv_from(&mut datagram)
+                .await
+                .expect("Allocate arrives");
+            let first_id: [u8; 12] = datagram[8..20].try_into().expect("header");
+            assert!(length >= 20);
+            server
+                .send_to(
+                    &turn::sha256_challenge_for_test(
+                        first_id,
+                        401,
+                        "example.com",
+                        "obMatJos2AAABnonce",
+                    ),
+                    from,
+                )
+                .await
+                .expect("challenge sends");
+
+            let (length, retry_from) = server
+                .recv_from(&mut datagram)
+                .await
+                .expect("authenticated Allocate arrives");
+            assert_eq!(retry_from, from);
+            let retry_id: [u8; 12] = datagram[8..20].try_into().expect("header");
+            let challenge =
+                turn::sha256_challenge_for_test(first_id, 401, "example.com", "obMatJos2AAABnonce");
+            let challenged = turn::response(&challenge).expect("challenge decodes");
+            let auth = match challenged {
+                turn::Response::Challenge {
+                    realm: Some(realm),
+                    nonce: Some(nonce),
+                    password_algorithms,
+                    ..
+                } => turn::Auth::challenged(&fixture_relay, &realm, nonce, password_algorithms)
+                    .expect("SHA-256 auth"),
+                _ => panic!("expected challenge"),
+            };
+            assert!(turn::authenticated_allocate_for_test(
+                &datagram[..length],
+                &auth
+            ));
+            let stale = turn::authenticated_challenge_for_test(
+                retry_id,
+                "allocate",
+                438,
+                "obMatJos2AAABnew-nonce",
+                &auth,
+            );
+            server
+                .send_to(&stale, from)
+                .await
+                .expect("stale-nonce challenge sends");
+
+            let (length, retry_from) = server
+                .recv_from(&mut datagram)
+                .await
+                .expect("fresh-nonce Allocate arrives");
+            assert_eq!(retry_from, from);
+            let retry_id: [u8; 12] = datagram[8..20].try_into().expect("header");
+            let challenged = turn::response(&stale).expect("stale challenge decodes");
+            let fresh_auth = match challenged {
+                turn::Response::Challenge {
+                    realm: Some(realm),
+                    nonce: Some(nonce),
+                    password_algorithms,
+                    ..
+                } => turn::Auth::challenged(&fixture_relay, &realm, nonce, password_algorithms)
+                    .expect("fresh SHA-256 auth"),
+                _ => panic!("expected stale challenge"),
+            };
+            assert!(turn::authenticated_allocate_for_test(
+                &datagram[..length],
+                &fresh_auth
+            ));
+            server
+                .send_to(
+                    &turn::allocation_success_for_test(
+                        retry_id,
+                        relayed,
+                        mapped,
+                        Duration::from_secs(600),
+                        &fresh_auth,
+                    ),
+                    from,
+                )
+                .await
+                .expect("success sends");
+        });
+
+        let rtp = bound().await;
+        let mut gathering = Gathering::new(credentials(), true);
+        gathering.relay = Some(relay);
+        let description = gather(
+            &[Base {
+                index: LocalBase(0),
+                component: ComponentId::RTP,
+                socket: &rtp,
+            }],
+            &gathering,
+            Arc::new(DiscardMeters::default()),
+        )
+        .await;
+
+        let candidate = description
+            .candidates()
+            .iter()
+            .find(|candidate| candidate.kind == CandidateType::Relayed)
+            .expect("the Allocate success becomes a candidate");
+        assert_eq!(candidate.address, relayed.ip());
+        assert_eq!(candidate.port, relayed.port());
+        assert_eq!(candidate.priority.get(), 16_777_215);
+        let related_address = candidate
+            .related
+            .as_ref()
+            .expect("relay carries raddr/rport");
+        assert_eq!(related_address.address, mapped.ip());
+        assert_eq!(related_address.port, mapped.port());
+    }
+
+    #[tokio::test]
+    async fn an_unauthenticated_stale_nonce_cannot_replace_allocation_credentials() {
+        let server = bound().await;
+        let server_address = server.local_addr().unwrap();
+        let relay = Relay::new(server_address, "1000", "relay-password").unwrap();
+        tokio::spawn(async move {
+            let mut datagram = vec![0u8; 1500];
+            let (_, from) = server
+                .recv_from(&mut datagram)
+                .await
+                .expect("Allocate arrives");
+            let first_id: [u8; 12] = datagram[8..20].try_into().expect("header");
+            server
+                .send_to(
+                    &turn::challenge_for_test(first_id, 401, "example.com", "nonce"),
+                    from,
+                )
+                .await
+                .expect("challenge sends");
+            let (_, from) = server
+                .recv_from(&mut datagram)
+                .await
+                .expect("authenticated Allocate arrives");
+            let retry_id: [u8; 12] = datagram[8..20].try_into().expect("header");
+            server
+                .send_to(
+                    &turn::challenge_for_test(retry_id, 438, "example.com", "attacker"),
+                    from,
+                )
+                .await
+                .expect("unauthenticated stale nonce sends");
+        });
+
+        let rtp = bound().await;
+        let mut gathering = Gathering::new(credentials(), true);
+        gathering.relay = Some(relay);
+        let description = gather(
+            &[Base {
+                index: LocalBase(0),
+                component: ComponentId::RTP,
+                socket: &rtp,
+            }],
+            &gathering,
+            Arc::new(DiscardMeters::default()),
+        )
+        .await;
+
+        assert!(
+            description
+                .candidates()
+                .iter()
+                .all(|candidate| candidate.kind != CandidateType::Relayed)
+        );
+    }
+
+    /// A configured relay is path diversity, not a requirement imposed on the call. Silence costs
+    /// only the bounded gathering deadline and leaves the host candidate.
+    #[tokio::test]
+    async fn an_unreachable_relay_degrades_to_host_candidates() {
+        let black_hole = bound().await;
+        let rtp = bound().await;
+        let mut gathering = Gathering::new(credentials(), true);
+        gathering.relay =
+            Some(Relay::new(black_hole.local_addr().unwrap(), "1000", "relay-password").unwrap());
+        gathering.relay_timeout = Duration::from_millis(120);
+        let description = gather(
+            &[Base {
+                index: LocalBase(0),
+                component: ComponentId::RTP,
+                socket: &rtp,
+            }],
+            &gathering,
+            Arc::new(DiscardMeters::default()),
+        )
+        .await;
+        assert_eq!(description.candidates().len(), 1);
+        assert_eq!(description.candidates()[0].kind, CandidateType::Host);
+    }
+
+    #[tokio::test]
+    async fn a_relay_refusal_degrades_to_host_candidates() {
+        let server = bound().await;
+        let server_address = server.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut datagram = vec![0u8; 1500];
+            let (_, from) = server
+                .recv_from(&mut datagram)
+                .await
+                .expect("Allocate arrives");
+            let transaction: [u8; 12] = datagram[8..20].try_into().expect("header");
+            server
+                .send_to(
+                    &turn::challenge_for_test(transaction, 486, "example.com", "nonce"),
+                    from,
+                )
+                .await
+                .expect("refusal sends");
+        });
+        let rtp = bound().await;
+        let mut gathering = Gathering::new(credentials(), true);
+        gathering.relay = Some(Relay::new(server_address, "1000", "relay-password").unwrap());
+        let description = gather(
+            &[Base {
+                index: LocalBase(0),
+                component: ComponentId::RTP,
+                socket: &rtp,
+            }],
+            &gathering,
+            Arc::new(DiscardMeters::default()),
+        )
+        .await;
+
         assert_eq!(description.candidates().len(), 1);
         assert_eq!(description.candidates()[0].kind, CandidateType::Host);
     }

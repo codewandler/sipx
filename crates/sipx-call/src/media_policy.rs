@@ -5,9 +5,10 @@
 //! acquire two implementations of negotiation.
 
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 
 use sipx_media::Codec;
-use sipx_media::ice::Gathering;
+use sipx_media::ice::{Gathering, Relay, RelayCredentialError};
 use sipx_sdp::Capabilities;
 use sipx_sdp::ice::Credentials as IceCredentials;
 
@@ -78,6 +79,7 @@ pub enum CodecSelectionError {
 /// they do not. An explicit [`Codecs::ordered`] list is the application's own and is used
 /// exactly as given; nothing reorders it toward this rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Codecs {
     ordered: [Option<CodecPreference>; 5],
 }
@@ -257,8 +259,109 @@ impl Codecs {
     }
 }
 
+/// Maximum encoded TURN username length accepted by the Supported call configuration.
+///
+/// RFC 8489 §14.3 requires a USERNAME value to contain fewer than 509 bytes. Validation belongs
+/// here, before the media port is bound, rather than in the later allocation encoder.
+pub const MAX_TURN_USERNAME_BYTES: usize = 508;
+
+/// Why a configured TURN relay cannot enter a call policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum TurnPolicyError {
+    /// The long-term username is absent.
+    #[error("TURN username must not be empty")]
+    EmptyUsername,
+    /// The long-term username cannot fit the RFC 8489 USERNAME profile.
+    #[error("TURN username exceeds {MAX_TURN_USERNAME_BYTES} bytes")]
+    UsernameTooLong,
+    /// The long-term password is absent.
+    #[error("TURN password must not be empty")]
+    EmptyPassword,
+    /// The username is not valid under RFC 8265's `OpaqueString` profile.
+    #[error("TURN username is not a valid OpaqueString")]
+    InvalidUsername,
+    /// The password is not valid under RFC 8265's `OpaqueString` profile.
+    #[error("TURN password is not a valid OpaqueString")]
+    InvalidPassword,
+    /// A future credential-profile refusal is not understood by this call crate version.
+    #[error("TURN credentials are not valid under the required profile")]
+    InvalidCredentialProfile,
+}
+
+/// One caller-configured TURN relay and its long-term credentials.
+///
+/// The password is retained only by the private ICE relay value and is never exposed by an
+/// accessor or `Debug`. Construction performs every validation possible without consulting the
+/// server, before a call can bind media or spawn a worker.
+#[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct TurnPolicy {
+    relay: Arc<Relay>,
+}
+
+impl TurnPolicy {
+    /// Validate a UDP TURN server and long-term credentials.
+    ///
+    /// # Errors
+    ///
+    /// Empty credentials and a username too long for RFC 8489's USERNAME attribute are refused.
+    pub fn new(
+        server: SocketAddr,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> std::result::Result<Self, TurnPolicyError> {
+        let username = username.into();
+        let password = password.into();
+        if username.is_empty() {
+            return Err(TurnPolicyError::EmptyUsername);
+        }
+        if password.is_empty() {
+            return Err(TurnPolicyError::EmptyPassword);
+        }
+        let relay = Relay::new(server, username, password).map_err(|error| match error {
+            RelayCredentialError::InvalidUsername => TurnPolicyError::InvalidUsername,
+            RelayCredentialError::InvalidPassword => TurnPolicyError::InvalidPassword,
+            _ => TurnPolicyError::InvalidCredentialProfile,
+        })?;
+        if relay.username().len() > MAX_TURN_USERNAME_BYTES {
+            return Err(TurnPolicyError::UsernameTooLong);
+        }
+        Ok(Self {
+            relay: Arc::new(relay),
+        })
+    }
+
+    /// The configured TURN server.
+    #[must_use]
+    pub fn server(&self) -> SocketAddr {
+        self.relay.server()
+    }
+
+    /// The long-term username. The password is intentionally not exposed.
+    #[must_use]
+    pub fn username(&self) -> &str {
+        self.relay.username()
+    }
+
+    pub(crate) fn relay(&self) -> Relay {
+        (*self.relay).clone()
+    }
+}
+
+impl std::fmt::Debug for TurnPolicy {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TurnPolicy")
+            .field("server", &self.server())
+            .field("username", &self.username())
+            .field("password", &"<redacted>")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Whether an initial call exchange uses ICE (`docs/specs/ice.md` §13.4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum IcePolicy {
     /// Emit no ICE attributes and start no connectivity-check worker.
@@ -268,6 +371,11 @@ pub enum IcePolicy {
     Host,
     /// Gather host candidates and ask this STUN server for server-reflexive candidates.
     Stun(SocketAddr),
+    /// Gather host candidates and allocate one configured relayed candidate.
+    ///
+    /// Failure to allocate leaves the host candidates available; it does not weaken an explicit
+    /// media-security policy or turn a viable direct pair into a call failure.
+    Turn(TurnPolicy),
 }
 
 /// How the initial audio stream is keyed.
@@ -300,6 +408,52 @@ pub enum NegotiatedKeying {
     DtlsSrtp,
 }
 
+/// One exact SRTP protection suite an application may require for a call.
+///
+/// With no requirement, both SDES and DTLS-SRTP offer every suite sipx can perform in
+/// strongest-first order. [`MediaPolicy::with_srtp_suite`] changes that list to exactly one
+/// value. It is a requirement, not a preference: use it only with [`Keying::Sdes`] or
+/// [`Keying::DtlsSrtp`], and a peer which cannot agree on that suite gets no media stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SrtpSuite {
+    /// AES-128 counter mode with an 80-bit HMAC-SHA1 tag (RFC 3711, RFC 4568 §6.2).
+    AesCm128HmacSha1_80,
+    /// AES-128 in Galois/Counter Mode with a 128-bit tag (RFC 7714).
+    AeadAes128Gcm,
+    /// AES-256 in Galois/Counter Mode with a 128-bit tag (RFC 7714).
+    AeadAes256Gcm,
+}
+
+impl SrtpSuite {
+    /// The stable configuration and result token.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::AesCm128HmacSha1_80 => "AES_CM_128_HMAC_SHA1_80",
+            Self::AeadAes128Gcm => "AEAD_AES_128_GCM",
+            Self::AeadAes256Gcm => "AEAD_AES_256_GCM",
+        }
+    }
+
+    pub(crate) const fn sdes(self) -> sipx_sdp::crypto::Suite {
+        match self {
+            Self::AesCm128HmacSha1_80 => sipx_sdp::crypto::Suite::AesCm128HmacSha1_80,
+            Self::AeadAes128Gcm => sipx_sdp::crypto::Suite::AeadAes128Gcm,
+            Self::AeadAes256Gcm => sipx_sdp::crypto::Suite::AeadAes256Gcm,
+        }
+    }
+
+    #[cfg(feature = "dtls")]
+    pub(crate) const fn dtls(self) -> sipx_media::dtls::Profile {
+        match self {
+            Self::AesCm128HmacSha1_80 => sipx_media::dtls::Profile::Aes128CmHmacSha1_80,
+            Self::AeadAes128Gcm => sipx_media::dtls::Profile::AeadAes128Gcm,
+            Self::AeadAes256Gcm => sipx_media::dtls::Profile::AeadAes256Gcm,
+        }
+    }
+}
+
 /// A named composition of call/media requirements.
 ///
 /// `Standard` preserves the independently selectable SIP media policies. `BrowserAudio` is the
@@ -316,16 +470,22 @@ pub enum MediaProfile {
 }
 
 /// The media choices shared by dialing and answering a call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct MediaPolicy {
     /// Named composition policy.
-    pub profile: MediaProfile,
+    pub(crate) profile: MediaProfile,
     /// Which codecs are offered and accepted.
-    pub codecs: Codecs,
+    pub(crate) codecs: Codecs,
     /// Whether and how the initial exchange gathers ICE candidates.
-    pub ice: IcePolicy,
+    pub(crate) ice: IcePolicy,
     /// Which media keying mechanism the application selected.
-    pub keying: Keying,
+    pub(crate) keying: Keying,
+    /// An exact SRTP suite requirement, or every supported suite in strongest-first order.
+    ///
+    /// A value is valid only with an explicit [`Keying::Sdes`] or [`Keying::DtlsSrtp`]. Calls
+    /// refuse contradictory `Auto` and `Plain` combinations before binding media or sending SIP.
+    pub(crate) srtp_suite: Option<SrtpSuite>,
 }
 
 impl MediaPolicy {
@@ -345,6 +505,7 @@ impl MediaPolicy {
             codecs,
             ice: IcePolicy::Host,
             keying: Keying::DtlsSrtp,
+            srtp_suite: None,
         }
     }
 
@@ -367,7 +528,7 @@ impl MediaPolicy {
 
     /// Select an ICE policy while retaining the other media choices.
     #[must_use]
-    pub const fn with_ice(mut self, ice: IcePolicy) -> Self {
+    pub fn with_ice(mut self, ice: IcePolicy) -> Self {
         self.ice = ice;
         self
     }
@@ -379,16 +540,60 @@ impl MediaPolicy {
         self
     }
 
+    /// Require exactly one SRTP suite for the selected explicit SRTP keying.
+    ///
+    /// This narrows SDES's `a=crypto` lines and DTLS-SRTP's `use_srtp` extension alike. A peer
+    /// that cannot perform the suite must refuse the stream; no weaker suite or clear RTP is
+    /// permitted. Combining this with [`Keying::Auto`] or [`Keying::Plain`] is refused by call
+    /// preflight because those policies may select clear RTP.
+    #[must_use]
+    pub const fn with_srtp_suite(mut self, suite: SrtpSuite) -> Self {
+        self.srtp_suite = Some(suite);
+        self
+    }
+
+    /// The named media profile.
+    #[must_use]
+    pub const fn profile(&self) -> MediaProfile {
+        self.profile
+    }
+
+    /// The ordered codec policy.
+    #[must_use]
+    pub const fn codecs(&self) -> Codecs {
+        self.codecs
+    }
+
+    /// The ICE policy, including caller-owned TURN credentials when selected.
+    #[must_use]
+    pub const fn ice(&self) -> &IcePolicy {
+        &self.ice
+    }
+
+    /// The requested media-keying mechanism.
+    #[must_use]
+    pub const fn keying(&self) -> Keying {
+        self.keying
+    }
+
+    /// The exact SRTP suite requirement, when one was selected.
+    #[must_use]
+    pub const fn srtp_suite(&self) -> Option<SrtpSuite> {
+        self.srtp_suite
+    }
+
     /// Build fresh per-call gathering state when ICE was selected.
-    pub(crate) fn gathering(self, offerer: bool) -> Result<Option<Gathering>> {
+    pub(crate) fn gathering(&self, offerer: bool) -> Result<Option<Gathering>> {
         if self.ice == IcePolicy::Disabled {
             return Ok(None);
         }
         let credentials = IceCredentials::new(token(), format!("{}{}", token(), token()))
             .ok_or_else(|| Error::Sdp("could not generate valid ICE credentials".to_owned()))?;
         let mut gathering = Gathering::new(credentials, offerer);
-        if let IcePolicy::Stun(server) = self.ice {
-            gathering.stun_server = Some(server);
+        match &self.ice {
+            IcePolicy::Stun(server) => gathering.stun_server = Some(*server),
+            IcePolicy::Turn(turn) => gathering.relay = Some(turn.relay()),
+            IcePolicy::Disabled | IcePolicy::Host => {}
         }
         Ok(Some(gathering))
     }
@@ -399,6 +604,54 @@ impl MediaPolicy {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn turn_policy_rejects_invalid_credentials_and_redacts_the_password() {
+        let server = "192.0.2.20:3478".parse().unwrap();
+        assert_eq!(
+            TurnPolicy::new(server, "", "secret"),
+            Err(TurnPolicyError::EmptyUsername)
+        );
+        assert_eq!(
+            TurnPolicy::new(server, "1000", ""),
+            Err(TurnPolicyError::EmptyPassword)
+        );
+        assert_eq!(
+            TurnPolicy::new(server, "x".repeat(MAX_TURN_USERNAME_BYTES + 1), "secret"),
+            Err(TurnPolicyError::UsernameTooLong)
+        );
+        assert_eq!(
+            TurnPolicy::new(server, "contains-\0-control", "secret"),
+            Err(TurnPolicyError::InvalidUsername)
+        );
+        assert_eq!(
+            TurnPolicy::new(server, "1000", "contains-\0-control"),
+            Err(TurnPolicyError::InvalidPassword)
+        );
+        let normalized = TurnPolicy::new(server, "cafe\u{301}", "secret").unwrap();
+        assert_eq!(normalized.username(), "caf\u{e9}");
+        let boundary = TurnPolicy::new(server, "e\u{301}".repeat(254), "secret").unwrap();
+        assert_eq!(boundary.username().len(), MAX_TURN_USERNAME_BYTES);
+        let configured = TurnPolicy::new(server, "1000", "relay-password").unwrap();
+        let debug = format!("{configured:?}");
+        assert!(debug.contains("1000"));
+        assert!(!debug.contains("relay-password"));
+    }
+
+    #[test]
+    fn turn_policy_enters_fresh_gathering_without_changing_defaults() {
+        let defaults = MediaPolicy::default();
+        assert_eq!(defaults.codecs(), Codecs::G711);
+        assert_eq!(defaults.ice(), &IcePolicy::Disabled);
+        assert_eq!(defaults.keying(), Keying::Auto);
+
+        let relay =
+            TurnPolicy::new("192.0.2.20:3478".parse().unwrap(), "1000", "relay-password").unwrap();
+        let policy = defaults.with_ice(IcePolicy::Turn(relay));
+        let gathering = policy.gathering(true).unwrap().unwrap();
+        assert!(gathering.relay.is_some());
+        assert!(gathering.stun_server.is_none());
+    }
 
     #[test]
     fn the_default_remains_the_g711_pair_in_wire_order() {

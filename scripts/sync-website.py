@@ -48,6 +48,13 @@ REGION = re.compile(
     re.DOTALL,
 )
 RELEASE = re.compile(r"^## \[(?P<version>[^]]+)\] — (?P<date>\d{4}-\d{2}-\d{2})$", re.MULTILINE)
+CHANGELOG_REFERENCE = re.compile(
+    r"^\[(?P<label>Unreleased|\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\]:\s+"
+    r"(?P<url>\S+)\s*$",
+    re.MULTILINE,
+)
+CHANGELOG_COMPARE_BASE = "https://github.com/codewandler/sipx/compare/"
+CHANGELOG_RELEASE_BASE = "https://github.com/codewandler/sipx/releases/tag/"
 # Story prefixes are a closed project convention. Keeping the prefix set explicit prevents
 # cryptographic names such as SHA-256 and AES-128 from looking like work-item identifiers.
 STORY_ID = re.compile(r"(?<![A-Za-z0-9])[STUMCPAX]-\d+\b")
@@ -98,6 +105,46 @@ APP_EVENT_TABLE_URL = (
     "https://github.com/codewandler/sipx/blob/main/"
     "docs/specs/app-contract.md#53-event-types"
 )
+
+
+def changelog_compare_problems(text: str) -> list[str]:
+    """Keep release references chained to the dated headings in document order.
+
+    Candidate numbers are not necessarily contiguous.  The document's dated headings are the
+    release ledger, so each release compares the next older heading to itself and Unreleased
+    compares the newest heading to HEAD.
+    """
+
+    releases = [match.group("version") for match in RELEASE.finditer(text)]
+    if not releases:
+        return ["CHANGELOG.md: no dated release headings found"]
+
+    references: dict[str, list[str]] = {}
+    for match in CHANGELOG_REFERENCE.finditer(text):
+        references.setdefault(match.group("label"), []).append(match.group("url"))
+
+    expected = {
+        "Unreleased": f"{CHANGELOG_COMPARE_BASE}v{releases[0]}...HEAD",
+        releases[-1]: f"{CHANGELOG_RELEASE_BASE}v{releases[-1]}",
+    }
+    for current, older in zip(releases, releases[1:]):
+        expected[current] = f"{CHANGELOG_COMPARE_BASE}v{older}...v{current}"
+
+    problems = []
+    for label, expected_url in expected.items():
+        urls = references.get(label, [])
+        if not urls:
+            problems.append(f"CHANGELOG.md: [{label}] has no reference link")
+        elif len(urls) > 1:
+            problems.append(f"CHANGELOG.md: [{label}] has {len(urls)} reference links")
+        elif urls[0] != expected_url:
+            problems.append(
+                f"CHANGELOG.md: [{label}] must link to {expected_url}, found {urls[0]}"
+            )
+
+    for label in sorted(references.keys() - expected.keys()):
+        problems.append(f"CHANGELOG.md: [{label}] has no dated release heading")
+    return problems
 
 
 def app_event_types(spec: str | None = None) -> tuple[str, ...]:
@@ -168,21 +215,11 @@ def app_event_family_problems(page: str, source: str) -> list[str]:
         problems.append(f"{source}: generated event inventory does not link the normative table")
     return problems
 
-# These entry points jointly define whether somebody can adopt the current public prerelease
-# without first reading the repository's internal roadmap. Unlike a copied capability table, the
-# guard asks only for the release boundary and stability contract that must be present on each
-# public front door. Detailed capability truth remains in the fit and CLI references.
+# These entry points jointly define whether somebody can adopt the current public release without
+# first reading the repository's internal roadmap. Unlike a copied capability table, the guard asks
+# only for the release boundary and stability contract that must be present on each public front
+# door. Detailed capability truth remains in the fit and CLI references.
 ADOPTION_REQUIREMENTS = {
-    "README.md": (
-        ("published public-prerelease status", re.compile(r"current public\s+prerelease", re.I)),
-        ("pre-1.0 non-frozen policy", re.compile(r"Public APIs are not frozen", re.I)),
-        ("Supported migration policy", re.compile(r"Supported APIs receive migration", re.I)),
-        ("Experimental change policy", re.compile(r"Experimental APIs may change", re.I)),
-    ),
-    "website/docs/intro.md": (
-        ("published public-prerelease status", re.compile(r"current public\s+prerelease", re.I)),
-        ("pre-1.0 non-frozen policy", re.compile(r"Public APIs are not frozen", re.I)),
-    ),
     "website/docs/whats-new.md": (
         ("published beta heading", re.compile(r"first public beta is published", re.I)),
         ("registry honesty", re.compile(r"published as exact crates\.io packages", re.I)),
@@ -208,6 +245,81 @@ ADOPTION_REQUIREMENTS = {
     ),
 }
 
+PRERELEASE_ADOPTION_REQUIREMENTS = {
+    "README.md": (
+        ("published public-prerelease status", re.compile(r"current public\s+prerelease", re.I)),
+        ("pre-1.0 non-frozen policy", re.compile(r"Public APIs are not frozen", re.I)),
+        ("Supported migration policy", re.compile(r"Supported APIs receive migration", re.I)),
+        ("Experimental change policy", re.compile(r"Experimental APIs may change", re.I)),
+    ),
+    "website/docs/intro.md": (
+        ("published public-prerelease status", re.compile(r"current public\s+prerelease", re.I)),
+        ("pre-1.0 non-frozen policy", re.compile(r"Public APIs are not frozen", re.I)),
+        ("Experimental change policy", re.compile(r"Experimental APIs may change", re.I)),
+    ),
+}
+
+STABLE_ADOPTION_REQUIREMENTS = {
+    "README.md": (
+        ("current stable-release status", re.compile(r"current\s+stable\s+release", re.I)),
+        (
+            "Supported v1 source-compatibility promise",
+            re.compile(
+                r"Supported Rust APIs (?:remain|are) source-compatible\s+"
+                r"(?:throughout|across)\s+(?:the\s+)?v1",
+                re.I,
+            ),
+        ),
+        ("Experimental change policy", re.compile(r"Experimental APIs may change", re.I)),
+        (
+            "Experimental v1 exclusion",
+            re.compile(r"Experimental APIs.*remain\s+unfrozen", re.I | re.DOTALL),
+        ),
+    ),
+    "website/docs/intro.md": (
+        ("current stable-release status", re.compile(r"current\s+stable\s+release", re.I)),
+        (
+            "Supported v1 source-compatibility promise",
+            re.compile(
+                r"Supported Rust APIs (?:remain|are) source-compatible\s+"
+                r"(?:throughout|across)\s+(?:the\s+)?v1",
+                re.I,
+            ),
+        ),
+        ("Experimental change policy", re.compile(r"Experimental APIs may change", re.I)),
+        (
+            "Experimental v1 exclusion",
+            re.compile(r"Experimental APIs.*remain\s+unfrozen", re.I | re.DOTALL),
+        ),
+    ),
+}
+
+STABLE_FORBIDDEN_POLICY = {
+    "README.md": (
+        ("still claims a public prerelease", re.compile(r"current public\s+prerelease", re.I)),
+        (
+            "still claims Supported APIs are not frozen",
+            re.compile(r"Public APIs are not frozen", re.I),
+        ),
+    ),
+    "website/docs/intro.md": (
+        ("still claims a public prerelease", re.compile(r"current public\s+prerelease", re.I)),
+        (
+            "still claims Supported APIs are not frozen",
+            re.compile(r"Public APIs are not frozen", re.I),
+        ),
+    ),
+}
+
+PRERELEASE_FORBIDDEN_POLICY = {
+    "README.md": (
+        ("still claims a stable release", re.compile(r"current\s+stable\s+release", re.I)),
+    ),
+    "website/docs/intro.md": (
+        ("still claims a stable release", re.compile(r"current\s+stable\s+release", re.I)),
+    ),
+}
+
 # These were once truthful alpha statements and remained on current-main pages after the
 # corresponding paths shipped. Historical release notes are deliberately excluded.
 CURRENT_SURFACE_PAGES = (
@@ -223,6 +335,51 @@ CURRENT_SURFACE_PAGES = (
     "website/docs/reference/comparison.md",
     "website/docs/sdk/overview.md",
     "website/docs/sdk/contract.md",
+)
+
+# Current prose only. `whats-new.md` is handled separately below so a truthful historical
+# prerelease section never becomes a false positive after stable v1.
+STABLE_V1_CURRENT_PAGES = (
+    "README.md",
+    "website/docs/intro.md",
+    "website/docs/getting-started.md",
+    "website/docs/guides/as-a-library.md",
+    "website/docs/guides/answer-a-call.md",
+    "website/docs/guides/does-this-fit.md",
+    "website/docs/guides/integrate-existing-system.md",
+    "website/docs/guides/persist-a-dialog.md",
+    "website/docs/reference/development-process.md",
+    "website/docs/sdk/overview.md",
+    "website/docs/sdk/contract.md",
+)
+STABLE_V1_RUSTDOC = (
+    "crates/sipx-app-protocol/src/lib.rs",
+    "crates/sipx-app/src/lib.rs",
+    "crates/sipx-audio/src/lib.rs",
+    "crates/sipx-call/src/lib.rs",
+    "crates/sipx-cli/src/main.rs",
+    "crates/sipx-media/src/lib.rs",
+    "crates/sipx-rtp/src/lib.rs",
+    "crates/sipx-sdp/src/lib.rs",
+    "crates/sipx-sip/src/lib.rs",
+    "crates/sipx-testkit/src/lib.rs",
+    "crates/sipx-transport/src/lib.rs",
+    "crates/sipx-ua/src/lib.rs",
+)
+EXPERIMENTAL_V1_RUSTDOC = ("crates/sipx-wasm/src/lib.rs",)
+LEGACY_V1_CLAIMS = (
+    re.compile(r"\bsipx (?:is|remains) pre-1\.0\b", re.I),
+    re.compile(r"\bwhile sipx remains pre-1\.0\b", re.I),
+    re.compile(r"\bunder (?:the |sipx(?:'s)? )?pre-1\.0 policy\b", re.I),
+    re.compile(r"\bPublic APIs are not frozen(?: before 1\.0)?\b", re.I),
+    re.compile(r"\bcurrent public prerelease\b", re.I),
+    re.compile(r"\bexact public prerelease\b", re.I),
+    re.compile(r"\b(?:same )?exact prerelease\b", re.I),
+    re.compile(r"\bAPI remains pre-1\.0\b", re.I),
+    re.compile(r"\brelease candidate is for programmable SIP endpoints\b", re.I),
+    re.compile(r"\bremains a prerelease rather than stable\b", re.I),
+    re.compile(r"\bInstall the public prerelease\b", re.I),
+    re.compile(r"\b1\.0\.0-rc\.24\b"),
 )
 STALE_CURRENT_CLAIMS = (
     re.compile(r"\bno ICE\b", re.I),
@@ -696,13 +853,23 @@ def public_fact_problems(text: str, source: str) -> list[str]:
 
 
 def public_adoption_problems(contents: dict[str, str]) -> list[str]:
-    """Hold the public prerelease entry points to their adoption and stability boundary."""
+    """Hold public entry points to the current version's adoption and stability boundary."""
     problems = []
-    for source, requirements in ADOPTION_REQUIREMENTS.items():
+    prerelease = "-" in canonical_facts().workspace_version
+    release_requirements = (
+        PRERELEASE_ADOPTION_REQUIREMENTS if prerelease else STABLE_ADOPTION_REQUIREMENTS
+    )
+    forbidden_policy = PRERELEASE_FORBIDDEN_POLICY if prerelease else STABLE_FORBIDDEN_POLICY
+    for source, requirements in {**ADOPTION_REQUIREMENTS, **release_requirements}.items():
         text = contents.get(source, "")
         for label, pattern in requirements:
             if not pattern.search(text):
                 problems.append(f"{source}: missing {label}")
+    for source, forbidden in forbidden_policy.items():
+        text = contents.get(source, "")
+        for label, pattern in forbidden:
+            if pattern.search(text):
+                problems.append(f"{source}: {label}")
     for source in CURRENT_SURFACE_PAGES:
         text = contents.get(source, "")
         for line_number, line in enumerate(text.splitlines(), start=1):
@@ -711,6 +878,47 @@ def public_adoption_problems(contents: dict[str, str]) -> list[str]:
                     problems.append(
                         f"{source}:{line_number}: stale current-main capability claim"
                     )
+    return problems
+
+
+def stable_v1_messaging_problems(
+    public_contents: dict[str, str], rust_contents: dict[str, str]
+) -> list[str]:
+    """Reject pre-v1 claims on current surfaces while preserving release history."""
+
+    problems = []
+    for source in STABLE_V1_CURRENT_PAGES:
+        text = REGION.sub("", public_contents.get(source, ""))
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            for pattern in LEGACY_V1_CLAIMS:
+                if pattern.search(line):
+                    problems.append(f"{source}:{line_number}: stale pre-v1 stability claim")
+
+    whats_new = public_contents.get("website/docs/whats-new.md", "")
+    headings = list(re.finditer(PUBLIC_RELEASE_HEADING.pattern, whats_new, re.MULTILINE))
+    current_end = headings[1].start() if len(headings) > 1 else len(whats_new)
+    current_release = REGION.sub("", whats_new[:current_end])
+    for line_number, line in enumerate(current_release.splitlines(), start=1):
+        for pattern in LEGACY_V1_CLAIMS:
+            if pattern.search(line):
+                problems.append(
+                    f"website/docs/whats-new.md:{line_number}: stale pre-v1 stability claim"
+                )
+
+    for source in (*STABLE_V1_RUSTDOC, *EXPERIMENTAL_V1_RUSTDOC):
+        text = rust_contents.get(source, "")
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            for pattern in LEGACY_V1_CLAIMS:
+                if pattern.search(line):
+                    problems.append(f"{source}:{line_number}: stale pre-v1 stability claim")
+
+    for source in STABLE_V1_RUSTDOC:
+        if "frozen for compatible v1 evolution" not in rust_contents.get(source, ""):
+            problems.append(f"{source}: missing Supported v1 compatibility contract")
+    for source in EXPERIMENTAL_V1_RUSTDOC:
+        text = rust_contents.get(source, "")
+        if "Experimental" not in text or "remains unfrozen" not in text:
+            problems.append(f"{source}: missing Experimental v1 exclusion")
     return problems
 
 
@@ -759,6 +967,7 @@ def public_files() -> list[Path]:
 def process(update: bool) -> int:
     failures = []
     regions = 0
+    failures.extend(changelog_compare_problems(CHANGELOG.read_text(encoding="utf-8")))
     pages = [README, *sorted(DOCS.rglob("*.md"))]
     for page in pages:
         text = page.read_text(encoding="utf-8")
@@ -808,12 +1017,17 @@ def process(update: bool) -> int:
     sdk_source = str(SDK_CONTRACT_PAGE.relative_to(ROOT))
     failures.extend(app_event_family_problems(public_contents.get(sdk_source, ""), sdk_source))
     failures.extend(public_adoption_problems(public_contents))
+    rust_contents = {}
     for source in sorted((ROOT / "crates").rglob("*.rs")):
+        relative = str(source.relative_to(ROOT))
+        text = source.read_text(encoding="utf-8")
+        rust_contents[relative] = text
         failures.extend(
             rust_doc_example_problems(
-                source.read_text(encoding="utf-8"), str(source.relative_to(ROOT))
+                text, relative
             )
         )
+    failures.extend(stable_v1_messaging_problems(public_contents, rust_contents))
 
     for failure in failures:
         print(f"sync-website: {failure}", file=sys.stderr)

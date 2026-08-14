@@ -8,7 +8,7 @@
 //! notifier driven by a scheduler somebody else owns has to be able to say what "now" is, and a
 //! test that wants to watch a subscription expire should not have to wait an hour.
 //! **Supported** (`S-35`): `sipx-call::Notifier` drives this exact store from the live endpoint
-//! dispatcher. Breaking changes receive migration guidance while sipx remains pre-1.0.
+//! dispatcher. The Supported surface is frozen for compatible v1 evolution.
 //!
 
 use std::time::Duration;

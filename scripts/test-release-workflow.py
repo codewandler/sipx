@@ -375,7 +375,7 @@ class PublicityBoundaryMutations(unittest.TestCase):
             1,
         )
         self.assertIn(
-            "specification does not separate the GitHub prerelease from broader publicity",
+            "specification does not separate the GitHub Release from broader publicity",
             checker.specification_problems(mutated),
         )
 
@@ -518,6 +518,18 @@ class RecoveryMutations(unittest.TestCase):
             with self.subTest(expected=expected):
                 self.assert_mutation(old, new, expected)
 
+    def test_failed_run_uses_the_current_ordinary_release_job_names(self) -> None:
+        self.assert_mutation(
+            'job.get("name") == "publish and verify release"',
+            'job.get("name") == "publish and verify prerelease"',
+            "recovery does not require exactly one current ordinary release job",
+        )
+        self.assert_mutation(
+            'job.get("name") == "publish or verify GitHub release"',
+            'job.get("name") == "publish or verify GitHub prerelease"',
+            "recovery accepts an earlier or missing GitHub release job",
+        )
+
     def test_recovery_uses_fixed_controller_interface_and_exact_authority(self) -> None:
         self.assert_mutation(
             '--release-root "$SIPX_RELEASE_ROOT"',
@@ -580,7 +592,7 @@ class RecoveryMutations(unittest.TestCase):
         self.assertIn(github_query, RESUME_WORKFLOW)
         mutated = RESUME_WORKFLOW.replace(github_query, "printf stale", 1)
         self.assertIn(
-            "recovery does not recheck the tag object before GitHub prerelease handling",
+            "recovery does not recheck the tag object before GitHub release handling",
             checker.resume_workflow_problems(mutated),
         )
 
@@ -634,7 +646,7 @@ class RecoveryMutations(unittest.TestCase):
         self.assert_mutation(
             "    needs: recover\n",
             "    needs: []\n",
-            "recovery GitHub prerelease is not dependent",
+            "recovery GitHub release is not dependent",
         )
         self.assert_mutation(
             "          persist-credentials: false\n",
@@ -645,6 +657,28 @@ class RecoveryMutations(unittest.TestCase):
         self.assertIn(
             "recovery contains an external announcement or posting side effect",
             checker.resume_workflow_problems(mutated),
+        )
+
+    def test_recovered_github_release_kind_is_derived_from_the_version(self) -> None:
+        self.assert_mutation(
+            "release_flag=--latest",
+            "release_flag=--prerelease",
+            "stable recovered GitHub Release is not marked latest",
+        )
+        self.assert_mutation(
+            'if [[ "$RELEASE_VERSION" == *-* ]]; then',
+            'if [[ "$RELEASE_VERSION" != *-* ]]; then',
+            "recovered stable and prerelease kinds are not selected from the version",
+        )
+        self.assert_mutation(
+            'record.get("prerelease") is not prerelease',
+            'record.get("prerelease") is not True',
+            "existing recovered GitHub release kind is not verified",
+        )
+        self.assert_mutation(
+            '"$release_flag"',
+            "--prerelease",
+            "recovery GitHub release does not use the version-selected kind",
         )
 
 

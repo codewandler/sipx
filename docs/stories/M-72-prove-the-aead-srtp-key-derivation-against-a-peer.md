@@ -2,7 +2,7 @@
 id: M-72
 title: Prove the AEAD SRTP key derivation against an independent peer
 pillar: Media
-status: in-progress
+status: done
 priority: 49
 design: docs/designs/media-security-profiles.md
 epic: media-security-profiles
@@ -24,13 +24,13 @@ repository can write will catch it being wrong.
 
 - [x] One interop run establishes AEAD-GCM protected media with an implementation that did not
       learn its key derivation from sipx, and audio is verified as non-silent in both directions.
-- [ ] Both `AEAD_AES_128_GCM` and `AEAD_AES_256_GCM` are covered, over SDES and over DTLS-SRTP,
+- [x] Both `AEAD_AES_128_GCM` and `AEAD_AES_256_GCM` are covered, over SDES and over DTLS-SRTP,
       because the two keying paths reach the derivation differently.
 - [x] The peer, its exact revision and the negotiated profile are recorded as run evidence a
       stranger can audit, in the shape `tests/interop/` already uses.
 - [x] A failing-first negative proves the harness would actually catch a wrong derivation — for
       example a deliberately perturbed salt offset must fail the run, not merely log.
-- [ ] `./scripts/gate.py` green, with the interop job registered as a gate step or in
+- [x] `./scripts/gate.py` green, with the interop job registered as a gate step or in
       `NOT_RUN_LOCALLY` with a reason.
 
 ## Progress
@@ -42,42 +42,37 @@ repository can write will catch it being wrong.
   round-trip test in the tree still passes**, because both ends share the same mistake. This is the
   failure shape §12.1 already describes.
 
-- 2026-08-08: **the derivation is right for `AEAD_AES_256_GCM`, proved against a native browser
-  over DTLS-SRTP.** The peer that was missing turned out to be already in the tree: the `M-51`
-  harness in `tests/browser-audio/` runs a real browser, and in the `browser-answerer` role sipx is
-  the DTLS server and selects its strongest profile. That run negotiated `AEAD_AES_256_GCM` and
-  carried non-silent Opus both ways — the browser derived its own session keys from the RFC 5764
-  exporter block by its own reading of RFC 7714 §11, so agreement is not something sipx can arrange
-  with itself. `driver.py:251` had recorded the profile since `M-51` and asserted only that it was
-  non-empty, so the evidence existed and the claim did not.
+- 2026-08-14: **both AEAD derivations are independently proved over DTLS-SRTP.** `MediaPolicy` now
+  has an exact-suite requirement which narrows both the SDP offer and the DTLS `use_srtp` list to
+  one profile and fails closed with plain or automatic keying. Omitting it preserves the existing
+  strongest-first behaviour. The bounded native-browser job requires `AEAD_AES_128_GCM` in the
+  `browser-offerer` role and `AEAD_AES_256_GCM` in the `browser-answerer` role. A real run carried
+  non-silent Opus in both directions under each exact suite. The evidence validator requires the
+  browser negotiation, call policy and installed SRTP context all to name that role's suite, and
+  captures the independent peer's revision dynamically in the run artifact.
 
-  What changed: the profile is checked against the registry rather than for non-emptiness, at least
-  one role must have keyed with AEAD-GCM or the run is refused, and the peer's exact revision is
-  captured from the WebDriver session's negotiated capabilities — the browser's own answer, not the
-  page's claim about itself. The run now emits `aead_key_derivation` naming the witness role, the
-  profile and the peer revision.
+  The negative is executable and measured. `build-perturbed-kdf.py` copies the source tree into an
+  owned disposable directory, verifies and replaces one exact KDF fragment only in that copy,
+  builds a separate proof endpoint under a five-minute bound, records the original source,
+  perturbed source and binary hashes, then removes the copy after its whole process group exits.
+  The published SRTP crate contains no selectable broken-crypto path. With the 12-octet AEAD salt
+  deliberately right-aligned in RFC 3711's 14-octet `x` value, ICE nomination and DTLS complete,
+  both peers send SRTP, neither accepts a packet, and sipx records SRTP authentication failures.
+  The proof refuses the negative unless every one of those facts is present and the executable
+  matches its build manifest.
 
-  The negative is measured, not asserted. Right-aligning the master salt against octet 14 instead of
-  left-aligning it at octet 0 — the competing reading, and a no-op for the 14-octet counter-mode
-  salt — leaves RFC 3711 §B.3's KDF vector passing, every RFC 7714 transform vector passing, and
-  **all 448 tests of `sipx-rtp` and `sipx-media` passing**. The same tree fails the browser run in
-  the `AEAD_AES_256_GCM` role while the counter-mode role stays green in that same run.
+  **Both AEAD suites are now independently proved over SDES as well.** The comparison-owned
+  wire-evidence registry pins the subject artifact by immutable digest and retains its exact
+  configuration, a standalone sipx adapter, results and peer logs entirely within the comparison
+  scope. `AEAD_AES_128_GCM` and `AEAD_AES_256_GCM` each negotiated as the sole RFC 4568 suite and
+  carried non-silent, partly bit-exact PCMU audio in both directions. A fresh SDES negative used a
+  separately built wrong-salt-alignment endpoint: the exact suite still negotiated and 50 packets
+  were sent, but sipx accepted none, both implementations recorded authentication failures and the
+  independent endpoint rejected all 50. The offline comparison checker validates the closed schema,
+  exact-suite facts, source/artifact hashes and negative count without Docker or network access;
+  the explicit refresh command is bounded and cancellation-safe. Only the full gate row remains.
 
-  Two of four combinations remain, and `tests/interop/` cannot close them today: the pinned peer is
-  **built without AEAD-GCM at all**. Measured twice — its SRTP module references no
-  `srtp_crypto_policy_set_aes_gcm_*`, and offered one `a=crypto` line at a time it answers `200 OK`
-  to `AES_CM_128_HMAC_SHA1_80` and `488 Not Acceptable Here` to both GCM suites. So
-  `a_real_peer_accepts_media_sipx_encrypted_with_sdes` has always been a counter-mode fact.
-  `AEAD_AES_128_GCM`, and both suites over SDES, need a SIP peer that is built with GCM and can be
-  made to *require* it; recorded in `tests/interop/README.md` and `docs/specs/srtp.md` §12.10.
-
-  A candidate for that peer was found and verified on the wire — `holius/baresip:v2` answers both
-  GCM suites over SDES and completes a GCM DTLS-SRTP handshake in both roles — with two caveats
-  recorded in `tests/interop/README.md`: it is a personal-namespace 833 MB image, and it never
-  *originates* a GCM offer. **The 128-bit suite is blocked on us, not on it:** sipx offers
-  strongest-first and no public API narrows a call's offer to one suite, so `DialOptions` would
-  need what `Capabilities::with_srtp_suites` already does a layer down. That is an API decision
-  this story should not take on its own.
+- 2026-08-14: the resealed evidence and integrated 55-step repository gate passed.
 
 ## Notes
 
@@ -87,5 +82,5 @@ repository can write will catch it being wrong.
 - This is the same class of gap as `T-13`: an interop claim that cannot be self-proved. Unlike
   `T-13`, a third-party implementation certainly exists here — AEAD-GCM SRTP is widely deployed —
   so this one is achievable without inventing a peer.
-- Until this lands, the release notes must not claim AEAD interoperation, only AEAD negotiation and
-  transform correctness against the RFC's vectors.
+- Release prose must retain the evidence scope: exact pinned calls prove both AEAD profiles over
+  DTLS-SRTP and RFC 4568 SDES, not SRTCP, rollover, re-keying or universal compatibility.

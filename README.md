@@ -9,19 +9,20 @@ transfer, and carry real audio from a Rust library or a shell command.
 
 <!-- BEGIN generated:badges -->
 <a href="https://codewandler.github.io/sipx/"><img alt="docs: codewandler.github.io/sipx" src="https://img.shields.io/static/v1?label=docs&message=codewandler.github.io%2Fsipx&color=blue"></a>
-<a href="CHANGELOG.md"><img alt="release: 1.0.0-rc.23" src="https://img.shields.io/static/v1?label=release&message=1.0.0-rc.23&color=blue"></a>
+<a href="CHANGELOG.md"><img alt="release: 1.0.0" src="https://img.shields.io/static/v1?label=release&message=1.0.0&color=blue"></a>
 <a href="#try-the-cli"><img alt="MSRV: rustc 1.88" src="https://img.shields.io/static/v1?label=MSRV&message=rustc%201.88&color=blue"></a>
-<a href="docs/compliance.md"><img alt="RFCs: 36 implemented of 83" src="https://img.shields.io/static/v1?label=RFCs&message=36%20implemented%20of%2083&color=blue"></a>
+<a href="docs/compliance.md"><img alt="RFCs: 37 implemented of 85" src="https://img.shields.io/static/v1?label=RFCs&message=37%20implemented%20of%2085&color=blue"></a>
 <a href="docs/compliance.md"><img alt="codecs: G.711 · G.722 · L16 · Opus" src="https://img.shields.io/static/v1?label=codecs&message=G.711%20%C2%B7%20G.722%20%C2%B7%20L16%20%C2%B7%20Opus&color=blue"></a>
 <a href="#license"><img alt="license: MIT OR Apache-2.0" src="https://img.shields.io/static/v1?label=license&message=MIT%20OR%20Apache-2.0&color=blue"></a>
 <!-- END generated:badges -->
 
 </div>
 
-> **Status: <!-- BEGIN generated:workspace-version -->1.0.0-rc.23<!-- END generated:workspace-version -->.** This is the current public prerelease. `main` can move ahead of
-> the release tag. Public APIs are not frozen;
-> Supported APIs receive migration notes when they break, while Experimental APIs may change or be
-> removed without one. Start with the exact registry install below when reproducibility matters.
+> **Status: <!-- BEGIN generated:workspace-version -->1.0.0<!-- END generated:workspace-version -->.** This is the current stable release. `main` can move ahead of the
+> release tag. Supported Rust APIs remain source-compatible throughout the v1 line. Supported CLI
+> contracts are frozen for compatible v1 evolution. Experimental APIs may change or be removed
+> without migration guidance and remain unfrozen throughout v1. Start with the exact registry
+> install below when reproducibility matters.
 
 ## Start here
 
@@ -33,7 +34,7 @@ transfer, and carry real audio from a Rust library or a shell command.
 | Understand crate boundaries | [Why the core is different](#why-the-core-is-different) and [Crates](#crates) |
 | Contribute to the repository | [Contributing](#contributing) and [`AGENTS.md`](AGENTS.md) |
 
-For reproducible results, use the exact prerelease versions shown below. For current development
+For reproducible results, use the exact release versions shown below. For current development
 APIs, follow the `main`-branch instructions in the getting-started guide and expect Experimental
 surfaces to change.
 
@@ -47,7 +48,7 @@ PBX, browser media engine, or video stack.
 | Calls | Place and answer, hold and resume, blind and attended transfer, session timers, bounded confirmed-dialog snapshots |
 | Audio | G.711, G.722, L16, DTMF, rate-converting PCM/WAV playback and recording; optional Opus and explicitly selected live devices behind Cargo features |
 | Security | TLS and secure WebSocket; selectable plain RTP, SDES-keyed SRTP, optional DTLS-SRTP, and a fail-closed browser-audio composition profile |
-| Reachability | `rport`, symmetric RTP, Path, Service-Route, Outbound, GRUU and push refresh; host and STUN-derived ICE candidates, but no TURN relay |
+| Reachability | `rport`, symmetric RTP, Path, Service-Route, Outbound, GRUU and push refresh; host, STUN-derived and configured TURN-relayed ICE candidates |
 | SIP events | Bounded inbound notifier, package-generic authenticated subscriber, live registration discovery, and conditional presence publication in both roles |
 | Automation | Single-line JSON reports, distinct outcome exit codes, interactive scenarios, bounded load, quality statistics and signalling capture |
 | Two-leg calls | Public early and confirmed coupling of two dialogs, with optional media bridging; the off-media relay role remains unfinished |
@@ -66,11 +67,11 @@ deployment shape.
 
 ## Try the CLI
 
-The <!-- BEGIN generated:release-tag -->v1.0.0-rc.23<!-- END generated:release-tag --> prerelease needs
+The <!-- BEGIN generated:release-tag -->v1.0.0<!-- END generated:release-tag --> release needs
 Rust <!-- BEGIN generated:msrv -->1.88<!-- END generated:msrv --> or newer:
 
 ```sh
-cargo install --locked --version =1.0.0-rc.23 sipx-cli
+cargo install --locked --version =1.0.0 sipx-cli
 sipx version
 ```
 
@@ -78,7 +79,7 @@ To use the bounded browser-audio profile, install that same exact release with i
 media features:
 
 ```sh
-cargo install --locked --version =1.0.0-rc.23 --features opus,dtls sipx-cli
+cargo install --locked --version =1.0.0 --features opus,dtls sipx-cli
 ```
 
 Then make a bounded loopback call. Terminal one listens for at most 15 seconds:
@@ -108,14 +109,15 @@ registration, expected output, and installing from `main`.
 ## Use the Rust libraries
 
 The workspace deliberately publishes modular crates rather than one facade crate. Pin every sipx
-dependency to the same exact prerelease while the API remains pre-1.0:
+dependency to the same exact stable release. Supported Rust APIs are covered by the v1
+compatibility contract; explicitly Experimental roots remain outside it:
 
 <!-- BEGIN generated:answer-consumer-dependencies -->
 ```toml
 [dependencies]
-sipx-call = "=1.0.0-rc.23"
-sipx-sip = "=1.0.0-rc.23"
-sipx-transport = "=1.0.0-rc.23"
+sipx-call = "=1.0.0"
+sipx-sip = "=1.0.0"
+sipx-transport = "=1.0.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 <!-- END generated:answer-consumer-dependencies -->
@@ -127,10 +129,10 @@ The call guides inline real example files that CI compiles:
 - [Register](https://codewandler.github.io/sipx/docs/guides/register)
 - [Choose crates and features](https://codewandler.github.io/sipx/docs/guides/as-a-library)
 
-The release candidate is for programmable SIP endpoints, not a promise of every telephony role. It
-does not provide proxy, registrar, PBX, TURN for relay-required networks, video, data channels,
-browser-facing APIs, or a general browser-media engine. It remains a prerelease rather than stable
-`1.0`, and the language-neutral application contract remains Experimental. The public
+The stable v1 release is for programmable SIP endpoints, not a promise of every telephony role. It
+does not provide proxy, registrar, PBX, a TURN server, video, data channels, browser-facing APIs,
+or a general browser-media engine. The language-neutral application contract remains Experimental.
+The public
 **[fit guide](https://codewandler.github.io/sipx/docs/guides/does-this-fit)** is the canonical list
 of shipped boundaries and intentional omissions.
 
@@ -183,7 +185,7 @@ The [public site](https://codewandler.github.io/sipx/) is for users and integrat
 - [RFC compliance](https://codewandler.github.io/sipx/docs/reference/compliance)
 - [How sipx compares](https://codewandler.github.io/sipx/docs/reference/comparison)
 
-The compliance registry currently tracks <!-- BEGIN generated:rfc-count -->83<!-- END generated:rfc-count --> RFCs; its public table is generated rather than copied by hand.
+The compliance registry currently tracks <!-- BEGIN generated:rfc-count -->85<!-- END generated:rfc-count --> RFCs; its public table is generated rather than copied by hand.
 
 Contributor specifications, designs, the roadmap, and the generated work board stay under
 [`docs/`](docs/). `./scripts/build-docs.sh` builds the public site, checks every link, verifies the

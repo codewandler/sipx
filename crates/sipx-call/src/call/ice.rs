@@ -66,7 +66,10 @@ fn is_ice_attribute(attribute: &sipx_sdp::Attribute) -> bool {
 /// The same three lines an initial description carries, from the agent rather than from the
 /// gathering that has long since finished — `ice2` included, because §13.5's re-signalling has to
 /// restate the whole half and a peer that stopped seeing `ice-options` would read it as a change.
-fn ice_attributes(local: &sipx_media::ice::Local) -> Vec<sipx_sdp::Attribute> {
+fn ice_attributes(
+    local: &sipx_media::ice::Local,
+    include_remote_candidates: bool,
+) -> Vec<sipx_sdp::Attribute> {
     let mut attributes = vec![
         sipx_sdp::Attribute::valued("ice-ufrag", local.credentials.ufrag()),
         sipx_sdp::Attribute::valued("ice-pwd", local.credentials.pwd()),
@@ -78,6 +81,12 @@ fn ice_attributes(local: &sipx_media::ice::Local) -> Vec<sipx_sdp::Attribute> {
             .iter()
             .map(|candidate| sipx_sdp::Attribute::valued("candidate", candidate.to_value())),
     );
+    if include_remote_candidates && !local.remote_candidates.is_empty() {
+        attributes.push(sipx_sdp::Attribute::valued(
+            "remote-candidates",
+            sipx_sdp::ice::RemoteCandidate::to_value(&local.remote_candidates),
+        ));
+    }
     attributes
 }
 
@@ -188,7 +197,9 @@ impl Call {
         audio
             .attributes
             .retain(|attribute| !is_ice_attribute(attribute));
-        audio.attributes.extend(ice_attributes(&signalled));
+        // RFC 8839 §5.2: only an offer from the controlling, Completed agent carries the selected
+        // peer addresses. The agent returns an empty list for every other state and generation.
+        audio.attributes.extend(ice_attributes(&signalled, true));
     }
 
     /// Put this side's ICE half into the answer to a later offer (RFC 8839 §4.4; `ice.md` §13.5).
@@ -233,7 +244,7 @@ impl Call {
         audio
             .attributes
             .retain(|attribute| !is_ice_attribute(attribute));
-        audio.attributes.extend(ice_attributes(&signalled));
+        audio.attributes.extend(ice_attributes(&signalled, false));
     }
 
     /// Whether this offer restarts ICE (RFC 8839 §4.4.1.1.1).

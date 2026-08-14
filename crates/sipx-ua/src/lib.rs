@@ -20,24 +20,24 @@
 //!
 //! # Stability
 //!
-//! sipx is pre-1.0, so **neither word below means frozen**. `1.0.0` is what freezes an API, and its
-//! predicates are in `docs/roadmap.md`. Until then:
+//! The Supported Rust API is frozen for compatible v1 evolution. Existing Supported paths and
+//! signatures remain source-compatible throughout major version 1; compatible additions use the
+//! reservations documented on their types.
 //!
-//! - **Supported** — meant to be depended on. Breaking changes get a `CHANGELOG.md` entry saying what
-//!   to do instead. New enum variants and new struct fields may still appear in a minor release, so a
-//!   downstream `match` should carry a `_` arm.
-//! - **Experimental** — may change shape or be removed without a migration note. Depend on it only if
-//!   you are prepared to follow it.
+//! - **Supported** — covered by the v1 compatibility contract. A breaking change waits for the next
+//!   major version.
+//! - **Experimental** — remains unfrozen and may change shape or be removed without a migration
+//!   note. Depend on it only if you are prepared to follow it.
 //!
 //!
 //! **Supported**: registration leases, digest authentication, authenticated caller identity, Path,
-//! Service-Route, registering as one Outbound flow, push, and the subscription store plus built-in
+//! Service-Route, bounded Outbound registration lifetimes, push, and the subscription store plus built-in
 //! dialog, registration and presence package documents selected by `sipx-call::Notifier`.
 //! `S-34` gives identity its caller:
 //! outbound and inbound policies in `sipx-call` select the authentication and verification
-//! services. `S-29` is what gives Outbound and push their callers — `sipx register --outbound` and
-//! `--push-provider`/`--push-prid` — and it is why `X-37` had demoted their compliance rows in the
-//! first place.
+//! services. `S-29` first gave Outbound and push their callers — `sipx register --outbound` and
+//! `--push-provider`/`--push-prid` — while `T-47` makes `Flows::start` own accepted flows,
+//! keep-alives, refresh, independent recovery and joined cancellation for the complete lifetime.
 //!
 //! **Which application backs that claim, stated because the two are not the same** (`X-38`). Every
 //! Registration, Outbound and push are called by `sipx-cli`, while authenticated identity is called
@@ -50,22 +50,34 @@
 //! surface, documented in `website/docs/reference/cli.md` and asserted by `tests/cli.rs`.
 //! `scripts/check-app-surface.py` checks that citation rather than trusting it, so this paragraph
 //! cannot rot into a claim with no caller at all. Push is earned in full: the `pn-*` parameters,
-//! §8.2's answer read back, and §4.1.3's refresh through `UserAgent::woken`. Outbound is earned
-//! only as far as the registration goes, which is what the wording above says and no further.
+//! §8.2's answer read back, and §4.1.3's refresh through `UserAgent::woken`. Outbound's supported
+//! surface is configuration plus the bounded `Flows::start` / `FlowLifetime::cancel` owner and its
+//! event and cleanup reports; the CLI reaches it as the one-entry case.
 //!
 //! **Experimental**: `event_client` and `publication_client`. They are public and tested.
 //! `event_client` is the bounded sans-I/O subscriber driven by
 //! `sipx-call::EventSubscriptions`, and `sipx-call::Publications` carries the publication core and
 //! exact compositor through live endpoints. The bounded `reginfo` consumer is reached by
 //! `sipx peers --registrar`; no CLI command publishes, and published presence is not automatically
-//! projected into later NOTIFY documents. Their pre-1.0 API shape is still soft.
+//! projected into later NOTIFY documents. Their Experimental API shape remains unfrozen during v1.
 //!
-//! By that same rule, and named here rather than left for a reader to discover: the rest of
-//! Outbound is experimental too. `Flows` and `Attempt` — one registration per outbound proxy,
-//! each flow failing independently under §4.5's backoff — plus `UserAgent::keepalive_after`
-//! (§4.4) and `UserAgent::dialog_contact`'s `ob` parameter (§4.3) are exercised by this crate's
-//! own tests and by nothing above them. `sipx register` places a single flow and does not hold it
-//! open, so those shapes have never been constrained by a caller either.
+//! The manual-pass Outbound surface remains experimental: `Flows::register`, `Flows::keepalive`,
+//! `Attempt`, `UserAgent::keepalive_after`, and `UserAgent::dialog_contact`'s `ob` parameter are
+//! useful protocol pieces but are exercised only below the lifetime owner, not called directly by
+//! an application contract. The registrar and proxy roles remain outside this crate.
+//!
+//! <!-- BEGIN sipx-api-classification -->
+//! **Experimental Rust API roots:**
+//!
+//! - [`sipx_ua::agent::UserAgent::dialog_contact`](crate::agent::UserAgent::dialog_contact)
+//! - [`sipx_ua::agent::UserAgent::keepalive_after`](crate::agent::UserAgent::keepalive_after)
+//! - [`sipx_ua::event_client`](crate::event_client)
+//! - [`sipx_ua::flows::Attempt`](crate::flows::Attempt)
+//! - [`sipx_ua::flows::Flows::keepalive`](crate::flows::Flows::keepalive)
+//! - [`sipx_ua::flows::Flows::register`](crate::flows::Flows::register)
+//! - [`sipx_ua::publication_client`](crate::publication_client)
+//! - [`sipx_ua::reginfo`](crate::reginfo)
+//! <!-- END sipx-api-classification -->
 
 // This crate's inline test modules opt out of coverage instrumentation, so the
 // published figure measures the code rather than the tests measuring it. Never set outside
@@ -101,7 +113,7 @@ pub use challenge::{Authenticator, Presented, Reason, Verdict};
 #[cfg(feature = "runtime")]
 pub use error::{Error, Result};
 #[cfg(feature = "runtime")]
-pub use flows::{Attempt, Flows};
+pub use flows::{Attempt, FlowCleanup, FlowEvent, FlowLifetime, Flows};
 pub use gruu::{Gruus, Kind as GruuKind};
 pub use history::{RetargetError, retarget};
 pub use outbound::{InstanceId, Keepalive, Power, RegId};

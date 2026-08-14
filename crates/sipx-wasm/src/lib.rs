@@ -44,11 +44,11 @@
 //!
 //! # Stability
 //!
-//! **Experimental.** The epic that owns this contract is not finished, the npm package it ships
-//! inside is pre-1.0, and completing the epic does not imply a stable 1.0 API (§7.4). What *is*
-//! stable within `sipx.browser.v1` is the ABI: additive fields, additive event types and appended
-//! error codes are compatible changes, and anything that breaks a §9 vector requires
-//! `sipx.browser.v2` and an [`abi::ABI_VERSION`] bump.
+//! **Experimental.** This Rust surface remains unfrozen during sipx v1, and completing its owning
+//! epic does not silently promote it into the Supported Rust API (§7.4). What *is* stable within
+//! `sipx.browser.v1` is the ABI: additive fields, additive event types and appended error codes are
+//! compatible changes, and anything that breaks a §9 vector requires `sipx.browser.v2` and an
+//! [`abi::ABI_VERSION`] bump.
 
 // This crate's inline test modules opt out of coverage instrumentation, so the
 // published figure measures the code rather than the tests measuring it. Never set outside

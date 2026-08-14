@@ -1,0 +1,15 @@
+{
+  "encrypted": true,
+  "keying": "SDES",
+  "longest_bit_exact_echo_bytes": 7520,
+  "match_floor_bytes": 320,
+  "negotiated_profile": "AeadAes256Gcm",
+  "packets_received": 373,
+  "packets_sent": 50,
+  "peer_audio_peak": 11900,
+  "peer_echo_audio_bytes": 31840,
+  "sent_audio_bytes": 8000,
+  "srtcp_unprotect_failures": 1,
+  "srtp_unprotect_failures": 0,
+  "suite_required": "AEAD_AES_256_GCM"
+}

@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/codewandler/sipx/docs/comparison/schema/interop-subject.schema.json",
+  "title": "One immutable interoperability subject artifact",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "id", "stack", "version", "artifact", "reported_version_marker"],
+  "properties": {
+    "schema": {"const": "sipx.comparison.interop.subject.v1"},
+    "id": {"type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"},
+    "stack": {"type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"},
+    "version": {"type": "string", "minLength": 1},
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "reference", "digest", "image_id"],
+      "properties": {
+        "kind": {"const": "oci-image"},
+        "reference": {"type": "string", "pattern": "^.+@sha256:[0-9a-f]{64}$"},
+        "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "image_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      }
+    },
+    "reported_version_marker": {"type": "string", "minLength": 1}
+  }
+}

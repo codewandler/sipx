@@ -831,8 +831,8 @@ This contract does not include, and completing the epic MUST NOT imply:
 - video, data channels, SCTP, or any Rust/WASM WebRTC engine (§3.3);
 - trickled candidate delivery — descriptions are complete-gathering, and a peer's `trickle` token
   is tolerated only under [webrtc-audio.md](webrtc-audio.md) §10's terms;
-- a TURN or relay support claim; relay behaviour through application-supplied ICE server
-  configuration is browser-owned and outside sipx's published claim until `M-24` widens it;
+- a TURN or relay support claim; relay behaviour through browser-owned ICE server configuration is
+  outside this SDK contract even though the Rust endpoint library has its own configured relay path;
 - hold/resume re-INVITEs, transfer (REFER), DTMF sending, MESSAGE, SUBSCRIBE/NOTIFY, PUBLISH —
   the v1 vocabulary is exactly §5.2;
 - multiple simultaneous registrations, multiple AORs per kernel, or shared kernels across tabs,

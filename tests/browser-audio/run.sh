@@ -179,6 +179,8 @@ fi
 : "${SIPX_BROWSER_AUDIO_WSS_SPKI_SHA256:?set SIPX_BROWSER_AUDIO_WSS_SPKI_SHA256}"
 : "${SIPX_BROWSER_AUDIO_WEBDRIVER_CMD:?set SIPX_BROWSER_AUDIO_WEBDRIVER_CMD}"
 : "${SIPX_BROWSER_AUDIO_PROOF_BIN:?set SIPX_BROWSER_AUDIO_PROOF_BIN}"
+: "${SIPX_BROWSER_AUDIO_PERTURBED_PROOF_BIN:?set SIPX_BROWSER_AUDIO_PERTURBED_PROOF_BIN}"
+: "${SIPX_BROWSER_AUDIO_PERTURBATION_MANIFEST:?set SIPX_BROWSER_AUDIO_PERTURBATION_MANIFEST}"
 : "${SIPX_BROWSER_AUDIO_MEDIA_ADDRESS:?set SIPX_BROWSER_AUDIO_MEDIA_ADDRESS}"
 : "${SIPX_BROWSER_AUDIO_EVIDENCE_DIR:?set SIPX_BROWSER_AUDIO_EVIDENCE_DIR}"
 
@@ -195,6 +197,11 @@ require_file "offerer config" "$SIPX_BROWSER_AUDIO_OFFERER_CONFIG"
 require_file "answerer config" "$SIPX_BROWSER_AUDIO_ANSWERER_CONFIG"
 require_executable "WebDriver command" "$SIPX_BROWSER_AUDIO_WEBDRIVER_CMD"
 require_executable "sipx proof endpoint" "$SIPX_BROWSER_AUDIO_PROOF_BIN"
+require_executable "perturbed-KDF sipx proof endpoint" "$SIPX_BROWSER_AUDIO_PERTURBED_PROOF_BIN"
+require_file "perturbed-KDF build manifest" "$SIPX_BROWSER_AUDIO_PERTURBATION_MANIFEST"
+"$DRIVER" preflight-perturbed-build \
+    --binary "$SIPX_BROWSER_AUDIO_PERTURBED_PROOF_BIN" \
+    --manifest "$SIPX_BROWSER_AUDIO_PERTURBATION_MANIFEST"
 preflight_identity "$SIPX_BROWSER_AUDIO_WSS_CERT" "$SIPX_BROWSER_AUDIO_WSS_HOST" "$SIPX_BROWSER_AUDIO_WSS_SPKI_SHA256"
 
 mkdir -p "$SIPX_BROWSER_AUDIO_EVIDENCE_DIR"
@@ -214,17 +221,24 @@ WEBDRIVER_URL=${SIPX_BROWSER_AUDIO_WEBDRIVER_URL:-http://127.0.0.1:9515}
 run_case() {
     local role=$1 case_name=$2 config_template=$3 directory=$4 driver_command=$5
     local browser_mutation=${6:-}
+    local srtp_suite=${7:-}
+    local proof_bin=${8:-$SIPX_BROWSER_AUDIO_PROOF_BIN}
     local product_case=${case_name:-positive}
+    local -a suite_args=()
+    if [[ -n $srtp_suite ]]; then
+        suite_args=(--srtp-suite "$srtp_suite")
+    fi
     mkdir -p "$directory"
     start_group \
         "$directory/sipx.stdout" \
         "$directory/sipx.stderr" \
-        "$SIPX_BROWSER_AUDIO_PROOF_BIN" \
+        "$proof_bin" \
         --role "$role" \
         --case "$product_case" \
         --media-address "$SIPX_BROWSER_AUDIO_MEDIA_ADDRESS" \
         --cert "$SIPX_BROWSER_AUDIO_WSS_CERT" \
         --key "$SIPX_BROWSER_AUDIO_WSS_KEY" \
+        "${suite_args[@]}" \
         --result "$directory/sipx.json"
     local sipx_pid=$STARTED_PID
     local address wss_url config
@@ -272,13 +286,13 @@ run_case() {
 }
 
 run_positive() {
-    local role=$1 config=$2 directory="$SIPX_BROWSER_AUDIO_EVIDENCE_DIR/$1"
+    local role=$1 config=$2 suite=$3 directory="$SIPX_BROWSER_AUDIO_EVIDENCE_DIR/$1"
     # Empty case argument means run-role receives no mutation flag.
-    run_case "$role" "" "$config" "$directory" run-role
+    run_case "$role" "" "$config" "$directory" run-role "" "$suite"
 }
 
-run_positive browser-offerer "$SIPX_BROWSER_AUDIO_OFFERER_CONFIG"
-run_positive browser-answerer "$SIPX_BROWSER_AUDIO_ANSWERER_CONFIG"
+run_positive browser-offerer "$SIPX_BROWSER_AUDIO_OFFERER_CONFIG" AEAD_AES_128_GCM
+run_positive browser-answerer "$SIPX_BROWSER_AUDIO_ANSWERER_CONFIG" AEAD_AES_256_GCM
 run_case \
     browser-offerer \
     "" \
@@ -296,8 +310,13 @@ for negative in FingerprintMismatch NoNominatedPair WeakerMedia; do
         role=browser-answerer
         config=$SIPX_BROWSER_AUDIO_ANSWERER_CONFIG
     fi
+    if [[ $role == browser-offerer ]]; then
+        suite=AEAD_AES_128_GCM
+    else
+        suite=AEAD_AES_256_GCM
+    fi
     negative_directory="$SIPX_BROWSER_AUDIO_EVIDENCE_DIR/negatives/$negative.run"
-    run_case "$role" "$negative" "$config" "$negative_directory" run-negative
+    run_case "$role" "$negative" "$config" "$negative_directory" run-negative "" "$suite"
     "$DRIVER" combine-negative \
         --positive-directory "$SIPX_BROWSER_AUDIO_EVIDENCE_DIR/$role" \
         --browser "$negative_directory/browser.json" \
@@ -307,6 +326,26 @@ for negative in FingerprintMismatch NoNominatedPair WeakerMedia; do
         --pin "$SIPX_BROWSER_AUDIO_WSS_SPKI_SHA256" \
         --output "$SIPX_BROWSER_AUDIO_EVIDENCE_DIR/negatives/$negative.json"
 done
+
+kdf_directory="$SIPX_BROWSER_AUDIO_EVIDENCE_DIR/negatives/KdfPerturbation.run"
+run_case \
+    browser-answerer \
+    KdfPerturbation \
+    "$SIPX_BROWSER_AUDIO_ANSWERER_CONFIG" \
+    "$kdf_directory" \
+    run-negative \
+    "" \
+    AEAD_AES_256_GCM \
+    "$SIPX_BROWSER_AUDIO_PERTURBED_PROOF_BIN"
+"$DRIVER" combine-negative \
+    --positive-directory "$SIPX_BROWSER_AUDIO_EVIDENCE_DIR/browser-answerer" \
+    --browser "$kdf_directory/browser.json" \
+    --sipx "$kdf_directory/sipx.json" \
+    --error KdfPerturbation \
+    --role browser-answerer \
+    --pin "$SIPX_BROWSER_AUDIO_WSS_SPKI_SHA256" \
+    --perturbation "$SIPX_BROWSER_AUDIO_PERTURBATION_MANIFEST" \
+    --output "$SIPX_BROWSER_AUDIO_EVIDENCE_DIR/negatives/KdfPerturbation.json"
 
 "$DRIVER" validate-proof \
     --directory "$SIPX_BROWSER_AUDIO_EVIDENCE_DIR" \

@@ -1,8 +1,8 @@
 //! RFC 8224 authentication and verification services.
 //!
 //! **Supported** (`S-34`): outbound and inbound call policies select these services through
-//! `sipx-call`, which constrains their public shape. sipx remains pre-1.0, so Supported does not
-//! mean frozen; breaking changes receive a migration note.
+//! `sipx-call`, which constrains their public shape. The Supported surface is frozen for compatible
+//! v1 evolution; a breaking change waits for the next major version.
 //!
 //! Network retrieval and trust remain caller-owned. This module only orders policy decisions,
 //! supplies a bounded cache, and maps verification failures to their specified SIP statuses.

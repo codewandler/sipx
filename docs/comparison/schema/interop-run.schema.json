@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/codewandler/sipx/docs/comparison/schema/interop-run.schema.json",
+  "title": "One retained exact-suite interoperability run",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "case", "subject", "evaluated_at", "protocol", "source_under_test", "positive", "negative", "sha256"],
+  "properties": {
+    "schema": {"const": "sipx.comparison.interop.run.v1"},
+    "case": {"type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"},
+    "subject": {"type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"},
+    "evaluated_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+    "protocol": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["signalling", "keying", "media", "codec"],
+      "properties": {
+        "signalling": {"const": "TLS"},
+        "keying": {"const": "SDES"},
+        "media": {"const": "RTP/SAVP"},
+        "codec": {"const": "PCMU/8000/1"}
+      }
+    },
+    "source_under_test": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["files", "normal_binary_sha256", "perturbed_binary_sha256"],
+      "properties": {
+        "files": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {"pattern": "^(crates|docs/comparison/interop)/.+$"},
+          "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        },
+        "normal_binary_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "perturbed_binary_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "positive": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["AEAD_AES_128_GCM", "AEAD_AES_256_GCM"],
+      "properties": {
+        "AEAD_AES_128_GCM": {"$ref": "#/$defs/positive"},
+        "AEAD_AES_256_GCM": {"$ref": "#/$defs/positive"}
+      }
+    },
+    "negative": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["suite", "mutation", "build_manifest", "result", "peer_log", "peer_srtp_rejections"],
+      "properties": {
+        "suite": {"enum": ["AEAD_AES_128_GCM", "AEAD_AES_256_GCM"]},
+        "mutation": {"type": "string", "minLength": 1},
+        "build_manifest": {"$ref": "#/$defs/file"},
+        "result": {"$ref": "#/$defs/file"},
+        "peer_log": {"$ref": "#/$defs/file"},
+        "peer_srtp_rejections": {"type": "integer", "minimum": 1}
+      }
+    },
+    "sha256": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"pattern": "^[^/]+(?:/[^/]+)*$"},
+      "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+    }
+  },
+  "$defs": {
+    "file": {"type": "string", "pattern": "^runs/[0-9]{4}-[0-9]{2}-[0-9]{2}/[^/]+$"},
+    "positive": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["result", "peer_log"],
+      "properties": {
+        "result": {"$ref": "#/$defs/file"},
+        "peer_log": {"$ref": "#/$defs/file"}
+      }
+    }
+  }
+}

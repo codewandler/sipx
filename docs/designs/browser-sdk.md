@@ -38,4 +38,4 @@ tests.
 A clean JavaScript consumer installs the package, serves the demo, registers over WSS and completes
 audio calls in both SIP roles using browser-native WebRTC. The generated types match the shipped WASM
 ABI, cancellation releases every timer/socket/media track, wrong fingerprints and weaker media fail
-closed, and the public boundary still says audio-only and relay-limited until TURN lands.
+closed, and the public boundary still says this browser contract is audio-only and relay-limited.

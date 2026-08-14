@@ -202,9 +202,10 @@ fn from_openssl_name(name: &str) -> Option<Profile> {
 /// The separator is OpenSSL's own list syntax for this option and is not RFC 5764's — §4.1.1 puts
 /// the two-byte identifiers on the wire, and the library maps the names to them. The names are
 /// that syntax too, hence [`openssl_name`].
-fn offered_profiles() -> String {
-    Profile::strongest_first()
-        .into_iter()
+fn offered_profiles_for(profiles: &[Profile]) -> String {
+    profiles
+        .iter()
+        .copied()
         .map(openssl_name)
         .collect::<Vec<_>>()
         .join(":")
@@ -229,12 +230,53 @@ impl Session {
         Self::with_io(Datagrams { socket }, identity)
     }
 
+    /// Prepare a handshake which can agree on exactly `profile` and no fallback.
+    ///
+    /// This is the DTLS half of a call-level exact-suite requirement. The one-name list is put in
+    /// `use_srtp` for either handshake role, so a peer without that profile fails the handshake
+    /// instead of selecting another transform.
+    pub fn new_with_profile(
+        socket: UdpSocket,
+        peer: SocketAddr,
+        identity: &Identity,
+        profile: Profile,
+        timeout: Duration,
+    ) -> Result<Self, DtlsError> {
+        socket.connect(peer)?;
+        socket.set_read_timeout(Some(timeout))?;
+        socket.set_write_timeout(Some(timeout))?;
+
+        Self::with_io_profile(Datagrams { socket }, identity, profile)
+    }
+
     /// Prepare a handshake over an adapter owned by the browser component.
     ///
     /// The adapter is the only DTLS view of the component: it receives records already admitted
     /// by ICE nomination and sends through the still-bound component socket. It never owns or
     /// duplicates that socket descriptor.
     pub(crate) fn with_io<I>(io: I, identity: &Identity) -> Result<Self, DtlsError>
+    where
+        I: Read + Write + Send + 'static,
+    {
+        Self::with_io_profiles(io, identity, &Profile::strongest_first())
+    }
+
+    pub(crate) fn with_io_profile<I>(
+        io: I,
+        identity: &Identity,
+        profile: Profile,
+    ) -> Result<Self, DtlsError>
+    where
+        I: Read + Write + Send + 'static,
+    {
+        Self::with_io_profiles(io, identity, &[profile])
+    }
+
+    fn with_io_profiles<I>(
+        io: I,
+        identity: &Identity,
+        profiles: &[Profile],
+    ) -> Result<Self, DtlsError>
     where
         I: Read + Write + Send + 'static,
     {
@@ -246,7 +288,7 @@ impl Session {
         // would be agreeing to a transform this stack cannot apply. The list is derived from the
         // one place that holds it rather than written out again, so it cannot come to disagree
         // with what `keys_from_exported` is prepared to key.
-        context.set_tlsext_use_srtp(&offered_profiles())?;
+        context.set_tlsext_use_srtp(&offered_profiles_for(profiles))?;
         // The peer's certificate is *requested* and not validated by OpenSSL, because there is
         // nothing for it to validate against: RFC 5763 §5 expects a self-signed certificate, and
         // what authenticates it is the fingerprint from the SDP. `super::establish` performs that
@@ -340,15 +382,28 @@ mod tests {
     /// [`Profile::as_str`], and only the library can say whether it did.
     #[test]
     fn openssl_accepts_every_name_in_the_offered_list() {
+        let profiles = Profile::strongest_first();
         assert_eq!(
-            offered_profiles(),
+            offered_profiles_for(&profiles),
             "SRTP_AEAD_AES_256_GCM:SRTP_AEAD_AES_128_GCM:SRTP_AES128_CM_SHA1_80"
         );
 
         let mut context = SslContext::builder(SslMethod::dtls()).unwrap();
         context
-            .set_tlsext_use_srtp(&offered_profiles())
+            .set_tlsext_use_srtp(&offered_profiles_for(&profiles))
             .expect("openssl knows every profile name sipx offers");
+    }
+
+    /// M-72: a one-profile list is an exact handshake requirement, not merely a preference.
+    #[test]
+    fn an_exact_profile_is_the_only_name_put_in_the_use_srtp_list() {
+        let profiles = [Profile::AeadAes128Gcm];
+        assert_eq!(offered_profiles_for(&profiles), "SRTP_AEAD_AES_128_GCM");
+
+        let mut context = SslContext::builder(SslMethod::dtls()).unwrap();
+        context
+            .set_tlsext_use_srtp(&offered_profiles_for(&profiles))
+            .expect("openssl accepts the exact registered profile");
     }
 
     /// The registry's spelling and OpenSSL's are different strings for the same identifier.

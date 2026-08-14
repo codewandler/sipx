@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import hashlib
 import importlib.util
 import inspect
 import json
@@ -23,12 +24,19 @@ from typing import Any, NamedTuple
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 DRIVER_PATH = ROOT / "tests/browser-audio/driver.py"
 RUNNER = ROOT / "tests/browser-audio/run.sh"
+PERTURBATION_BUILDER = ROOT / "tests/browser-audio/build-perturbed-kdf.py"
 WORKFLOW = ROOT / ".github/workflows/ci.yml"
 sys.dont_write_bytecode = True
 SPEC = importlib.util.spec_from_file_location("browser_audio_driver", DRIVER_PATH)
 assert SPEC is not None and SPEC.loader is not None
 DRIVER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(DRIVER)
+BUILDER_SPEC = importlib.util.spec_from_file_location(
+    "browser_audio_perturbation_builder", PERTURBATION_BUILDER
+)
+assert BUILDER_SPEC is not None and BUILDER_SPEC.loader is not None
+BUILDER = importlib.util.module_from_spec(BUILDER_SPEC)
+BUILDER_SPEC.loader.exec_module(BUILDER)
 
 
 PIN = "ERERERERERERERERERERERERERERERERERERERERERE="
@@ -51,13 +59,8 @@ def browser(role: str) -> dict:
             "dtls_state": "connected",
             "setup_role": "active" if role == "browser-offerer" else "passive",
             "dtls_cipher": "cipher",
-            # The profiles a real run of this harness negotiates, per role. The browser picks
-            # when it is the DTLS server, which is the offerer role, and picks counter mode;
-            # sipx picks in the answerer role and picks its strongest, which is AEAD-GCM. That
-            # asymmetry is what makes the answerer role M-72's key-derivation witness.
-            "srtp_profile": (
-                "AES_CM_128_HMAC_SHA1_80" if role == "browser-offerer" else "AEAD_AES_256_GCM"
-            ),
+            # The call-level exact suite requirement assigns one AEAD KDF to each role.
+            "srtp_profile": DRIVER.EXACT_AEAD_PROFILE_BY_ROLE[role],
         },
         "peer": {
             "browser_name": "chrome",
@@ -93,6 +96,8 @@ def sipx(role: str) -> dict:
         "negotiated_payload_type": 111,
         "negotiated_clock_rate": 48000,
         "negotiated_keying": "dtls-srtp",
+        "requested_srtp_suite": DRIVER.EXACT_AEAD_PROFILE_BY_ROLE[role],
+        "negotiated_srtp_suite": DRIVER.EXACT_AEAD_PROFILE_BY_ROLE[role],
         "browser_role": role,
         "ice_component": 1,
         "nominated_local": "198.51.100.20:41000",
@@ -126,6 +131,13 @@ def negative(name: str, role: str, digest: str) -> dict:
         facts.update({"selected_pair": True, "nominated": True, "dtls_state": "failed"})
     elif name == "NoNominatedPair":
         facts.update({"ice_started": True, "ice_state": "closed", "selected_pair": False, "nominated": False, "dtls_state": "closed"})
+    elif name == "KdfPerturbation":
+        facts.update({
+            "selected_pair": True,
+            "nominated": True,
+            "dtls_state": "connected",
+            "outbound_rtp_attempts": 5,
+        })
     else:
         facts.update({"ice_started": False, "dtls_state": "not-started"})
     browser_result = {
@@ -136,12 +148,31 @@ def negative(name: str, role: str, digest: str) -> dict:
         "error": f"observed {name}",
         "facts": facts,
     }
-    return {
+    sipx_result = {"error": name}
+    if name == "KdfPerturbation":
+        sipx_result.update({
+            "requested_srtp_suite": DRIVER.EXACT_AEAD_PROFILE_BY_ROLE[role],
+            "negotiated_srtp_suite": DRIVER.EXACT_AEAD_PROFILE_BY_ROLE[role],
+            "packets_sent": 5,
+            "packets_received": 0,
+            "srtp_authentication_failures": 5,
+        })
+    result = {
         "positive_role": role,
         "positive_sha256": digest,
         "browser": browser_result,
-        "sipx": {"error": name},
+        "sipx": sipx_result,
     }
+    if name == "KdfPerturbation":
+        result["derivation_mutation"] = {
+            "contract": "sipx.browser-audio.kdf-perturbation.v1",
+            "mutation": "right-align-aead-master-salt-in-14-octet-x",
+            "source": "crates/sipx-rtp/src/srtp/mod.rs",
+            "original_sha256": "a" * 64,
+            "perturbed_sha256": "b" * 64,
+            "binary_sha256": "c" * 64,
+        }
+    return result
 
 
 @contextlib.contextmanager
@@ -175,12 +206,6 @@ def validator_blind_to(messages: tuple[str, ...]):
 POSITIVE_FACTS: tuple[tuple[str, str, Any, tuple[str, ...]], ...] = (
     ("codec", "mime_type", "audio/PCMU", ("selected codec is not Opus",)),
     ("security", "dtls_state", "connecting", ("DTLS is not connected",)),
-    (
-        "security",
-        "srtp_profile",
-        "",
-        ("the negotiated SRTP profile is not a name the registry carries",),
-    ),
     ("candidate_pair", "nominated", False, ("candidate pair is not nominated",)),
     ("candidate_pair", "component", 2, ("browser-audio selected another ICE component",)),
     ("media", "inbound_packets", 0, ("inbound_packets must be positive",)),
@@ -259,12 +284,17 @@ PROOF_ASSERTIONS: tuple[Audited, ...] = (
         for section, field, _, messages in POSITIVE_FACTS
     ),
     Audited(
-        "test_a_counter_mode_only_proof_does_not_prove_the_aead_derivation",
-        "a run in which no role keyed with AEAD-GCM is not a proof of the AEAD derivation. "
-        "Removing the requirement does not admit such a run: it leaves `validate_proof` with no "
-        "witness to name, so the record it would have to publish cannot be built at all",
-        ("no role negotiated an AEAD-GCM profile, so the AEAD key derivation is unproven",),
-        IndexError,
+        "test_each_role_must_negotiate_and_key_its_exact_aead_suite",
+        "the browser, requested call policy and keyed session independently name each role's exact suite",
+        tuple(
+            message
+            for role, profile in DRIVER.EXACT_AEAD_PROFILE_BY_ROLE.items()
+            for message in (
+                f"{role} did not negotiate its exact SRTP suite {profile}",
+                f"sipx did not require {profile} for {role}",
+                f"sipx did not key {profile} for {role}",
+            )
+        ),
     ),
     Audited(
         "test_the_negotiated_profile_must_be_a_name_the_registry_carries",
@@ -289,6 +319,26 @@ PROOF_ASSERTIONS: tuple[Audited, ...] = (
         "test_negatives_are_bound_to_validated_positive_and_layer",
         "a negative failed at the layer it claims",
         ("fingerprint negative did not reach DTLS verification",),
+    ),
+    Audited(
+        "test_kdf_perturbation_is_a_non_vacuous_media_authentication_failure",
+        "the perturbed AEAD KDF reaches connected DTLS and then rejects independently derived media in both directions",
+        (
+            "KDF perturbation selected no ICE pair",
+            "KDF perturbation nominated no ICE pair",
+            "KDF perturbation did not complete DTLS",
+            "KDF perturbation peer sent no RTP",
+            "KDF perturbation did not require the exact AEAD suite",
+            "KDF perturbation keyed another SRTP suite",
+            "KDF perturbation sent no SRTP",
+            "KDF perturbation accepted SRTP",
+            "KDF perturbation produced no SRTP authentication failure",
+            "KDF perturbation build contract is wrong",
+            "KDF perturbation build names another mutation",
+            "KDF perturbation build names another source",
+            "KDF perturbation binary_sha256 is not SHA-256",
+            "KDF perturbation changed no source bytes",
+        ),
     ),
     Audited(
         "test_the_two_ends_must_report_the_same_reversed_pair",
@@ -318,7 +368,7 @@ class BrowserAudioProofTest(unittest.TestCase):
         )
         negative_dir = self.directory / "negatives"
         negative_dir.mkdir()
-        for name in ("FingerprintMismatch", "NoNominatedPair", "WeakerMedia"):
+        for name in ("FingerprintMismatch", "NoNominatedPair", "WeakerMedia", "KdfPerturbation"):
             role = "browser-offerer" if name == "FingerprintMismatch" else "browser-answerer"
             digest = DRIVER.proof_digest(browser(role), sipx(role))
             (negative_dir / f"{name}.json").write_text(
@@ -362,7 +412,7 @@ class BrowserAudioProofTest(unittest.TestCase):
         So every test that mutates a role's evidence calls this, and `PROOF_ASSERTIONS` is where
         that is checked rather than trusted.
         """
-        for name in ("FingerprintMismatch", "NoNominatedPair", "WeakerMedia"):
+        for name in ("FingerprintMismatch", "NoNominatedPair", "WeakerMedia", "KdfPerturbation"):
             role = "browser-offerer" if name == "FingerprintMismatch" else "browser-answerer"
             digest = DRIVER.proof_digest(
                 json.loads((self.directory / role / "browser.json").read_text(encoding="utf-8")),
@@ -446,23 +496,25 @@ class BrowserAudioProofTest(unittest.TestCase):
                 self.rebind_negatives()
                 self.assert_refused()
 
-    def test_a_counter_mode_only_proof_does_not_prove_the_aead_derivation(self) -> None:
-        """M-72: the run must refuse to call itself a proof when no role keyed with AEAD-GCM.
-
-        RFC 7714 publishes no key-derivation vector, so where the 96-bit master salt sits in the
-        PRF input block rests on a reading of the spec. Two sipx endpoints sharing a wrong
-        reading interoperate perfectly with each other, and every round-trip test in the tree
-        still passes. Only a foreign implementation deriving the same session keys can catch it,
-        and only the AEAD profiles exercise that derivation — a counter-mode run proves the
-        RFC 3711 derivation, which a published vector already pins.
-        """
+    def test_each_role_must_negotiate_and_key_its_exact_aead_suite(self) -> None:
+        """M-72: both sides of the evidence must name each role's required AEAD suite."""
         for role in DRIVER.ROLES:
-            target = self.directory / role / "browser.json"
-            result = json.loads(target.read_text(encoding="utf-8"))
-            result["security"]["srtp_profile"] = "AES_CM_128_HMAC_SHA1_80"
-            target.write_text(json.dumps(result), encoding="utf-8")
-        self.rebind_negatives()
-        self.assert_refused()
+            browser_path = self.directory / role / "browser.json"
+            browser_result = json.loads(browser_path.read_text(encoding="utf-8"))
+            browser_result["security"]["srtp_profile"] = "AES_CM_128_HMAC_SHA1_80"
+            browser_path.write_text(json.dumps(browser_result), encoding="utf-8")
+            self.rebind_negatives()
+            self.assert_refused()
+            browser_path.write_text(json.dumps(browser(role)), encoding="utf-8")
+
+            sipx_path = self.directory / role / "sipx.json"
+            for field in ("requested_srtp_suite", "negotiated_srtp_suite"):
+                sipx_result = sipx(role)
+                sipx_result[field] = "AES_CM_128_HMAC_SHA1_80"
+                sipx_path.write_text(json.dumps(sipx_result), encoding="utf-8")
+                self.rebind_negatives()
+                self.assert_refused()
+            sipx_path.write_text(json.dumps(sipx(role)), encoding="utf-8")
 
     def test_the_negotiated_profile_must_be_a_name_the_registry_carries(self) -> None:
         """A profile field nothing checks records a string, not a negotiation.
@@ -470,18 +522,16 @@ class BrowserAudioProofTest(unittest.TestCase):
         Presence alone is satisfied by any non-empty value, including a placeholder, so the
         evidence would survive the harness losing track of what was negotiated.
 
-        The offerer role carries the mutation because it is the one no other assertion constrains
-        to a set of profiles. An unregistered name in the answerer is refused by M-72's AEAD
-        witness requirement as well, so this suite would keep passing with registry membership
-        unchecked — the assertion would name a field it had stopped deciding anything about.
+        The unused-candidate compatibility run carries the mutation because its profile is not
+        constrained by M-72's exact-suite witnesses. Mutating an ordinary role would also trip the
+        exact-suite check and would not prove registry membership itself is load-bearing.
         """
-        target = self.directory / "browser-offerer/browser.json"
+        target = self.directory / "unused-rtcp-candidate/browser.json"
         original = json.loads(target.read_text(encoding="utf-8"))
         for value in ("profile", "AEAD_AES_192_GCM", "aead_aes_256_gcm"):
             changed = copy.deepcopy(original)
             changed["security"]["srtp_profile"] = value
             target.write_text(json.dumps(changed), encoding="utf-8")
-            self.rebind_negatives()
             self.assert_refused()
 
     def test_the_peer_and_its_exact_revision_are_recorded(self) -> None:
@@ -519,6 +569,83 @@ class BrowserAudioProofTest(unittest.TestCase):
         changed["browser"]["facts"]["dtls_state"] = "connecting"
         target.write_text(json.dumps(changed), encoding="utf-8")
         DRIVER.validate_proof(self.directory, PIN)
+
+    def test_kdf_perturbation_is_a_non_vacuous_media_authentication_failure(self) -> None:
+        target = self.directory / "negatives/KdfPerturbation.json"
+        original = json.loads(target.read_text(encoding="utf-8"))
+        mutations = (
+            ("browser", "selected_pair", False),
+            ("browser", "nominated", False),
+            ("browser", "dtls_state", "failed"),
+            ("browser", "outbound_rtp_attempts", 0),
+            ("sipx", "requested_srtp_suite", "AEAD_AES_128_GCM"),
+            ("sipx", "negotiated_srtp_suite", "AEAD_AES_128_GCM"),
+            ("sipx", "packets_sent", 0),
+            ("sipx", "packets_received", 1),
+            ("sipx", "srtp_authentication_failures", 0),
+            ("manifest", "contract", "wrong"),
+            ("manifest", "mutation", "another-mutation"),
+            ("manifest", "source", "another/source.rs"),
+            ("manifest", "binary_sha256", "not-a-hash"),
+            ("manifest", "perturbed_sha256", "a" * 64),
+        )
+        for side, field, value in mutations:
+            changed = copy.deepcopy(original)
+            if side == "browser":
+                section = changed[side]["facts"]
+            elif side == "sipx":
+                section = changed[side]
+            else:
+                section = changed["derivation_mutation"]
+            section[field] = value
+            target.write_text(json.dumps(changed), encoding="utf-8")
+            self.assert_refused()
+
+    def test_perturbation_builder_matches_one_exact_production_fragment(self) -> None:
+        completed = subprocess.run(
+            [str(PERTURBATION_BUILDER), "--check"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        manifest = json.loads(completed.stdout)
+        self.assertEqual("crates/sipx-rtp/src/srtp/mod.rs", manifest["source"])
+        self.assertNotEqual(manifest["original_sha256"], manifest["perturbed_sha256"])
+
+    def test_perturbed_binary_is_bound_to_its_build_manifest(self) -> None:
+        binary = self.directory / "perturbed-proof"
+        binary.write_bytes(b"measured proof binary")
+        manifest = negative(
+            "KdfPerturbation",
+            "browser-answerer",
+            "0" * 64,
+        )["derivation_mutation"]
+        manifest["binary_sha256"] = hashlib.sha256(binary.read_bytes()).hexdigest()
+        path = self.directory / "perturbation.json"
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        DRIVER.verify_perturbed_build(binary, path)
+        binary.write_bytes(b"another binary")
+        with self.assertRaisesRegex(DRIVER.ProofError, "differs from its build manifest"):
+            DRIVER.verify_perturbed_build(binary, path)
+
+    def test_perturbation_builder_timeout_reaps_its_process_group(self) -> None:
+        pid_file = self.directory / "builder-pids"
+        command = [
+            "bash",
+            "-c",
+            'sleep 300 & child=$!; printf "%s\\n%s\\n" "$$" "$child" >"$1"; wait "$child"',
+            "bounded-build-probe",
+            str(pid_file),
+        ]
+        with self.assertRaises(BUILDER.BuildTimedOut):
+            BUILDER.run_bounded_build(command, self.directory, os.environ.copy(), 0.5)
+        pids = [int(value) for value in pid_file.read_text(encoding="utf-8").splitlines()]
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and any(
+            pathlib.Path(f"/proc/{pid}").exists() for pid in pids
+        ):
+            time.sleep(0.02)  # poll interval: /proc disappearance is the cleanup condition
+        self.assertFalse([pid for pid in pids if pathlib.Path(f"/proc/{pid}").exists()])
 
     def test_the_two_ends_must_report_the_same_reversed_pair(self) -> None:
         target = self.directory / "browser-answerer/sipx.json"

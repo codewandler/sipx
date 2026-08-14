@@ -6,6 +6,7 @@ import re
 import tomllib
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -15,6 +16,58 @@ SPEC = importlib.util.spec_from_file_location(
 assert SPEC is not None and SPEC.loader is not None
 SYNC = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(SYNC)
+
+
+class ChangelogCompareTests(unittest.TestCase):
+    """`X-151`: release compare links follow the dated headings, not memory."""
+
+    def test_stale_unreleased_and_missing_release_links_are_named(self) -> None:
+        changelog = """\
+## [Unreleased]
+
+## [1.0.0-rc.3] — 2026-08-14
+
+## [1.0.0-rc.1] — 2026-08-13
+
+[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.1...HEAD
+[1.0.0-rc.1]: https://github.com/codewandler/sipx/releases/tag/v1.0.0-rc.1
+"""
+        problems = SYNC.changelog_compare_problems(changelog)
+        self.assertEqual(2, len(problems))
+        self.assertTrue(any("Unreleased" in problem for problem in problems))
+        self.assertTrue(any("1.0.0-rc.3" in problem for problem in problems))
+
+    def test_chain_follows_actual_release_order_when_a_candidate_was_skipped(self) -> None:
+        changelog = """\
+## [Unreleased]
+
+## [1.0.0-rc.3] — 2026-08-14
+
+## [1.0.0-rc.1] — 2026-08-13
+
+[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.3...HEAD
+[1.0.0-rc.3]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.1...v1.0.0-rc.3
+[1.0.0-rc.1]: https://github.com/codewandler/sipx/releases/tag/v1.0.0-rc.1
+"""
+        self.assertEqual([], SYNC.changelog_compare_problems(changelog))
+
+    def test_each_release_has_exactly_one_reference_definition(self) -> None:
+        changelog = """\
+## [Unreleased]
+
+## [1.0.0-rc.1] — 2026-08-14
+
+[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.1...HEAD
+[1.0.0-rc.1]: https://github.com/codewandler/sipx/releases/tag/v1.0.0-rc.1
+[1.0.0-rc.1]: https://github.com/codewandler/sipx/releases/tag/v1.0.0-rc.1
+"""
+        problems = SYNC.changelog_compare_problems(changelog)
+        self.assertEqual(1, len(problems))
+        self.assertIn("2 reference links", problems[0])
+
+    def test_repository_changelog_compare_chain_is_complete(self) -> None:
+        changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        self.assertEqual([], SYNC.changelog_compare_problems(changelog))
 
 
 class ArchitectureCoverageTests(unittest.TestCase):
@@ -343,11 +396,11 @@ class PublicGuardTests(unittest.TestCase):
             source: (ROOT / source).read_text(encoding="utf-8") for source in sources
         }
         contents["README.md"] = contents["README.md"].replace(
-            "current public prerelease", "development branch", 1
+            "current stable release", "development branch", 1
         )
         contents["website/docs/getting-started.md"] += "\nThe CLI can use UDP or TCP only.\n"
         problems = SYNC.public_adoption_problems(contents)
-        self.assertTrue(any("missing published public-prerelease status" in p for p in problems))
+        self.assertTrue(any("missing current stable-release status" in p for p in problems))
         self.assertTrue(any("stale current-main capability claim" in p for p in problems))
 
     def test_adoption_guard_rejects_the_retired_message_denial(self) -> None:
@@ -360,6 +413,134 @@ class PublicGuardTests(unittest.TestCase):
         )
         problems = SYNC.public_adoption_problems(contents)
         self.assertTrue(any("stale current-main capability claim" in p for p in problems))
+
+    def test_stable_v1_guard_accepts_current_prose_and_rustdoc(self) -> None:
+        public_sources = set(SYNC.STABLE_V1_CURRENT_PAGES) | {
+            "website/docs/whats-new.md"
+        }
+        public_contents = {
+            source: (ROOT / source).read_text(encoding="utf-8") for source in public_sources
+        }
+        rust_sources = set(SYNC.STABLE_V1_RUSTDOC) | set(SYNC.EXPERIMENTAL_V1_RUSTDOC)
+        rust_contents = {
+            source: (ROOT / source).read_text(encoding="utf-8") for source in rust_sources
+        }
+        self.assertEqual(
+            [], SYNC.stable_v1_messaging_problems(public_contents, rust_contents)
+        )
+
+    def test_stable_v1_guard_rejects_legacy_current_prose_and_rustdoc(self) -> None:
+        public_contents = {
+            source: "" for source in set(SYNC.STABLE_V1_CURRENT_PAGES) | {
+                "website/docs/whats-new.md"
+            }
+        }
+        public_contents["README.md"] = "Public APIs are not frozen before 1.0.\n"
+        public_contents["website/docs/whats-new.md"] = (
+            "## 1.0.0 — 2026-08-14\nStable.\n\n"
+            "## 1.0.0-rc.23 — 2026-08-10\nThe historical prerelease remains unchanged.\n"
+        )
+        rust_contents = {
+            source: "frozen for compatible v1 evolution"
+            for source in SYNC.STABLE_V1_RUSTDOC
+        }
+        rust_contents.update(
+            {source: "Experimental and remains unfrozen" for source in SYNC.EXPERIMENTAL_V1_RUSTDOC}
+        )
+        rust_contents[SYNC.STABLE_V1_RUSTDOC[0]] = "sipx is pre-1.0"
+        problems = SYNC.stable_v1_messaging_problems(public_contents, rust_contents)
+        self.assertTrue(any("README.md:1" in problem for problem in problems))
+        self.assertTrue(any(SYNC.STABLE_V1_RUSTDOC[0] in problem for problem in problems))
+        self.assertFalse(any("rc.23" in problem for problem in problems))
+
+    def test_adoption_guard_accepts_stable_entry_points_with_the_v1_promise(self) -> None:
+        sources = set(SYNC.ADOPTION_REQUIREMENTS) | set(SYNC.CURRENT_SURFACE_PAGES)
+        contents = {
+            source: (ROOT / source).read_text(encoding="utf-8") for source in sources
+        }
+        contents["README.md"] = contents["README.md"].replace(
+            "current public prerelease", "current stable release", 1
+        ).replace(
+            "Public APIs are not frozen;",
+            "Supported Rust APIs remain source-compatible throughout the v1 line.",
+            1,
+        )
+        contents["website/docs/intro.md"] = contents["website/docs/intro.md"].replace(
+            "current public prerelease", "current stable release", 1
+        ).replace(
+            "Public APIs are not frozen before 1.0:",
+            "Supported Rust APIs remain source-compatible throughout the v1 line.",
+            1,
+        )
+        stable = SYNC.canonical_facts()._replace(workspace_version="1.0.0")
+        with mock.patch.object(SYNC, "canonical_facts", return_value=stable):
+            self.assertEqual([], SYNC.public_adoption_problems(contents))
+
+    def test_adoption_guard_rejects_prerelease_policy_on_a_stable_version(self) -> None:
+        sources = set(SYNC.ADOPTION_REQUIREMENTS) | set(SYNC.CURRENT_SURFACE_PAGES)
+        contents = {
+            source: (ROOT / source).read_text(encoding="utf-8") for source in sources
+        }
+        contents["README.md"] = contents["README.md"].replace(
+            "current stable release", "current public prerelease", 1
+        ).replace(
+            "Supported Rust APIs remain source-compatible throughout the v1 line.",
+            "Public APIs are not frozen;",
+            1,
+        )
+        contents["website/docs/intro.md"] = contents["website/docs/intro.md"].replace(
+            "current stable release", "current public prerelease", 1
+        ).replace(
+            "Supported Rust APIs remain source-compatible throughout the v1 line.",
+            "Public APIs are not frozen before 1.0:",
+            1,
+        )
+        stable = SYNC.canonical_facts()._replace(workspace_version="1.0.0")
+        with mock.patch.object(SYNC, "canonical_facts", return_value=stable):
+            problems = SYNC.public_adoption_problems(contents)
+        self.assertTrue(any("missing current stable-release status" in p for p in problems))
+        self.assertTrue(any("still claims a public prerelease" in p for p in problems))
+        self.assertTrue(any("still claims Supported APIs are not frozen" in p for p in problems))
+
+    def test_stable_policy_keeps_shared_adoption_and_capability_guards(self) -> None:
+        sources = set(SYNC.ADOPTION_REQUIREMENTS) | set(SYNC.CURRENT_SURFACE_PAGES)
+        contents = {
+            source: (ROOT / source).read_text(encoding="utf-8") for source in sources
+        }
+        contents["README.md"] = contents["README.md"].replace(
+            "current public prerelease", "current stable release", 1
+        ).replace(
+            "Public APIs are not frozen;",
+            "Supported Rust APIs remain source-compatible throughout the v1 line.",
+            1,
+        )
+        contents["website/docs/intro.md"] = contents["website/docs/intro.md"].replace(
+            "current public prerelease", "current stable release", 1
+        ).replace(
+            "Public APIs are not frozen before 1.0:",
+            "Supported Rust APIs remain source-compatible throughout the v1 line.",
+            1,
+        )
+        contents["website/docs/whats-new.md"] = contents[
+            "website/docs/whats-new.md"
+        ].replace("published as exact crates.io packages", "available from source", 1)
+        contents["website/docs/getting-started.md"] += "\nThe CLI can use UDP or TCP only.\n"
+        stable = SYNC.canonical_facts()._replace(workspace_version="1.0.0")
+        with mock.patch.object(SYNC, "canonical_facts", return_value=stable):
+            problems = SYNC.public_adoption_problems(contents)
+        self.assertTrue(any("missing registry honesty" in p for p in problems))
+        self.assertTrue(any("stale current-main capability claim" in p for p in problems))
+
+    def test_prerelease_policy_rejects_a_concurrent_stable_status(self) -> None:
+        sources = set(SYNC.ADOPTION_REQUIREMENTS) | set(SYNC.CURRENT_SURFACE_PAGES)
+        contents = {
+            source: (ROOT / source).read_text(encoding="utf-8") for source in sources
+        }
+        contents["README.md"] += "\nThis is the current stable release.\n"
+        prerelease = SYNC.canonical_facts()._replace(workspace_version="1.0.0-rc.24")
+        with mock.patch.object(SYNC, "canonical_facts", return_value=prerelease):
+            problems = SYNC.public_adoption_problems(contents)
+        self.assertTrue(any("still claims a stable release" in p for p in problems))
 
 
 class RustDocExampleGuardTests(unittest.TestCase):

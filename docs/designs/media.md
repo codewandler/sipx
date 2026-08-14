@@ -373,7 +373,7 @@ control protocol, able to say what it heard and never to learn what the far end 
 | The sans-IO agent | [`M-21`](../stories/M-21-ice-agent.md) | ready |
 | Driving it on the media port | [`M-22`](../stories/M-22-ice-on-media-port.md) | backlog |
 | ICE restart | [`M-23`](../stories/M-23-ice-restart.md) | backlog |
-| Relayed candidates (TURN, RFC 8656) | [`M-24`](../stories/M-24-ice-relayed-candidate.md) | backlog |
+| Relayed candidates (TURN, RFC 8656) | [`M-24`](../stories/M-24-ice-relayed-candidate.md) | in progress — implementation complete, acceptance gate pending |
 
 [`M-16`](../stories/M-16-ice.md) is the tracker and stays open until the six children are. It is
 also the record of why the split falls where it does — twelve Acceptance items over two RFCs, with

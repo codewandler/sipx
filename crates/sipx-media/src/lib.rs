@@ -13,30 +13,35 @@
 //!
 //! # Stability
 //!
-//! sipx is pre-1.0, so **neither word below means frozen**. `1.0.0` is what freezes an API, and its
-//! predicates are in `docs/roadmap.md`. Until then:
+//! The Supported Rust API is frozen for compatible v1 evolution. Existing Supported paths and
+//! signatures remain source-compatible throughout major version 1; compatible additions use the
+//! reservations documented on their types.
 //!
-//! - **Supported** — meant to be depended on. Breaking changes get a `CHANGELOG.md` entry saying what
-//!   to do instead. New enum variants and new struct fields may still appear in a minor release, and
-//!   the types that can grow say so: they carry `#[non_exhaustive]`, so a downstream `match` needs a
-//!   `_` arm and a downstream value is built with the type's constructor rather than a struct
-//!   literal. That is this reservation made checkable instead of merely stated — `M-80` settled it
-//!   for [`Encoded`] and [`sipx_rtp::Packet`] together, and `scripts/check-audio-claims.py` holds
-//!   the rest of this crate's constructor-bearing public types to it.
-//! - **Experimental** — may change shape or be removed without a migration note. Depend on it only if
-//!   you are prepared to follow it.
+//! - **Supported** — covered by the v1 compatibility contract. The types that can grow carry
+//!   `#[non_exhaustive]`, so downstream matches retain a `_` arm and downstream values use their
+//!   constructors. `M-80` made that reservation checkable for [`Encoded`] and
+//!   [`sipx_rtp::Packet`]; `scripts/check-audio-claims.py` holds the rest of this crate's
+//!   constructor-bearing public types to it.
+//! - **Experimental** — remains unfrozen and may change shape or be removed without a migration
+//!   note. Depend on it only if you are prepared to follow it.
 //!
 //!
 //! **Supported**: `MediaSession` and the RTP/RTCP plumbing under it — binding, symmetric RTP, the
-//! pacing clock, SRTP keyed from SDES, quality statistics — plus [`ice`], whose gathering and
-//! selected-pair driver are consumed by `sipx-call`, and [`dtls`]'s protocol, key-derivation and
-//! handshake surface, which `sipx-call` selects for explicit DTLS-SRTP policy (`M-28`). [`processing`]
+//! pacing clock, SRTP keyed from SDES, quality statistics — plus [`ice`]'s agent, candidates and
+//! selected-path diagnostics, whose gathering and driver are consumed by `sipx-call`, and
+//! [`dtls`]'s protocol, key-derivation and handshake surface, which `sipx-call` selects for
+//! explicit DTLS-SRTP policy (`M-28`). [`processing`]
 //! is the one call-audio tap, specified in `docs/specs/call-audio-seam.md` (`M-54`); local speech
 //! and deterministic call-audio analysis both ride it rather than adding a second.
 //!
 //! **Experimental**:
 //!
-//! - [`dsp`] — call-local DSP graphs, `docs/specs/call-dsp-graph.md` (`M-64`, `M-102`). The graph,
+//! - [`ice::Relay`] and [`ice::RelayCredentialError`] — the lower-layer TURN allocation
+//!   configuration. Endpoint applications use `sipx_call::TurnPolicy`, whose preflight and
+//!   stability contract is narrower; exposing these values does not make a second Supported call
+//!   configuration path.
+//! - [`dsp`] and `MediaSession::attach_dsp` — call-local DSP graphs,
+//!   `docs/specs/call-dsp-graph.md` (`M-64`, `M-102`). The graph,
 //!   its generation, its bounds, its failure policy and its teardown barrier are real and tested,
 //!   and a supervised stage runs its worker in an operating-system process this crate spawns, kills
 //!   and reaps (`M-102`) — so that profile's containment claim is the one
@@ -48,15 +53,33 @@
 //!   while doing so and when it makes speech worse than leaving it alone. What is not here is an
 //!   SDK surface for controlling a graph (`M-67`) or the measured CPU, memory and quality
 //!   thresholds (`M-68`, `X-109`).
-//! - `dtls::openssl` — the optional OpenSSL implementation behind the off-by-default `dtls`
-//!   feature. No shipped application enables it by default; the feature never changes a session or
-//!   call without explicit DTLS-SRTP policy.
+//! - `dtls::openssl` and the direct `MediaPort` DTLS/browser-audio start methods — the optional
+//!   OpenSSL implementation and its low-level session entry points behind the off-by-default
+//!   `dtls` feature. No shipped application enables it by default; the feature never changes a
+//!   session or call without explicit DTLS-SRTP policy.
 //! - [`Bridge`] and [`Conference`] — real and tested over sessions **you** own; a `Call` does not hand
 //!   out its `MediaSession`, so two calls cannot be bridged yet (`C-6`).
 //! - [`speech`] — the provider *contract* of `docs/specs/speech-providers.md` and nothing behind
 //!   it. No recogniser, synthesiser, model or accelerator dependency ships in this crate, and no
 //!   call gains the ability to transcribe or speak by depending on it; the types exist so `M-55`,
 //!   `M-56` and downstream replacements are written against one document (`A-39`).
+//!
+//! <!-- BEGIN sipx-api-classification -->
+//! **Experimental Rust API roots:**
+//!
+//! - [`sipx_media::bridge`](crate::bridge)
+//! - [`sipx_media::conference`](crate::conference)
+//! - [`sipx_media::dsp`](crate::dsp)
+//! - [`sipx_media::dtls::openssl`](crate::dtls::openssl)
+//! - [`sipx_media::ice::Relay`](crate::ice::Relay)
+//! - [`sipx_media::ice::RelayCredentialError`](crate::ice::RelayCredentialError)
+//! - [`sipx_media::session::MediaPort::key_with_dtls`](crate::session::MediaPort::key_with_dtls)
+//! - [`sipx_media::session::MediaPort::key_with_dtls_profile`](crate::session::MediaPort::key_with_dtls_profile)
+//! - [`sipx_media::session::MediaPort::start_browser_audio`](crate::session::MediaPort::start_browser_audio)
+//! - [`sipx_media::session::MediaPort::start_browser_audio_with_profile`](crate::session::MediaPort::start_browser_audio_with_profile)
+//! - [`sipx_media::session::MediaSession::attach_dsp`](crate::session::MediaSession::attach_dsp)
+//! - [`sipx_media::speech`](crate::speech)
+//! <!-- END sipx-api-classification -->
 
 // This crate's inline test modules opt out of coverage instrumentation, so the
 // published figure measures the code rather than the tests measuring it. Never set outside

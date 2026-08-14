@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/codewandler/sipx/docs/comparison/schema/interop-dataset.schema.json",
+  "title": "Independent interoperability evidence dataset",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "evaluated_at", "cases"],
+  "properties": {
+    "schema": {"const": "sipx.comparison.interop.dataset.v1"},
+    "evaluated_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "subject", "subject_descriptor", "run", "reproduce", "claim", "not_inferred"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"},
+          "subject": {"type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"},
+          "subject_descriptor": {"type": "string", "pattern": "^subjects/[a-z0-9]+(?:-[a-z0-9]+)*\\.json$"},
+          "run": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*/runs/[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+          "reproduce": {"type": "string", "pattern": "^docs/comparison/interop/[a-z0-9]+(?:-[a-z0-9]+)*/reproduce\\.sh$"},
+          "claim": {"type": "string", "minLength": 1},
+          "not_inferred": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+        }
+      }
+    }
+  }
+}

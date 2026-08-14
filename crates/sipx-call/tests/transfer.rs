@@ -106,12 +106,12 @@ async fn a_referred_call_reaches_the_target_and_notifies_the_transferor() {
     let carol_addr = carol_endpoint.local_addr();
 
     // Alice calls Bob.
-    let (mut alice, mut bob) = connect(
+    let (mut alice, mut bob) = Box::pin(connect(
         &alice_endpoint,
         bob_endpoint.clone(),
         &mut bob_incoming,
         "<sip:alice@example.net>",
-    )
+    ))
     .await;
 
     // Carol will answer whatever arrives.
@@ -186,12 +186,12 @@ async fn a_transfer_the_target_refuses_is_reported_as_a_failure() {
     let (carol_endpoint, mut carol_incoming) = endpoint().await;
     let carol_addr = carol_endpoint.local_addr();
 
-    let (mut alice, mut bob) = connect(
+    let (mut alice, mut bob) = Box::pin(connect(
         &alice_endpoint,
         bob_endpoint.clone(),
         &mut bob_incoming,
         "<sip:alice@example.net>",
-    )
+    ))
     .await;
 
     // Carol is busy.
@@ -248,12 +248,12 @@ async fn a_refer_that_cannot_be_honoured_is_rejected() {
     let (bob_endpoint, mut bob_incoming) = endpoint().await;
     let elsewhere = "127.0.0.1:9".parse().expect("valid");
 
-    let (mut alice, mut bob) = connect(
+    let (mut alice, mut bob) = Box::pin(connect(
         &alice_endpoint,
         bob_endpoint.clone(),
         &mut bob_incoming,
         "<sip:alice@example.net>",
-    )
+    ))
     .await;
 
     let bobs_side = tokio::spawn(async move {
@@ -293,12 +293,12 @@ async fn a_refer_with_an_unusable_refer_to_is_rejected_without_asking() {
     let (alice_endpoint, _alice_incoming) = endpoint().await;
     let (bob_endpoint, mut bob_incoming) = endpoint().await;
 
-    let (alice, mut bob) = connect(
+    let (alice, mut bob) = Box::pin(connect(
         &alice_endpoint,
         bob_endpoint.clone(),
         &mut bob_incoming,
         "<sip:alice@example.net>",
-    )
+    ))
     .await;
 
     // A REFER built by hand, because the library will not build a broken one.

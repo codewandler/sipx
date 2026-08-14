@@ -1882,6 +1882,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "precis-core"
+version = "0.1.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c2e7b31f132e0c6f8682cfb7bf4a5340dbe925b7986618d0826a56dfe0c8e56"
+dependencies = [
+ "precis-tools",
+ "ucd-parse",
+ "unicode-normalization",
+]
+
+[[package]]
+name = "precis-profiles"
+version = "0.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "31e2768890a47af73a032af9f0cedbddce3c9d06cf8de201d5b8f2436ded7674"
+dependencies = [
+ "lazy_static",
+ "precis-core",
+ "precis-tools",
+ "unicode-normalization",
+]
+
+[[package]]
+name = "precis-tools"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6cc1eb2d5887ac7bfd2c0b745764db89edb84b856e4214e204ef48ef96d10c4a"
+dependencies = [
+ "lazy_static",
+ "regex",
+ "ucd-parse",
+]
+
+[[package]]
 name = "prefix-trie"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2137,6 +2171,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "regex"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f020237b6c8eed93db2e2cb53c00c60a8e1bc73da7d073199a1180401450218d"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
 name = "regex-automata"
 version = "0.4.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2146,6 +2192,12 @@ dependencies = [
  "memchr",
  "regex-syntax",
 ]
+
+[[package]]
+name = "regex-lite"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cab834c73d247e67f4fae452806d17d3c7501756d98c8808d7c9c7aa7d18f973"
 
 [[package]]
 name = "regex-syntax"
@@ -2552,7 +2604,7 @@ checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
 name = "sipx-app"
-version = "1.0.0-rc.23"
+version = "1.0.0"
 dependencies = [
  "base64",
  "bytes",
@@ -2575,7 +2627,7 @@ dependencies = [
 
 [[package]]
 name = "sipx-app-protocol"
-version = "1.0.0-rc.23"
+version = "1.0.0"
 dependencies = [
  "sipx-call",
  "sipx-media",
@@ -2587,7 +2639,7 @@ dependencies = [
 
 [[package]]
 name = "sipx-audio"
-version = "1.0.0-rc.23"
+version = "1.0.0"
 dependencies = [
  "bytes",
  "opus",
@@ -2598,16 +2650,18 @@ dependencies = [
 
 [[package]]
 name = "sipx-call"
-version = "1.0.0-rc.23"
+version = "1.0.0"
 dependencies = [
  "base64",
  "bytes",
  "cpal",
  "futures-util",
+ "hmac",
  "openssl",
  "pretty_assertions",
  "rand 0.9.5",
  "serde_json",
+ "sha2",
  "sipx-audio",
  "sipx-media",
  "sipx-rtp",
@@ -2624,7 +2678,7 @@ dependencies = [
 
 [[package]]
 name = "sipx-cli"
-version = "1.0.0-rc.23"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -2655,14 +2709,17 @@ dependencies = [
 
 [[package]]
 name = "sipx-media"
-version = "1.0.0-rc.23"
+version = "1.0.0"
 dependencies = [
  "bytes",
  "hmac",
+ "md-5",
  "openssl",
+ "precis-profiles",
  "pretty_assertions",
  "rand 0.9.5",
  "sha1 0.10.7",
+ "sha2",
  "sipx-audio",
  "sipx-rtp",
  "sipx-sdp",
@@ -2675,7 +2732,7 @@ dependencies = [
 
 [[package]]
 name = "sipx-rtp"
-version = "1.0.0-rc.23"
+version = "1.0.0"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -2692,7 +2749,7 @@ dependencies = [
 
 [[package]]
 name = "sipx-sdp"
-version = "1.0.0-rc.23"
+version = "1.0.0"
 dependencies = [
  "bytes",
  "pretty_assertions",
@@ -2706,7 +2763,7 @@ dependencies = [
 
 [[package]]
 name = "sipx-sip"
-version = "1.0.0-rc.23"
+version = "1.0.0"
 dependencies = [
  "base64",
  "bytes",
@@ -2723,7 +2780,7 @@ dependencies = [
 
 [[package]]
 name = "sipx-testkit"
-version = "1.0.0-rc.23"
+version = "1.0.0"
 dependencies = [
  "base64",
  "bytes",
@@ -2745,7 +2802,7 @@ dependencies = [
 
 [[package]]
 name = "sipx-transport"
-version = "1.0.0-rc.23"
+version = "1.0.0"
 dependencies = [
  "bytes",
  "futures-util",
@@ -2769,7 +2826,7 @@ dependencies = [
 
 [[package]]
 name = "sipx-ua"
-version = "1.0.0-rc.23"
+version = "1.0.0"
 dependencies = [
  "bytes",
  "hmac",
@@ -2789,7 +2846,7 @@ dependencies = [
 
 [[package]]
 name = "sipx-wasm"
-version = "1.0.0-rc.23"
+version = "1.0.0"
 dependencies = [
  "bytes",
  "pretty_assertions",
@@ -3265,6 +3322,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
+name = "ucd-parse"
+version = "0.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c06ff81122fcbf4df4c1660b15f7e3336058e7aec14437c9f85c6b31a0f279b9"
+dependencies = [
+ "regex-lite",
+]
+
+[[package]]
 name = "unarray"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3275,6 +3341,15 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "unicode-normalization"
+version = "0.1.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fd4f6878c9cb28d874b009da9e8d183b5abc80117c40bbd187a1fde336be6e8"
+dependencies = [
+ "tinyvec",
+]
 
 [[package]]
 name = "unicode-width"

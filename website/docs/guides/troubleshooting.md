@@ -64,11 +64,11 @@ Check these in order:
    never arrived.
 
 sipx supports symmetric RTP: after a valid packet arrives, media can be sent back to its observed
-source instead of the address advertised in SDP. Calls can also gather host candidates or use a
-configured STUN server to gather server-reflexive candidates and run ICE connectivity checks. TURN
-and relayed candidates are not available, so topologies that require a media relay will still fail.
-When ICE is enabled, the nominated candidate pair owns the destination; ordinary RTP source
-learning cannot override it.
+source instead of the address advertised in SDP. CLI calls can also gather host candidates or use a
+configured STUN server to gather server-reflexive candidates and run ICE connectivity checks. A
+library application can supply `sipx_call::TurnPolicy` to gather and use a configured relay when a
+direct path cannot work; sipx does not operate the relay service. When ICE is enabled, the nominated
+candidate pair owns the destination; ordinary RTP source learning cannot override it.
 WebSocket signalling does not solve media reachability; RTP uses its own network path.
 
 ## Signalling and media took different routes

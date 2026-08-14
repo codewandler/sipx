@@ -29,7 +29,9 @@ inside the provenance scope this file is not — see `COMPARISON_SCOPE` in
 
 import argparse
 import datetime
+import hashlib
 import importlib.util
+import ipaddress
 import json
 import os.path
 import pathlib
@@ -50,6 +52,8 @@ OBSERVATIONS = COMPARISON / "observations"
 CAPABILITIES = COMPARISON / "capabilities"
 CAPABILITY_EXPECTED = CAPABILITIES / "expected"
 EXTERNAL_STORIES = CAPABILITIES / "external"
+INTEROP = COMPARISON / "interop"
+INTEROP_DATASET = INTEROP / "dataset.json"
 REPORT = ROOT / "docs" / "comparison.md"
 
 # Live sources for the generated tier. Each is read by its own rule below.
@@ -123,6 +127,43 @@ CAPABILITY_KEYS = (
     {"id", "category", "title", "confidence", "ownership", "status", "evidence"},
     {"story", "rationale", "implementation"},
 )
+
+INTEROP_DATASET_KEYS = {"schema", "evaluated_at", "cases"}
+INTEROP_CASE_KEYS = {
+    "id", "subject", "subject_descriptor", "run", "reproduce", "claim", "not_inferred"
+}
+INTEROP_SUBJECT_KEYS = {
+    "schema", "id", "stack", "version", "artifact", "reported_version_marker"
+}
+INTEROP_ARTIFACT_KEYS = {"kind", "reference", "digest", "image_id"}
+INTEROP_RUN_KEYS = {
+    "schema", "case", "subject", "evaluated_at", "protocol", "source_under_test",
+    "positive", "negative", "sha256"
+}
+INTEROP_PROTOCOL_KEYS = {"signalling", "keying", "media", "codec"}
+INTEROP_SOURCE_KEYS = {"files", "normal_binary_sha256", "perturbed_binary_sha256"}
+INTEROP_POSITIVE_ENTRY_KEYS = {"result", "peer_log"}
+INTEROP_NEGATIVE_KEYS = {
+    "suite", "mutation", "build_manifest", "result", "peer_log", "peer_srtp_rejections"
+}
+INTEROP_POSITIVE_RESULT_KEYS = {
+    "encrypted", "keying", "longest_bit_exact_echo_bytes", "match_floor_bytes",
+    "negotiated_profile", "packets_received", "packets_sent", "peer_audio_peak",
+    "peer_echo_audio_bytes", "sent_audio_bytes", "srtcp_unprotect_failures",
+    "srtp_unprotect_failures", "suite_required"
+}
+INTEROP_NEGATIVE_RESULT_KEYS = {
+    "encrypted", "expected_outcome", "keying", "negative", "negotiated_profile",
+    "packets_received", "packets_sent", "peer_echo_audio_bytes",
+    "srtcp_unprotect_failures", "srtp_unprotect_failures", "suite_required"
+}
+INTEROP_KDF_KEYS = {
+    "binary_sha256", "contract", "mutation", "original_sha256", "perturbed_sha256", "source"
+}
+INTEROP_SUITES = {
+    "AEAD_AES_128_GCM": "AeadAes128Gcm",
+    "AEAD_AES_256_GCM": "AeadAes256Gcm",
+}
 
 CAPABILITY_OWNERS = ("sipx", "sipx-clstr", "not-shipped", "not-applicable")
 CAPABILITY_STATUS = {
@@ -1926,6 +1967,305 @@ def check(dimension_list, stack_list, observation_list, values, today) -> list[s
     return problems
 
 
+def interop_dataset(base=None):
+    """Load the comparison-owned wire-evidence registry without executing its reproducer."""
+    base = pathlib.Path(base) if base is not None else INTEROP
+    path = base / "dataset.json"
+    if not path.is_file():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _interop_digest(path: pathlib.Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _interop_file(base: pathlib.Path, relative, where, problems):
+    if not isinstance(relative, str) or not relative or pathlib.PurePosixPath(relative).is_absolute():
+        problems.append(f"{where} is not a relative file path")
+        return None
+    if ".." in pathlib.PurePosixPath(relative).parts:
+        problems.append(f"{where} escapes the interoperability registry")
+        return None
+    path = base / relative
+    if path.is_symlink():
+        problems.append(f"{where} is a symlink; retained evidence must be self-contained")
+        return None
+    try:
+        path.resolve().relative_to(base.resolve())
+    except ValueError:
+        problems.append(f"{where} escapes the interoperability registry")
+        return None
+    if not path.is_file():
+        problems.append(f"{where} does not exist: {relative}")
+        return None
+    return path
+
+
+def _interop_json(base, relative, where, problems):
+    path = _interop_file(base, relative, where, problems)
+    if path is None:
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        problems.append(f"{where} is not valid JSON: {error}")
+        return None
+
+
+def _interop_staleness(stamp, today):
+    try:
+        evaluated = datetime.date.fromisoformat(stamp)
+    except (TypeError, ValueError):
+        return ["interoperability dataset evaluated_at is not a YYYY-MM-DD date"]
+    age = (today - evaluated).days
+    if age < 0:
+        return ["interoperability dataset is dated in the future"]
+    if age > MAX_OBSERVATION_AGE_DAYS:
+        return [f"interoperability dataset is stale: evaluated {age} days ago"]
+    return []
+
+
+def interop_problems(dataset, stack_list, today, base=None) -> list[str]:
+    """Verify exact suites, independent observations, mutations, and every retained byte."""
+    base = pathlib.Path(base) if base is not None else INTEROP
+    if dataset is None:
+        return ["docs/comparison/interop/dataset.json is missing; wire claims require evidence"]
+    problems = _load_keys("interoperability dataset", dataset, INTEROP_DATASET_KEYS)
+    if not isinstance(dataset, dict):
+        return problems
+    if dataset.get("schema") != "sipx.comparison.interop.dataset.v1":
+        problems.append("interoperability dataset carries the wrong schema")
+    problems.extend(_interop_staleness(dataset.get("evaluated_at"), today))
+    cases = dataset.get("cases")
+    if not isinstance(cases, list) or not cases:
+        problems.append("interoperability dataset carries no cases")
+        return problems
+    known_stacks = {stack.get("id") for stack in stack_list}
+    seen = set()
+    for case in cases:
+        where = f"interoperability case {case.get('id', '?') if isinstance(case, dict) else '?'}"
+        problems.extend(_load_keys(where, case, INTEROP_CASE_KEYS))
+        if not isinstance(case, dict):
+            continue
+        case_id = case.get("id")
+        if case_id in seen:
+            problems.append(f"{where} is duplicated")
+        seen.add(case_id)
+        if case.get("subject") not in known_stacks:
+            problems.append(f"{where} names no subject in stacks.json")
+        limitations = case.get("not_inferred")
+        if not isinstance(limitations, list) or not limitations or not all(
+            isinstance(item, str) and item.strip() for item in limitations
+        ):
+            problems.append(f"{where} must carry non-empty scope limitations")
+        reproducer = case.get("reproduce")
+        prefix = "docs/comparison/interop/"
+        if not isinstance(reproducer, str) or not reproducer.startswith(prefix):
+            problems.append(f"{where} reproducer must stay under docs/comparison/interop")
+        else:
+            script = _interop_file(base, reproducer[len(prefix):], f"{where} reproducer", problems)
+            if script is not None and not os.access(script, os.X_OK):
+                problems.append(f"{where} reproducer is not executable")
+
+        subject = _interop_json(base, case.get("subject_descriptor"), f"{where} subject", problems)
+        if isinstance(subject, dict):
+            problems.extend(_load_keys(f"{where} subject", subject, INTEROP_SUBJECT_KEYS))
+            artifact = subject.get("artifact")
+            problems.extend(_load_keys(f"{where} subject artifact", artifact, INTEROP_ARTIFACT_KEYS))
+            if subject.get("stack") != case.get("subject"):
+                problems.append(f"{where} subject descriptor disagrees with its stack")
+            if isinstance(artifact, dict):
+                digest = artifact.get("digest")
+                reference = artifact.get("reference")
+                if artifact.get("kind") != "oci-image":
+                    problems.append(f"{where} subject is not an immutable OCI image")
+                if not isinstance(digest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+                    problems.append(f"{where} subject has no full image digest")
+                if not isinstance(reference, str) or not isinstance(digest, str) or not reference.endswith("@" + digest):
+                    problems.append(f"{where} subject reference is mutable or disagrees with its digest")
+
+        run_key = case.get("run")
+        manifest = _interop_json(base, f"{run_key}/manifest.json", f"{where} run", problems)
+        if not isinstance(manifest, dict):
+            continue
+        problems.extend(_load_keys(f"{where} run", manifest, INTEROP_RUN_KEYS))
+        if manifest.get("schema") != "sipx.comparison.interop.run.v1":
+            problems.append(f"{where} run carries the wrong schema")
+        if manifest.get("case") != case_id:
+            problems.append(f"{where} run disagrees with the case id")
+        if isinstance(subject, dict) and manifest.get("subject") != subject.get("id"):
+            problems.append(f"{where} run disagrees with the subject descriptor")
+        if manifest.get("evaluated_at") != dataset.get("evaluated_at"):
+            problems.append(f"{where} run and dataset dates disagree")
+        protocol = manifest.get("protocol")
+        problems.extend(_load_keys(f"{where} protocol", protocol, INTEROP_PROTOCOL_KEYS))
+        if protocol != {"signalling": "TLS", "keying": "SDES", "media": "RTP/SAVP", "codec": "PCMU/8000/1"}:
+            problems.append(f"{where} did not measure the fixed TLS, SDES, RTP/SAVP, PCMU profile")
+        source = manifest.get("source_under_test")
+        problems.extend(_load_keys(f"{where} source", source, INTEROP_SOURCE_KEYS))
+        if isinstance(source, dict):
+            for field in ("normal_binary_sha256", "perturbed_binary_sha256"):
+                if re.fullmatch(r"[0-9a-f]{64}", str(source.get(field, ""))) is None:
+                    problems.append(f"{where} source {field} is not a full SHA-256")
+            files = source.get("files")
+            if not isinstance(files, dict) or not files:
+                problems.append(f"{where} names no source files")
+            else:
+                for relative, expected in files.items():
+                    path = _interop_file(ROOT, relative, f"{where} source {relative}", problems)
+                    if path is not None and _interop_digest(path) != expected:
+                        problems.append(f"{where} source hash drifted: {relative}")
+
+        hashes = manifest.get("sha256")
+        if not isinstance(hashes, dict) or not hashes:
+            problems.append(f"{where} carries no evidence hashes")
+            hashes = {}
+        case_directory = base / str(case_id)
+        retained = {
+            path.relative_to(case_directory).as_posix()
+            for path in case_directory.rglob("*")
+            if path.is_file() and path.name != "manifest.json"
+        } if case_directory.is_dir() else set()
+        if set(hashes) != retained:
+            missing = sorted(retained - set(hashes))
+            extra = sorted(set(hashes) - retained)
+            problems.append(
+                f"{where} evidence inventory is not exact; unlisted={missing}, missing={extra}"
+            )
+        for relative, expected in hashes.items():
+            if re.fullmatch(r"[0-9a-f]{64}", str(expected)) is None:
+                problems.append(f"{where} evidence hash is not a full SHA-256: {relative}")
+            path = _interop_file(base / case_id, relative, f"{where} evidence {relative}", problems)
+            if path is not None and _interop_digest(path) != expected:
+                problems.append(f"{where} evidence hash mismatch: {relative}")
+
+        positive = manifest.get("positive")
+        if not isinstance(positive, dict) or set(positive) != set(INTEROP_SUITES):
+            problems.append(f"{where} must contain exactly both RFC 7714 AEAD suites")
+        else:
+            for suite, profile in INTEROP_SUITES.items():
+                entry = positive[suite]
+                problems.extend(_load_keys(f"{where} {suite}", entry, INTEROP_POSITIVE_ENTRY_KEYS))
+                if not isinstance(entry, dict):
+                    continue
+                result = _interop_json(base / case_id, entry.get("result"), f"{where} {suite} result", problems)
+                log_path = _interop_file(base / case_id, entry.get("peer_log"), f"{where} {suite} peer log", problems)
+                if isinstance(result, dict):
+                    problems.extend(_load_keys(f"{where} {suite} result", result, INTEROP_POSITIVE_RESULT_KEYS))
+                    if result.get("suite_required") != suite or result.get("negotiated_profile") != profile:
+                        problems.append(f"{where} {suite} fell back from the required exact profile")
+                    if result.get("keying") != "SDES" or result.get("encrypted") is not True:
+                        problems.append(f"{where} {suite} did not establish encrypted SDES media")
+                    if any(not isinstance(result.get(key), int) or result.get(key) <= 0 for key in (
+                        "packets_sent", "packets_received", "peer_audio_peak", "peer_echo_audio_bytes",
+                        "longest_bit_exact_echo_bytes"
+                    )):
+                        problems.append(f"{where} {suite} has silent or one-way media")
+                    if result.get("srtp_unprotect_failures") != 0:
+                        problems.append(f"{where} {suite} has SRTP authentication failures")
+                if log_path is not None and isinstance(subject, dict):
+                    log = log_path.read_text(encoding="utf-8", errors="replace")
+                    if subject.get("reported_version_marker") not in log:
+                        problems.append(f"{where} {suite} peer log lacks its version marker")
+                    if f"SRTP is Enabled (cryptosuite={suite})" not in log or "incoming rtp" not in log:
+                        problems.append(f"{where} {suite} peer log lacks exact-suite bidirectional evidence")
+                    packet_line = re.search(r"packets:\s+(\d+)\s+(\d+)", log)
+                    error_line = re.search(r"errors:\s+(\d+)\s+(\d+)", log)
+                    if packet_line is None or min(map(int, packet_line.groups())) <= 0:
+                        problems.append(f"{where} {suite} peer log has no bidirectional packet counts")
+                    if error_line is None or any(map(int, error_line.groups())):
+                        problems.append(f"{where} {suite} peer log has media errors")
+
+        negative = manifest.get("negative")
+        problems.extend(_load_keys(f"{where} negative", negative, INTEROP_NEGATIVE_KEYS))
+        if isinstance(negative, dict):
+            result = _interop_json(base / case_id, negative.get("result"), f"{where} negative result", problems)
+            mutation = _interop_json(base / case_id, negative.get("build_manifest"), f"{where} mutation", problems)
+            log_path = _interop_file(base / case_id, negative.get("peer_log"), f"{where} negative peer log", problems)
+            suite = negative.get("suite")
+            if isinstance(result, dict):
+                problems.extend(_load_keys(f"{where} negative result", result, INTEROP_NEGATIVE_RESULT_KEYS))
+                if suite not in INTEROP_SUITES or result.get("suite_required") != suite or result.get("negotiated_profile") != INTEROP_SUITES.get(suite):
+                    problems.append(f"{where} negative did not negotiate the exact suite")
+                if result.get("packets_sent", 0) <= 0 or result.get("packets_received") != 0 or result.get("peer_echo_audio_bytes") != 0 or result.get("srtp_unprotect_failures", 0) <= 0:
+                    problems.append(f"{where} negative does not isolate authenticated media rejection")
+                if result.get("encrypted") is not True or result.get("keying") != "SDES" or result.get("expected_outcome") != "independent-peer-rejects-incorrect-derived-keys":
+                    problems.append(f"{where} negative does not state the closed SDES rejection outcome")
+            if isinstance(mutation, dict):
+                problems.extend(_load_keys(f"{where} mutation", mutation, INTEROP_KDF_KEYS))
+                if mutation.get("original_sha256") == mutation.get("perturbed_sha256"):
+                    problems.append(f"{where} mutation did not change the KDF source")
+                if isinstance(source, dict) and mutation.get("binary_sha256") != source.get("perturbed_binary_sha256"):
+                    problems.append(f"{where} mutation binary disagrees with the run")
+                mutation_source = mutation.get("source")
+                if isinstance(source, dict) and mutation.get("original_sha256") != source.get("files", {}).get(mutation_source):
+                    problems.append(f"{where} mutation baseline disagrees with the audited KDF")
+                if mutation.get("mutation") != negative.get("mutation") or result.get("negative") != negative.get("mutation"):
+                    problems.append(f"{where} mutation identity disagrees across retained evidence")
+            if log_path is not None:
+                rejections = log_path.read_text(encoding="utf-8", errors="replace").count("failed to decrypt RTP packet")
+                if rejections != negative.get("peer_srtp_rejections") or rejections <= 0:
+                    problems.append(f"{where} negative peer rejection count disagrees with its log")
+        for path in case_directory.rglob("*") if case_directory.is_dir() else ():
+            if not path.is_file():
+                continue
+            raw = path.read_bytes()
+            if re.search(br"-----BEGIN [A-Z ]*PRIVATE KEY-----", raw):
+                problems.append(f"{where} retains private key material in {path.name}")
+            text = raw.decode("utf-8", errors="ignore")
+            if re.search(r"/(?:home|Users)/[^/\s]+/", text):
+                problems.append(f"{where} retains an absolute home path in {path.name}")
+            for address in re.findall(r"(?<![0-9.])(?:\d{1,3}\.){3}\d{1,3}(?![0-9.])", text):
+                try:
+                    ip = ipaddress.ip_address(address)
+                except ValueError:
+                    continue
+                documented = any(ip in ipaddress.ip_network(network) for network in (
+                    "192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24"
+                ))
+                if not ip.is_loopback and not documented:
+                    problems.append(f"{where} retains a non-fixture address in {path.name}")
+    return problems
+
+
+def render_interop_section(dataset, stack_list, base=None) -> list[str]:
+    """Render only exact observed calls and their explicit non-claims."""
+    if dataset is None:
+        return []
+    base = pathlib.Path(base) if base is not None else INTEROP
+    names = {stack.get("id"): stack.get("name", stack.get("id")) for stack in stack_list}
+    out = [
+        "## Independently measured interoperability", "",
+        "These rows report exact pinned builds and calls, not general compatibility claims.", "",
+        "| Subject | Keying | Exact suite | sipx sent/received | Exact echo | Evidence |",
+        "|---|---|---|---|---|---|",
+    ]
+    for case in dataset.get("cases", []):
+        case_id = case["id"]
+        manifest = json.loads((base / case["run"] / "manifest.json").read_text(encoding="utf-8"))
+        subject = json.loads((base / case["subject_descriptor"]).read_text(encoding="utf-8"))
+        name = cell(str(names.get(case["subject"], case["subject"])))
+        digest = subject["artifact"]["digest"]
+        for suite, entry in manifest["positive"].items():
+            result = json.loads((base / case_id / entry["result"]).read_text(encoding="utf-8"))
+            evidence = os.path.relpath(base / case_id / entry["result"], REPORT.parent)
+            out.append(
+                f"| {name} `{cell(subject['version'])}` `{digest[:19]}…` | SDES | `{suite}` |"
+                f" {result['packets_sent']}/{result['packets_received']} |"
+                f" {result['longest_bit_exact_echo_bytes']} bytes | [raw result]({evidence}) |"
+            )
+        negative = manifest["negative"]
+        out += [
+            "", f"Negative control: a disposable wrong salt-alignment build negotiated"
+            f" `{negative['suite']}`, sent media, and the independent peer rejected all"
+            f" {negative['peer_srtp_rejections']} packets.", "",
+            f"Reproduce: `{case['reproduce']}`", "",
+            f"Not inferred: {cell('; '.join(case['not_inferred']))}.", "",
+        ]
+    return out
+
+
 def plural(count: int, noun: str) -> str:
     """A success line that says `1 stacks` reads as a script nobody finished."""
     return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
@@ -1993,7 +2333,15 @@ def render_capability_ledgers(ledger_list, stack_list) -> list[str]:
     return out
 
 
-def render(dimension_list, stack_list, observation_list, values, ledger_list=None, load=None) -> str:
+def render(
+    dimension_list,
+    stack_list,
+    observation_list,
+    values,
+    ledger_list=None,
+    load=None,
+    interop=None,
+) -> str:
     answers = {
         (o.get("stack"), o.get("dimension")): o for o in observation_list
     }
@@ -2080,6 +2428,9 @@ def render(dimension_list, stack_list, observation_list, values, ledger_list=Non
             )
         out.append("")
 
+    if interop is not None:
+        out.extend(render_interop_section(interop, stack_list))
+
     out.extend(render_capability_ledgers(ledger_list or [], stack_list))
 
     if load is not None:
@@ -2130,6 +2481,8 @@ def main() -> int:
     load_data = load_dataset()
     load_run_map = load_runs(load_data)
     problems.extend(load_problems(load_data, load_run_map, stack_list, today))
+    interop_data = interop_dataset()
+    problems.extend(interop_problems(interop_data, stack_list, today))
     rendered = render(
         dimension_list,
         stack_list,
@@ -2137,6 +2490,7 @@ def main() -> int:
         values,
         ledger_list,
         load=(load_data, load_run_map),
+        interop=interop_data,
     )
 
     # Notice, not a result. Printed in both modes and before the verdict, so it is visible on the
@@ -2162,7 +2516,8 @@ def main() -> int:
             f"comparison: {plural(len(stack_list), 'stack')} over"
             f" {plural(len(dimension_list), 'dimension')}, every claim evidenced,"
             f" {plural(sum(len(ledger.get('capabilities', [])) for ledger in ledger_list), 'capability row')}"
-            f" owned, none stale{countdown}"
+            f" owned, {plural(len(interop_data.get('cases', [])) if interop_data else 0, 'interop case')}"
+            f" sealed, none stale{countdown}"
         )
         return 0
 

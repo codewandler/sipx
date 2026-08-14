@@ -49,6 +49,8 @@ SIPX_BROWSER_AUDIO_WSS_SPKI_SHA256=$(
 export SIPX_BROWSER_AUDIO_WSS_SPKI_SHA256
 export SIPX_BROWSER_AUDIO_WEBDRIVER_CMD="$ROOT/tests/browser-audio/webdriver.sh"
 export SIPX_BROWSER_AUDIO_PROOF_BIN="${CARGO_TARGET_DIR:-$ROOT/target}/debug/examples/browser_audio_proof"
+export SIPX_BROWSER_AUDIO_PERTURBED_PROOF_BIN="${CARGO_TARGET_DIR:-$ROOT/target}/browser-audio-kdf-perturbed/debug/examples/browser_audio_proof"
+export SIPX_BROWSER_AUDIO_PERTURBATION_MANIFEST="${CARGO_TARGET_DIR:-$ROOT/target}/browser-audio-kdf-perturbed/debug/examples/browser_audio_proof.kdf-perturbation.json"
 export SIPX_BROWSER_AUDIO_EVIDENCE_DIR="$EVIDENCE_ROOT"
 SIPX_BROWSER_AUDIO_MEDIA_ADDRESS=$(python3 - <<'PY'
 import ipaddress

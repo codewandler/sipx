@@ -19,7 +19,7 @@ use bytes::Bytes;
 use sipx_sip::build::ResponseBuilder;
 use sipx_sip::{HeaderName, Host, HostName, StatusCode, Uri};
 use sipx_transport::{Config as TransportConfig, Incoming, Target, bind};
-use sipx_ua::{Config, Flows, InstanceId, Power, RegId, UserAgent};
+use sipx_ua::{Config, FlowEvent, Flows, InstanceId, Keepalive, Power, RegId, UserAgent};
 use tokio::sync::mpsc::Receiver;
 
 /// How a stub registrar answers.
@@ -559,5 +559,219 @@ async fn a_flow_whose_reflexive_address_changes_has_failed_even_though_the_pings
     assert!(
         matches!(outcome, Err(sipx_ua::Error::FlowRebound { .. })),
         "a changed mapping is a failed flow, however healthy the socket looks: {outcome:?}"
+    );
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PeerEvent {
+    Registered,
+    Keepalive,
+}
+
+/// One RFC 5626 peer with an observable wire barrier for the lifetime-owner tests.
+async fn lifetime_peer(
+    answer_keepalives: bool,
+    expected_keepalives: usize,
+) -> (Target, Receiver<PeerEvent>, tokio::task::JoinHandle<()>) {
+    let socket = Arc::new(
+        tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("binds"),
+    );
+    let addr = socket.local_addr().expect("has an address");
+    let (events, observed) = tokio::sync::mpsc::channel(8);
+    let listening = Arc::clone(&socket);
+    let task = tokio::spawn(async move {
+        let mut buf = vec![0u8; 4096];
+        let mut keepalives = 0usize;
+        while let Ok((len, from)) = listening.recv_from(&mut buf).await {
+            let datagram = buf.get(..len).unwrap_or_default().to_vec();
+            if sipx_transport::stun::is_stun(&datagram) {
+                let _ = events.send(PeerEvent::Keepalive).await;
+                keepalives += 1;
+                if !answer_keepalives {
+                    if keepalives >= expected_keepalives {
+                        break;
+                    }
+                    continue;
+                }
+                let Some(id) = datagram
+                    .get(8..20)
+                    .and_then(|slice| <[u8; 12]>::try_from(slice).ok())
+                else {
+                    continue;
+                };
+                let mut response = sipx_transport::stun::binding_request(&id);
+                response[0] = 0x01;
+                response[1] = 0x01;
+                let _ = listening.send_to(&response, from).await;
+                if keepalives >= expected_keepalives {
+                    break;
+                }
+                continue;
+            }
+
+            let text = String::from_utf8_lossy(&datagram).into_owned();
+            let field = |name: &str| {
+                text.lines()
+                    .find(|line| {
+                        line.to_ascii_lowercase()
+                            .starts_with(&name.to_ascii_lowercase())
+                    })
+                    .map(|line| line.trim_end().to_owned())
+                    .unwrap_or_default()
+            };
+            let response = format!(
+                "SIP/2.0 200 OK\r\n{}\r\n{}\r\n{}\r\n{}\r\n{}\r\nRequire: outbound\r\n\
+                 Flow-Timer: 1\r\n{};expires=60\r\nContent-Length: 0\r\n\r\n",
+                field("Via:"),
+                field("To:"),
+                field("From:"),
+                field("Call-ID:"),
+                field("CSeq:"),
+                field("Contact:"),
+            );
+            let _ = listening.send_to(response.as_bytes(), from).await;
+            let _ = events.send(PeerEvent::Registered).await;
+        }
+    });
+    (Target::udp(addr), observed, task)
+}
+
+async fn next_registered(lifetime: &mut sipx_ua::FlowLifetime) -> (RegId, Keepalive) {
+    // Failure bound: a missing protocol event is a failed test, never an unbounded cargo process.
+    tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            if let FlowEvent::Registered {
+                reg_id,
+                keepalive: Some(kind),
+                ..
+            } = lifetime.next_event().await.expect("a live flow event")
+            {
+                return (reg_id, kind);
+            }
+        }
+    })
+    .await
+    .expect("registration event before the failure bound")
+}
+
+/// T-47's first failing-first lifetime proof.
+#[tokio::test]
+async fn a_registered_udp_flow_is_kept_alive_until_the_lease_is_cancelled() {
+    let (target, mut peer, peer_task) = lifetime_peer(true, 1).await;
+    let mut flows =
+        Flows::with_limit(InstanceId::generate(), 1).expect("one is a valid flow bound");
+    let (endpoint, _incoming) = local_endpoint().await;
+    let local = endpoint.local_addr();
+    let contact = format!("<sip:alice@{local}>");
+    flows
+        .add(endpoint, config(contact, target.clone()), target)
+        .expect("one bounded flow");
+
+    let mut lifetime = flows
+        .start(Power::Unconstrained, Some(Duration::from_secs(2)))
+        .expect("the test has a runtime");
+    let (reg_id, kind) = next_registered(&mut lifetime).await;
+    assert_eq!(reg_id.value(), 1);
+    assert_eq!(kind, Keepalive::Stun);
+    assert_eq!(peer.recv().await, Some(PeerEvent::Registered));
+
+    // The Flow-Timer is the protocol schedule. The peer event, not elapsed wall time, is the
+    // success barrier for the keep-alive.
+    assert_eq!(peer.recv().await, Some(PeerEvent::Keepalive));
+    // Failure bound: the peer has observed the ping, so its correlated response must terminate it.
+    tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            if matches!(
+                lifetime.next_event().await,
+                Some(FlowEvent::KeptAlive { reg_id: kept, kind: Keepalive::Stun, .. }) if kept == reg_id
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("keep-alive outcome before the failure bound");
+
+    let cleanup = lifetime.cancel().await;
+    assert_eq!(cleanup.configured, 1);
+    assert_eq!(cleanup.joined, 1);
+    assert_eq!(cleanup.active, 0);
+    peer_task.await.expect("the finite peer joined");
+    // Rebinding the exact address is the socket-close barrier; a delay followed by an assertion
+    // would only show that enough time happened to pass on this machine.
+    let rebound = tokio::net::UdpSocket::bind(local)
+        .await
+        .expect("cancellation closed the owned endpoint");
+    drop(rebound);
+}
+
+/// T-47's second failing-first lifetime proof.
+#[tokio::test]
+async fn one_failed_outbound_flow_does_not_end_its_peer() {
+    let (silent, mut silent_peer, silent_task) = lifetime_peer(false, 1).await;
+    let (answering, mut answering_peer, answering_task) = lifetime_peer(true, 2).await;
+    let mut flows =
+        Flows::with_limit(InstanceId::generate(), 2).expect("two is a valid flow bound");
+
+    for target in [silent, answering] {
+        let (endpoint, _incoming) = local_endpoint().await;
+        let contact = format!("<sip:alice@{}>", endpoint.local_addr());
+        flows
+            .add(endpoint, config(contact, target.clone()), target)
+            .expect("within the configured bound");
+    }
+
+    let mut lifetime = flows
+        .start(Power::Unconstrained, Some(Duration::from_secs(2)))
+        .expect("the test has a runtime");
+    let mut registered = Vec::new();
+    while registered.len() < 2 {
+        let (reg_id, kind) = next_registered(&mut lifetime).await;
+        assert_eq!(kind, Keepalive::Stun);
+        registered.push(reg_id);
+    }
+    registered.sort();
+    assert_eq!(registered, [RegId::new(1).unwrap(), RegId::new(2).unwrap()]);
+    assert_eq!(silent_peer.recv().await, Some(PeerEvent::Registered));
+    assert_eq!(answering_peer.recv().await, Some(PeerEvent::Registered));
+    assert_eq!(silent_peer.recv().await, Some(PeerEvent::Keepalive));
+    assert_eq!(answering_peer.recv().await, Some(PeerEvent::Keepalive));
+
+    let first = RegId::new(1).expect("valid");
+    // Failure bound: the silent peer was observed receiving a ping, so its answer deadline must
+    // either report the flow failure or fail this test instead of hanging it.
+    tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            if matches!(
+                lifetime.next_event().await,
+                Some(FlowEvent::Failed { reg_id, retry_generation: 1, .. }) if reg_id == first
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("failed-flow event before the failure bound");
+
+    // A second observed datagram on flow 2 proves its independent timer and task survived flow 1.
+    assert_eq!(answering_peer.recv().await, Some(PeerEvent::Keepalive));
+    let cleanup = lifetime.cancel().await;
+    assert_eq!(cleanup.configured, 2);
+    assert_eq!(cleanup.joined, 2);
+    silent_task.await.expect("the finite silent peer joined");
+    answering_task
+        .await
+        .expect("the finite answering peer joined");
+}
+
+#[test]
+fn starting_a_flow_lifetime_without_a_runtime_is_a_typed_refusal() {
+    let flows = Flows::with_limit(InstanceId::generate(), 1).expect("a valid bound");
+    let outcome = flows.start(Power::Unconstrained, None);
+    assert!(
+        matches!(outcome, Err(sipx_ua::Error::RuntimeUnavailable)),
+        "library startup must not panic merely because the caller has no runtime"
     );
 }

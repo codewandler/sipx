@@ -5,7 +5,9 @@ use std::time::Duration;
 use sipx_sip::push::Device;
 use sipx_sip::{Host, HostName, Uri};
 use sipx_transport::{Config as TransportConfig, bind};
-use sipx_ua::{Config, Credentials, Flow, InstanceId, RegId, UserAgent};
+use sipx_ua::{
+    Config, Credentials, Flow, FlowEvent, Flows, InstanceId, Keepalive, RegId, UserAgent,
+};
 
 use crate::budget::Attempt;
 use crate::cli::RegisterOptions;
@@ -116,12 +118,13 @@ pub(crate) async fn run(options: RegisterOptions, format: Format) -> Exit {
     for header in headers {
         ua_config = ua_config.with_header(header);
     }
-    ua_config.expires = Duration::from_secs(options.expires);
+    ua_config = ua_config.with_expires(Duration::from_secs(options.expires));
     if let Some(password) = password {
         ua_config = ua_config.with_credentials(Credentials::new(user.clone(), password));
     }
 
     let Reachability { flow, device, wake } = reach;
+    let lifetime_flow = flow.clone();
     let outbound = flow.is_some();
     let provider = device.as_ref().map(|device| device.provider().to_owned());
     if let Some(flow) = flow {
@@ -136,7 +139,7 @@ pub(crate) async fn run(options: RegisterOptions, format: Format) -> Exit {
     let aor = format!("sip:{user}@{domain}");
 
     match register_candidates(&handle, &ua_config, &candidates, &attempt).await {
-        Ok((mut agent, lease, negotiated_transport)) => {
+        Ok((mut agent, mut lease, negotiated_transport)) => {
             let mut report = transport.report(
                 Report::new()
                     .text("status", "registered")
@@ -149,7 +152,13 @@ pub(crate) async fn run(options: RegisterOptions, format: Format) -> Exit {
                 // §6: a registrar that performed an outbound registration says so in `Require`.
                 // Asking and not getting it is not an error — the binding is an ordinary one —
                 // but it must be *said*, or a script believes a flow is being kept that is not.
-                report = report.boolean("flow", agent.flow_accepted());
+                let keepalive = agent
+                    .flow_accepted()
+                    .then(|| sipx_ua::outbound::keepalive_for(negotiated_transport));
+                report = report
+                    .boolean("flow", agent.flow_accepted())
+                    .number("flow_id", 1)
+                    .text("keepalive", keepalive.map_or("none", keepalive_name));
             }
             if let Some(provider) = &provider {
                 // §8.2: a 200 from a registrar that named a *different* push service is a
@@ -172,16 +181,31 @@ pub(crate) async fn run(options: RegisterOptions, format: Format) -> Exit {
                 // own push service for one ring. It is a second exchange, so it gets the stated
                 // deadline over again rather than whatever the first attempt left behind: a
                 // budget already spent would refuse the refresh instead of bounding it.
-                let woken = match wake_report(&mut agent, &aor, &attempt).await {
+                let (woken, refreshed) = match wake_report(&mut agent, &aor, &attempt).await {
                     Ok(woken) => woken,
                     Err(error) => {
                         return report_failure(format, export, &handle, &error, &options.aor).await;
                     }
                 };
+                lease = refreshed;
                 if !options.keep_alive {
                     return report_joined(format, export, &handle, woken).await;
                 }
                 woken.emit(format);
+            }
+
+            if let Some(flow) = lifetime_flow {
+                return keep_outbound_registered(
+                    format,
+                    export,
+                    &handle,
+                    agent,
+                    lease,
+                    flow,
+                    attempt.stated(),
+                    &aor,
+                )
+                .await;
             }
 
             // `keep_registered_from` refreshes forever; its success type is uninhabited, so the
@@ -405,7 +429,7 @@ async fn wake_report(
     agent: &mut UserAgent,
     aor: &str,
     attempt: &Attempt,
-) -> Result<Report, sipx_ua::Error> {
+) -> Result<(Report, sipx_ua::Lease), sipx_ua::Error> {
     let pending = match attempt.stated() {
         Some(limit) => agent.woken_within(limit).await,
         None => agent.woken().await,
@@ -420,7 +444,111 @@ async fn wake_report(
     if let Some(purr) = &pending.purr {
         report = report.text("purr", purr);
     }
-    Ok(report)
+    Ok((report, pending.lease))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the terminal report keeps the command's ownership and output context together"
+)]
+async fn keep_outbound_registered(
+    format: Format,
+    export: crate::counters::Export,
+    handle: &sipx_transport::Handle,
+    agent: UserAgent,
+    lease: sipx_ua::Lease,
+    flow: Flow,
+    attempt_limit: Option<Duration>,
+    aor: &str,
+) -> Exit {
+    let kind = agent
+        .flow_accepted()
+        .then(|| sipx_ua::outbound::keepalive_for(agent.target().transport));
+    let flows = match Flows::continue_registered(1, agent, lease) {
+        Ok(flows) => flows,
+        Err(error) => return report_failure(format, export, handle, &error, aor).await,
+    };
+    let mut lifetime = match flows.start(sipx_ua::Power::Unconstrained, attempt_limit) {
+        Ok(lifetime) => lifetime,
+        Err(error) => return report_failure(format, export, handle, &error, aor).await,
+    };
+
+    let stop = crate::stop::Stop::new();
+    let waiting = stop.wait();
+    tokio::pin!(waiting);
+    let mut last_failure = None;
+    let mut owner_ended = false;
+    loop {
+        tokio::select! {
+            () = &mut waiting => break,
+            event = lifetime.next_event() => match event {
+                Some(FlowEvent::Failed { reg_id, error, retry_after, .. }) => {
+                    last_failure = Some(error.to_string());
+                    Report::new()
+                        .text("status", "flow_failed")
+                        .text("aor", aor)
+                        .number("flow_id", i64::from(reg_id.value()))
+                        .text("keepalive", kind.map_or("none", keepalive_name))
+                        .text("error", error.to_string())
+                        .seconds("retry_in", retry_after)
+                        .emit(format);
+                }
+                Some(_) => {}
+                None => {
+                    owner_ended = true;
+                    break;
+                }
+            },
+        }
+    }
+
+    let joining = tokio::time::Instant::now();
+    let cleanup = lifetime.cancel().await;
+    let cleanup_elapsed = joining.elapsed();
+    let mut report = Report::new()
+        .text("status", if owner_ended { "failed" } else { "stopped" })
+        .text("aor", aor)
+        .number("flow_id", i64::from(flow.reg_id.value()))
+        .text("keepalive", kind.map_or("none", keepalive_name))
+        .number(
+            "flow_tasks",
+            i64::try_from(cleanup.configured).unwrap_or(i64::MAX),
+        )
+        .number(
+            "flow_tasks_joined",
+            i64::try_from(cleanup.joined).unwrap_or(i64::MAX),
+        )
+        .number(
+            "flow_events_dropped",
+            i64::try_from(cleanup.dropped_events).unwrap_or(i64::MAX),
+        )
+        .millis("cleanup_ms", cleanup_elapsed);
+    if let Some(failure) = last_failure {
+        report = report.text("flow_failure", failure);
+    }
+    if let Some(signal) = stop.signal() {
+        report = report.text("stop_signal", signal);
+    }
+    if let Some(failure) = stop.failure() {
+        report = report.text("stop_failure", failure);
+    }
+    let report = match export.into_report(report) {
+        Ok(report) => report,
+        Err(message) => return fail(format, Exit::Failed, &message),
+    };
+    report.emit(format);
+    if owner_ended || stop.failure().is_some() {
+        Exit::Failed
+    } else {
+        Exit::Success
+    }
+}
+
+const fn keepalive_name(kind: Keepalive) -> &'static str {
+    match kind {
+        Keepalive::Crlf => "crlf",
+        Keepalive::Stun => "stun",
+    }
 }
 
 /// Report a failure, after joining what the attempt left running.

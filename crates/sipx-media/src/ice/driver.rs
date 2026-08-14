@@ -2,15 +2,16 @@
 //!
 //! The division is the whole point of the shape. [`Agent`](super::Agent) owns the protocol —
 //! which check goes out next, when it is retransmitted, which pair wins — and this task owns the
-//! two things a state machine must not: a `UdpSocket` and a deadline. Every datagram it sends is
-//! an [`Output::Send`] it was handed, and **every timer it arms is an [`Output::SetTimer`] it was
-//! handed**. It never schedules anything of its own.
+//! two things a state machine must not: a `UdpSocket` and a deadline. ICE protocol timers are
+//! still only the [`Output::SetTimer`] values the sans-I/O agent hands it. TURN allocation,
+//! permission and retransmission deadlines are a separate socket-owner lifecycle from RFC 8656;
+//! they are bounded here and never manufactured as ICE inputs.
 //!
 //! That last rule is not tidiness. A driver with a timer of its own can keep an agent that has
 //! stopped asking for ticks alive, which makes a dead pacing path look healthy from the outside —
 //! the exact defect `M-21`'s review found in a *test* that fired Ta by hand, one layer up. The
-//! deadline table here holds only what the agent put in it, a fired one-shot is removed before the
-//! agent sees it, and nothing re-arms it but the agent's own next output.
+//! ICE deadline table here holds only what the agent put in it, a fired one-shot is removed before
+//! the agent sees it, and nothing re-arms it but the agent's own next output.
 //!
 //! The other rule is subtractive: the driver feeds the agent only inputs [spec] §2 names, and only
 //! when the thing they describe actually happened. Manufacturing an input — replaying a datagram,
@@ -19,18 +20,21 @@
 //!
 //! [spec]: https://github.com/codewandler/sipx/blob/main/docs/specs/ice.md
 
-use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::collections::{HashMap, HashSet};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::sync::RwLock as StdRwLock;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::time::Duration;
 
 use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, mpsc, oneshot, watch};
 
-use sipx_sdp::ice::{Candidate, CandidateType, ComponentId, Credentials};
+use sipx_sdp::ice::{Candidate, CandidateType, ComponentId, Credentials, RemoteCandidate};
 
 use super::agent::{Agent, Input, Output, Timer};
 use super::candidate::LocalBase;
+use super::turn::{self, Allocation};
 use crate::counters::DiscardMeters;
 
 /// How many events may queue for the driver before the media path stops offering them.
@@ -40,6 +44,15 @@ use crate::counters::DiscardMeters;
 /// receive loop or a send loop for: a driver that has fallen this far behind will not catch up by
 /// being given more.
 const EVENTS: usize = 64;
+/// Two component allocations times the ICE pair-set ceiling, plus their Refresh operations.
+/// A hostile peer cannot make the outstanding TURN transaction set larger than this.
+const TURN_TRANSACTIONS: usize = 202;
+/// The ICE checklist is capped at 100 pairs, so no more first checks need wait on permissions.
+const TURN_DEFERRED: usize = 100;
+/// RFC 8489 §7.2.1's initial UDP retransmission timeout.
+const TURN_RTO: Duration = Duration::from_millis(500);
+/// Six retransmits after the initial send gives the RFC's seven-request bounded ladder.
+const TURN_RETRANSMITS: u8 = 6;
 
 /// The candidate path an ICE-backed media session actually selected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +123,8 @@ pub(crate) enum Event {
         from: SocketAddr,
         /// Which of our sockets it arrived on.
         on: LocalBase,
+        /// Direct UDP or an embedded datagram unwrapped from a TURN Data indication.
+        via: CandidateType,
         /// The bytes, exactly as they arrived.
         bytes: Vec<u8>,
     },
@@ -160,6 +175,8 @@ pub struct Local {
     pub credentials: Credentials,
     /// `a=candidate`, priced by the agent, in descending priority.
     pub candidates: Vec<Candidate>,
+    /// `a=remote-candidates`, present only for a controlling, Completed current generation.
+    pub remote_candidates: Vec<RemoteCandidate>,
 }
 
 impl Local {
@@ -175,6 +192,7 @@ impl Local {
         Self {
             credentials,
             candidates,
+            remote_candidates: Vec::new(),
         }
     }
 }
@@ -192,6 +210,8 @@ pub(crate) struct Handle {
     /// the agent would discard every one of them.
     selected: Arc<AtomicBool>,
     path: Arc<AtomicU8>,
+    relay_routes: Arc<StdRwLock<Vec<RelayRoute>>>,
+    relay_servers: Arc<Vec<(LocalBase, SocketAddr)>>,
     #[cfg_attr(not(feature = "dtls"), allow(dead_code))]
     selection: watch::Receiver<Selection>,
 }
@@ -249,10 +269,21 @@ impl Handle {
     /// Dropping is right and not merely convenient. A connectivity check is a retransmitted
     /// transaction (RFC 5389 §7.2.1) and the far end will send it again; blocking the receive loop
     /// on a slow driver would stall the *audio* to protect a check that is already redundant.
-    pub(crate) fn datagram(&self, from: SocketAddr, on: LocalBase, bytes: Vec<u8>) -> bool {
+    pub(crate) fn datagram(
+        &self,
+        from: SocketAddr,
+        on: LocalBase,
+        via: CandidateType,
+        bytes: Vec<u8>,
+    ) -> bool {
         if self
             .events
-            .try_send(Event::Datagram { from, on, bytes })
+            .try_send(Event::Datagram {
+                from,
+                on,
+                via,
+                bytes,
+            })
             .is_err()
         {
             self.discards
@@ -263,6 +294,34 @@ impl Handle {
         } else {
             true
         }
+    }
+
+    /// Wrap a media datagram in a TURN Send indication when this component selected a relayed
+    /// local candidate. `None` means the ordinary direct send path remains in force.
+    pub(crate) fn relay_datagram(
+        &self,
+        component: ComponentId,
+        peer: SocketAddr,
+        bytes: &[u8],
+    ) -> Option<(SocketAddr, Vec<u8>)> {
+        let routes = self.relay_routes.read().ok()?;
+        let route = routes.iter().find(|route| route.component == component)?;
+        let datagram = turn::send_indication(turn::new_transaction_id(), peer, bytes).ok()?;
+        Some((route.server, datagram))
+    }
+
+    /// Unwrap a Data indication only when it came from the allocation server for this base.
+    pub(crate) fn relayed_data<'a>(
+        &self,
+        from: SocketAddr,
+        on: LocalBase,
+        bytes: &'a [u8],
+    ) -> Option<turn::PeerData<'a>> {
+        self.relay_servers
+            .iter()
+            .any(|(base, server)| *base == on && *server == from)
+            .then(|| turn::data_indication(bytes).ok())
+            .flatten()
     }
 
     /// Apply a later exchange's ICE half and read back what the next description must signal.
@@ -320,6 +379,21 @@ pub(crate) struct Destinations {
     pub(crate) rtcp: Arc<Mutex<Option<SocketAddr>>>,
 }
 
+/// Bound component sockets and the TURN allocations whose five-tuples they own.
+pub(crate) struct BoundSockets {
+    sockets: Vec<Arc<UdpSocket>>,
+    allocations: Vec<Allocation>,
+}
+
+impl BoundSockets {
+    pub(crate) fn new(sockets: Vec<Arc<UdpSocket>>, allocations: Vec<Allocation>) -> Self {
+        Self {
+            sockets,
+            allocations,
+        }
+    }
+}
+
 /// The running driver.
 struct Driver {
     agent: Agent,
@@ -334,8 +408,46 @@ struct Driver {
     selected: Arc<AtomicBool>,
     path: Arc<AtomicU8>,
     selection: watch::Sender<Selection>,
+    allocations: Vec<Allocation>,
+    allocation_refresh: Vec<tokio::time::Instant>,
+    permission_refresh: Option<tokio::time::Instant>,
+    turn_pending: Vec<TurnPending>,
+    permissions: HashSet<(usize, IpAddr)>,
+    deferred_relay: Vec<DeferredRelay>,
+    relay_routes: Arc<StdRwLock<Vec<RelayRoute>>>,
     stop: Arc<crate::session::Stop>,
     discards: Arc<DiscardMeters>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RelayRoute {
+    component: ComponentId,
+    server: SocketAddr,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TurnOperation {
+    Refresh,
+    Permission(IpAddr),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TurnPending {
+    base: LocalBase,
+    transaction: turn::TransactionId,
+    allocation: usize,
+    operation: TurnOperation,
+    bytes: Vec<u8>,
+    retry_at: tokio::time::Instant,
+    rto: Duration,
+    retransmits: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeferredRelay {
+    base: LocalBase,
+    peer: SocketAddr,
+    bytes: Vec<u8>,
 }
 
 /// A browser component retains both halves so shutdown can join the ICE task.
@@ -349,19 +461,19 @@ pub(crate) struct OwnedDriver {
 pub(crate) fn spawn(
     agent: Agent,
     pending: Vec<Output>,
-    sockets: Vec<Arc<UdpSocket>>,
+    bound: BoundSockets,
     destinations: Destinations,
     stop: Arc<crate::session::Stop>,
     discards: Arc<DiscardMeters>,
 ) -> (Handle, tokio::task::JoinHandle<()>) {
-    spawn_parts(agent, pending, sockets, destinations, stop, discards, None)
+    spawn_parts(agent, pending, bound, destinations, stop, discards, None)
 }
 
 #[cfg(feature = "dtls")]
 pub(crate) fn spawn_owned(
     agent: Agent,
     pending: Vec<Output>,
-    sockets: Vec<Arc<UdpSocket>>,
+    bound: BoundSockets,
     destinations: Destinations,
     stop: Arc<crate::session::Stop>,
     discards: Arc<DiscardMeters>,
@@ -370,7 +482,7 @@ pub(crate) fn spawn_owned(
     let (handle, task) = spawn_parts(
         agent,
         pending,
-        sockets,
+        bound,
         destinations,
         stop,
         discards,
@@ -382,7 +494,7 @@ pub(crate) fn spawn_owned(
 fn spawn_parts(
     agent: Agent,
     pending: Vec<Output>,
-    sockets: Vec<Arc<UdpSocket>>,
+    bound: BoundSockets,
     destinations: Destinations,
     stop: Arc<crate::session::Stop>,
     discards: Arc<DiscardMeters>,
@@ -390,10 +502,21 @@ fn spawn_parts(
         Arc<crate::browser::ProfileTasks>,
     >,
 ) -> (Handle, tokio::task::JoinHandle<()>) {
+    let BoundSockets {
+        sockets,
+        allocations,
+    } = bound;
     let (events_tx, events_rx) = mpsc::channel(EVENTS);
     let selected = Arc::new(AtomicBool::new(false));
     let path = Arc::new(AtomicU8::new(IcePath::Checking.encoded()));
     let (selection, selected_pair) = watch::channel(Selection::Checking);
+    let relay_routes = Arc::new(StdRwLock::new(Vec::new()));
+    let relay_servers = Arc::new(
+        allocations
+            .iter()
+            .map(|allocation| (allocation.base, allocation.server))
+            .collect(),
+    );
     let driver = Driver {
         agent,
         sockets,
@@ -403,6 +526,13 @@ fn spawn_parts(
         selected: Arc::clone(&selected),
         path: Arc::clone(&path),
         selection,
+        allocations,
+        allocation_refresh: Vec::new(),
+        permission_refresh: None,
+        turn_pending: Vec::new(),
+        permissions: HashSet::new(),
+        deferred_relay: Vec::new(),
+        relay_routes: Arc::clone(&relay_routes),
         stop,
         discards: Arc::clone(&discards),
     };
@@ -419,6 +549,8 @@ fn spawn_parts(
         selected,
         path,
         selection: selected_pair,
+        relay_routes,
+        relay_servers,
         discards,
     };
     (handle, task)
@@ -428,11 +560,12 @@ impl Driver {
     /// The loop. One `select!` over three things: the stop signal, an event from the media path,
     /// and the earliest deadline the agent has asked for.
     async fn run(mut self, pending: Vec<Output>) {
+        self.start_turn().await;
         self.apply(pending).await;
 
         loop {
             if self.stop.is_stopped() {
-                return;
+                break;
             }
             // Recomputed every pass, because the agent may have moved, cleared or added a
             // deadline while handling the last event. There is no timer here that outlives the
@@ -442,33 +575,57 @@ impl Driver {
                 .iter()
                 .min_by_key(|(_, at)| **at)
                 .map(|(timer, at)| (*timer, *at));
+            let next_turn = self.next_turn_deadline();
 
             // Disabled outright when the agent has asked for nothing, so an agent that has gone
             // quiet is not woken by a deadline this loop invented. The instant in that case is
             // never waited on — the guard is what makes the arm inert.
-            let deadline = next.map_or_else(tokio::time::Instant::now, |(_, at)| at);
+            let deadline = match (next.map(|(_, at)| at), next_turn) {
+                (Some(agent), Some(turn)) => agent.min(turn),
+                (Some(agent), None) => agent,
+                (None, Some(turn)) => turn,
+                (None, None) => tokio::time::Instant::now(),
+            };
             let event = tokio::select! {
-                () = self.stop.wait() => return,
+                () = self.stop.wait() => break,
                 event = self.events.recv() => event,
-                () = tokio::time::sleep_until(deadline), if next.is_some() => {
-                    if let Some((timer, _)) = next {
+                () = tokio::time::sleep_until(deadline), if next.is_some() || next_turn.is_some() => {
+                    let now = tokio::time::Instant::now();
+                    if let Some((timer, at)) = next
+                        && at <= now
+                    {
                         // A one-shot that has fired is no longer armed. Removing it *before* the
                         // agent sees it is what makes the next one the agent's to ask for.
                         self.deadlines.remove(&timer);
                         let outputs = self.agent.handle(Input::TimerFired(timer));
                         self.apply(outputs).await;
                     }
+                    self.service_turn(now).await;
                     continue;
                 }
             };
 
             let Some(event) = event else {
                 // Every sender is gone, which means the session's loops have ended.
-                return;
+                break;
             };
             let outputs = match event {
-                Event::Datagram { from, on, bytes } => {
-                    self.agent.handle(Input::Datagram { from, on, bytes })
+                Event::Datagram {
+                    from,
+                    on,
+                    via,
+                    bytes,
+                } => {
+                    if self.turn_response(on, from, &bytes).await {
+                        Vec::new()
+                    } else {
+                        self.agent.handle(Input::Datagram {
+                            from,
+                            on,
+                            via,
+                            bytes,
+                        })
+                    }
                 }
                 Event::DataSent { component } => self.agent.handle(Input::DataSent { component }),
                 Event::Renegotiated { local, peer, reply } => {
@@ -480,6 +637,7 @@ impl Driver {
                         .send(Local {
                             credentials: self.agent.credentials().clone(),
                             candidates: super::gather::lines(self.agent.local_candidates()),
+                            remote_candidates: self.agent.selected_remote_candidates(),
                         })
                         .is_err()
                     {
@@ -491,6 +649,379 @@ impl Driver {
                 }
             };
             self.apply(outputs).await;
+        }
+        self.delete_allocations().await;
+    }
+
+    async fn start_turn(&mut self) {
+        if self.allocations.is_empty() {
+            return;
+        }
+        self.refresh_permissions().await;
+        let now = tokio::time::Instant::now();
+        self.allocation_refresh = self
+            .allocations
+            .iter()
+            .map(|allocation| now + half_lifetime(allocation.lifetime))
+            .collect();
+        self.permission_refresh = Some(now + Duration::from_secs(240));
+    }
+
+    fn next_turn_deadline(&self) -> Option<tokio::time::Instant> {
+        self.allocation_refresh
+            .iter()
+            .copied()
+            .chain(self.permission_refresh)
+            .chain(self.turn_pending.iter().map(|pending| pending.retry_at))
+            .min()
+    }
+
+    async fn service_turn(&mut self, now: tokio::time::Instant) {
+        self.retransmit_turn(now).await;
+        let due: Vec<usize> = self
+            .allocation_refresh
+            .iter()
+            .enumerate()
+            .filter_map(|(index, at)| (*at <= now).then_some(index))
+            .collect();
+        for index in due {
+            self.send_refresh(index).await;
+            let Some(allocation) = self.allocations.get(index) else {
+                continue;
+            };
+            if let Some(deadline) = self.allocation_refresh.get_mut(index) {
+                *deadline = now + half_lifetime(allocation.lifetime);
+            }
+        }
+        if self.permission_refresh.is_some_and(|at| at <= now) {
+            self.refresh_permissions().await;
+            self.permission_refresh = Some(now + Duration::from_secs(240));
+        }
+    }
+
+    async fn retransmit_turn(&mut self, now: tokio::time::Instant) {
+        let due: Vec<(LocalBase, turn::TransactionId)> = self
+            .turn_pending
+            .iter()
+            .filter(|pending| pending.retry_at <= now)
+            .map(|pending| (pending.base, pending.transaction))
+            .collect();
+        for (base, transaction) in due {
+            let Some(position) = self
+                .turn_pending
+                .iter()
+                .position(|pending| pending.base == base && pending.transaction == transaction)
+            else {
+                continue;
+            };
+            let Some((retransmits, allocation, bytes)) =
+                self.turn_pending.get(position).map(|pending| {
+                    (
+                        pending.retransmits,
+                        pending.allocation,
+                        pending.bytes.clone(),
+                    )
+                })
+            else {
+                continue;
+            };
+            if retransmits == 0 {
+                self.turn_pending.remove(position);
+                continue;
+            }
+            let Some(server) = self.allocations.get(allocation).map(|value| value.server) else {
+                self.turn_pending.remove(position);
+                continue;
+            };
+            let Some(socket) = self.sockets.get(usize::from(base.0)).cloned() else {
+                self.turn_pending.remove(position);
+                continue;
+            };
+            if let Err(error) = socket.send_to(&bytes, server).await {
+                self.discards
+                    .ice_send_failures
+                    .fetch_add(1, Ordering::Relaxed);
+                tracing::debug!(%server, %error, "a TURN retransmission could not be sent");
+            }
+            if let Some(pending) = self.turn_pending.get_mut(position) {
+                pending.rto = pending.rto.saturating_mul(2);
+                pending.retry_at = now + pending.rto;
+                pending.retransmits = pending.retransmits.saturating_sub(1);
+            }
+        }
+    }
+
+    async fn refresh_permissions(&mut self) {
+        let mut peers: Vec<IpAddr> = self
+            .agent
+            .remote_candidates()
+            .iter()
+            .map(|candidate| candidate.address.ip())
+            .collect();
+        peers.sort_unstable();
+        peers.dedup();
+        let jobs: Vec<(usize, IpAddr)> = self
+            .allocations
+            .iter()
+            .enumerate()
+            .flat_map(|(index, allocation)| {
+                peers.iter().copied().filter_map(move |peer| {
+                    matches!(
+                        (peer, allocation.relayed.ip()),
+                        (IpAddr::V4(_), IpAddr::V4(_)) | (IpAddr::V6(_), IpAddr::V6(_))
+                    )
+                    .then_some((index, peer))
+                })
+            })
+            .collect();
+        for (index, peer) in jobs.into_iter().take(TURN_TRANSACTIONS) {
+            self.send_permission(index, peer).await;
+        }
+    }
+
+    async fn send_refresh(&mut self, index: usize) {
+        let Some(allocation) = self.allocations.get(index) else {
+            return;
+        };
+        let (base, server, lifetime, auth) = (
+            allocation.base,
+            allocation.server,
+            allocation.lifetime,
+            allocation.auth.clone(),
+        );
+        let Some(socket) = self.sockets.get(usize::from(base.0)).cloned() else {
+            return;
+        };
+        let transaction = turn::new_transaction_id();
+        let Ok(bytes) = turn::refresh(transaction, lifetime, &auth) else {
+            return;
+        };
+        let pending = TurnPending {
+            base,
+            transaction,
+            allocation: index,
+            operation: TurnOperation::Refresh,
+            bytes: bytes.clone(),
+            retry_at: tokio::time::Instant::now() + TURN_RTO,
+            rto: TURN_RTO,
+            retransmits: TURN_RETRANSMITS,
+        };
+        if self.track_turn(pending)
+            && let Err(error) = socket.send_to(&bytes, server).await
+        {
+            self.discards
+                .ice_send_failures
+                .fetch_add(1, Ordering::Relaxed);
+            tracing::debug!(%server, %error, "a TURN refresh could not be sent");
+        }
+    }
+
+    async fn send_permission(&mut self, index: usize, peer: IpAddr) {
+        let Some(allocation) = self.allocations.get(index) else {
+            return;
+        };
+        let (base, server, auth) = (allocation.base, allocation.server, allocation.auth.clone());
+        let Some(socket) = self.sockets.get(usize::from(base.0)).cloned() else {
+            return;
+        };
+        let transaction = turn::new_transaction_id();
+        let Ok(bytes) = turn::create_permission(transaction, SocketAddr::new(peer, 9), &auth)
+        else {
+            return;
+        };
+        let pending = TurnPending {
+            base,
+            transaction,
+            allocation: index,
+            operation: TurnOperation::Permission(peer),
+            bytes: bytes.clone(),
+            retry_at: tokio::time::Instant::now() + TURN_RTO,
+            rto: TURN_RTO,
+            retransmits: TURN_RETRANSMITS,
+        };
+        if self.track_turn(pending)
+            && let Err(error) = socket.send_to(&bytes, server).await
+        {
+            self.discards
+                .ice_send_failures
+                .fetch_add(1, Ordering::Relaxed);
+            tracing::debug!(%server, %error, "a TURN permission request could not be sent");
+        }
+    }
+
+    fn track_turn(&mut self, pending: TurnPending) -> bool {
+        self.turn_pending
+            .retain(|known| known.base != pending.base || known.operation != pending.operation);
+        if self.turn_pending.len() < TURN_TRANSACTIONS {
+            self.turn_pending.push(pending);
+            true
+        } else {
+            // discard: the fixed outstanding-transaction budget is deliberate backpressure;
+            // the periodic permission/refresh schedule will retry operations that remain needed.
+            tracing::warn!("TURN transaction bound reached; refusing another operation");
+            false
+        }
+    }
+
+    async fn turn_response(&mut self, on: LocalBase, from: SocketAddr, bytes: &[u8]) -> bool {
+        if !self
+            .allocations
+            .iter()
+            .any(|allocation| allocation.base == on && allocation.server == from)
+        {
+            return false;
+        }
+        let Ok(response) = turn::response(bytes) else {
+            return false;
+        };
+        let Some(position) = self.turn_pending.iter().position(|pending| {
+            pending.base == on && pending.transaction == response.transaction()
+        }) else {
+            // It is a TURN response from this base's configured server, but not to any live
+            // operation. Drop it here rather than handing a non-Binding message to the ICE agent.
+            return true;
+        };
+        let Some(pending) = self.turn_pending.get(position).cloned() else {
+            return true;
+        };
+        let Some(allocation) = self.allocations.get(pending.allocation) else {
+            return true;
+        };
+        let operation_matches = match pending.operation {
+            TurnOperation::Refresh => response.is_refresh(),
+            TurnOperation::Permission(_) => response.is_permission(),
+        };
+        if allocation.base != on
+            || allocation.server != from
+            || !response.verify(&allocation.auth)
+            || !operation_matches
+        {
+            return true;
+        }
+        self.turn_pending.remove(position);
+        match response {
+            turn::Response::Challenge {
+                code: 438,
+                realm: Some(realm),
+                nonce: Some(nonce),
+                password_algorithms,
+                ..
+            } => {
+                if let Some(allocation) = self.allocations.get_mut(pending.allocation)
+                    && allocation
+                        .auth
+                        .replace_challenge(&realm, nonce, password_algorithms)
+                        .is_err()
+                {
+                    return true;
+                }
+                match pending.operation {
+                    TurnOperation::Refresh => self.send_refresh(pending.allocation).await,
+                    TurnOperation::Permission(peer) => {
+                        self.send_permission(pending.allocation, peer).await;
+                    }
+                }
+            }
+            turn::Response::Success {
+                lifetime: Some(lifetime),
+                ..
+            } if pending.operation == TurnOperation::Refresh => {
+                if let Some(allocation) = self.allocations.get_mut(pending.allocation) {
+                    allocation.lifetime = lifetime;
+                }
+                if let Some(deadline) = self.allocation_refresh.get_mut(pending.allocation) {
+                    *deadline = tokio::time::Instant::now() + half_lifetime(lifetime);
+                }
+            }
+            turn::Response::Success { .. } => {
+                if let TurnOperation::Permission(peer) = pending.operation {
+                    self.permissions.insert((pending.allocation, peer));
+                    self.flush_permission(pending.allocation, peer).await;
+                }
+            }
+            _ => {}
+        }
+        true
+    }
+
+    async fn send_relayed(&mut self, base: LocalBase, peer: SocketAddr, bytes: Vec<u8>) {
+        let Some(allocation) = self
+            .allocations
+            .iter()
+            .position(|allocation| allocation.base == base)
+        else {
+            return;
+        };
+        if self.permissions.contains(&(allocation, peer.ip())) {
+            self.send_relay_now(allocation, peer, &bytes).await;
+            return;
+        }
+        let deferred = DeferredRelay { base, peer, bytes };
+        if self.deferred_relay.len() < TURN_DEFERRED && !self.deferred_relay.contains(&deferred) {
+            self.deferred_relay.push(deferred);
+        }
+        let already_pending = self.turn_pending.iter().any(|pending| {
+            pending.allocation == allocation
+                && pending.operation == TurnOperation::Permission(peer.ip())
+        });
+        if !already_pending {
+            self.send_permission(allocation, peer.ip()).await;
+        }
+    }
+
+    async fn flush_permission(&mut self, allocation: usize, peer: IpAddr) {
+        let deferred = std::mem::take(&mut self.deferred_relay);
+        for datagram in deferred {
+            let belongs = self
+                .allocations
+                .get(allocation)
+                .is_some_and(|known| known.base == datagram.base)
+                && datagram.peer.ip() == peer;
+            if belongs {
+                self.send_relay_now(allocation, datagram.peer, &datagram.bytes)
+                    .await;
+            } else {
+                self.deferred_relay.push(datagram);
+            }
+        }
+    }
+
+    async fn send_relay_now(&self, allocation: usize, peer: SocketAddr, bytes: &[u8]) {
+        let Some(allocation) = self.allocations.get(allocation) else {
+            return;
+        };
+        let Some(socket) = self.sockets.get(usize::from(allocation.base.0)) else {
+            return;
+        };
+        let Ok(indication) = turn::send_indication(turn::new_transaction_id(), peer, bytes) else {
+            return;
+        };
+        if let Err(error) = socket.send_to(&indication, allocation.server).await {
+            self.discards
+                .ice_send_failures
+                .fetch_add(1, Ordering::Relaxed);
+            tracing::debug!(%peer, %error, "a relayed datagram could not be sent");
+        }
+    }
+
+    async fn delete_allocations(&self) {
+        for allocation in &self.allocations {
+            let Some(socket) = self.sockets.get(usize::from(allocation.base.0)) else {
+                continue;
+            };
+            if let Ok(bytes) =
+                turn::refresh(turn::new_transaction_id(), Duration::ZERO, &allocation.auth)
+                && let Err(error) = socket.send_to(&bytes, allocation.server).await
+            {
+                self.discards
+                    .ice_send_failures
+                    .fetch_add(1, Ordering::Relaxed);
+                tracing::debug!(
+                    server = %allocation.server,
+                    %error,
+                    "a TURN allocation deletion could not be sent"
+                );
+            }
         }
     }
 
@@ -537,7 +1068,16 @@ impl Driver {
     async fn apply(&mut self, outputs: Vec<Output>) {
         for output in outputs {
             match output {
-                Output::Send { on, to, bytes } => {
+                Output::Send {
+                    on,
+                    kind,
+                    to,
+                    bytes,
+                } => {
+                    if kind == CandidateType::Relayed {
+                        self.send_relayed(on, to, bytes).await;
+                        continue;
+                    }
                     let Some(socket) = self.sockets.get(usize::from(on.0)) else {
                         // The agent named a base the driver did not bind. It cannot: every base
                         // it knows came from a `LocalCandidate` this driver gathered.
@@ -635,13 +1175,36 @@ impl Driver {
         } else {
             *self.destinations.rtcp.lock().await = Some(remote);
         }
+        if local_kind == CandidateType::Relayed
+            && let Some(allocation) = self
+                .allocations
+                .iter()
+                .find(|allocation| allocation.base == local)
+            && let Ok(mut routes) = self.relay_routes.write()
+        {
+            routes.retain(|route| route.component != component);
+            routes.push(RelayRoute {
+                component,
+                server: allocation.server,
+            });
+        }
         tracing::debug!(component = component.get(), %remote, "ice selected a pair");
     }
 }
 
+fn half_lifetime(lifetime: Duration) -> Duration {
+    lifetime.div_f64(2.0).max(Duration::from_secs(1))
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::too_many_lines
+)]
 mod tests {
     use super::*;
 
@@ -663,5 +1226,408 @@ mod tests {
             IcePath::selected(CandidateType::Host, CandidateType::Relayed),
             IcePath::Relayed
         );
+    }
+
+    #[test]
+    fn selected_relay_routes_wrap_send_and_unwrap_data_only_from_the_server() {
+        let server: SocketAddr = "192.0.2.10:3478".parse().unwrap();
+        let peer: SocketAddr = "203.0.113.9:40000".parse().unwrap();
+        let (events, _receiver) = mpsc::channel(1);
+        let (_selection, selected_pair) = watch::channel(Selection::Checking);
+        let handle = Handle {
+            events,
+            discards: Arc::new(DiscardMeters::default()),
+            selected: Arc::new(AtomicBool::new(true)),
+            path: Arc::new(AtomicU8::new(IcePath::Relayed.encoded())),
+            selection: selected_pair,
+            relay_routes: Arc::new(StdRwLock::new(vec![RelayRoute {
+                component: ComponentId::RTP,
+                server,
+            }])),
+            relay_servers: Arc::new(vec![(LocalBase(0), server)]),
+        };
+        let payload = [0x80, 0x00, 0x00, 0x01];
+        let (to, send) = handle
+            .relay_datagram(ComponentId::RTP, peer, &payload)
+            .expect("selected relay wraps media");
+        assert_eq!(to, server);
+        assert_eq!(
+            turn::sent_data(&send).expect("Send indication"),
+            turn::PeerData {
+                peer,
+                data: &payload,
+            }
+        );
+
+        let data = turn::data_indication_for_test([7; 12], peer, &payload);
+        assert_eq!(
+            handle
+                .relayed_data(server, LocalBase(0), &data)
+                .expect("configured server unwraps Data"),
+            turn::PeerData {
+                peer,
+                data: &payload,
+            }
+        );
+        assert!(
+            handle
+                .relayed_data("192.0.2.11:3478".parse().unwrap(), LocalBase(0), &data)
+                .is_none(),
+            "a Data indication from another address is not an allocation packet"
+        );
+    }
+
+    #[test]
+    fn an_allocation_refreshes_before_its_granted_lifetime() {
+        assert_eq!(
+            half_lifetime(Duration::from_secs(600)),
+            Duration::from_secs(300)
+        );
+        assert_eq!(
+            half_lifetime(Duration::from_secs(1)),
+            Duration::from_secs(1),
+            "the refresh delay never collapses to a busy loop"
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_responses_match_the_base_transaction_operation_and_integrity() {
+        let server = UdpSocket::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+            .await
+            .expect("relay binds");
+        let server_address = server.local_addr().unwrap();
+        let first = Arc::new(
+            UdpSocket::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+                .await
+                .expect("first base binds"),
+        );
+        let second = Arc::new(
+            UdpSocket::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+                .await
+                .expect("second base binds"),
+        );
+        let relay = turn::Relay::new(server_address, "1000", "relay-password").unwrap();
+        let auth = turn::Auth::challenged(&relay, "example.com", "nonce".to_owned(), None)
+            .expect("legacy auth");
+        let allocation = |base, relayed: &str| Allocation {
+            base,
+            server: server_address,
+            relayed: relayed.parse().unwrap(),
+            mapped: "198.51.100.20:50000".parse().unwrap(),
+            lifetime: Duration::from_secs(600),
+            auth: auth.clone(),
+        };
+        let (_events, event_rx) = mpsc::channel(1);
+        let (selection, _selected) = watch::channel(Selection::Checking);
+        let mut driver = Driver {
+            agent: Agent::new(
+                super::super::Config::default(),
+                true,
+                Credentials::new("aaaa", "asd88fgpdd777uzjYhagZg").unwrap(),
+                7,
+            ),
+            sockets: vec![first, second],
+            deadlines: HashMap::new(),
+            events: event_rx,
+            destinations: Destinations {
+                rtp: Arc::new(Mutex::new("203.0.113.9:40000".parse().unwrap())),
+                rtcp: Arc::new(Mutex::new(None)),
+            },
+            selected: Arc::new(AtomicBool::new(false)),
+            path: Arc::new(AtomicU8::new(IcePath::Checking.encoded())),
+            selection,
+            allocations: vec![
+                allocation(LocalBase(0), "192.0.2.44:49152"),
+                allocation(LocalBase(1), "192.0.2.45:49153"),
+            ],
+            allocation_refresh: Vec::new(),
+            permission_refresh: None,
+            turn_pending: Vec::new(),
+            permissions: HashSet::new(),
+            deferred_relay: Vec::new(),
+            relay_routes: Arc::new(StdRwLock::new(Vec::new())),
+            stop: Arc::new(crate::session::Stop::default()),
+            discards: Arc::new(DiscardMeters::default()),
+        };
+        let mut datagram = vec![0u8; 1500];
+
+        driver.send_refresh(0).await;
+        let (length, _) = server
+            .recv_from(&mut datagram)
+            .await
+            .expect("first refresh");
+        let first_id = turn::transaction_for_test(&datagram[..length]).expect("transaction");
+        driver.send_refresh(1).await;
+        let (length, _) = server
+            .recv_from(&mut datagram)
+            .await
+            .expect("second refresh");
+        let second_id = turn::transaction_for_test(&datagram[..length]).expect("transaction");
+
+        let second_success =
+            turn::refresh_success_for_test(second_id, Duration::from_secs(120), &auth);
+        assert!(
+            driver
+                .turn_response(LocalBase(0), server_address, &second_success)
+                .await
+        );
+        assert_eq!(driver.allocations[0].lifetime, Duration::from_secs(600));
+        assert_eq!(driver.allocations[1].lifetime, Duration::from_secs(600));
+        assert_eq!(driver.turn_pending.len(), 2, "wrong base consumes nothing");
+
+        let wrong_operation = turn::authenticated_challenge_for_test(
+            first_id,
+            "permission",
+            438,
+            "wrong-operation",
+            &auth,
+        );
+        assert!(
+            driver
+                .turn_response(LocalBase(0), server_address, &wrong_operation)
+                .await
+        );
+        assert_eq!(
+            driver.turn_pending.len(),
+            2,
+            "wrong operation consumes nothing"
+        );
+
+        let mut forged =
+            turn::authenticated_challenge_for_test(first_id, "refresh", 438, "forged", &auth);
+        *forged.last_mut().expect("integrity tag") ^= 1;
+        assert!(
+            driver
+                .turn_response(LocalBase(0), server_address, &forged)
+                .await
+        );
+        assert_eq!(
+            driver.turn_pending.len(),
+            2,
+            "bad integrity consumes nothing"
+        );
+
+        let stale =
+            turn::authenticated_challenge_for_test(first_id, "refresh", 438, "fresh", &auth);
+        assert!(
+            driver
+                .turn_response(LocalBase(0), server_address, &stale)
+                .await
+        );
+        let (length, _) = server
+            .recv_from(&mut datagram)
+            .await
+            .expect("fresh-nonce refresh");
+        let first_retry_id =
+            turn::transaction_for_test(&datagram[..length]).expect("new transaction");
+        assert_ne!(first_retry_id, first_id);
+
+        assert!(
+            driver
+                .turn_response(LocalBase(1), server_address, &second_success)
+                .await
+        );
+        assert_eq!(driver.allocations[1].lifetime, Duration::from_secs(120));
+        assert_eq!(driver.allocations[0].lifetime, Duration::from_secs(600));
+
+        let first_success =
+            turn::refresh_success_for_test(first_retry_id, Duration::from_secs(90), &auth);
+        assert!(
+            driver
+                .turn_response(LocalBase(0), server_address, &first_success)
+                .await
+        );
+        assert_eq!(driver.allocations[0].lifetime, Duration::from_secs(90));
+        assert!(driver.turn_pending.is_empty());
+
+        let peer: SocketAddr = "203.0.113.9:40000".parse().unwrap();
+        let payload = vec![0x00, 0x01, 0x02, 0x03];
+        driver
+            .send_relayed(LocalBase(0), peer, payload.clone())
+            .await;
+        let (length, _) = server
+            .recv_from(&mut datagram)
+            .await
+            .expect("permission precedes the relayed check");
+        assert_eq!(
+            turn::operation_for_test(&datagram[..length]),
+            Some("permission")
+        );
+        let permission_id = turn::transaction_for_test(&datagram[..length]).expect("transaction");
+        for value in 0..=TURN_DEFERRED {
+            driver
+                .send_relayed(LocalBase(0), peer, vec![u8::try_from(value).unwrap_or(0)])
+                .await;
+        }
+        assert_eq!(driver.deferred_relay.len(), TURN_DEFERRED);
+        assert!(
+            server.try_recv_from(&mut datagram).is_err(),
+            "the Send indication waits for permission success"
+        );
+
+        let permission_success = turn::permission_success_for_test(permission_id, &auth);
+        assert!(
+            driver
+                .turn_response(LocalBase(0), server_address, &permission_success)
+                .await
+        );
+        let (length, _) = server
+            .recv_from(&mut datagram)
+            .await
+            .expect("deferred Send indication");
+        assert_eq!(
+            turn::sent_data(&datagram[..length]).expect("Send indication"),
+            turn::PeerData {
+                peer,
+                data: &payload,
+            }
+        );
+        assert!(driver.deferred_relay.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_driver_keeps_permissions_and_allocations_alive_and_deletes_on_shutdown() {
+        let server = UdpSocket::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+            .await
+            .expect("relay binds");
+        let server_address = server.local_addr().unwrap();
+        let media = Arc::new(
+            UdpSocket::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+                .await
+                .expect("media binds"),
+        );
+        let media_address = media.local_addr().unwrap();
+        let credentials = Credentials::new("aaaa", "asd88fgpdd777uzjYhagZg").unwrap();
+        let mut agent = Agent::new(super::super::Config::default(), true, credentials, 7);
+        agent.handle(Input::LocalCandidate(super::super::Gathered::new(
+            LocalBase(0),
+            media_address,
+            media_address,
+            CandidateType::Host,
+            ComponentId::RTP,
+            None,
+        )));
+        agent.handle(Input::RemoteDescription {
+            credentials: Credentials::new("bbbb", "zsd88fgpdd777uzjYhagZg").unwrap(),
+            candidates: vec![
+                Candidate::parse("1 1 UDP 2130706431 203.0.113.9 40000 typ host").unwrap(),
+            ],
+            lite: false,
+        });
+        let relay = turn::Relay::new(server_address, "1000", "relay-password").unwrap();
+        let allocation = Allocation {
+            base: LocalBase(0),
+            server: server_address,
+            relayed: "192.0.2.44:49152".parse().unwrap(),
+            mapped: "198.51.100.20:50000".parse().unwrap(),
+            lifetime: Duration::from_secs(600),
+            auth: turn::Auth::challenged(&relay, "example.com", "nonce".to_owned(), None)
+                .expect("legacy auth"),
+        };
+        let (_events, event_rx) = mpsc::channel(1);
+        let (selection, _selected) = watch::channel(Selection::Checking);
+        let routes = Arc::new(StdRwLock::new(Vec::new()));
+        let stop = Arc::new(crate::session::Stop::default());
+        let mut driver = Driver {
+            agent,
+            sockets: vec![media],
+            deadlines: HashMap::new(),
+            events: event_rx,
+            destinations: Destinations {
+                rtp: Arc::new(Mutex::new("203.0.113.9:40000".parse().unwrap())),
+                rtcp: Arc::new(Mutex::new(None)),
+            },
+            selected: Arc::new(AtomicBool::new(false)),
+            path: Arc::new(AtomicU8::new(IcePath::Checking.encoded())),
+            selection,
+            allocations: vec![allocation],
+            allocation_refresh: Vec::new(),
+            permission_refresh: None,
+            turn_pending: Vec::new(),
+            permissions: HashSet::new(),
+            deferred_relay: Vec::new(),
+            relay_routes: routes,
+            stop,
+            discards: Arc::new(DiscardMeters::default()),
+        };
+
+        driver.start_turn().await;
+        let mut datagram = vec![0u8; 1500];
+        let (length, _) =
+            tokio::time::timeout(Duration::from_secs(1), server.recv_from(&mut datagram))
+                .await
+                .expect("permission send is bounded")
+                .expect("permission arrives");
+        assert_eq!(
+            turn::operation_for_test(&datagram[..length]),
+            Some("permission")
+        );
+        let permission_transaction =
+            turn::transaction_for_test(&datagram[..length]).expect("transaction");
+        driver
+            .retransmit_turn(tokio::time::Instant::now() + TURN_RTO)
+            .await;
+        let (length, _) =
+            tokio::time::timeout(Duration::from_secs(1), server.recv_from(&mut datagram))
+                .await
+                .expect("permission retransmit is bounded")
+                .expect("permission retransmit arrives");
+        assert_eq!(
+            turn::transaction_for_test(&datagram[..length]),
+            Some(permission_transaction),
+            "a retransmission keeps the transaction id"
+        );
+        assert_eq!(driver.turn_pending[0].rto, Duration::from_secs(1));
+        driver.turn_pending.clear();
+
+        driver
+            .service_turn(tokio::time::Instant::now() + Duration::from_secs(301))
+            .await;
+        let mut operations = Vec::new();
+        for _ in 0..2 {
+            let (length, _) =
+                tokio::time::timeout(Duration::from_secs(1), server.recv_from(&mut datagram))
+                    .await
+                    .expect("refresh sends are bounded")
+                    .expect("refresh arrives");
+            operations.push(turn::operation_for_test(&datagram[..length]));
+        }
+        assert!(operations.contains(&Some("refresh")));
+        assert!(operations.contains(&Some("permission")));
+
+        driver.delete_allocations().await;
+        let (length, _) =
+            tokio::time::timeout(Duration::from_secs(1), server.recv_from(&mut datagram))
+                .await
+                .expect("delete send is bounded")
+                .expect("delete arrives");
+        assert_eq!(
+            turn::operation_for_test(&datagram[..length]),
+            Some("refresh")
+        );
+        assert_eq!(
+            turn::lifetime_for_test(&datagram[..length]),
+            Some(Duration::ZERO)
+        );
+
+        driver.turn_pending.clear();
+        let now = tokio::time::Instant::now();
+        for index in 0..=TURN_TRANSACTIONS {
+            let octet = u8::try_from(index).expect("bound fits in one octet");
+            let pending = TurnPending {
+                base: LocalBase(0),
+                transaction: [octet; 12],
+                allocation: 0,
+                operation: TurnOperation::Permission(IpAddr::V4(std::net::Ipv4Addr::new(
+                    192, 0, 2, octet,
+                ))),
+                bytes: Vec::new(),
+                retry_at: now,
+                rto: TURN_RTO,
+                retransmits: TURN_RETRANSMITS,
+            };
+            let _ = driver.track_turn(pending);
+        }
+        assert_eq!(driver.turn_pending.len(), TURN_TRANSACTIONS);
     }
 }

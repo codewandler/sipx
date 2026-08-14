@@ -66,6 +66,7 @@ use sipx_sip::{HeaderName, Method, Request, StatusCode};
 use sipx_transport::{Handle, Incoming};
 use tokio::sync::{Mutex, Notify, mpsc, watch};
 
+use crate::CallConfig;
 use crate::call::{Call, token};
 use crate::dialog::{Dialog, cseq_number, from_tag, to_tag};
 use crate::error::{Error, Result};
@@ -225,6 +226,29 @@ impl Invitation {
         .await
     }
 
+    /// Answer with the Supported configuration shared with the dialing role.
+    ///
+    /// Every shape and build-feature check runs before the invitation is claimed and before a
+    /// media socket is bound. A failure therefore leaves the invitation available for a typed
+    /// refusal or a different application decision.
+    pub async fn answer_with_config(&self, endpoint: &Handle, config: CallConfig) -> Result<Call> {
+        config.validate(self.incoming.transport)?;
+        let tag = self.pending.tag();
+        let mut requests = self.requests.lock().await;
+        crate::call::answer_tagged(
+            endpoint,
+            &self.incoming,
+            config.media_address(),
+            &tag,
+            Some(&|| self.pending.claim()),
+            config.media_policy().clone(),
+            config.initial_direction(),
+            &[],
+            Some(&mut *requests),
+        )
+        .await
+    }
+
     /// [`Self::answer`], using one coherent codec and ICE policy.
     pub async fn answer_with_policy(
         &self,
@@ -256,6 +280,7 @@ impl Invitation {
             &tag,
             Some(&|| self.pending.claim()),
             policy,
+            sipx_sdp::Direction::SendRecv,
             &[],
             Some(&mut *requests),
         )

@@ -7,6 +7,7 @@ priority: 4
 design: docs/vision.md
 epic: app-sdk
 areas: [docs, sipx-sip, sipx-call, sipx-media, sipx-transport, sipx-ua, sipx-sdp, sipx-rtp, sipx-audio]
+promotion: 4
 note: A-8 stated the promise and left the two mechanical halves — every public error enum outside sipx-app-protocol is exhaustive, so it promises never to add a variant, and ten of eleven crates will publish to crates.io with no README at all
 ---
 

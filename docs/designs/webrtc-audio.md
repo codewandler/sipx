@@ -15,7 +15,8 @@ It does not turn sipx into a full WebRTC stack. Video, browser APIs, capture/ren
 SCTP, simulcast, multiple bundled media sections, and a general-purpose browser media engine remain
 out of scope. `M-24`'s TURN client widens which NAT topologies are reachable, but running a relay is
 not part of this epic and TURN is not required to demonstrate the first host/server-reflexive path.
-The public boundary must continue to say that relay-required networks are not served until `M-24`.
+The public boundary must continue to say that this browser profile itself does not configure a
+relay, even though the general Rust call policy now can.
 
 ## What already exists
 
@@ -23,7 +24,7 @@ The public boundary must continue to say that relay-required networks are not se
 |---|---|---|
 | SIP signalling | `T-8`, `T-9`, `T-23` | WS/WSS and non-root request paths are implemented and independently exercised |
 | Audio formats | `M-3`, `M-7`, `M-13`, `M-30`, `P-9`, `P-13` | G.711, telephone events and Opus are call- and CLI-reachable |
-| ICE | `M-19` … `M-23`, `M-27`, `P-9` | host and server-reflexive paths work; TURN remains `M-24` |
+| ICE | `M-19` … `M-24`, `M-27`, `P-9` | the browser profile proves host and server-reflexive paths; the general call policy also supports configured TURN relay |
 | DTLS-SRTP | `M-15`, `M-28`, `P-9`, `M-46`, `M-49`, `M-50` | ordinary calls select it directly; the named browser-audio profile composes it with ICE after nomination |
 | Browser media profile | `M-48` … `M-51` | one fail-closed `RTP/SAVPF` + RTCP-mux profile and a bounded native-browser CI proof in both roles |
 

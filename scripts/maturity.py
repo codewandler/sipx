@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate alpha integrity and beta-announcement readiness from checked sources.
+"""Generate alpha, beta-announcement and stable-promotion readiness from checked sources.
 
 Someone asked how far sipx is from v1, and the honest first answer was that the question had no
 denominator: the roadmap ran M0-M12 with a deferral list and never named 1.0, and the only `v1` in
@@ -119,6 +119,12 @@ PREDICATE_FIELD = "predicate"
 #: story may block public adoption without describing a correctness defect in an alpha predicate.
 ANNOUNCEMENT_FIELD = "announcement"
 
+#: The stable gate's story-owned association. The name is deliberately not `predicate`: those
+#: numbers belong to the alpha gate, and reusing the field would make `3` mean two different things
+#: in the file a story author edits. Derived stable rows have no declaring story; evidence whose
+#: truth is recorded by a story uses this field so deleting the record cannot report progress.
+PROMOTION_FIELD = "promotion"
+
 #: The seven predicates from `docs/roadmap.md`. A predicate is met when every story declaring it is
 #: `done`; that is the whole rule. What is written here is the predicate — its number, its name, and
 #: whether it can be computed at all — never which stories bear on it.
@@ -172,6 +178,21 @@ BETA = (
     Predicate(5, "An independent browser endpoint carries Opus in both roles", "computed"),
     Predicate(6, "Exact registry, CLI, Pages and GitHub release evidence agrees", "computed"),
 )
+
+#: Stable promotion is conjunctive with the bounded content contract in
+#: `docs/specs/v1-endpoint-library.md`. These are the roadmap's five *evidence* predicates, not a
+#: score over features or RFC rows. The first two are derived from checked state; the remaining
+#: associations live in story frontmatter.
+STABLE = (
+    Predicate(1, "Alpha integrity still holds and survived a later release", "derived"),
+    Predicate(2, "Reachability is bound to callers at every layer", "derived"),
+    Predicate(3, "A separately governed downstream product uses the public API", "recorded"),
+    Predicate(4, "Published contracts shaped a refused breaking change", "computed"),
+    Predicate(5, "Two independent peers pass every released signalling transport", "computed"),
+)
+
+ALPHA_TAG = "v1.0.0-alpha"
+POST_ALPHA_RELEASE = re.compile(r"v1\.0\.0-(?:beta|rc)\.\d+")
 
 
 #: Files under `docs/stories` that are not stories however they are shaped. `_TEMPLATE.md` carries a
@@ -922,13 +943,17 @@ def predicate_row(
 ):
     """The `State` and `Waiting on` cells for one predicate."""
     open_stories, declared = predicate_state(predicate, found, predicates, field, gate)
-    if predicate.kind == "computed" and not declared:
+    if predicate.kind in {"computed", "recorded"} and not declared:
         # Not met: unrecorded. A computed predicate is computed over stories, and there are none to
         # compute over — so the honest report is that nobody has said what would close it.
         return "**unknown**", f"no story declares `{field}: {predicate.number}`"
     if open_stories:
         return "open", ", ".join(f"`{story_id}`" for story_id in open_stories)
-    return ("met" if predicate.kind == "computed" else "met (attested)"), "—"
+    if predicate.kind == "computed":
+        return "met", "—"
+    if predicate.kind == "recorded":
+        return "met (recorded)", "—"
+    return "met (attested)", "—"
 
 
 def announcement_predicate_row(predicate, found, alpha=ALPHA):
@@ -949,6 +974,88 @@ def announcement_predicate_row(predicate, found, alpha=ALPHA):
     if waiting:
         return "open", ", ".join(waiting)
     return "met", "—"
+
+
+def release_preserving_alpha_integrity():
+    """One post-alpha version tag whose checked report still has every alpha predicate met.
+
+    The tag is evidence that integrity survived a release boundary rather than existing only in the
+    working tree. `docs/maturity.md` is accepted here because every release gate checks it against
+    the story snapshot before the annotated tag can be published. An absent tag, missing report or
+    stale report therefore keeps stable predicate 1 open instead of being inferred from time or the
+    current board.
+    """
+    tags = git_lines(["tag", "--contains", ALPHA_TAG, "--merged", "HEAD"])
+    if tags is None:
+        return None
+    marker = f"**{len(ALPHA)} of {len(ALPHA)} predicates met.**"
+    candidates = sorted(
+        (tag.strip() for tag in tags if POST_ALPHA_RELEASE.fullmatch(tag.strip())),
+        reverse=True,
+    )
+    for tag in candidates:
+        report = git_text(["show", f"{tag}:docs/maturity.md"])
+        if report is not None and marker in report:
+            return tag
+    return None
+
+
+_CURRENT_RELEASE_EVIDENCE = object()
+
+
+def layer_reachability_basis(layer):
+    """The generated basis for one RFC layer, shared by both tables that reason from it."""
+    return "application + path check" if layer in REACHABILITY_CHECKED else "application"
+
+
+def stable_predicate_row(
+    predicate,
+    found,
+    rows,
+    alpha=ALPHA,
+    preserved_release=_CURRENT_RELEASE_EVIDENCE,
+):
+    """One stable-evidence row, deriving only what repository evidence can establish."""
+    if predicate.number == 1:
+        waiting = []
+        for alpha_predicate in alpha:
+            state, _ = predicate_row(alpha_predicate, found, predicates=alpha)
+            if not state.startswith("met"):
+                waiting.append(f"alpha predicate {alpha_predicate.number} ({state.strip('*')})")
+        if preserved_release is _CURRENT_RELEASE_EVIDENCE:
+            preserved_release = release_preserving_alpha_integrity()
+        if preserved_release is None:
+            waiting.append("no later release preserves all alpha predicates")
+        if waiting:
+            return "open", ", ".join(waiting)
+        return "met (derived)", "—"
+
+    if predicate.number == 2:
+        alpha_reachability = next((item for item in alpha if item.number == 1), None)
+        if alpha_reachability is None:
+            return "open", "alpha has no caller-reachability predicate"
+        state, _ = predicate_row(alpha_reachability, found, predicates=alpha)
+        if not state.startswith("met"):
+            return "open", f"alpha predicate 1 ({state.strip('*')})"
+        layers = {row.get("layer") for row in rows if row.get("layer")}
+        if not layers:
+            return "open", "RFC registry has no layer reachability evidence"
+        unbound = sorted(
+            layer for layer in layers if not layer_reachability_basis(layer).startswith("application")
+        )
+        if unbound:
+            return "open", ", ".join(f"{layer} caller" for layer in unbound)
+        if not (ROOT / SURFACE_CHECKER).is_file():
+            return "open", f"missing `{SURFACE_CHECKER}`"
+        return "met (derived)", "—"
+
+    return predicate_row(
+        predicate,
+        found,
+        predicates=STABLE,
+        field=PROMOTION_FIELD,
+        gate="stable-promotion",
+    )
 
 
 def render(reseed=False):
@@ -1012,6 +1119,35 @@ def render(reseed=False):
     )
     lines.append("")
 
+    # ---- stable evidence, conjunctive with the separate bounded-content contract
+    stable_met = 0
+    lines.append("## Stable `1.0.0` promotion readiness")
+    lines.append("")
+    lines.append("| # | Evidence predicate | State | Waiting on |")
+    lines.append("|---|---|---|---|")
+    preserved_release = release_preserving_alpha_integrity()
+    for predicate in STABLE:
+        state, waiting = stable_predicate_row(
+            predicate,
+            found,
+            rows,
+            preserved_release=preserved_release,
+        )
+        if state.startswith("met"):
+            stable_met += 1
+        lines.append(f"| {predicate.number} | {predicate.name} | {state} | {waiting} |")
+    lines.append("")
+    lines.append(
+        f"**{stable_met} of {len(STABLE)} evidence predicates met. All {len(STABLE)} and the bounded "
+        "v1 content contract are required; this is not a weighted score.** Alpha continuity and "
+        "per-layer caller reachability are derived from checked repository state. Every other "
+        f"association lives in a story's `{PROMOTION_FIELD}:` frontmatter. Predicate 3 records a "
+        "reviewed downstream attestation: the report can prove that its evidence story is closed, "
+        "but it cannot re-run confidential source or disclose a private product. Release authority "
+        "remains separate from readiness."
+    )
+    lines.append("")
+
     # ---- RFCs per layer. One aggregate percentage would call unlike layers alike.
     lines.append("## RFC coverage, per layer")
     lines.append("")
@@ -1029,11 +1165,7 @@ def render(reseed=False):
         # Every layer now has an application under it, which is what `X-38` changed. Two of them also
         # have the per-row path check, and that is strictly more than the others have — so the column
         # says which, rather than flattening both into "yes".
-        basis = (
-            "application + path check"
-            if layer in REACHABILITY_CHECKED
-            else "application"
-        )
+        basis = layer_reachability_basis(layer)
         lines.append(
             f"| {layer} | {counts['total']} | {counts['implemented']} | {counts['partial']} | "
             f"{counts['none']} | {counts['other']} | {basis} |"
@@ -1132,8 +1264,9 @@ def render(reseed=False):
     )
     lines.append(
         "- **A predicate's stories are whichever stories declare it, so what this cannot see is a "
-        f"story that declares nothing.** Alpha associations are read from `{PREDICATE_FIELD}:` and "
-        f"beta associations from `{ANNOUNCEMENT_FIELD}:` on the stories themselves; a story naming "
+        f"story that declares nothing.** Alpha associations are read from `{PREDICATE_FIELD}:`, "
+        f"beta associations from `{ANNOUNCEMENT_FIELD}:`, and story-backed stable associations from "
+        f"`{PROMOTION_FIELD}:` on the stories themselves; a story naming "
         "a predicate that does not exist fails the "
         "gate rather than being dropped, and a computed predicate no story declares reads "
         "**unknown** rather than met. What no script can decide is which predicate a story *should* "
@@ -1241,8 +1374,8 @@ def main():
             )
             return 1
         print(
-            f"maturity: {len(ALPHA)} alpha predicates and {len(BETA)} beta-announcement "
-            "predicates, report current"
+            f"maturity: {len(ALPHA)} alpha predicates, {len(BETA)} beta-announcement predicates "
+            f"and {len(STABLE)} stable-promotion predicates, report current"
         )
         return 0
 

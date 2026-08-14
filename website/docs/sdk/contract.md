@@ -8,8 +8,9 @@ description: A tour of sipx.app.v1 as used by the implemented webhook and full-d
 :::caution Experimental wire contract
 
 `sipx-host` uses this contract with document-mode webhooks and authenticated full-duplex sessions.
-The Rust vocabulary and interpreter are Supported under the pre-1.0 policy, but the wire shape may
-change without a migration path. An embedded handler and packaged language SDK are not implemented.
+The Supported Rust vocabulary and interpreter are frozen for compatible v1 evolution, but the wire
+shape remains Experimental and unfrozen and may change without a migration path. An embedded
+handler and packaged language SDK are not implemented.
 
 :::
 

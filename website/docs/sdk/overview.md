@@ -7,9 +7,9 @@ description: Application hosting through webhooks, full-duplex sessions, and rea
 
 :::caution Contract stability
 
-The Rust host surfaces are Supported under sipx's pre-1.0 policy: incompatible changes receive
-migration guidance, but APIs are not frozen. The `sipx.app.v1` wire contract remains Experimental
-and may change without a migration path. There is no packaged language-specific SDK today.
+The Supported Rust host surfaces are frozen for compatible v1 evolution. The `sipx.app.v1` wire
+contract remains Experimental and unfrozen, and may change without a migration path. There is no
+packaged language-specific SDK today.
 
 :::
 

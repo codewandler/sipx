@@ -1,6 +1,6 @@
 # Spec: Transport layer
 
-**Status:** normative · **Crate:** `sipx-transport` · **Stories:** T-1 … T-4, T-25 … T-29, T-32, T-34, T-35 · **Design:**
+**Status:** normative · **Crate:** `sipx-transport` · **Stories:** T-1 … T-4, T-25 … T-29, T-32, T-34, T-35, T-47 · **Design:**
 [sip-transport](../designs/sip-transport.md)
 
 ## 1. Normative references
@@ -15,6 +15,7 @@
 - RFC 7118 — SIP over WebSocket.
 - RFC 7339 §4–§5, §7.2 — hop-by-hop SIP overload control and the loss algorithm.
 - RFC 7415 §3.3–§3.5.1 — rate-based overload control.
+- RFC 5626 §4.1–§4.5, §6 and §8 — Outbound registration, keep-alive and flow recovery.
 
 **Out of scope:** TLS certificate policy (a later story), and everything the sans-IO core
 already specifies.
@@ -470,6 +471,64 @@ application response and transaction-generated 100 Trying—reports the active v
 remaining validity; an ordinary response cannot undo feedback while the same bounded queue remains
 saturated. After expiry, every response reports explicit control-off state.
 
+## 10.5 Outbound registration lifetime owner (RFC 5626)
+
+**[sipx] One `Flows` lifetime owns one device's complete Outbound registration lifetime.** Its
+configured non-zero `max_flows` bounds the retained flow records, child tasks, event queue and final
+cleanup accounting. A flow added after the limit is reached is refused before an endpoint or task is
+retained. Position in the configured outbound-proxy set assigns `reg-id`; retries and replacement
+connections keep that number. Removing or failing one flow never compacts or renumbers its peers.
+
+Starting the lifetime consumes the set. It creates exactly one child loop per configured flow and
+one bounded event receiver shared by those loops. Each child exclusively owns its `UserAgent`,
+registration lease, connection or UDP endpoint, consecutive-failure count, and these monotonically
+increasing generations:
+
+| Generation | Incremented when | A matching firing may do |
+|---|---|---|
+| registration lease | a REGISTER succeeds | refresh that flow before the granted lease expires |
+| keep-alive | an accepted Outbound registration selects its next interval | send one keep-alive on that flow |
+| recovery | a registration, refresh or keep-alive fails | retry that same stable `reg-id` after §4.5 backoff |
+
+A firing carrying an older generation is stale and has no effect. The single-owner loop normally
+makes stale work unobservable; retaining generations in events and the state contract makes that
+property explicit and prevents a later concurrent timer implementation from weakening it.
+
+**[RFC 5626 §4.2, §4.4–§4.5] Flows progress independently.** Every configured proxy is
+registered even if a peer rejects or times out. A successful refresh replaces only that flow's
+lease generation. A keep-alive or refresh failure clears only that flow's lease, increments only its
+recovery generation and schedules only its backoff. The §4.5 choice between the 30-second and
+90-second base observes whether any *other* flow is active, but does not refresh, cancel or otherwise
+mutate it.
+
+An accepted UDP flow sends a STUN Binding Request over the authenticated REGISTER's endpoint at each
+configured `Flow-Timer`, or at §4.4.2's jittered default when none was returned. RFC 5626 §8 says
+this STUN usage requires no attributes: registration authenticates the association and the random
+96-bit transaction ID correlates its pong; no STUN credential or `MESSAGE-INTEGRITY` exchange is
+invented. A Binding Error, unanswered transaction, or changed `XOR-MAPPED-ADDRESS` fails that flow.
+An accepted connection-oriented flow sends double CRLF and requires the single-CRLF pong within its
+configured answer bound. A registrar that did not confirm `Require: outbound` has granted an
+ordinary binding: it is refreshed but is not sent Outbound keep-alives.
+
+Refresh and keep-alive timers are armed together after each successful registration. The earlier
+firing is handled and its own next generation is armed without moving the peer timer. Registration
+attempts use the caller's optional finite attempt limit or the transaction layer's finite timer
+schedule. Retrying after a failed refresh or keep-alive re-establishes the same `reg-id`; it does not
+retain the failed lease or run a second loop beside it.
+
+**[sipx] Cancellation is a completion barrier, not a request to begin cleanup.** It invalidates all
+three generations for every flow, prevents another refresh, keep-alive or retry from starting,
+shuts down every owned endpoint and waits for the endpoint's durable task barrier. The lifetime then
+joins every child before returning one bounded cleanup summary. Tests advance protocol timers only
+after observing the registration or prior keep-alive event and observe peer traffic or task joins as
+their completion barrier; a fixed sleep is never evidence of shutdown.
+
+`sipx register --outbound --keep-alive` is the one-entry case of this owner. Its progress and final
+records name the stable `reg-id`, selected keep-alive kind, flow-local failure when one occurs, and
+joined cleanup count. Reports contain no credential object, password, digest response or STUN
+transaction ID. Process interruption cancels the owner and waits for its cleanup barrier before the
+terminal record is emitted.
+
 ## 11. Test vectors
 
 | # | Scenario | Expected |
@@ -523,6 +582,11 @@ saturated. After expiry, every response reports explicit control-off state.
 | X47 | INVITE with a large SDP body exceeds the unknown-path 1300-byte cutoff on a UDP target | It arrives at the same peer over TCP with a TCP top `Via`; UDP remains silent and `oversized_request_tcp_fallbacks` increments once |
 | X48 | The X47 peer has no TCP listener | Typed `TcpFallbackUnavailable` retains the message size, derived limit and connection cause; no UDP datagram is sent |
 | X49 | Known path MTUs of 1500 and 1200 bytes | The one derived request limits are 1300 and 1000 bytes respectively |
+| X50 | One authenticated UDP registration with `Flow-Timer: 1`, followed by cancellation after an observed Binding exchange | A correlated STUN Binding Request is sent on the registered endpoint; cancellation closes it and joins the one flow task |
+| X51 | Two configured Outbound proxies where flow 1 stops answering keep-alives | Flow 1 alone reports failure and recovery generation 1; flow 2 keeps stable `reg-id=2`, refreshes and emits later keep-alives |
+| X52 | An accepted TCP registration with a configured flow timer | Double CRLF is sent on that connection and its single-CRLF pong keeps the flow active |
+| X53 | A UDP Binding Response changes `XOR-MAPPED-ADDRESS` | The owner reports the flow failed and schedules recovery; no further work uses the old lease generation |
+| X54 | Add one more flow than `max_flows` | Typed capacity refusal and no added endpoint, task, retained event or cleanup row |
 
 ### 11.1 Live endpoint policy and observation
 

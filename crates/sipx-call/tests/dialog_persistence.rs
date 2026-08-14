@@ -90,9 +90,10 @@ async fn connected_with_media(policy: MediaPolicy) -> Connected {
     let (caller_endpoint, _caller_incoming) = endpoint().await;
     let callee_addr = callee_endpoint.local_addr();
     let answer_handle = callee_endpoint.clone();
+    let answer_policy = policy.clone();
     let answering = tokio::spawn(async move {
         let incoming = callee_incoming.recv().await.expect("INVITE arrives");
-        let call = answer_with_policy(&answer_handle, &incoming, loopback(), policy)
+        let call = answer_with_policy(&answer_handle, &incoming, loopback(), answer_policy)
             .await
             .expect("answers");
         (call, callee_incoming)

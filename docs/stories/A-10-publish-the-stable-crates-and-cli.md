@@ -3,44 +3,46 @@ id: A-10
 title: Publish the stable crate set and diagnostic CLI artifacts
 pillar: Application
 status: in-progress
-priority: 51
+priority: 1
 design: docs/specs/release-artifacts.md
 epic: app-sdk
 areas: [release, docs, sipx-cli]
-note: promote the public beta only after every v1 predicate; stable archives and SBOM live here
+note: stable 1.0 owner · predicates, exact-SHA gate, registry set, five archives, SBOM, Pages and release evidence
 ---
 
 # Publish the stable crate set and diagnostic CLI artifacts
 
 ## Goal
 
-Turn a source checkout into versioned dependencies and diagnostic binaries that another project can
-pin and reproduce.
+Publish the frozen `1.0.0` endpoint-library boundary as reproducible registry packages,
+documentation and diagnostic binaries after every content and evidence predicate is satisfied.
 
 ## Acceptance
 
-- [ ] Every v1 predicate in `docs/roadmap.md` is met; this story does not waive external-use or
-      interop evidence to meet a date.
-- [ ] All publishable crates pass `cargo publish --dry-run` and are published in dependency order
-      with one workspace version and matching API documentation.
-- [ ] Linux x86_64 and arm64 CLI archives are built once from the release commit, smoke-tested by
-      digest and published with checksums and an SBOM.
-- [ ] macOS and Windows compile-check the device feature; no binary publication promise is made for
-      them in this milestone.
-- [ ] A clean consumer project builds from registry versions only, and the published CLI completes a
-      bounded loopback call without a repository checkout.
-- [ ] Release notes name experimental surfaces and every intentional omission; no capability is
-      promoted solely because code exists below its public caller.
+- [ ] Every stable evidence predicate generated in `docs/maturity.md` is met, every blocking row of
+      the bounded v1 content contract is closed, and the finalized `1.0.0` tree passes the complete
+      local gate exactly once after all generated artifacts are synchronized.
+- [ ] The reviewed stable note names the Supported endpoint boundary, Experimental surfaces,
+      intentional omissions, verification limits and privacy-safe downstream-adoption result; all
+      manifests, internal dependencies, lockfile, changelog, comparison, maturity, roadmap, board
+      and website artifacts agree on `1.0.0`; the reviewed rc.24 API baseline remains immutable and
+      accepts the stable candidate under its same-major compatibility rule.
+- [ ] Exact-SHA `main` CI, including Pages, passes before one reviewed annotated `v1.0.0` tag is
+      pushed; no existing tag, package, release or asset is moved or overwritten.
+- [ ] The protected workflow publishes or verifies every public crate in dependency order, an
+      exact registry-only consumer, the installed optional-feature CLI, all five native archives,
+      five SPDX documents, `SHA256SUMS`, exact-SHA Pages and a non-draft, non-prerelease release
+      built from the reviewed note.
+- [ ] Registry versions and checksums, workflow and gate evidence, annotated tag object, release
+      commit and URL, Pages result, registry consumer and complete portable-asset set are recorded
+      here before the story closes.
 
 ## Progress
 
-- 2026-08-05: selected for the stable-release wave together with `P-14`. A predicate audit found
-  concrete evidence for four of the five roadmap predicates: alpha integrity held across beta.2
-  through beta.7; every maturity layer is bound to an application caller; `A-9` records the public
-  contract shaping an otherwise breaking enum change; and the diagnostic-phone proof requires two
-  independent profiles for UDP, TCP, TLS, WS and WSS. No qualifying external application is yet
-  recorded. Registry reverse dependencies currently resolve only to this workspace's own packages,
-  so predicate 3 remains open rather than being inferred from downloads or examples.
+- 2026-08-05: selected for the stable-release wave together with `P-14`. Four of the five evidence
+  predicates were already present: post-alpha integrity, caller-bound reachability, a contract that
+  shaped a refused breaking change, and two-profile interoperability for every released signalling
+  transport. Separate-product adoption remained open.
 - 2026-08-05: `docs/specs/release-artifacts.md` now fixes the five native target artifacts,
   no-optional-feature policy, static-musl proof, bounded call smoke test, SPDX identity, checksum
   aggregation and idempotent publication contract before workflow implementation.
@@ -48,9 +50,18 @@ pin and reproduce.
   release inputs, aggregates the ten published target files plus `SHA256SUMS`, creates stable or
   prerelease records from the version, and refuses to overwrite different existing bytes. The
   portable contract has 18 passing adversarial tests; its supervisor also completed a real call
-  through the no-default-feature `sipx` binary. Stable publication remains blocked on roadmap
-  predicate 3 and the actual release run, not on artifact implementation.
+  through the no-default-feature `sipx` binary. Stable publication remains an explicit release run,
+  not an artifact-design task.
 - 2026-08-05: `1.0.0-rc.2` is the first selected published exercise of that portable publication
   path; the RC.1 rehearsal stopped before publication.
   A successful candidate run can prove the mechanism and artifact bytes, but it cannot close this
-  stable story while the independent-application predicate remains open.
+  stable story.
+- 2026-08-14: an authorized audit verified production adoption in a separately governed private
+  downstream product without publishing its identity or proprietary details. `X-152` makes that
+  product-boundary rule and the five stable evidence predicates generated. The bounded endpoint
+  content and mechanical Supported-API baseline are complete; stable version and release-document
+  synchronization are in progress. Tagging, pushing and publication remain deliberately unrun.
+- 2026-08-14: the stable manifest sweep also found two explicit internal dependency versions in the
+  unpublished WebAssembly member that predated the release checklist's count. They now follow the
+  workspace at `1.0.0`; the final manifest scan covers every path dependency rather than trusting a
+  transcribed total.

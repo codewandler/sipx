@@ -1,0 +1,8 @@
+{
+  "binary_sha256": "29b4e983ee09fdfa790d406b1cfc9b0d0a0f75b29193ce64149f18e081c047ca",
+  "contract": "sipx.m72.sdes-kdf-perturbation.v1",
+  "mutation": "right-align-aead-master-salt-in-14-octet-x",
+  "original_sha256": "5c0fa7528b83b7e90802fcf1b3bb343cd32d63763beeb923a28d215edb26e631",
+  "perturbed_sha256": "f06b342f85acff5febbff79a8d8b76837087e917fbadf58fee016dada3de0ae7",
+  "source": "crates/sipx-rtp/src/srtp/mod.rs"
+}

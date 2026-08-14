@@ -183,7 +183,7 @@ async fn a_named_registrar_is_resolved_and_registered() {
     .expect("the registrar's name resolves");
 
     assert_eq!(
-        config.target.addr,
+        config.target().addr,
         format!("127.0.0.1:{port}")
             .parse::<SocketAddr>()
             .expect("valid"),
@@ -214,12 +214,12 @@ async fn a_secure_registrar_keeps_its_name_as_the_verification_identity() {
     .expect("the registrar's name resolves");
 
     assert_eq!(
-        config.target.transport,
+        config.target().transport,
         TransportKind::Tls,
         "a sips: URI never falls back to cleartext"
     );
     assert_eq!(
-        config.target.verify_as.as_deref(),
+        config.target().verify_as.as_deref(),
         Some(RESOLVABLE),
         "the name asked for, not the address resolved to, is the verification identity"
     );
@@ -281,7 +281,7 @@ async fn resolution_failure_resolution_timeout_and_connection_failure_are_distin
     )
     .await
     .expect("the registrar's name resolves");
-    assert_eq!(config.target.transport, TransportKind::Tcp);
+    assert_eq!(config.target().transport, TransportKind::Tcp);
 
     let refused = UserAgent::new(agent_endpoint, config)
         .register()

@@ -11,7 +11,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use serde_json::{Value, json};
 use sipx_call::{
-    Call, DialOptions, Error, MediaAddress, MediaPolicy, MediaProfile, NegotiatedKeying,
+    Call, DialOptions, Error, MediaAddress, MediaPolicy, MediaProfile, NegotiatedKeying, SrtpSuite,
     answer_with_policy_at, dial, serve,
 };
 use sipx_media::Codec;
@@ -54,6 +54,7 @@ enum Case {
     FingerprintMismatch,
     NoNominatedPair,
     WeakerMedia,
+    KdfPerturbation,
 }
 
 impl Case {
@@ -63,13 +64,14 @@ impl Case {
             "FingerprintMismatch" => Ok(Self::FingerprintMismatch),
             "NoNominatedPair" => Ok(Self::NoNominatedPair),
             "WeakerMedia" => Ok(Self::WeakerMedia),
+            "KdfPerturbation" => Ok(Self::KdfPerturbation),
             _ => Err(format!("unknown proof case {value}")),
         }
     }
 
     const fn expected(self) -> Option<ProfileError> {
         match self {
-            Self::Positive => None,
+            Self::Positive | Self::KdfPerturbation => None,
             Self::FingerprintMismatch => Some(ProfileError::FingerprintMismatch),
             Self::NoNominatedPair => Some(ProfileError::NoNominatedPair),
             Self::WeakerMedia => Some(ProfileError::WeakerMedia),
@@ -82,6 +84,7 @@ impl Case {
             Self::FingerprintMismatch => "FingerprintMismatch",
             Self::NoNominatedPair => "NoNominatedPair",
             Self::WeakerMedia => "WeakerMedia",
+            Self::KdfPerturbation => "KdfPerturbation",
         }
     }
 }
@@ -93,6 +96,7 @@ struct Arguments {
     certificate: PathBuf,
     key: PathBuf,
     result: PathBuf,
+    srtp_suite: Option<SrtpSuite>,
 }
 
 impl Arguments {
@@ -103,6 +107,7 @@ impl Arguments {
         let mut certificate = None;
         let mut key = None;
         let mut result = None;
+        let mut srtp_suite = None;
         let mut values = std::env::args().skip(1);
         while let Some(flag) = values.next() {
             let value = values
@@ -121,6 +126,7 @@ impl Arguments {
                 "--cert" => certificate = Some(PathBuf::from(value)),
                 "--key" => key = Some(PathBuf::from(value)),
                 "--result" => result = Some(PathBuf::from(value)),
+                "--srtp-suite" => srtp_suite = Some(parse_srtp_suite(&value)?),
                 _ => return Err(format!("unknown argument {flag}")),
             }
         }
@@ -131,6 +137,7 @@ impl Arguments {
             certificate: certificate.ok_or_else(|| "--cert is required".to_owned())?,
             key: key.ok_or_else(|| "--key is required".to_owned())?,
             result: result.ok_or_else(|| "--result is required".to_owned())?,
+            srtp_suite,
         })
     }
 
@@ -139,6 +146,10 @@ impl Arguments {
             Case::Positive => true,
             Case::FingerprintMismatch => self.role == Role::BrowserOfferer,
             Case::NoNominatedPair | Case::WeakerMedia => self.role == Role::BrowserAnswerer,
+            Case::KdfPerturbation => {
+                self.role == Role::BrowserAnswerer
+                    && self.srtp_suite == Some(SrtpSuite::AeadAes256Gcm)
+            }
         };
         valid.then_some(()).ok_or_else(|| {
             format!(
@@ -148,13 +159,29 @@ impl Arguments {
             )
         })
     }
+
+    fn media_policy(&self) -> MediaPolicy {
+        match self.srtp_suite {
+            Some(suite) => MediaPolicy::browser_audio().with_srtp_suite(suite),
+            None => MediaPolicy::browser_audio(),
+        }
+    }
+}
+
+fn parse_srtp_suite(value: &str) -> Result<SrtpSuite, String> {
+    match value {
+        "AEAD_AES_128_GCM" => Ok(SrtpSuite::AeadAes128Gcm),
+        "AEAD_AES_256_GCM" => Ok(SrtpSuite::AeadAes256Gcm),
+        "AES_CM_128_HMAC_SHA1_80" => Ok(SrtpSuite::AesCm128HmacSha1_80),
+        _ => Err(format!("unknown SRTP suite {value}")),
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let arguments = Arguments::read().map_err(std::io::Error::other)?;
     arguments.validate().map_err(std::io::Error::other)?;
-    let result = tokio::time::timeout(OPERATION_BOUND, execute(&arguments))
+    let result = Box::pin(tokio::time::timeout(OPERATION_BOUND, execute(&arguments)))
         .await
         .map_err(|_| {
             std::io::Error::other("browser-audio proof operation exceeded 90 seconds")
@@ -189,7 +216,7 @@ async fn execute(arguments: &Arguments) -> Result<Value, Box<dyn std::error::Err
                 &endpoint,
                 &invitation,
                 MediaAddress::new(arguments.media_address),
-                MediaPolicy::browser_audio(),
+                arguments.media_policy(),
             )
             .await
         }
@@ -212,7 +239,7 @@ async fn execute(arguments: &Arguments) -> Result<Value, Box<dyn std::error::Err
             endpoint.respond(&readiness.key, response).await?;
             let to = Uri::sip(Host::Name(HostName::new("localhost")?));
             let options = DialOptions::new("<sip:sipx@localhost>", arguments.media_address)
-                .with_media_policy(MediaPolicy::browser_audio())
+                .with_media_policy(arguments.media_policy())
                 // This proof deliberately runs both media endpoints on one CI host. The shared
                 // private range is therefore its topology, not an accidental advertised route.
                 .with_media_range_overlap(true)
@@ -221,10 +248,20 @@ async fn execute(arguments: &Arguments) -> Result<Value, Box<dyn std::error::Err
         }
     };
 
+    if arguments.case == Case::KdfPerturbation {
+        return match attempt {
+            Ok(call) => perturbed_kdf_result(&call, arguments).await,
+            Err(error) => Err(std::io::Error::other(format!(
+                "KDF perturbation failed before media authentication at {error}"
+            ))
+            .into()),
+        };
+    }
+
     match (attempt, arguments.case.expected()) {
         (Ok(mut call), None) => {
             let received_audio_peak = exercise_media(&call).await?;
-            let result = positive_result(&call, arguments.role, received_audio_peak)?;
+            let result = positive_result(&call, arguments, received_audio_peak)?;
             match arguments.role {
                 Role::BrowserOfferer => serve(&mut call, &mut incoming).await?,
                 Role::BrowserAnswerer => call.hang_up().await?,
@@ -244,6 +281,33 @@ async fn execute(arguments: &Arguments) -> Result<Value, Box<dyn std::error::Err
         }
         (Err(error), None) => Err(error.into()),
     }
+}
+
+async fn perturbed_kdf_result(
+    call: &Call,
+    arguments: &Arguments,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    let media_failure = match exercise_media(call).await {
+        Ok(_) => {
+            return Err(std::io::Error::other(
+                "perturbed AEAD key derivation unexpectedly carried audio",
+            )
+            .into());
+        }
+        Err(error) => error.to_string(),
+    };
+    let component = call
+        .browser_component()
+        .ok_or_else(|| std::io::Error::other("browser component facts are absent"))?;
+    Ok(json!({
+        "error": arguments.case.error_name(),
+        "media_failure": media_failure,
+        "requested_srtp_suite": arguments.srtp_suite.map_or("any", SrtpSuite::name),
+        "negotiated_srtp_suite": negotiated_srtp_suite(call),
+        "packets_sent": call.media().packets_sent(),
+        "packets_received": call.media().packets_received(),
+        "srtp_authentication_failures": component.counts.srtp_authentication_failures,
+    }))
 }
 
 async fn next_method<T>(
@@ -286,7 +350,7 @@ async fn exercise_media(call: &Call) -> Result<u16, Box<dyn std::error::Error>> 
 
 fn positive_result(
     call: &Call,
-    role: Role,
+    arguments: &Arguments,
     received_audio_peak: u16,
 ) -> Result<Value, Box<dyn std::error::Error>> {
     let component = call
@@ -317,6 +381,7 @@ fn positive_result(
         NegotiatedKeying::DtlsSrtp => "dtls-srtp",
         _ => "unknown",
     };
+    let negotiated_srtp_suite = negotiated_srtp_suite(call);
     let media_state = match component.state {
         ComponentState::IceChecking => "ice-checking",
         ComponentState::Nominated => "nominated",
@@ -333,7 +398,9 @@ fn positive_result(
         "negotiated_payload_type": call.negotiated_payload_type(),
         "negotiated_clock_rate": call.negotiated_clock_rate(),
         "negotiated_keying": negotiated_keying,
-        "browser_role": role.as_str(),
+        "requested_srtp_suite": arguments.srtp_suite.map_or("any", SrtpSuite::name),
+        "negotiated_srtp_suite": negotiated_srtp_suite,
+        "browser_role": arguments.role.as_str(),
         "ice_component": 1,
         "nominated_local": selected.local,
         "nominated_remote": selected.remote,
@@ -346,6 +413,16 @@ fn positive_result(
         "packets_received": call.media().packets_received(),
         "received_audio_peak": received_audio_peak,
     }))
+}
+
+fn negotiated_srtp_suite(call: &Call) -> &'static str {
+    match call.media().srtp_profile() {
+        Some(sipx_rtp::srtp::Profile::AesCm128HmacSha1_80) => "AES_CM_128_HMAC_SHA1_80",
+        Some(sipx_rtp::srtp::Profile::AeadAes128Gcm) => "AEAD_AES_128_GCM",
+        Some(sipx_rtp::srtp::Profile::AeadAes256Gcm) => "AEAD_AES_256_GCM",
+        Some(_) => "unknown",
+        None => "none",
+    }
 }
 
 #[cfg(test)]

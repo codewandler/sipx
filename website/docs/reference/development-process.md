@@ -139,10 +139,11 @@ The core rules sit underneath that automation:
 
 ## What this evidence does not prove
 
-sipx remains pre-1.0. Breaking API changes are still permitted before 1.0 and are recorded in the
-[changelog](https://github.com/codewandler/sipx/blob/main/CHANGELOG.md). The website is built from
-`main`, so it may describe work newer than the latest tag; install a named release when
-reproducibility matters.
+Supported Rust APIs and CLI contracts are frozen for compatible v1 evolution. The compatibility
+baseline rejects breaking Supported Rust changes, and an incompatible CLI change requires the next
+major version. Experimental roots remain unfrozen and may change without migration guidance. The
+website is built from `main`, so it may describe work newer than the latest tag; install a named
+release when reproducibility matters.
 
 A green gate proves only the observations it runs. It cannot prove that no unknown defect exists,
 that every possible deployment topology has been exercised, or that a story was correctly attached
@@ -154,6 +155,6 @@ condition named by its title. RFC coverage is not a maturity percentage either; 
 scope, role, and reachability, and partial support is not a fraction of complete support. The
 reports preserve those limits instead of compressing them into a reassuring number.
 
-The generated beta predicates and reproduced registry artifacts define release readiness. They do
-not promise a separate public announcement, and they are not an API-stability promise. Stable
-`1.0.0` remains a separate decision.
+The generated maturity predicates and reproduced registry artifacts define release readiness. They
+do not promise a separate public announcement; the API-stability promise is the distinct Supported
+v1 compatibility baseline.

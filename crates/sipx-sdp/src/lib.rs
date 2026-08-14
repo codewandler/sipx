@@ -14,18 +14,24 @@
 //!
 //! # Stability
 //!
-//! sipx is pre-1.0, so **neither word below means frozen**. `1.0.0` is what freezes an API, and its
-//! predicates are in `docs/roadmap.md`. Until then:
+//! The Supported Rust API is frozen for compatible v1 evolution. Existing Supported paths and
+//! signatures remain source-compatible throughout major version 1; compatible additions use the
+//! reservations documented on their types.
 //!
-//! - **Supported** — meant to be depended on. Breaking changes get a `CHANGELOG.md` entry saying what
-//!   to do instead. New enum variants and new struct fields may still appear in a minor release, so a
-//!   downstream `match` should carry a `_` arm.
-//! - **Experimental** — may change shape or be removed without a migration note. Depend on it only if
-//!   you are prepared to follow it.
+//! - **Supported** — covered by the v1 compatibility contract. A breaking change waits for the next
+//!   major version.
+//! - **Experimental** — remains unfrozen and may change shape or be removed without a migration
+//!   note. Depend on it only if you are prepared to follow it.
 //!
 //!
 //! **Supported.** This includes `with_dtls_srtp` and the ICE attribute helpers: `sipx-call`
 //! consumes both for explicit media policy in dial and answer roles (`M-27`, `M-28`).
+//!
+//! <!-- BEGIN sipx-api-classification -->
+//! **Experimental Rust API roots:**
+//!
+//! - None.
+//! <!-- END sipx-api-classification -->
 
 // This crate's inline test modules opt out of coverage instrumentation, so the
 // published figure measures the code rather than the tests measuring it. Never set outside

@@ -45,6 +45,13 @@ AEAD_SRTP_PROFILES = frozenset({"AEAD_AES_128_GCM", "AEAD_AES_256_GCM"})
 
 KNOWN_SRTP_PROFILES = COUNTER_MODE_SRTP_PROFILES | AEAD_SRTP_PROFILES
 
+#: Exact call-level requirements used by the two ordinary roles. Covering one key size by each
+#: role makes both KDFs independent-peer facts without changing the native peer's implementation.
+EXACT_AEAD_PROFILE_BY_ROLE = {
+    "browser-offerer": "AEAD_AES_128_GCM",
+    "browser-answerer": "AEAD_AES_256_GCM",
+}
+
 
 class ProofError(RuntimeError):
     """A harness or evidence boundary failed closed."""
@@ -203,6 +210,51 @@ def write_json_evidence(path: pathlib.Path, value: Any) -> None:
     path.write_bytes(encoded)
 
 
+def _file_sha256(path: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def validate_perturbation_manifest(value: Any) -> dict[str, Any]:
+    manifest = _mapping(value, "KDF perturbation build manifest")
+    require(
+        manifest.get("contract") == "sipx.browser-audio.kdf-perturbation.v1",
+        "KDF perturbation build contract is wrong",
+    )
+    require(
+        manifest.get("mutation") == "right-align-aead-master-salt-in-14-octet-x",
+        "KDF perturbation build names another mutation",
+    )
+    require(
+        manifest.get("source") == "crates/sipx-rtp/src/srtp/mod.rs",
+        "KDF perturbation build names another source",
+    )
+    hashes = []
+    for field in ("original_sha256", "perturbed_sha256", "binary_sha256"):
+        value = manifest.get(field)
+        require(
+            isinstance(value, str)
+            and len(value) == 64
+            and all(character in "0123456789abcdef" for character in value),
+            f"KDF perturbation {field} is not SHA-256",
+        )
+        hashes.append(value)
+    require(hashes[0] != hashes[1], "KDF perturbation changed no source bytes")
+    return manifest
+
+
+def verify_perturbed_build(binary: pathlib.Path, manifest_path: pathlib.Path) -> None:
+    manifest = validate_perturbation_manifest(load_json(manifest_path))
+    require(binary.is_file(), "perturbed-KDF proof endpoint is not a file")
+    require(
+        _file_sha256(binary) == manifest["binary_sha256"],
+        "perturbed-KDF proof endpoint differs from its build manifest",
+    )
+
+
 def unwrap_webdriver_value(value: Any) -> Any:
     if not isinstance(value, dict) or "value" not in value:
         return value
@@ -255,7 +307,9 @@ def _socket_address(value: Any, name: str) -> tuple[ipaddress.IPv4Address | ipad
     return address, port
 
 
-def validate_browser_result(value: Any, role: str, expected_pin: str) -> dict[str, Any]:
+def validate_browser_result(
+    value: Any, role: str, expected_pin: str, expected_profile: str | None = None
+) -> dict[str, Any]:
     result = _mapping(value, "browser result")
     require(result.get("contract") == CONTRACT, "browser result contract is missing or wrong")
     require(result.get("type") == "proof.result", "browser did not emit a terminal proof result")
@@ -274,6 +328,11 @@ def validate_browser_result(value: Any, role: str, expected_pin: str) -> dict[st
         security.get("srtp_profile") in KNOWN_SRTP_PROFILES,
         "the negotiated SRTP profile is not a name the registry carries",
     )
+    if expected_profile is not None:
+        require(
+            security.get("srtp_profile") == expected_profile,
+            f"{role} did not negotiate its exact SRTP suite {expected_profile}",
+        )
 
     # Which build agreed with us, from the driver rather than from the page under test. "A browser
     # interoperated" is not a fact anyone can check twice; "this browser at this revision
@@ -311,7 +370,9 @@ def validate_browser_result(value: Any, role: str, expected_pin: str) -> dict[st
     return result
 
 
-def validate_sipx_result(value: Any, role: str) -> dict[str, Any]:
+def validate_sipx_result(
+    value: Any, role: str, expected_profile: str | None = None
+) -> dict[str, Any]:
     result = _mapping(value, "sipx result")
     require(result.get("status") == "answered", "sipx did not report an answered call")
     require(result.get("media_profile") == "browser-audio", "sipx did not report browser-audio")
@@ -319,6 +380,19 @@ def validate_sipx_result(value: Any, role: str) -> dict[str, Any]:
     _positive_number(result.get("negotiated_payload_type"), "sipx Opus payload type")
     require(result.get("negotiated_clock_rate") == 48000, "sipx did not report a 48 kHz Opus clock")
     require(result.get("negotiated_keying") == "dtls-srtp", "sipx did not report DTLS-SRTP")
+    requested = result.get("requested_srtp_suite")
+    negotiated = result.get("negotiated_srtp_suite")
+    require(
+        requested == "any" or requested in KNOWN_SRTP_PROFILES,
+        "sipx exact SRTP suite requirement is absent or unknown",
+    )
+    require(
+        negotiated in KNOWN_SRTP_PROFILES,
+        "sipx negotiated SRTP suite is absent or unknown",
+    )
+    if expected_profile is not None:
+        require(requested == expected_profile, f"sipx did not require {expected_profile} for {role}")
+        require(negotiated == expected_profile, f"sipx did not key {expected_profile} for {role}")
     require(result.get("browser_role") == role, "sipx result names the wrong browser role")
     require(result.get("ice_component") == 1, "sipx selected another ICE component")
     require(bool(result.get("nominated_local")) and bool(result.get("nominated_remote")), "sipx nominated-pair evidence is absent")
@@ -437,14 +511,53 @@ def validate_negative(value: Any, expected: str, roles: dict[str, Any]) -> None:
         require(facts.get("ice_started") is False, "weaker-media negative started ICE")
         require(facts.get("dtls_state") in ("new", "not-started"), "weaker-media negative started DTLS")
         require(facts.get("fallback_attempted") is False, "weaker-media negative attempted fallback")
+    elif expected == "KdfPerturbation":
+        validate_perturbation_manifest(result.get("derivation_mutation"))
+        expected_profile = EXACT_AEAD_PROFILE_BY_ROLE[role]
+        require(facts.get("selected_pair") is True, "KDF perturbation selected no ICE pair")
+        require(facts.get("nominated") is True, "KDF perturbation nominated no ICE pair")
+        require(facts.get("dtls_state") == "connected", "KDF perturbation did not complete DTLS")
+        outbound = facts.get("outbound_rtp_attempts")
+        require(
+            type(outbound) in (int, float) and outbound > 0,
+            "KDF perturbation peer sent no RTP",
+        )
+        require(
+            sipx.get("requested_srtp_suite") == expected_profile,
+            "KDF perturbation did not require the exact AEAD suite",
+        )
+        require(
+            sipx.get("negotiated_srtp_suite") == expected_profile,
+            "KDF perturbation keyed another SRTP suite",
+        )
+        sent = sipx.get("packets_sent")
+        require(
+            type(sent) in (int, float) and sent > 0,
+            "KDF perturbation sent no SRTP",
+        )
+        received = sipx.get("packets_received")
+        require(
+            type(received) in (int, float) and received == 0,
+            "KDF perturbation accepted SRTP",
+        )
+        authentication_failures = sipx.get("srtp_authentication_failures")
+        require(
+            type(authentication_failures) in (int, float) and authentication_failures > 0,
+            "KDF perturbation produced no SRTP authentication failure",
+        )
 
 
 def validate_proof(directory: pathlib.Path, expected_pin: str) -> dict[str, Any]:
     roles: dict[str, Any] = {}
     for role in ROLES:
         role_dir = directory / role
-        browser = validate_browser_result(load_json(role_dir / "browser.json"), role, expected_pin)
-        sipx = validate_sipx_result(load_json(role_dir / "sipx.json"), role)
+        expected_profile = EXACT_AEAD_PROFILE_BY_ROLE[role]
+        browser = validate_browser_result(
+            load_json(role_dir / "browser.json"), role, expected_pin, expected_profile
+        )
+        sipx = validate_sipx_result(
+            load_json(role_dir / "sipx.json"), role, expected_profile
+        )
         cross_check_pair(browser, sipx)
         roles[role] = {"browser": browser, "sipx": sipx}
     compatibility_directory = directory / "unused-rtcp-candidate"
@@ -453,26 +566,17 @@ def validate_proof(directory: pathlib.Path, expected_pin: str) -> dict[str, Any]
         load_json(compatibility_directory / "sipx.json"),
         expected_pin,
     )
-    for name in ("FingerprintMismatch", "NoNominatedPair", "WeakerMedia"):
+    for name in ("FingerprintMismatch", "NoNominatedPair", "WeakerMedia", "KdfPerturbation"):
         validate_negative(load_json(directory / "negatives" / f"{name}.json"), name, roles)
 
-    # M-72. At least one role has to have keyed with AEAD-GCM, or this run proves nothing about
-    # the one SRTP parameter no published vector pins. A counter-mode run is not worthless — it is
-    # simply already pinned by RFC 3711 §B.3's vector, which sipx reproduces in-tree — so a proof
-    # that quietly became counter-mode-only would keep passing while the claim it carries evaporated.
-    #
-    # The witness is the browser-answerer role: sipx is the DTLS server there and picks its
-    # strongest offered profile, whereas in the offerer role the browser picks and picks counter
-    # mode. Neither side is asked to prefer anything for the test's benefit.
+    # M-72. The two roles above require one exact AEAD suite apiece, so neither a counter-mode
+    # fallback nor proving the 256-bit KDF twice can satisfy the evidence. This is the one SRTP
+    # parameter no published vector pins; the native peer derives independently in both roles.
     aead = {
         role: evidence["browser"]["security"]["srtp_profile"]
         for role, evidence in roles.items()
         if evidence["browser"]["security"]["srtp_profile"] in AEAD_SRTP_PROFILES
     }
-    require(
-        bool(aead),
-        "no role negotiated an AEAD-GCM profile, so the AEAD key derivation is unproven",
-    )
     witness = sorted(aead)[0]
     peer = roles[witness]["browser"]["peer"]
     return {
@@ -486,6 +590,13 @@ def validate_proof(directory: pathlib.Path, expected_pin: str) -> dict[str, Any]
             "role": witness,
             "srtp_profile": aead[witness],
             "peer": peer,
+            "witnesses": {
+                role: {
+                    "srtp_profile": profile,
+                    "peer": roles[role]["browser"]["peer"],
+                }
+                for role, profile in sorted(aead.items())
+            },
             "profiles_by_role": {
                 role: evidence["browser"]["security"]["srtp_profile"]
                 for role, evidence in roles.items()
@@ -658,17 +769,23 @@ def combine_negative(
     role: str,
     expected_pin: str,
     output: pathlib.Path,
+    perturbation_path: pathlib.Path | None = None,
 ) -> None:
+    expected_profile = EXACT_AEAD_PROFILE_BY_ROLE[role]
     browser_positive = validate_browser_result(
-        load_json(positive_directory / "browser.json"), role, expected_pin
+        load_json(positive_directory / "browser.json"), role, expected_pin, expected_profile
     )
-    sipx_positive = validate_sipx_result(load_json(positive_directory / "sipx.json"), role)
+    sipx_positive = validate_sipx_result(
+        load_json(positive_directory / "sipx.json"), role, expected_profile
+    )
     combined = {
         "positive_role": role,
         "positive_sha256": proof_digest(browser_positive, sipx_positive),
         "browser": load_json(browser_path),
         "sipx": load_json(sipx_path),
     }
+    if perturbation_path is not None:
+        combined["derivation_mutation"] = load_json(perturbation_path)
     validate_negative(combined, expected, {role: {"browser": browser_positive, "sipx": sipx_positive}})
     output.write_text(json.dumps(combined, separators=(",", ":")) + "\n", encoding="utf-8")
 
@@ -694,6 +811,10 @@ def main() -> int:
     wait = commands.add_parser("wait-webdriver")
     wait.add_argument("--url", required=True)
     wait.add_argument("--timeout", type=float, default=10)
+
+    perturbed = commands.add_parser("preflight-perturbed-build")
+    perturbed.add_argument("--binary", type=pathlib.Path, required=True)
+    perturbed.add_argument("--manifest", type=pathlib.Path, required=True)
 
     listening = commands.add_parser("wait-listening")
     listening.add_argument("--input", type=pathlib.Path, required=True)
@@ -727,7 +848,11 @@ def main() -> int:
     negative.add_argument("--config", type=pathlib.Path, required=True)
     negative.add_argument("--capabilities", type=pathlib.Path, required=True)
     negative.add_argument("--role", choices=ROLES, required=True)
-    negative.add_argument("--mutation", choices=("FingerprintMismatch", "NoNominatedPair", "WeakerMedia"), required=True)
+    negative.add_argument(
+        "--mutation",
+        choices=("FingerprintMismatch", "NoNominatedPair", "WeakerMedia", "KdfPerturbation"),
+        required=True,
+    )
     negative.add_argument("--pin", required=True)
     negative.add_argument("--output", type=pathlib.Path, required=True)
     negative.add_argument("--timeout", type=int, default=120)
@@ -740,10 +865,15 @@ def main() -> int:
     combine.add_argument("--positive-directory", type=pathlib.Path, required=True)
     combine.add_argument("--browser", type=pathlib.Path, required=True)
     combine.add_argument("--sipx", type=pathlib.Path, required=True)
-    combine.add_argument("--error", choices=("FingerprintMismatch", "NoNominatedPair", "WeakerMedia"), required=True)
+    combine.add_argument(
+        "--error",
+        choices=("FingerprintMismatch", "NoNominatedPair", "WeakerMedia", "KdfPerturbation"),
+        required=True,
+    )
     combine.add_argument("--role", choices=ROLES, required=True)
     combine.add_argument("--pin", required=True)
     combine.add_argument("--output", type=pathlib.Path, required=True)
+    combine.add_argument("--perturbation", type=pathlib.Path)
 
     bounded = commands.add_parser("bounded-run")
     bounded.add_argument("--stdout", type=pathlib.Path, required=True)
@@ -760,6 +890,8 @@ def main() -> int:
         preflight_wss(args.url, args.ca, args.pin, args.timeout)
     elif args.command == "wait-webdriver":
         wait_webdriver(args.url, args.timeout)
+    elif args.command == "preflight-perturbed-build":
+        verify_perturbed_build(args.binary, args.manifest)
     elif args.command == "wait-listening":
         print(wait_listening(args.input, args.timeout))
     elif args.command == "prepare-config":
@@ -779,7 +911,8 @@ def main() -> int:
             if isinstance(result, dict):
                 result["peer"] = driver.peer
             write_json_evidence(args.output, result)
-            validate_browser_result(result, args.role, args.pin)
+            expected_profile = None if args.mutation else EXACT_AEAD_PROFILE_BY_ROLE[args.role]
+            validate_browser_result(result, args.role, args.pin, expected_profile)
         finally:
             driver.close()
     elif args.command == "run-negative":
@@ -808,6 +941,7 @@ def main() -> int:
             args.role,
             args.pin,
             args.output,
+            args.perturbation,
         )
     elif args.command == "bounded-run":
         program = args.program[1:] if args.program[:1] == ["--"] else args.program

@@ -1,4 +1,4 @@
-name: Resume partial crates.io beta
+name: Resume partial release
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       failed_run_id:
-        description: Failed Publish crates.io beta Actions run ID
+        description: Failed Publish release Actions run ID
         required: true
         type: string
 
@@ -181,7 +181,7 @@ jobs:
           if run.get("status") != "completed" or run.get("conclusion") != "failure":
               problems.append("run is not a completed failed release")
 
-          release_jobs = [job for job in jobs if job.get("name") == "publish and verify prerelease"]
+          release_jobs = [job for job in jobs if job.get("name") == "publish and verify release"]
           if len(release_jobs) != 1:
               problems.append("run does not have exactly one release job")
           else:
@@ -210,9 +210,9 @@ jobs:
               if any(not isinstance(number, int) for number in numbers) or numbers != sorted(numbers):
                   problems.append("validation, gate, rehearsal and publication evidence is out of order")
 
-          prerelease_jobs = [job for job in jobs if job.get("name") == "publish or verify GitHub prerelease"]
-          if len(prerelease_jobs) != 1 or prerelease_jobs[0].get("conclusion") != "skipped":
-              problems.append("the failed run reached or omitted the GitHub prerelease job")
+          github_release_jobs = [job for job in jobs if job.get("name") == "publish or verify GitHub release"]
+          if len(github_release_jobs) != 1 or github_release_jobs[0].get("conclusion") != "skipped":
+              problems.append("the failed run reached or omitted the GitHub release job")
           if problems:
               raise SystemExit("failed release run is not authorized recovery evidence: " + "; ".join(problems))
           PY
@@ -325,7 +325,7 @@ jobs:
           echo "Pages run $run_id job $deployment_job is bound to $RELEASE_SHA"
 
   github_release:
-    name: publish or verify recovered GitHub prerelease
+    name: publish or verify recovered GitHub release
     needs: recover
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -345,7 +345,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Create or verify the recovered GitHub prerelease
+      - name: Create or verify the recovered GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -354,14 +354,20 @@ jobs:
           local_tag_object="$(git rev-parse "refs/tags/$RELEASE_TAG")"
           remote_tag_object="$(git ls-remote --refs --tags origin "refs/tags/$RELEASE_TAG" | awk 'NR == 1 { print $1 } NR > 1 { exit 2 }')"
           if [[ "$local_tag_object" != "$RELEASE_TAG_OBJECT" || "$remote_tag_object" != "$RELEASE_TAG_OBJECT" ]]; then
-            echo "release tag object moved before GitHub prerelease handling" >&2
+            echo "release tag object moved before GitHub release handling" >&2
             exit 1
+          fi
+          prerelease=false
+          release_flag=--latest
+          if [[ "$RELEASE_VERSION" == *-* ]]; then
+            prerelease=true
+            release_flag=--prerelease
           fi
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             record="$RUNNER_TEMP/sipx-existing-release.json"
             gh api -H 'Accept: application/vnd.github+json' \
               "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" >"$record"
-            python3 - "$record" "$RELEASE_NOTES" "$RELEASE_TAG" "$RELEASE_VERSION" "$RELEASE_SHA" <<'PY'
+            python3 - "$record" "$RELEASE_NOTES" "$RELEASE_TAG" "$RELEASE_VERSION" "$RELEASE_SHA" "$prerelease" <<'PY'
           import json
           import pathlib
           import sys
@@ -371,6 +377,7 @@ jobs:
           tag = sys.argv[3]
           version = sys.argv[4]
           sha = sys.argv[5]
+          prerelease = sys.argv[6] == "true"
           problems = []
           if record.get("tag_name") != tag:
               problems.append("tag differs")
@@ -378,18 +385,18 @@ jobs:
               problems.append("target differs")
           if record.get("name") != f"sipx {version}":
               problems.append("title differs")
-          if record.get("draft") is not False or record.get("prerelease") is not True:
-              problems.append("release is not a published prerelease")
+          if record.get("draft") is not False or record.get("prerelease") is not prerelease:
+              problems.append("release kind differs")
           if str(record.get("body", "")).strip() != notes:
               problems.append("reviewed notes differ")
           if problems:
-              raise SystemExit("existing GitHub Release is not the reviewed prerelease: " + ", ".join(problems))
+              raise SystemExit("existing GitHub Release is not the reviewed release: " + ", ".join(problems))
           PY
           else
             gh release create "$RELEASE_TAG" \
               --verify-tag \
               --target "$RELEASE_SHA" \
-              --prerelease \
+              "$release_flag" \
               --title "sipx $RELEASE_VERSION" \
               --notes-file "$RELEASE_NOTES"
           fi

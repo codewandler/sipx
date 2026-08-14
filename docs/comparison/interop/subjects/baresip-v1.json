@@ -1,0 +1,13 @@
+{
+  "schema": "sipx.comparison.interop.subject.v1",
+  "id": "baresip-v1",
+  "stack": "baresip",
+  "version": "v1.0.0",
+  "artifact": {
+    "kind": "oci-image",
+    "reference": "docker.io/holius/baresip@sha256:3f2deef4f8a03ca569c3f252b919c439b8b2015a0a68f5b2ddc22d3edd8e2da7",
+    "digest": "sha256:3f2deef4f8a03ca569c3f252b919c439b8b2015a0a68f5b2ddc22d3edd8e2da7",
+    "image_id": "sha256:a5cf7390285b4536b23064f08d1edc48899dc075c1c8b060fa6eeb38e6241524"
+  },
+  "reported_version_marker": "baresip v1.0.0"
+}

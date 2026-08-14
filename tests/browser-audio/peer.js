@@ -205,6 +205,9 @@
 
   function mutateSdp(sdp, mutation) {
     if (!mutation) return sdp;
+    // The KDF negative changes only sipx's proof build. Leaving the browser's SDP and crypto
+    // implementation untouched is what makes it an independent derivation witness.
+    if (mutation === "KdfPerturbation") return sdp;
     if (mutation === "UnusedRtcpCandidate") {
       const candidate = sdp.split(/\r?\n/).find((line) => /^a=candidate:\S+ 1 /i.test(line));
       if (!candidate) fail("browser SDP had no component-one candidate to extend");

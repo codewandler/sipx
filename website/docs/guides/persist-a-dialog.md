@@ -10,10 +10,10 @@ The result is deterministic, bounded, versioned bytes. It is deliberately not a 
 `Call`: an endpoint handle, socket, transaction, timer task, credential, private key, media key,
 entropy source, media frame, and process-local clock instant never enter the snapshot.
 
-The surface is Experimental while sipx is pre-1.0. The version-one format accepts ordinary
-non-ICE audio calls whose initial ACK and offer/answer exchange have settled and which have no live
-transfer usage. A call with pending work returns a typed refusal instead of writing an incomplete
-snapshot.
+The surface remains Experimental and unfrozen during sipx v1. The version-one format accepts
+ordinary non-ICE audio calls whose initial ACK and offer/answer exchange have settled and which
+have no live transfer usage. A call with pending work returns a typed refusal instead of writing
+an incomplete snapshot.
 
 ## Capture and store
 

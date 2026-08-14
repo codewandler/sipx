@@ -276,7 +276,7 @@ async fn two_calls_bridge_and_pass_audio() {
         mut left,
         mut right,
         bob,
-    } = parties().await;
+    } = Box::pin(parties()).await;
 
     let bridge = CallBridge::connect(&mut left, &mut right);
     assert!(
@@ -312,7 +312,7 @@ async fn a_keypress_is_delivered_to_the_host_by_default() {
         mut left,
         mut right,
         bob,
-    } = parties().await;
+    } = Box::pin(parties()).await;
 
     let bridge = CallBridge::connect(&mut left, &mut right);
     assert_eq!(bridge.dtmf(), DtmfBridging::Deliver);
@@ -345,7 +345,7 @@ async fn a_keypress_passes_through_when_the_bridge_says_so() {
         mut left,
         mut right,
         bob,
-    } = parties().await;
+    } = Box::pin(parties()).await;
 
     let bridge = CallBridge::connect_with(
         &mut left,
@@ -372,7 +372,7 @@ async fn unbridging_returns_both_calls_to_independent_operation() {
         mut left,
         mut right,
         bob,
-    } = parties().await;
+    } = Box::pin(parties()).await;
 
     let mut left_events = left.events().expect("one receiver");
     let mut right_events = right.events().expect("one receiver");
@@ -431,7 +431,7 @@ async fn ending_one_call_ends_the_bridge_on_the_other_stream() {
         mut left,
         mut right,
         bob: _bob,
-    } = parties().await;
+    } = Box::pin(parties()).await;
 
     let mut right_events = right.events().expect("one receiver");
     let bridge = CallBridge::connect(&mut left, &mut right);
@@ -463,7 +463,7 @@ async fn the_ending_call_stream_still_ends_with_ended() {
         mut left,
         mut right,
         bob: _bob,
-    } = parties().await;
+    } = Box::pin(parties()).await;
 
     let mut left_events = left.events().expect("one receiver");
     let _bridge = CallBridge::connect(&mut left, &mut right);
@@ -499,7 +499,7 @@ async fn calls_join_and_leave_the_conference() {
         mut left,
         mut right,
         bob,
-    } = parties().await;
+    } = Box::pin(parties()).await;
 
     let conference = CallConference::narrowband().expect("a narrowband conference starts");
     assert!(conference.is_empty().await);

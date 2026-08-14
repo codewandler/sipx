@@ -153,6 +153,44 @@ also requires both files to pin the same source revision. The independent `stack
 sets `capability_inventory: true`; that marker requires both files, and the checker refuses a dataset
 with no marked subject, so deleting the ledger and its ratchet together cannot erase the inventory.
 
+### `interop/`: independently derived wire evidence
+
+Interop is a property of one execution between two independently implemented endpoints. It is not
+an observation read from one subject's source and it is not a comparative load result, so it gets a
+third, closed evidence shape rather than being squeezed into either registry.
+
+`interop/dataset.json` names each case, its comparison subject, a subject descriptor, one retained
+run directory and one bounded reproduction command. A subject descriptor under `interop/subjects/`
+pins an OCI artifact by full `sha256:` digest and records the version marker the running artifact
+prints. It does not rely on a mutable tag. A run manifest binds the subject, protocol profile,
+normal and deliberately perturbed proof binaries, relevant sipx source bytes, adapter and peer
+configuration, positive result records, peer logs and negative result records by SHA-256.
+
+The first contract is deliberately narrow: exact-suite AEAD SRTP over RFC 4568 SDES. A conforming
+run carries **exactly** `AEAD_AES_128_GCM` and `AEAD_AES_256_GCM` positive cases. Each must state
+SDES, encrypted media, the corresponding installed profile, outbound and accepted packets,
+non-silent returned audio, a bit-exact echoed span and zero SRTP unprotect failures. The independent
+peer log must print the same suite, establish inbound RTP, report non-zero traffic in both
+directions and report zero media errors. The negative mutates only the AEAD master-salt alignment in
+an owned disposable source copy; it must still negotiate an exact AEAD suite, send media, accept no
+packet, expose no audio and record authentication failures at both implementations. That mutation
+is tied to different original and perturbed source hashes and a separate binary hash.
+
+The checker reads all of those retained files **offline**. Ordinary
+`scripts/comparison-report.py --check` never starts a container, resolves a registry name or runs
+the proof. Refresh is explicit: the case's `reproduce` path must remain inside `docs/comparison/`
+and executable. That command pins the image by digest, uses loopback-only addresses, creates fresh
+TLS material below this repository's ignored `target/`, bounds builds and calls, owns container and
+process-group cleanup, writes sanitized logs, and then seals the run. Private keys, build trees and
+disposable mutated source never enter the registry.
+
+The schema is closed at every level. Unknown keys fail; subject and case identifiers must resolve;
+the run and reproduction paths cannot escape `docs/comparison/interop/`; every required evidence
+file must appear exactly once in the manifest hash map; every hash is recomputed; current source
+bytes must still match the run; positive suites cannot be duplicated or omitted; and the negative's
+recorded rejection count must equal the independent log. A run ages under the same 180-day wall as
+the other comparison evidence.
+
 ### The confidence ladder
 
 | Tier | Means | Who may hold it |
@@ -242,9 +280,10 @@ it to smooth the cliff would be a lie told to a checker.
 tier or removal of the row, because both change what the published page says.
 
 It deliberately does **not** verify that an `assessed` rationale is fair, or that the evidence a
-row cites has anything to do with the question its dimension asks. Only a reader can. Nor is it an
-interop result: interop is a property of a test run against another implementation, not of a row in
-a table, and `tests/interop/` is where that claim lives.
+row cites has anything to do with the question its dimension asks. Only a reader can. An
+observation row is not an interop result: interop is a property of a retained test run against an
+independent implementation, and the separately checked `interop/` registry is where that claim
+lives.
 
 `scripts/test-comparison-report.py` tests the checker itself.
 

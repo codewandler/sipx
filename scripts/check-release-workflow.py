@@ -549,7 +549,14 @@ def resume_workflow_problems(text: str) -> list[str]:
         ("failed-run evidence is not checked in step order", r"ordered\s*=.*?Validate the immutable annotated tag.*?Run the complete release gate.*?Rehearse the locked registry packages.*?Publish dependency-ready frontiers under a finite bound.*?numbers.*?sorted\(numbers\)"),
         ("recovery accepts downstream consumer evidence from the failed run", r"Verify the exact registry consumer and installed CLI[\"']:\s*[\"']skipped"),
         ("recovery accepts downstream Pages evidence from the failed run", r"Verify Pages deployment from the release commit[\"']:\s*[\"']skipped"),
-        ("recovery accepts an earlier GitHub prerelease", r"publish or verify GitHub prerelease.*?conclusion.*?skipped"),
+        (
+            "recovery does not require exactly one current ordinary release job",
+            r"release_jobs\s*=\s*\[job for job in jobs if job\.get\([\"']name[\"']\)\s*==\s*[\"']publish and verify release[\"']\].*?len\(release_jobs\)\s*!=\s*1",
+        ),
+        (
+            "recovery accepts an earlier or missing GitHub release job",
+            r"github_release_jobs\s*=\s*\[job for job in jobs if job\.get\([\"']name[\"']\)\s*==\s*[\"']publish or verify GitHub release[\"']\].*?len\(github_release_jobs\)\s*!=\s*1.*?conclusion.*?skipped",
+        ),
         ("Cargo secret does not use the repository convention in recovery", r"CARGO_REGISTRY_TOKEN:\s*\$\{\{\s*secrets\.CARGO_REGISTRY_TOKEN\s*\}\}"),
         ("empty Cargo secret is not refused in recovery", r"-z [\"']?\$CARGO_REGISTRY_TOKEN"),
         ("recovery publication does not use the fixed controller", r"working-directory:\s*controller\s*\n\s+run:\s*\|.*?\./scripts/release\.py"),
@@ -575,19 +582,31 @@ def resume_workflow_problems(text: str) -> list[str]:
         ("recovery Pages evidence omits the deployment job", r"deploy docs site.*?conclusion == [\"']success[\"']"),
         ("recovery public guide is not probed", r"https://codewandler\.github\.io/sipx/docs/getting-started"),
         ("recovery public API is not probed", r"https://codewandler\.github\.io/sipx/api/sipx_call/index\.html"),
-        ("recovery GitHub prerelease is not dependent", r"\n\s*github_release:\s*\n.*?needs:\s*recover"),
-        ("recovery GitHub prerelease lacks least-privilege write authority", r"\n\s*github_release:\s*\n.*?permissions:\s*\n\s+contents:\s*write\s*\n\s+env:"),
-        ("recovery prerelease checkout cannot prove the annotated tag object", r"Check out the recovered release record.*?fetch-depth:\s*0.*?persist-credentials:\s*false"),
-        ("recovery write token is not scoped to prerelease step", r"Create or verify the recovered GitHub prerelease\s*\n\s+env:\s*\n\s+GH_TOKEN:\s*\$\{\{\s*github\.token\s*\}\}"),
-        ("recovery GitHub prerelease does not verify the tag", r"gh release create .*?--verify-tag"),
-        ("recovery GitHub Release is not a prerelease", r"gh release create .*?--prerelease"),
-        ("recovery GitHub prerelease is not bound to release SHA", r"gh release create .*?--target [\"']\$RELEASE_SHA[\"']"),
+        ("recovery GitHub release is not dependent", r"\n\s*github_release:\s*\n.*?needs:\s*recover"),
+        ("recovery GitHub release lacks least-privilege write authority", r"\n\s*github_release:\s*\n.*?permissions:\s*\n\s+contents:\s*write\s*\n\s+env:"),
+        ("recovery release checkout cannot prove the annotated tag object", r"Check out the recovered release record.*?fetch-depth:\s*0.*?persist-credentials:\s*false"),
+        ("recovery write token is not scoped to release step", r"Create or verify the recovered GitHub release\s*\n\s+env:\s*\n\s+GH_TOKEN:\s*\$\{\{\s*github\.token\s*\}\}"),
+        ("recovery GitHub release does not verify the tag", r"gh release create .*?--verify-tag"),
         (
-            "recovery does not recheck the tag object before GitHub prerelease handling",
-            r"Create or verify the recovered GitHub prerelease.*?local_tag_object=.*?rev-parse .*?refs/tags/\$RELEASE_TAG.*?remote_tag_object=.*?ls-remote --refs --tags origin .*?refs/tags/\$RELEASE_TAG.*?local_tag_object.*?RELEASE_TAG_OBJECT.*?remote_tag_object.*?RELEASE_TAG_OBJECT.*?gh release view",
+            "recovered stable and prerelease kinds are not selected from the version",
+            r"RELEASE_VERSION[\"']? == \*-\*.*?prerelease=true.*?release_flag=--prerelease",
         ),
-        ("recovery GitHub prerelease does not consume reviewed notes", r"gh release create .*?--notes-file [\"']\$RELEASE_NOTES[\"']"),
-        ("recovery does not verify an existing prerelease", r"gh release view .*?record\.get\([\"']prerelease[\"']\).*?reviewed notes differ"),
+        ("stable recovered GitHub Release is not marked latest", r"release_flag=--latest"),
+        (
+            "existing recovered GitHub release kind is not verified",
+            r"record\.get\([\"']prerelease[\"']\) is not prerelease",
+        ),
+        (
+            "recovery GitHub release does not use the version-selected kind",
+            r"gh release create .*?[\"']\$release_flag[\"']",
+        ),
+        ("recovery GitHub release is not bound to release SHA", r"gh release create .*?--target [\"']\$RELEASE_SHA[\"']"),
+        (
+            "recovery does not recheck the tag object before GitHub release handling",
+            r"Create or verify the recovered GitHub release.*?local_tag_object=.*?rev-parse .*?refs/tags/\$RELEASE_TAG.*?remote_tag_object=.*?ls-remote --refs --tags origin .*?refs/tags/\$RELEASE_TAG.*?local_tag_object.*?RELEASE_TAG_OBJECT.*?remote_tag_object.*?RELEASE_TAG_OBJECT.*?gh release view",
+        ),
+        ("recovery GitHub release does not consume reviewed notes", r"gh release create .*?--notes-file [\"']\$RELEASE_NOTES[\"']"),
+        ("recovery does not verify an existing release", r"gh release view .*?record\.get\([\"']prerelease[\"']\).*?reviewed notes differ"),
     )
     for label, pattern in checks:
         required(text, label, pattern, problems)
@@ -617,7 +636,7 @@ def resume_workflow_problems(text: str) -> list[str]:
         "- name: Resume dependency-ready frontiers",
         "- name: Verify the exact registry consumer",
         "- name: Verify Pages deployment",
-        "- name: Create or verify the recovered GitHub prerelease",
+        "- name: Create or verify the recovered GitHub release",
     )
     positions = [text.find(marker) for marker in ordered]
     if all(position >= 0 for position in positions) and positions != sorted(positions):
@@ -632,7 +651,7 @@ def specification_problems(text: str) -> list[str]:
     problems: list[str] = []
     required(
         text,
-        "specification does not separate the GitHub prerelease from broader publicity",
+        "specification does not separate the GitHub Release from broader publicity",
         r"MUST NOT post broader publicity",
         problems,
     )

@@ -34,7 +34,7 @@ registry probe or write.
 The Cargo credential is the environment or repository secret named `CARGO_REGISTRY_TOKEN`, exposed
 only to the presence check and publication step. An empty value MUST fail before the gate or any
 registry probe. The gate/publication job has read-only repository contents permission and does not
-persist the checkout credential. A dependent GitHub-prerelease job alone has repository contents
+persist the checkout credential. A dependent GitHub-release job alone has repository contents
 write permission; its checkout also does not persist a credential, and its GitHub token is exposed
 only to the create-or-verify step. No credential is printed.
 
@@ -158,6 +158,15 @@ reviewed body. Existing asset bytes MUST be compared, missing assets MAY be adde
 asset may be overwritten or deleted. It MUST NOT publish a second release or silently rewrite the
 first one. Broader publicity remains hypothetical and requires separate explicit authorization;
 the workflow MUST NOT post broader publicity.
+
+The public entry points built for the same commit MUST describe that version's release kind and API
+promise. A version with a prerelease suffix identifies itself as the current public prerelease and
+states that Supported APIs are not yet frozen. A stable version identifies itself as the current
+stable release and states that Supported Rust APIs remain source-compatible throughout the v1
+line. Both kinds retain the Experimental change policy and the shared adoption and capability
+boundaries. The synchronization checker MUST derive which requirement set applies from the
+workspace version; carrying both statements or accepting prerelease wording for stable is not a
+substitute.
 
 ## 6. Static vectors
 

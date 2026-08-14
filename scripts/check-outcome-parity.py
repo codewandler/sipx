@@ -109,19 +109,32 @@ PLAUSIBLE_OUTCOMES = 6
 #: rather than by command: these are properties of the *fact* a field reports, and a fact that
 #: only exists on one kind of ending exists that way wherever it is reported.
 #:
-#: Nothing about identity belongs here. `aor`, `peer`, `caller` and their kind name *which* thing
-#: a record is about, are known before the exchange begins, and are therefore reportable whatever
-#: happened — which is the whole of `P-28`.
+#: Nothing about the command's subject identity belongs here. `aor`, `peer`, `caller` and their kind
+#: name *which* thing a record is about, are known before the exchange begins, and are therefore
+#: reportable whatever happened — which is the whole of `P-28`. An optional subordinate object is
+#: different: `flow_id` names an Outbound flow that an ordinary registration never creates.
 OUTCOME_SPECIFIC: dict[str, str] = {
     "error": "what went wrong exists only where something did; a successful record carrying an "
     "empty `error` would be read as a failure with no message",
     "expires": "the lease a registrar granted, so it exists only where a registrar answered",
     "refresh_in": "derived from the granted lease, and absent for the same reason",
+    "flow_id": "identifies an optional Outbound flow; an ordinary registration has no flow to "
+    "number",
+    "keepalive": "selected for an Outbound flow; an ordinary registration has no flow whose "
+    "keep-alive kind it could report",
+    "retry_in": "the backoff scheduled by a flow-local failure; outcomes that did not schedule "
+    "flow recovery have no retry interval",
     "registration_limit_ms": "the deadline is reported by the record that hit it; on every other "
     "ending the limit was not what decided the outcome",
     "registration_elapsed_ms": "measured against that deadline, and reported beside it",
-    "cleanup_ms": "how long the join took after the deadline expired, which only the timeout "
-    "record performs and can therefore measure",
+    "cleanup_ms": "how long a terminal join took, reported only where an attempt timed out or an "
+    "Outbound lifetime owner was cancelled and therefore performed that measured cleanup",
+    "flow_tasks": "the number of tasks in an Outbound owner's terminal cleanup; progress and "
+    "ordinary registration outcomes have no such cleanup summary",
+    "flow_tasks_joined": "the joined subset of an Outbound owner's terminal cleanup; it exists "
+    "only after that owner has stopped",
+    "flow_events_dropped": "events discarded while an Outbound owner is terminally cleaned up; "
+    "outcomes without that owner have no flow event queue",
     "ended_by": "the cause a *call* ended for, which a record written before the call was ever "
     "established has nothing to name",
     "duration_ms": "how long a call ran, so it exists only where one ran",

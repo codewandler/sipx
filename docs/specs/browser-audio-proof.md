@@ -49,6 +49,7 @@ The runner executes these cases serially:
 | `browser-offerer` | create and send the INVITE offer; apply the answer; ACK; exchange media; BYE | listen on WSS, answer, report its selected path |
 | `browser-answerer` | accept INVITE; apply offer; create/send answer; exchange media; accept or send BYE | place the WSS call, report its selected path |
 | `unused-rtcp-candidate` | create the offer, append exactly one bounded component-2 host fallback derived from its first component-1 host candidate, then complete the ordinary offerer lifecycle | answer with mux, discard the fallback before ICE, and report its selected path |
+| `KdfPerturbation` | answer the ordinary exact-suite call with an unchanged native crypto implementation, then report terminal media statistics | use the disposable-source proof endpoint from §5, prove connected DTLS followed by SRTP authentication failure, and report its ingress counters |
 
 The driver supplies one bounded JSON configuration and receives one terminal object with
 `contract: "sipx.browser-audio.v1"`, a `role`, and a stable `type`. The terminal browser result has:
@@ -96,15 +97,16 @@ The overall proof succeeds only after both ordinary roles and the unused-candida
 case satisfy the list. Process exit without all facts is failure. A terminal result from only one
 role, or compatibility evidence not containing both offered components, is failure.
 
-**At least one role must have negotiated an AEAD-GCM profile** (`M-72`). RFC 7714 publishes no
-key-derivation vector, so the placement of its 96-bit master salt in the PRF input block rests on a
-reading of the spec; two sipx endpoints sharing a wrong reading interoperate with each other and
-with nobody else, and every round-trip test in the repository still passes. DTLS-SRTP hands both
-sides only a master key and salt, so each derives its own session keys — which makes this harness
-the one place that contradiction can surface. A run that quietly became counter-mode-only would
-keep passing while that claim evaporated, so it is refused instead. The run records the witness
-role, the profile, and the peer revision under `aead_key_derivation`; `docs/specs/srtp.md` §12.10
-holds the result and the combinations it leaves open.
+**Each ordinary role requires one exact AEAD-GCM profile** (`M-72`): `browser-offerer` requires
+`AEAD_AES_128_GCM` and `browser-answerer` requires `AEAD_AES_256_GCM`. The browser transport
+statistics, sipx call policy and installed sipx SRTP context MUST all name that role's profile. RFC
+7714 publishes no key-derivation vector, so the placement of its 96-bit master salt in the PRF
+input block rests on a reading of the spec; two sipx endpoints sharing a wrong reading interoperate
+with each other and with nobody else. DTLS-SRTP hands both sides only a master key and salt, so each
+derives its own session keys. A run that fell back to counter mode, or proved one AEAD key size
+twice, is refused. The run records both witnesses and the independently reported peer revision
+under `aead_key_derivation`; `docs/specs/srtp.md` §12.10 holds the result and the SDES combinations
+it leaves open.
 
 ## 5. Negative non-vacuity
 
@@ -127,6 +129,19 @@ was selected or nominated, fail as
 must show that no fallback was attempted. A peer that could not
 complete the paired positive makes the negative vacuous and therefore red.
 
+`KdfPerturbation` is paired with the exact `AEAD_AES_256_GCM` browser-answerer positive. The
+published crate contains no selectable broken-crypto branch. A build helper instead copies the
+source into an owned disposable directory, verifies and replaces one exact KDF fragment in that
+copy, and right-aligns the 12-octet AEAD salt in RFC 3711's 14-octet `x` value. It records the
+original source, changed source and executable SHA-256 values, and the runner verifies the binary
+against that manifest before admitting any role. The copied source is removed only after the
+bounded build process group has exited and been reaped.
+
+The KDF negative MUST select and nominate an ICE pair, complete DTLS under the exact suite, and
+observe positive outbound SRTP counts at both peers. It MUST then observe zero accepted RTP at both
+peers and a positive sipx SRTP-authentication-failure count. A handshake failure, a silent peer, a
+different profile, accepted media, an unbound executable, or merely logging a mismatch is failure.
+
 ## 6. Bounds and cleanup
 
 One shell process owns the complete invocation. WebDriver, each sipx role command and any helper are
@@ -139,8 +154,9 @@ path:
 4. send `KILL` to the groups still alive; and
 5. wait for every recorded leader before returning.
 
-The complete proof is bounded at five minutes; one role at two minutes; WebDriver readiness at ten
-seconds; browser setup, ICE, DTLS and media evidence at the smaller bounds owned by their specs.
+The disposable mutation build is bounded at five minutes and owns a separate process group. The
+complete runtime proof is bounded at five minutes; one role at two minutes; WebDriver readiness at
+ten seconds; browser setup, ICE, DTLS and media evidence at the smaller bounds owned by their specs.
 After the sipx role reports its WSS listener, its first role-specific browser method is a causal
 readiness event: the role waits for that method without adding a separate first-method deadline;
 the sipx command's enclosing 90-second operation bound is its sole product-side bound. A timeout is
@@ -148,8 +164,9 @@ failure and names the owning phase. No fixed sleep stands in for readiness: poll
 declared endpoint/event and the overall deadline bounds failure.
 
 Each terminal object, WebDriver response and process output is capped at 1 MiB. Candidate and pair
-identifiers are capped at 256 characters and retained browser errors at 4,096 characters. Cleanup runs on success and every
-failure, including malformed evidence and an interrupted shell. The cancellation self-test waits
+identifiers are capped at 256 characters and retained browser errors at 4,096 characters. Cleanup
+runs on success and every failure, including malformed evidence and an interrupted shell. The
+cancellation self-test waits
 for a two-PID readiness record before interrupting the outer owner, then proves both the admitted
 leader and its child disappear. A separate complete-proof timeout test asserts the bound and its
 diagnostic without assuming that a role was admitted before that outer deadline.
@@ -157,8 +174,8 @@ diagnostic without assuming that a role was admitted before that outer deadline.
 ## 7. CI and harness self-test
 
 The real proof job must install or discover a compatible headless browser/WebDriver, issue the WSS
-fixture identity, and run both roles. Until the M-49/M-50 product commands exist, CI runs only the
-harness self-test and does not publish a compatibility result.
+fixture identity, build the disposable mutation witness, and run both roles plus every negative.
+An unavailable native runtime is a red environment, never a skip.
 
 The self-test reverses the harness's own trust boundaries with fixture processes:
 
@@ -167,9 +184,7 @@ The self-test reverses the harness's own trust boundaries with fixture processes
 - malformed, partial and oversized JSON prove structured-fact assertions fail closed;
 - a one-role result proves both-role completeness is required, and missing or malformed
   unused-candidate evidence proves the compatibility case cannot be inferred from an ordinary run;
-- each negative without its paired positive proves non-vacuity is enforced; and
+- each negative without its paired positive proves non-vacuity is enforced;
+- a build timeout proves the mutation builder terminates and reaps its whole process group, while
+  source and executable hashes prove the negative ran the audited disposable mutation; and
 - a pin mismatch proves no page or sipx role starts after identity preflight fails.
-
-When real role commands land, the CI job replaces the infrastructure-only invocation with the real
-two-role proof and the gate contract names that job explicitly. Until then, no generated report or
-public page may say the browser-audio acceptance positive passed.

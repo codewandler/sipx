@@ -53,6 +53,9 @@ jobs:
       # The documentation guides include these files verbatim. A sample that no longer compiles
       # is worse than no sample: it is read as working code.
       - run: cargo build --workspace --all-features --examples
+      # A-41: compile the public endpoint path from a registry-shaped manifest, then require the
+      # former answer asymmetry and lower-layer TURN dependency to remain compile failures.
+      - run: ./scripts/check-v1-endpoint-consumer.py
       # P-13: run the candidate command's actual help and compare it, plus every versioned CLI JSON
       # producer, with the public reference. A parsed Rust help constant would miss dispatch/build
       # defects and is deliberately not substituted here.
@@ -63,6 +66,13 @@ jobs:
       # C-5's end-to-end proof: the app contract interpreter driving a real call with no host,
       # asserted on the trace the example prints. Not a `#[test]`, so nothing else runs it.
       - run: bash crates/sipx-app-protocol/tests/canned_program.sh
+      # X-149: dependencies are already present from the stable workspace build above. Switch only
+      # for rustdoc JSON, whose unstable schema is pinned by docs/api/toolchain.toml; both checks
+      # themselves stay locked and offline, and the package proof compiles extracted archives.
+      - uses: dtolnay/rust-toolchain@nightly-2026-07-28
+      - run: python3 scripts/test-api-compat.py
+      - run: ./scripts/check-api-compat.py --check
+      - run: ./scripts/check-packaged-endpoint-consumer.py --check
 
   msrv:
     name: msrv
@@ -159,10 +169,16 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libopus-dev libssl-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build -p sipx-call --example browser_audio_proof --features opus,dtls
-      # M-51: native browser APIs in both SIP roles, non-silent Opus both ways, and the three
-      # browser-driven fingerprint/nomination/downgrade negatives. The runner image inventories
-      # its matched browser and WebDriver; an unavailable one is a red environment, never a skip.
+      - run: |
+          cargo build -p sipx-call --example browser_audio_proof --features opus,dtls
+          ./tests/browser-audio/build-perturbed-kdf.py \
+            --work "$RUNNER_TEMP/sipx-browser-audio-kdf-source" \
+            --target "${CARGO_TARGET_DIR:-target}/browser-audio-kdf-perturbed" \
+            --build-timeout 300
+      # M-51/M-72: native browser APIs in both SIP roles, non-silent Opus under both exact AEAD
+      # suites, the three browser-driven profile negatives, and one proof-only perturbed-KDF
+      # media-authentication negative. An unavailable native peer is a red environment, never a
+      # skip.
       - run: ./tests/browser-audio/ci.sh
       - uses: actions/upload-artifact@v4
         if: always()

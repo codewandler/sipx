@@ -285,8 +285,8 @@ impl Actor {
         // No answer budget here: each candidate is funded below from what the frame's budget has
         // left when it is tried, so a name with several addresses cannot spend the frame's
         // deadline once per address.
-        let mut options =
-            sipx_call::DialOptions::new(from.clone(), media_address).with_media_policy(self.policy);
+        let mut options = sipx_call::DialOptions::new(from.clone(), media_address)
+            .with_media_policy(self.policy.clone());
         for header in self.headers.iter().cloned() {
             options = options.with_header(header);
         }
@@ -350,10 +350,14 @@ impl Actor {
         } else {
             self.handle.local_addr().ip()
         };
-        let mut call =
-            sipx_call::answer_with_policy(&self.handle, &incoming, media_address, self.policy)
-                .await
-                .map_err(|error| error.to_string())?;
+        let mut call = sipx_call::answer_with_policy(
+            &self.handle,
+            &incoming,
+            media_address,
+            self.policy.clone(),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
         self.events = call.events();
         self.snapshot.state = CallState::Answered;
         self.call = Some(call);

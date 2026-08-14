@@ -12,26 +12,15 @@ cannot fall behind the way a second hand-written one here would.
 
 ## Status
 
-_As of 2026-08-08:_ **`1.0.0-rc.5` is the current public prerelease; beta.2 through beta.7, `rc.2`,
-`rc.3` and `rc.4` remain immutable.** The fifth candidate adds deterministic call-audio analysis —
-voice activity and signal metrics as typed call events, loading no speech model — the asynchronous
-driver and privacy boundary for the speech contract, the sans-I/O session kernel exported to
-WebAssembly with identical wire bytes on both targets, and RFC 7092 §3.1.3 signalling-only dialog
-coupling. Video was considered and **not admitted**, with the reversal conditions recorded rather
-than the question left open. Stable `1.0.0` remains a separate promotion: independent application
-use is still missing and is not inferred from repository evidence.
-
-_As of 2026-08-08:_ **`1.0.0-rc.3` is the current public prerelease; beta.2 through beta.7 and
-`rc.2` remain immutable.** The second release candidate answers two independent external sweeps of
-the published `rc.2` artifacts — twenty-five findings across call lifecycle, endpoint reachability,
-timeout honesty, refusal signalling, automation contracts and published onboarding — and adds
-bounded SIP endpoint resolution, G.722, a typed CLI parser, supervisor-termination handling and the
-six-module call split, which moves no public path. Local speech and call-audio analysis are
-specified and deliberately unimplemented. Both endpoint-responder directions were re-measured under
-the current contract after a schema change invalidated the retained pair; their intervals still
-overlap at the tested ceiling, so the comparison stays inconclusive rather than a ranking. Stable
-`1.0.0` remains a separate promotion: independent application use is still missing and is not
-inferred from repository evidence.
+_As of 2026-08-14:_ **stable `1.0.0` is the release candidate being finalized; `1.0.0-rc.23`
+remains the current published prerelease and every earlier tag remains immutable.** The bounded v1
+endpoint-library content gate is complete: Outbound flow ownership, configured TURN relay,
+generated ICE `remote-candidates`, independently checked AEAD key derivation, one symmetric
+Supported call configuration and a mechanical Supported-API compatibility baseline passed their
+integrated gate. A separately governed private downstream product supplies the remaining adoption
+evidence without making its identity or proprietary details public. The tree is not yet a published
+stable release: final synchronization, one stable gate, exact-SHA CI, tagging and protected
+publication remain separate steps.
 
 _As of 2026-08-05:_ **`1.0.0-rc.2` was the first published release candidate.** It combined the
 post-beta.7 transport fallback and drain, application-owned observability, the explicit PCM/L16
@@ -166,8 +155,9 @@ evidence and the completed M15 specification gate; the remaining M15 through M18
   - **A nominated pair where symmetric RTP cannot reach** — `M-27`'s
     `a_call_uses_a_nominated_pair_when_both_host_candidates_are_silent`, which already held and is
     untouched by this story.
-  - **`M-16`'s open tracker is not M10's status.** It stays open for `M-24`'s relayed candidate,
-    which belongs to the ICE epic and to no milestone; reading the tracker as the milestone is the
+  - **`M-16`'s tracker is not M10's status.** It closed later, after `M-24`'s relayed candidate and
+    the remaining RFC 8839 offer evidence landed in the v1 content wave. Those belong to the ICE
+    epic and to no M10 milestone; reading the tracker's later closure as M10's delivery date is the
     substitution [the M10 section below](#m10--reachable) exists to refuse.
 - **M12 — Provable.** What lets someone outside the project check the claims rather than take them:
   the whole RFC 5118 corpus classified and green and now tamper-evident (`X-16`, `S-31`, `X-56`), two
@@ -448,8 +438,8 @@ the epic that owns it. **The second reading governs** (`X-50`), on three grounds
 work belonging to an epic and to no milestone is a shape this file already carries, in the epics
 below and in [After M12](#after-m12) — and it lands in whichever milestone someone asks for it in.
 What it buys is exactly the case the clause above excludes: both ends behind symmetric NAT, where no
-candidate type but a relayed one reaches. Until it lands, sipx's ICE is host and server-reflexive,
-and the [compliance table](compliance.md) says so — 8445 and 8839 are `partial`.
+candidate type but a relayed one reaches. It landed later as part of the v1 endpoint content wave;
+that later delivery widens reachability without changing what the already-delivered M10 required.
 
 **Where M10 stands, 2026-07-31.** **Delivered.** All three clauses are now demonstrated by a test
 written as the clause is written, and the milestone is recorded in [Delivered](#delivered) against
@@ -470,10 +460,11 @@ those three tests rather than against the statuses of the stories that built the
   carries `T-21`'s ordering through to the answered call and the audio on it. `T-21`'s
   `a_push_wakes_a_client_that_refreshes_its_binding_before_the_invite` proved §4.1.3's order and
   stopped at the INVITE, which was its whole Acceptance and is not reopened either.
-- **ICE** — `M-19`…`M-23` and `M-27`, done; `M-24` out of scope per above. Demonstrated in full by
-  the test named in ground 1. The table's `M-16` row is the epic's tracker, and a tracker stays open
-  until its last child lands — including `M-24`. **`M-16`'s status is therefore not M10's**, and
-  reading it as M10's is the same substitution the ICE heading used to make.
+- **ICE** — `M-19`…`M-23` and `M-27`, done for M10; `M-24` remained outside that milestone per
+  above. The test named in ground 1 demonstrates M10's path. The table's `M-16` row is the epic's
+  tracker and closed only when the later v1 content wave delivered `M-24` and the remaining offer
+  evidence. **`M-16`'s later status is therefore not M10's**, and reading it as M10's is the same
+  substitution the ICE heading used to make.
 
 **What was demonstrated, and what was not repaired.** Both new tests passed the first time they ran:
 nothing in the stack was broken, and this milestone was short of *evidence* rather than of behaviour.
@@ -683,25 +674,43 @@ added, and the report was one story from calling the alpha complete (`X-42`). A 
 
 ### `1.0.0` — the predicates
 
-The alpha is the point where a v1 *could* be cut. These are what would make it right to actually cut
-one, and they are separate because every one of them needs something this repository cannot supply on
-its own. Each is checkable, for the same reason the alpha predicates are: a prose paragraph is not a
-definition.
+The alpha is the point where a v1 *could* be cut. These are what make it right to actually cut one,
+and they remain separate from feature count and RFC coverage. Each is checkable, for the same reason
+the alpha predicates are: a prose paragraph is not a definition.
+
+Stable promotion has **two conjunctive gates**. The bounded product content is the normative
+[v1 endpoint-library contract](specs/v1-endpoint-library.md): its blocking exit rows must all be
+closed. The five evidence predicates below must all hold as well. The content
+contract is not a sixth predicate — it answers *what endpoint library is being frozen*; these
+predicates answer whether that surface is truthful, exercised and ready to freeze. Passing either
+half cannot waive the other.
+
+The content half closed on 2026-08-14: every blocking exit row is done and the integrated 55-step
+local gate is green. The evidence predicates below still govern stable promotion independently.
 
 1. **Every alpha predicate above holds**, and has held across at least one release rather than only at
    the moment of measurement.
 2. **Reachability is bound to callers at every layer.** No layer in
    [`maturity.md`](maturity.md) carries the "unverified against callers" caveat — that is `X-37`, and
    until it lands `implemented` outside `media` and `security` means "the code exists".
-3. **The public API has been used from outside this repository**, by at least one application nobody
-   here wrote. This is the one the roadmap has always given as the reason to wait, and it is not
-   something a gate can assert: it is recorded when it happens, with what broke.
+3. **The public API has been used by a separately governed downstream product.** Public and private
+   applications both count when they live in a separate repository, are developed under their own
+   product requirements and release decisions, consume an exact public sipx version or commit, and
+   exercise a non-test production path. Contributor overlap does not erase that product boundary,
+   but it MUST NOT be described as unrelated authorship. A local path dependency, vendored copy,
+   fork, workspace example, test consumer or application created only to satisfy this predicate does
+   not count. An authorized reviewer verifies the exact sipx input, dependency boundary,
+   non-test production use, reproducible validation and what broke or remained constrained. For a
+   private product, its identity, source, exercised architecture, authorship, build records and
+   infrastructure remain confidential; a story carrying `promotion: 3` publicly attests only that
+   the criteria were reviewed and whether they passed.
 4. **Every published crate's contract is stated and has survived a breaking change being refused.**
    `A-8` states them; v1 needs at least one instance of a change being shaped by the contract rather
    than the contract being edited to fit the change.
 5. **Interop passes against two independent implementations for every transport the README claims.**
-   Today it is two peers, and not across every transport — the count is in `tests/interop/`, not here,
-   so this is read from there rather than restated.
+   The shared list now covers all five released signalling transports against both profiles. The
+   count and exact matrix remain in `tests/interop/`, so they are read from there rather than
+   restated here.
 
 **What is deliberately absent from that list**: any feature count, any RFC total, any percentage. The
 vision makes maximum feature count a non-goal and says a smaller stack whose every path is tested
@@ -715,8 +724,10 @@ sipx do **more**; the alpha is about sipx being **right**, and about the table b
 rather than a claim. They are v1's content, not its gate — and shipping an alpha is how the API
 surface gets exercised before it is frozen.
 
-**We stop at the alpha deliberately.** Cutting `1.0.0` means freezing the public API, and the API
-has not yet been used by anyone outside this repository.
+**The external-use wait is now evidence, not a publicity requirement.** `X-152` records the exact
+public sipx revision and privacy-safe integration facts from a separately governed private
+downstream product. Confidentiality does not turn that production integration into repository-owned
+test evidence, and it does not waive the other four predicates or the stable publication gate.
 
 ## Epics
 
@@ -910,8 +921,10 @@ The order is a dependency chain, not a preference. `M-19` (the RFC 8839 attribut
 (the STUN check codec) are independent and can run together; `M-21` (the sans-IO agent) needs
 `M-20`; `M-22` (driving it on the media port) needs `M-19` and `M-21` and owns the test `M-16`
 named; `M-23` (restart) follows it, and so does `M-27`, which offers and answers ICE from a call and
-is what made everything above it reachable from `sipx-call`. `M-24` (a relayed candidate) is last and
-unscheduled. ICE-lite is deferred with its reason recorded — sipx is a UA behind NATs, which is the
+is what made everything above it reachable from `sipx-call`. `M-24` (a relayed candidate) and
+`M-130` (completed-pair offer evidence) landed later in the v1 endpoint content wave; their combined
+gate completed the epic on 2026-08-14. ICE-lite is
+deferred with its reason recorded — sipx is a UA behind NATs, which is the
 case lite does not serve — but *interoperating* with a lite peer is not, because an implementation
 that only handles a full peer hangs waiting for checks a lite peer is never required to send.
 See [design](designs/media.md).

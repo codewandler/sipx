@@ -121,12 +121,12 @@ async fn a_replaces_naming_someone_elses_dialog_is_refused() {
     let (bob_endpoint, mut bob_incoming) = endpoint().await;
     let (attacker, _attacker_incoming) = endpoint().await;
 
-    let (_alice, mut bob) = connect(
+    let (_alice, mut bob) = Box::pin(connect(
         &alice_endpoint,
         bob_endpoint.clone(),
         &mut bob_incoming,
         "<sip:alice@example.net>",
-    )
+    ))
     .await;
 
     let call_id = String::from_utf8_lossy(&bob.dialog.id.call_id).into_owned();
@@ -193,12 +193,12 @@ async fn a_replaces_naming_this_dialog_takes_the_call_over() {
     let (bob_endpoint, mut bob_incoming) = endpoint().await;
     let (carol, mut carol_incoming) = endpoint().await;
 
-    let (mut alice, mut bob) = connect(
+    let (mut alice, mut bob) = Box::pin(connect(
         &alice_endpoint,
         bob_endpoint.clone(),
         &mut bob_incoming,
         "<sip:alice@example.net>",
-    )
+    ))
     .await;
 
     // Carol builds the header the way the transferor would: from *Bob's* point of view, whose
@@ -272,12 +272,12 @@ async fn an_invite_without_replaces_does_not_displace_anything() {
     let (bob_endpoint, mut bob_incoming) = endpoint().await;
     let (carol, _carol_incoming) = endpoint().await;
 
-    let (_alice, mut bob) = connect(
+    let (_alice, mut bob) = Box::pin(connect(
         &alice_endpoint,
         bob_endpoint.clone(),
         &mut bob_incoming,
         "<sip:alice@example.net>",
-    )
+    ))
     .await;
 
     let to = Uri::sip(Host::Name(HostName::new("bob.example").expect("valid")));
