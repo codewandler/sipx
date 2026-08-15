@@ -24,8 +24,8 @@ publish = false
 # `workspace = true` for the reason `sipx-media` spells out `sipx-transport`: Cargo refuses
 # `default-features = false` on a workspace dependency that does not set it, and setting it in
 # the workspace table would turn `identity` and `sdes-keys` off for the crates that want them.
-sipx-sip = { path = "../sipx-sip", version = "1.0.0", default-features = false }
-sipx-sdp = { path = "../sipx-sdp", version = "1.0.0", default-features = false }
+sipx-sip = { path = "../sipx-sip", version = "1.0.1", default-features = false }
+sipx-sdp = { path = "../sipx-sdp", version = "1.0.1", default-features = false }
 bytes.workspace = true
 # The control plane is RFC 8259 JSON (`docs/specs/browser-sdk.md` §5). Used for *parsing* host
 # documents only: events are written by `json::Writer` because §5.1 pins their field order, and

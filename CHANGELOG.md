@@ -7,11 +7,29 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.1] — 2026-08-15
+
+This is the first published stable v1 release. The immutable `v1.0.0` cut passed exact-SHA main CI
+but its protected cold-cache gate stopped before package rehearsal, registry publication, portable
+artifacts or GitHub Release creation. No `1.0.0` sipx package was uploaded; the unchanged stable
+endpoint boundary ships forward as `1.0.1`.
+
+### Fixed
+
+- **The packaged endpoint consumer establishes its own locked Cargo cache.** It fetches only the
+  dependency identities recorded in the committed workspace lockfile, then retains the offline
+  lock pruning, identity-subset check and final `--locked --offline` compile and metadata proofs.
+  A clean runner no longer depends on target-specific archives warmed by an unrelated earlier job.
+
 ## [1.0.0] — 2026-08-14
 
-Eight content stories close at the stable boundary. The bounded v1 endpoint-library contract is now
-implemented across ICE and TURN reachability, AEAD-SRTP proof, long-lived Outbound registration,
-high-level endpoint configuration and a mechanically guarded Supported Rust API.
+This immutable cut was not published. Its protected workflow stopped at the complete gate before
+package rehearsal, publication, artifacts or GitHub Release creation; the unchanged stable content
+and one release-rehearsal correction ship as `1.0.1`.
+
+Eight content stories reached the stable boundary in this cut. The bounded v1 endpoint-library
+contract is implemented across ICE and TURN reachability, AEAD-SRTP proof, long-lived Outbound
+registration, high-level endpoint configuration and a mechanically guarded Supported Rust API.
 
 ### Added
 
@@ -4683,7 +4701,8 @@ Stated so nobody has to discover it from a stack trace:
 - **Interop is verified against Kamailio only.** A second implementation with different
   opinions — Asterisk, as a B2BUA rather than a proxy — has not been tried.
 
-[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/codewandler/sipx/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/codewandler/sipx/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.23...v1.0.0
 [1.0.0-rc.23]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.22...v1.0.0-rc.23
 [1.0.0-rc.22]: https://github.com/codewandler/sipx/compare/v1.0.0-rc.21...v1.0.0-rc.22

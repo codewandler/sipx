@@ -5,8 +5,8 @@ edition = "2024"
 publish = false
 
 [dependencies]
-sipx-call = { version = "=1.0.0", features = ["dtls"] }
-sipx-sip = "=1.0.0"
-sipx-transport = "=1.0.0"
-sipx-ua = "=1.0.0"
+sipx-call = { version = "=1.0.1", features = ["dtls"] }
+sipx-sip = "=1.0.1"
+sipx-transport = "=1.0.1"
+sipx-ua = "=1.0.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

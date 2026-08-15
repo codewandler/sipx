@@ -9,6 +9,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -878,6 +879,25 @@ class PackagedConsumerLockVectors(unittest.TestCase):
                     workspace_lock, consumer_lock
                 )
                 or "",
+            )
+
+    def test_cold_cache_is_populated_from_the_committed_lock(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="sipx-package-lock-") as temporary:
+            root = pathlib.Path(temporary)
+            environment = {"CARGO_HOME": str(root / "cargo-home")}
+            calls: list[tuple[tuple[str, ...], pathlib.Path, dict[str, str] | None]] = []
+
+            def record(
+                args: list[str], *, cwd: pathlib.Path, env: dict[str, str] | None = None
+            ) -> None:
+                calls.append((tuple(args), cwd, env))
+
+            with mock.patch.object(packaged_endpoint_consumer, "run", side_effect=record):
+                packaged_endpoint_consumer.prefetch_locked_workspace(environment, root)
+
+            self.assertEqual(
+                [(("cargo", "fetch", "--locked"), root, environment)],
+                calls,
             )
 
 

@@ -14,20 +14,20 @@ note: stable 1.0 owner · predicates, exact-SHA gate, registry set, five archive
 
 ## Goal
 
-Publish the frozen `1.0.0` endpoint-library boundary as reproducible registry packages,
+Publish the frozen stable v1 endpoint-library boundary as reproducible registry packages,
 documentation and diagnostic binaries after every content and evidence predicate is satisfied.
 
 ## Acceptance
 
 - [ ] Every stable evidence predicate generated in `docs/maturity.md` is met, every blocking row of
-      the bounded v1 content contract is closed, and the finalized `1.0.0` tree passes the complete
+      the bounded v1 content contract is closed, and the finalized stable tree passes the complete
       local gate exactly once after all generated artifacts are synchronized.
 - [ ] The reviewed stable note names the Supported endpoint boundary, Experimental surfaces,
       intentional omissions, verification limits and privacy-safe downstream-adoption result; all
       manifests, internal dependencies, lockfile, changelog, comparison, maturity, roadmap, board
-      and website artifacts agree on `1.0.0`; the reviewed rc.24 API baseline remains immutable and
-      accepts the stable candidate under its same-major compatibility rule.
-- [ ] Exact-SHA `main` CI, including Pages, passes before one reviewed annotated `v1.0.0` tag is
+      and website artifacts agree on the published stable patch; the reviewed rc.24 API baseline
+      remains immutable and accepts the stable candidate under its same-major compatibility rule.
+- [ ] Exact-SHA `main` CI, including Pages, passes before one reviewed annotated stable tag is
       pushed; no existing tag, package, release or asset is moved or overwritten.
 - [ ] The protected workflow publishes or verifies every public crate in dependency order, an
       exact registry-only consumer, the installed optional-feature CLI, all five native archives,
@@ -65,3 +65,8 @@ documentation and diagnostic binaries after every content and evidence predicate
   unpublished WebAssembly member that predated the release checklist's count. They now follow the
   workspace at `1.0.0`; the final manifest scan covers every path dependency rather than trusting a
   transcribed total.
+- 2026-08-15: immutable `v1.0.0` passed exact-SHA main CI but the protected cold-cache gate stopped
+  before package rehearsal or any external write because the package-only consumer assumed one
+  target-specific locked archive had already been cached. No `1.0.0` package or GitHub Release was
+  published. `X-155` fixes forward; the normal protected path will publish `1.0.1` without moving
+  or deleting the refused tag.

@@ -1,12 +1,12 @@
 ---
 title: What's new
-description: Release highlights and adoption notes for the stable sipx 1.0.0 release.
+description: Release highlights and adoption notes for the stable sipx 1.0.1 release.
 ---
 
 # What's new
 
 <!-- BEGIN generated:release-heading -->
-## 1.0.0 — 2026-08-14
+## 1.0.1 — 2026-08-15
 <!-- END generated:release-heading -->
 
 Stable 1.0 closes the bounded endpoint-library contract and freezes Supported Rust APIs and CLI
@@ -15,8 +15,12 @@ carries one high-level configuration for both SIP roles, complete Outbound flow 
 configured TURN relay, completed-ICE `remote-candidates`, independent AEAD key-derivation evidence
 and a mechanical compatibility baseline.
 
+This is the first published stable v1 patch. The preceding immutable stable cut stopped in its
+protected cold-cache gate before package rehearsal or any external write; `1.0.1` establishes the
+exact locked Cargo cache before retaining the package consumer's locked offline proof.
+
 ```bash
-cargo install --locked --version =1.0.0 sipx-cli
+cargo install --locked --version =1.0.1 sipx-cli
 ```
 
 - **Supported means source-compatible throughout v1.** The checked baseline covers every

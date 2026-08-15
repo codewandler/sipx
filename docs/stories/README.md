@@ -21,18 +21,20 @@ test or CI job that carries every clause rather than against the mechanism under
 roadmap keeps both sections for the scoping arguments in them: [where M10
 stands](../roadmap.md#m10--reachable), [where M12 stands](../roadmap.md#m12--provable).
 
-The current published boundary is **`1.0.0-rc.23`**; stable **`1.0.0`** is being finalized locally.
+The current published boundary is **`1.0.0-rc.23`**; stable **`1.0.1`** is being finalized locally.
 The bounded production endpoint contract is complete, its Supported Rust API has a mechanical
 same-major compatibility baseline, and all five stable evidence predicates have repository or
 reviewed-attestation owners. The adoption evidence comes from a separately governed private
 downstream product; its identity and proprietary details are deliberately absent from this public
 repository.
 
-`A-10` owns stable release completion: synchronized `1.0.0` content, the finalized local gate,
+`A-10` owns stable release completion: synchronized `1.0.1` content, the finalized local gate,
 exact-SHA CI and Pages, one immutable annotated tag, registry-only consumption, the optional CLI,
-five native archives, SPDX documents, checksums and a non-prerelease release. Commit, tag, push and
-publication are deliberately unrun. Historical release stories with incomplete irreversible rows
-remain open as truthful records; they do not widen or block the stable content boundary.
+five native archives, SPDX documents, checksums and a non-prerelease release. Immutable `v1.0.0`
+stopped in its cold protected gate before any package or GitHub Release was published; `X-155`
+fixes that cache assumption forward without moving the refused tag. Historical release stories
+with incomplete irreversible rows remain open as truthful records; they do not widen or block the
+stable content boundary.
 
 The stable endpoint is an audio UAC/UAS library and diagnostic phone, not a configuration-driven
 PBX or every adjacent communications product. TURN relay, complete Outbound lifetime, nominated
@@ -68,6 +70,7 @@ appeared twice before anyone named it.
 - [X-93 — Make protected release evidence faster without weakening it](X-93-make-protected-release-evidence-faster.md) · Build · measure cache and preflight changes against the 12m37 cold beta gate · follow-up
 - [X-109 — Measure custom DSP quality and real-time cost](X-109-measure-custom-dsp-quality-and-cost.md) · Build · after M-65/M-66/M-68 · exact effects, quality, cost, isolation and packaged conformance
 - [X-140 — Carry the modelled registry allowance across frontier invocations, not just its cost](X-140-carry-the-modelled-registry-allowance-across-frontier-invocations.md) · Build · found while implementing X-127 · the budget now spans invocations, the token buckets do not
+- [X-155 — Make package rehearsal independent of Cargo cache state](X-155-make-package-rehearsal-independent-of-cargo-cache.md) · Build · the locked package consumer must establish its own cache before proving an offline build
 
 ## Next (ready — take the top one unless the user named a story)
 

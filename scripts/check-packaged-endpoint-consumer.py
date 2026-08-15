@@ -269,6 +269,13 @@ def lockfile_resolution_problem(
     return None
 
 
+def prefetch_locked_workspace(
+    environment: dict[str, str], workspace_root: pathlib.Path = ROOT
+) -> None:
+    """Populate a cold Cargo cache without permitting dependency resolution drift."""
+    run(["cargo", "fetch", "--locked"], cwd=workspace_root, env=environment)
+
+
 def check() -> None:
     if not (FIXTURE / "Cargo.toml").is_file() or not (FIXTURE / "src" / "main.rs").is_file():
         raise RehearsalError(
@@ -281,6 +288,10 @@ def check() -> None:
         raise RehearsalError(f"publishable workspace versions disagree: {versions}")
     roots = fixture_dependencies(FIXTURE / "Cargo.toml", versions[0])
     closure = package_closure(metadata, roots)
+    # `--offline` proves that the package-only consumer needs no live registry during resolution or
+    # compilation; it must not accidentally require that an unrelated preceding build warmed every
+    # target-specific archive in Cargo's cache. Fetch only identities from the committed lock first.
+    prefetch_locked_workspace(os.environ.copy())
     paths = package_archives(closure)
     tree_digests_before = {
         name: api_compat.tree_digest(path) for name, path in sorted(paths.items())

@@ -12,15 +12,16 @@ cannot fall behind the way a second hand-written one here would.
 
 ## Status
 
-_As of 2026-08-14:_ **stable `1.0.0` is the release candidate being finalized; `1.0.0-rc.23`
-remains the current published prerelease and every earlier tag remains immutable.** The bounded v1
+_As of 2026-08-15:_ **stable `1.0.1` is the release candidate being finalized; immutable `v1.0.0`
+was refused before publication and `1.0.0-rc.23` remains the current published prerelease.** The bounded v1
 endpoint-library content gate is complete: Outbound flow ownership, configured TURN relay,
 generated ICE `remote-candidates`, independently checked AEAD key derivation, one symmetric
 Supported call configuration and a mechanical Supported-API compatibility baseline passed their
 integrated gate. A separately governed private downstream product supplies the remaining adoption
 evidence without making its identity or proprietary details public. The tree is not yet a published
-stable release: final synchronization, one stable gate, exact-SHA CI, tagging and protected
-publication remain separate steps.
+stable release: `v1.0.0` passed exact-SHA main CI, then its cold protected gate exposed a package
+rehearsal that depended on ambient Cargo cache state before any external write. `1.0.1` fixes that
+rehearsal forward; one final gate, exact-SHA CI, tagging and protected publication remain.
 
 _As of 2026-08-05:_ **`1.0.0-rc.2` was the first published release candidate.** It combined the
 post-beta.7 transport fallback and drain, application-owned observability, the explicit PCM/L16

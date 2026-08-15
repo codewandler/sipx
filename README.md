@@ -9,7 +9,7 @@ transfer, and carry real audio from a Rust library or a shell command.
 
 <!-- BEGIN generated:badges -->
 <a href="https://codewandler.github.io/sipx/"><img alt="docs: codewandler.github.io/sipx" src="https://img.shields.io/static/v1?label=docs&message=codewandler.github.io%2Fsipx&color=blue"></a>
-<a href="CHANGELOG.md"><img alt="release: 1.0.0" src="https://img.shields.io/static/v1?label=release&message=1.0.0&color=blue"></a>
+<a href="CHANGELOG.md"><img alt="release: 1.0.1" src="https://img.shields.io/static/v1?label=release&message=1.0.1&color=blue"></a>
 <a href="#try-the-cli"><img alt="MSRV: rustc 1.88" src="https://img.shields.io/static/v1?label=MSRV&message=rustc%201.88&color=blue"></a>
 <a href="docs/compliance.md"><img alt="RFCs: 37 implemented of 85" src="https://img.shields.io/static/v1?label=RFCs&message=37%20implemented%20of%2085&color=blue"></a>
 <a href="docs/compliance.md"><img alt="codecs: G.711 · G.722 · L16 · Opus" src="https://img.shields.io/static/v1?label=codecs&message=G.711%20%C2%B7%20G.722%20%C2%B7%20L16%20%C2%B7%20Opus&color=blue"></a>
@@ -18,7 +18,7 @@ transfer, and carry real audio from a Rust library or a shell command.
 
 </div>
 
-> **Status: <!-- BEGIN generated:workspace-version -->1.0.0<!-- END generated:workspace-version -->.** This is the current stable release. `main` can move ahead of the
+> **Status: <!-- BEGIN generated:workspace-version -->1.0.1<!-- END generated:workspace-version -->.** This is the current stable release. `main` can move ahead of the
 > release tag. Supported Rust APIs remain source-compatible throughout the v1 line. Supported CLI
 > contracts are frozen for compatible v1 evolution. Experimental APIs may change or be removed
 > without migration guidance and remain unfrozen throughout v1. Start with the exact registry
@@ -67,11 +67,11 @@ deployment shape.
 
 ## Try the CLI
 
-The <!-- BEGIN generated:release-tag -->v1.0.0<!-- END generated:release-tag --> release needs
+The <!-- BEGIN generated:release-tag -->v1.0.1<!-- END generated:release-tag --> release needs
 Rust <!-- BEGIN generated:msrv -->1.88<!-- END generated:msrv --> or newer:
 
 ```sh
-cargo install --locked --version =1.0.0 sipx-cli
+cargo install --locked --version =1.0.1 sipx-cli
 sipx version
 ```
 
@@ -79,7 +79,7 @@ To use the bounded browser-audio profile, install that same exact release with i
 media features:
 
 ```sh
-cargo install --locked --version =1.0.0 --features opus,dtls sipx-cli
+cargo install --locked --version =1.0.1 --features opus,dtls sipx-cli
 ```
 
 Then make a bounded loopback call. Terminal one listens for at most 15 seconds:
@@ -115,9 +115,9 @@ compatibility contract; explicitly Experimental roots remain outside it:
 <!-- BEGIN generated:answer-consumer-dependencies -->
 ```toml
 [dependencies]
-sipx-call = "=1.0.0"
-sipx-sip = "=1.0.0"
-sipx-transport = "=1.0.0"
+sipx-call = "=1.0.1"
+sipx-sip = "=1.0.1"
+sipx-transport = "=1.0.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 <!-- END generated:answer-consumer-dependencies -->

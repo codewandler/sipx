@@ -174,6 +174,16 @@ The newcomer-facing answer example has a separate source-shape and direct-depend
 [`published-onboarding.md`](published-onboarding.md). It runs on ordinary `main` with disposable
 local registry patches; this rehearsal remains the authority for the same-version packaged bytes.
 
+The packaged endpoint consumer MUST NOT depend on an ambient Cargo cache. Before any offline
+package operation it runs `cargo fetch --locked` against the committed workspace lockfile; fetching
+may populate the cache but may not resolve or change a package identity. It then seeds the consumer
+with that lockfile and permits Cargo one offline metadata resolution to remove workspace-only
+packages from the smaller graph. Before compilation, every retained package identity — name,
+version, source and checksum — MUST occur in the committed workspace lockfile. A new identity is a
+release failure even if Cargo selected it successfully. The consumer then runs both compilation and
+the metadata inspection with `--locked --offline`; network access populates the proof's exact locked
+prerequisites and never substitutes for its final offline assertion.
+
 ## 4. Partial registry availability
 
 Publishing is restartable. Before a write, the helper asks Cargo whether each public

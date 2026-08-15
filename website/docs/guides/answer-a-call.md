@@ -14,9 +14,9 @@ pinned to the same exact stable release:
 <!-- BEGIN generated:answer-consumer-dependencies -->
 ```toml
 [dependencies]
-sipx-call = "=1.0.0"
-sipx-sip = "=1.0.0"
-sipx-transport = "=1.0.0"
+sipx-call = "=1.0.1"
+sipx-sip = "=1.0.1"
+sipx-transport = "=1.0.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 <!-- END generated:answer-consumer-dependencies -->
