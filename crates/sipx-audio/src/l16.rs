@@ -20,8 +20,10 @@ pub fn decode(payload: &[u8]) -> Result<Vec<i16>, L16Error> {
         return Err(L16Error::OddLength(payload.len()));
     }
     Ok(payload
-        .chunks_exact(2)
-        .map(|word| i16::from_be_bytes(word.try_into().unwrap_or_default()))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&word| i16::from_be_bytes(word))
         .collect())
 }
 

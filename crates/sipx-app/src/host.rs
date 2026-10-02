@@ -1344,13 +1344,12 @@ fn incoming_snapshot(incoming: &Incoming, id: &str) -> CallSnapshot {
 fn samples(source: &Source, grants: &Grants) -> Option<Vec<i16>> {
     match source {
         Source::Inline(bytes) => {
-            let mut chunks = bytes.chunks_exact(2);
+            let (chunks, remainder) = bytes.as_chunks::<2>();
             let samples = chunks
-                .by_ref()
-                .filter_map(|chunk| <[u8; 2]>::try_from(chunk).ok())
-                .map(i16::from_le_bytes)
+                .iter()
+                .map(|&chunk| i16::from_le_bytes(chunk))
                 .collect();
-            chunks.remainder().is_empty().then_some(samples)
+            remainder.is_empty().then_some(samples)
         }
         Source::File(path) => {
             let requested = std::fs::canonicalize(path).ok()?;
