@@ -105,8 +105,10 @@ fn prompt_pcm() -> Vec<u8> {
 /// PCM back out of the contract's byte-oriented [`Source`], for the media layer.
 fn samples(bytes: &[u8]) -> Vec<i16> {
     bytes
-        .chunks_exact(2)
-        .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&pair| i16::from_le_bytes(pair))
         .collect()
 }
 
