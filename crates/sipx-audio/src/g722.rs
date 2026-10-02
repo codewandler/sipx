@@ -583,11 +583,7 @@ impl Encoder {
     #[must_use]
     pub fn encode(&mut self, samples: &[i16]) -> Vec<u8> {
         let mut payload = Vec::with_capacity(samples.len() / 2);
-        for pair in samples.chunks_exact(2) {
-            let &[first, second] = pair else {
-                // Unreachable: `chunks_exact(2)` yields complete pairs only.
-                break;
-            };
+        for &[first, second] in samples.as_chunks::<2>().0 {
             let (xl, xh) = qmf_analysis(&mut self.qmf_delay, first, second);
             let il = lsb_encode(&mut self.lower, xl);
             let ih = hsb_encode(&mut self.higher, xh);
@@ -678,8 +674,10 @@ mod tests {
             panic!("reading {path}: {error}; run scripts/import-g722-corpus.sh")
         });
         bytes
-            .chunks_exact(2)
-            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&pair| u16::from_be_bytes(pair))
             .collect()
     }
 

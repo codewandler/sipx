@@ -385,10 +385,7 @@ fn fill(
     };
     samples.clear();
     samples.reserve(body.len() / 2);
-    for octets in body.chunks_exact(2) {
-        let Some(pair) = octets.first_chunk::<2>() else {
-            return Err(WorkerProtocolError::Truncated.into());
-        };
+    for pair in body.as_chunks::<2>().0 {
         samples.push(i16::from_be_bytes(*pair));
     }
     Ok(())
