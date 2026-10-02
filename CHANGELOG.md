@@ -7,6 +7,27 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Early coupling accepts independent source and target media policies. Native browser audio can
+  use ICE/DTLS-SRTP without requiring reliable provisionals while the other leg uses ordinary RTP.
+- Realm-, username- and algorithm-bound Digest verifiers support authentication from a stored
+  base HA1, with explicit secret export/import and redacted diagnostics. Password authentication
+  uses the same verification and replay-protection path.
+
+### Fixed
+
+- Mixed-rate media bridges resample and frame audio for each destination, including browser Opus
+  and narrowband RTP. Zero-sized frames fail closed and incomplete tails end with the call.
+- Coupled calls retain cancellation ownership through answer preparation, refuse failed setup,
+  and terminate both dialogs after post-answer media failure. Native proof validation binds each
+  hangup direction to its case and checks provisional/final-response ordering.
+- Digest authorization rejects malformed or unknown explicit algorithms. Replay state is isolated
+  by nonce, username and client nonce, and a full replay window refuses new identities without
+  evicting still-valid history.
+- Complete-chunk iteration satisfies current stable Rust Clippy while preserving PCM byte order,
+  incomplete-record truncation and existing malformed-payload refusals.
+
 ## [1.0.1] — 2026-08-15
 
 This is the first published stable v1 release. The immutable `v1.0.0` cut passed exact-SHA main CI
