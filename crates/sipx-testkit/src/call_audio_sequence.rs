@@ -335,11 +335,10 @@ impl Program {
     #[must_use]
     pub fn decode(bytes: &[u8]) -> Self {
         let events = bytes
-            .chunks_exact(RECORD)
-            .filter_map(|chunk| match chunk {
-                &[op, a, b, c] => Some(decode_event(op, a, b, c)),
-                _ => None,
-            })
+            .as_chunks::<RECORD>()
+            .0
+            .iter()
+            .map(|&[op, a, b, c]| decode_event(op, a, b, c))
             .collect();
         Self { events }
     }

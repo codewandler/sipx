@@ -128,13 +128,10 @@ pub fn read_wav(mut source: impl Read) -> Result<Wav, WavError> {
             }
             b"data" => {
                 samples = Some(
-                    body.chunks_exact(2)
-                        .map(|pair| {
-                            i16::from_le_bytes([
-                                pair.first().copied().unwrap_or(0),
-                                pair.get(1).copied().unwrap_or(0),
-                            ])
-                        })
+                    body.as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|&pair| i16::from_le_bytes(pair))
                         .collect::<Vec<i16>>(),
                 );
             }

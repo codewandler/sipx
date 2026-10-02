@@ -339,7 +339,12 @@ impl Program {
             .map_or(Side::Runtime, |byte| Side::from_byte(*byte));
         let ceiling = data.get(1).copied().unwrap_or(DEFAULT_CEILING);
         let rest = data.get(2..).unwrap_or_default();
-        let steps = rest.chunks_exact(4).filter_map(decode_step).collect();
+        let steps = rest
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter_map(|record| decode_step(record))
+            .collect();
         Self {
             side,
             ceiling,
