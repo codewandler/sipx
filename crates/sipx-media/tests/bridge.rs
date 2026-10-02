@@ -303,3 +303,137 @@ async fn dropping_a_bridge_stops_the_forwarding() {
     bob.stop();
     right.stop();
 }
+
+async fn mixed_rate_bridge(wide_codec: Codec) {
+    let (narrow, left) = pair(Codec::Pcmu, Codec::Pcmu).await;
+    let (right, wide) = pair(wide_codec, wide_codec).await;
+    let bridge = Bridge::connect(Arc::new(left), Arc::new(right));
+    assert!(bridge.is_transcoding());
+    for (sender, recipient) in [(&narrow, &wide), (&wide, &narrow)] {
+        let rate = sender.audio_rate() as usize;
+        let clip: Vec<i16> = (0..rate / 2)
+            .map(|i| {
+                ((i as f64 * 440.0 * std::f64::consts::TAU / rate as f64).sin() * 12000.0) as i16
+            })
+            .collect();
+        let wanted = recipient.audio_rate() as usize * 3 / 10;
+        let (played, heard) = tokio::join!(
+            sender.play(&clip, sender.samples_per_packet()),
+            recipient.record_at_least(wanted, DELIVERY_BOUND),
+        );
+        assert!(played);
+        assert!(
+            heard.len() >= wanted,
+            "mixed-rate bridge carried {} of {wanted} destination samples",
+            heard.len()
+        );
+        assert!(
+            heard.iter().any(|sample| sample.unsigned_abs() > 4000),
+            "mixed-rate audio is silent"
+        );
+        let crossings = heard
+            .windows(2)
+            .filter(|pair| pair[0] <= 0 && pair[1] > 0)
+            .count();
+        let frequency = crossings as f64 * f64::from(recipient.audio_rate()) / heard.len() as f64;
+        assert!(
+            (400.0..480.0).contains(&frequency),
+            "resampling changed 440Hz to {frequency}Hz"
+        );
+    }
+    bridge.close();
+    narrow.stop();
+    wide.stop();
+}
+
+#[tokio::test]
+async fn mixed_rate_g711_g722_bridge_preserves_audio_clock_both_ways() {
+    mixed_rate_bridge(Codec::G722).await;
+}
+
+#[cfg(feature = "opus")]
+#[tokio::test]
+async fn mixed_rate_g711_opus_bridge_preserves_audio_clock_both_ways() {
+    mixed_rate_bridge(Codec::Opus).await;
+}
+
+#[tokio::test]
+async fn a_zero_sample_destination_refuses_transcoding_without_buffering() {
+    let (peer, source) = pair(Codec::Pcmu, Codec::Pcmu).await;
+    let port = MediaPort::bind("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let mut config = Config::new("127.0.0.1:45000".parse().unwrap(), Codec::L16);
+    config.clock_rate = 1;
+    config.packet_duration = Duration::from_millis(1);
+    config.rtcp_interval = None;
+    let destination = port.start(config).unwrap();
+    assert_eq!(destination.samples_per_packet(), 0);
+    let bridge = Bridge::connect(Arc::new(source), Arc::new(destination));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while bridge.is_connected() {
+            // poll interval: task termination, not elapsed time, proves refusal.
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("zero-sized packetization refuses before receiving or buffering PCM");
+    bridge.close();
+    peer.stop();
+}
+
+#[tokio::test]
+async fn equal_l16_codecs_with_distinct_rates_and_packet_sizes_are_resampled() {
+    async fn l16_pair(rate: u32, duration: Duration) -> (MediaSession, MediaSession) {
+        let one = MediaPort::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let two = MediaPort::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let mut a = Config::new(two.local_addr(), Codec::L16);
+        a.clock_rate = rate;
+        a.packet_duration = duration;
+        a.rtcp_interval = None;
+        let mut b = Config::new(one.local_addr(), Codec::L16);
+        b.clock_rate = rate;
+        b.packet_duration = duration;
+        b.rtcp_interval = None;
+        (one.start(a).unwrap(), two.start(b).unwrap())
+    }
+    let (narrow, left) = l16_pair(8000, Duration::from_millis(10)).await;
+    let (right, wide) = l16_pair(16000, Duration::from_millis(30)).await;
+    let bridge = Bridge::connect(Arc::new(left), Arc::new(right));
+    assert!(
+        bridge.is_transcoding(),
+        "equal codec names do not imply equal audio clocks"
+    );
+    for (sender, recipient) in [(&narrow, &wide), (&wide, &narrow)] {
+        let rate = sender.audio_rate() as usize;
+        let clip: Vec<i16> = (0..rate / 2)
+            .map(|i| {
+                ((i as f64 * 440.0 * std::f64::consts::TAU / rate as f64).sin() * 12000.0) as i16
+            })
+            .collect();
+        let wanted = recipient.audio_rate() as usize * 3 / 10;
+        let (played, heard) = tokio::join!(
+            sender.play(&clip, sender.samples_per_packet()),
+            recipient.record_at_least(wanted, DELIVERY_BOUND),
+        );
+        assert!(played);
+        assert!(heard.len() >= wanted, "destination clock lost audio");
+        assert!(heard.iter().any(|sample| sample.unsigned_abs() > 4000));
+        let crossings = heard
+            .windows(2)
+            .filter(|pair| pair[0] <= 0 && pair[1] > 0)
+            .count();
+        let frequency = crossings as f64 * f64::from(recipient.audio_rate()) / heard.len() as f64;
+        assert!(
+            (420.0..460.0).contains(&frequency),
+            "wrong audio clock: {frequency} Hz"
+        );
+    }
+    bridge.close();
+    narrow.stop();
+    wide.stop();
+}

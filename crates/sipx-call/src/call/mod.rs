@@ -3898,7 +3898,7 @@ async fn answer_delayed(
         &policy,
     )
     .await?;
-    let agreed = negotiate_session(endpoint, incoming).await?;
+    let agreed = negotiate_session(endpoint, incoming, claim).await?;
     let to_with_tag = {
         let existing = incoming
             .request
@@ -3959,14 +3959,14 @@ async fn answer_delayed(
     let (answer, answer_bytes) = match answer {
         Ok(answer) => answer,
         Err(error) => {
-            end_failed_delayed_answer(endpoint, &dialog, target).await;
+            end_failed_answer(endpoint, &dialog, target).await;
             return Err(error);
         }
     };
     let early = match offer.settle(&answer).await {
         Ok(early) => early,
         Err(error) => {
-            end_failed_delayed_answer(endpoint, &dialog, target).await;
+            end_failed_answer(endpoint, &dialog, target).await;
             return Err(error);
         }
     };
@@ -4018,8 +4018,8 @@ async fn answer_delayed(
     })
 }
 
-/// End a dialog whose delayed answer could not create the session promised by its 200.
-async fn end_failed_delayed_answer(endpoint: &Handle, dialog: &Dialog, target: Target) {
+/// End a dialog whose answer could not create the session promised by its 200.
+async fn end_failed_answer(endpoint: &Handle, dialog: &Dialog, target: Target) {
     if let Ok(bye) = bye_request(
         dialog,
         dialog.local_cseq.saturating_add(1),
@@ -5808,6 +5808,18 @@ pub async fn answer_ringing_with_policy_at(
     ringing: &crate::Ringing,
     policy: MediaPolicy,
 ) -> Result<Call> {
+    answer_ringing_claimed(endpoint, incoming, media_address, ringing, policy, None).await
+}
+
+/// Retain invitation cancellation until the final-response boundary inside the answer path.
+pub(crate) async fn answer_ringing_claimed(
+    endpoint: &Handle,
+    incoming: &Incoming,
+    media_address: MediaAddress,
+    ringing: &crate::Ringing,
+    policy: MediaPolicy,
+    claim: Option<Claim<'_>>,
+) -> Result<Call> {
     // RFC 3262 §3 and §5: a 2xx must not go out while a reliable provisional carrying a session
     // description is unacknowledged. This path never puts a description in one — `ring` sends a
     // bodiless provisional, and `ring_early` is the entry point that does, where
@@ -5821,7 +5833,7 @@ pub async fn answer_ringing_with_policy_at(
         Ok(offer) => offer,
         Err(error) => {
             let error = Error::Sdp(error.to_string());
-            refuse_initial_offer(endpoint, incoming, ringing.tag(), None, 400, "Bad Request")
+            refuse_initial_offer(endpoint, incoming, ringing.tag(), claim, 400, "Bad Request")
                 .await?;
             return Err(error);
         }
@@ -5833,7 +5845,7 @@ pub async fn answer_ringing_with_policy_at(
         offer,
         ringing.tag(),
         Some(ringing.is_reliable()),
-        None,
+        claim,
         policy,
         Direction::SendRecv,
         &[],
@@ -5876,7 +5888,7 @@ pub async fn answer_early(
     // Before anything is taken out of the `Ringing`. A 422 leaves here through the `?`, and it
     // is a counter-offer rather than a failure — the caller is expected to be rung again — so
     // it must not cost the bound port and the session the early exchange settled.
-    let agreed = negotiate_session(endpoint, incoming).await?;
+    let agreed = negotiate_session(endpoint, incoming, None).await?;
 
     let (early, dialog, negotiation, peer_allows_update) = ringing.take_early()?;
     let target = in_dialog_target(&dialog, Target::new(incoming.source, incoming.transport));
@@ -5981,6 +5993,7 @@ pub async fn answer_early(
 async fn negotiate_session(
     endpoint: &Handle,
     incoming: &Incoming,
+    claim: Option<Claim<'_>>,
 ) -> Result<Option<session::Accepted>> {
     Ok(
         match session::answer(
@@ -6016,6 +6029,9 @@ async fn negotiate_session(
                 )?
                 .header(HeaderName::MinSe, Bytes::from(floor.as_secs().to_string()))?
                 .build();
+                if let Some(claim) = claim {
+                    claim()?;
+                }
                 endpoint.respond(&incoming.key, refusal).await?;
                 return Err(Error::IntervalTooBrief(floor));
             }
@@ -6197,7 +6213,7 @@ async fn answer_negotiated(
         format!("{};tag={tag}", strip_header_params(&existing))
     };
 
-    let agreed = negotiate_session(endpoint, incoming).await?;
+    let agreed = negotiate_session(endpoint, incoming, claim).await?;
 
     let response = ok_with_answer(
         endpoint,
@@ -6263,6 +6279,7 @@ async fn answer_negotiated(
         Ok(started) => started,
         Err(error) => {
             cancel_and_join(&ack_stop, &mut ack_retransmission).await;
+            end_failed_answer(endpoint, &dialog, target).await;
             return Err(error);
         }
     };

@@ -22,3 +22,12 @@ nominated component and protected audio in both directions. `scripts/test-browse
 separately reverses the measuring instrument's identity, structured-evidence, completeness,
 output-cap and process-tree boundaries. The real proof and self-test are different claims, and both
 must pass.
+
+For the terminating browser-to-ordinary-SIP seam, run `run.sh --coupling-only` with the same
+identity, browser, proof-binary, media-address and evidence-directory inputs. This mode does not
+need the perturbed-KDF binary. It runs a native browser offer without `100rel`, couples it to a
+separate UDP/G.711 peer, and validates audio at both far endpoints. One case hangs up from the
+browser, the other from the ordinary peer. Each case retains `browser.json`, `sipx.json` and
+`proof.json`; the ordinary peer's PCM peak is explicitly identified as the audio observation.
+A third case corrupts the offered fingerprint and requires post-answer BYE on the browser
+dialog, target teardown without audio, and the typed fingerprint error.

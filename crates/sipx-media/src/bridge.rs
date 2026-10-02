@@ -85,7 +85,7 @@ impl Bridge {
     /// Connect two sessions.
     pub fn connect(one: Arc<MediaSession>, two: Arc<MediaSession>) -> Self {
         // The same codec on both legs means the bytes can go straight across.
-        let transcoding = one.codec() != two.codec();
+        let transcoding = one.codec() != two.codec() || one.audio_rate() != two.audio_rate();
         if transcoding {
             tracing::info!(
                 from = ?one.codec(),
@@ -151,13 +151,36 @@ impl Drop for Bridge {
 fn spawn_leg(from: Arc<MediaSession>, to: Arc<MediaSession>, transcoding: bool) -> JoinHandle<()> {
     tokio::spawn(async move {
         if transcoding {
-            // Decode on one side, re-encode on the other. The samples are the only common
-            // ground between two different codecs.
+            // PCM belongs to its session's audio clock, not its RTP clock (G.722 differs).
+            // Keep interpolation phase across packets and emit only complete destination
+            // frames: an 8 kHz packet's 160 samples are not a valid 48 kHz Opus frame.
+            let mut resampler =
+                match sipx_audio::LinearResampler::new(from.audio_rate(), to.audio_rate()) {
+                    Ok(resampler) => resampler,
+                    Err(error) => {
+                        tracing::warn!(%error, "cannot resample a bridge's audio clocks");
+                        return;
+                    }
+                };
+            let frame_size = to.samples_per_packet();
+            if frame_size == 0 {
+                tracing::warn!("cannot packetize a bridge into zero-sample frames");
+                return;
+            }
+            let mut pending = Vec::with_capacity(frame_size);
             while let Some(samples) = from.recv().await {
-                if !to.send(samples).await {
-                    return;
+                for sample in resampler.push_i16(&samples) {
+                    pending.push(sample);
+                    if pending.len() == frame_size {
+                        let frame = std::mem::replace(&mut pending, Vec::with_capacity(frame_size));
+                        if !to.send(frame).await {
+                            return;
+                        }
+                    }
                 }
             }
+            // A partial frame needs future source samples. Ending the source drops it; no
+            // fabricated padding outlives the call, and Drop cancels either blocked direction.
         } else {
             while let Some(encoded) = from.recv_encoded().await {
                 if !relay(&to, encoded).await {

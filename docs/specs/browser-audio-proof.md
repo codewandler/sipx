@@ -193,3 +193,27 @@ The self-test reverses the harness's own trust boundaries with fixture processes
 - a build timeout proves the mutation builder terminates and reaps its whole process group, while
   source and executable hashes prove the negative ran the audited disposable mutation; and
 - a pin mismatch proves no page or sipx role starts after identity preflight fails.
+
+## Coupled browser and ordinary RTP proof
+
+`run.sh --coupling-only` runs three browser-offerer cases. The browser sends no `100rel` support;
+the gateway owns an `EarlyCoupling` with browser source policy and ordinary target policy. A
+separate UDP peer sends a reliable provisional answer before the final answer. The source must
+receive a bodiless provisional after its INVITE and before its final browser answer, with
+independent SDP/security. Every recorded provisional must fall within that interval; repeated
+provisionals within it are allowed. SIP event values must be strings, and INVITE, final answer,
+ACK, BYE and BYE completion must each occur exactly once in that order in the proof evidence.
+
+Both runs validate the unchanged `X-Test-Route: app-1000` at the target and measure non-silent
+received PCM there, together with native browser received audio energy and sent packets. The
+ordinary peer sends the tone; no gateway-local tone can satisfy the reverse direction. One run
+ends from the browser and one from the ordinary peer; both dialogues must end within the role
+deadline. `CoupledBrowserHangup` must report the browser as origin and `CoupledPeerHangup` must
+report the ordinary peer; unknown case directories are refused. The same identity pin and bounded
+process-group owner as the direct proof apply.
+
+The third case corrupts only the offered fingerprint, while native ICE and DTLS run unchanged.
+It requires the typed fingerprint refusal after a 200, a source ACK followed by BYE and its final
+response, and a terminated ordinary peer which sent no audio. A conflicting final response or
+an orphaned source/target cannot pass this case. The same typed, unambiguous lifecycle ordering
+applies; any recorded provisional must precede the final answer.
