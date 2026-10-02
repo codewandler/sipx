@@ -5,15 +5,17 @@
 //!
 //! **Scope is the primitives.** Which credential a username maps to, and what to do about a
 //! failure, belong to whoever is authenticating: a credential store is not this crate's business.
-//! So verification takes the password as an argument and returns a verdict, and the caller decides
-//! everything around it.
+//! Verification accepts a password or a bound base-HA1 verifier and returns a verdict.
+//! The caller compares the presented URI to the request URI and decides everything around it.
 
 use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sipx_sip::{HeaderName, Request};
 
-use crate::auth::{Algorithm, Credentials, respond};
+#[cfg(test)]
+use crate::auth::respond;
+use crate::auth::{Algorithm, Credentials, DigestVerifier};
 
 /// How long a nonce is good for by default.
 ///
@@ -22,11 +24,9 @@ use crate::auth::{Algorithm, Credentials, respond};
 /// convenient — a client that gets `stale=true` re-sends without prompting anyone.
 pub const DEFAULT_LIFETIME: Duration = Duration::from_secs(300);
 
-/// How many nonces the replay window remembers at once.
+/// How many nonce/user/client-nonce identities the replay window remembers at once.
 ///
-/// The window has to be bounded or it is a memory leak with a protocol in front of it. Evicting
-/// the oldest is safe in the direction that matters: a client whose nonce is evicted is challenged
-/// again with `stale=true` and retries without a human, whereas an unbounded map is an outage.
+/// An unexpired entry is never evicted. New identities fail closed at capacity until expiry.
 const REPLAY_CAPACITY: usize = 4096;
 
 /// What a request presented in its `Authorization` or `Proxy-Authorization`.
@@ -76,9 +76,13 @@ impl Presented {
     /// Read a `Digest …` credentials value.
     #[must_use]
     pub fn parse(value: &[u8]) -> Option<Self> {
-        let text = String::from_utf8_lossy(value);
-        let rest = text.trim().strip_prefix("Digest")?.trim_start();
-        let param = |name: &str| parameter(rest, name);
+        let text = std::str::from_utf8(value).ok()?.trim_matches([' ', '\t']);
+        let (scheme, rest) = text.split_once([' ', '\t'])?;
+        if !scheme.eq_ignore_ascii_case("Digest") {
+            return None;
+        }
+        let fields = parameters(rest)?;
+        let param = |name: &str| fields.get(name).cloned();
 
         let qop = param("qop");
         Some(Self {
@@ -87,11 +91,11 @@ impl Presented {
             nonce: param("nonce")?,
             uri: param("uri").unwrap_or_default(),
             response: param("response")?,
-            algorithm: param("algorithm")
-                .as_deref()
-                .and_then(Algorithm::parse)
-                // RFC 7616 §3.4: an absent algorithm means MD5.
-                .unwrap_or(Algorithm::Md5),
+            algorithm: match param("algorithm") {
+                Some(named) => Algorithm::parse(&named)?,
+                // RFC 7616 §3.4: only an absent algorithm means MD5.
+                None => Algorithm::Md5,
+            },
             nonce_count: param("nc").and_then(|nc| u32::from_str_radix(&nc, 16).ok()),
             cnonce: param("cnonce"),
             qop_auth: qop.as_deref() == Some("auth"),
@@ -99,48 +103,72 @@ impl Presented {
     }
 }
 
-/// Read one parameter out of a comma-separated credentials list, quoted or not.
-fn parameter(input: &str, name: &str) -> Option<String> {
-    let mut rest = input;
+/// Parse the complete list before looking up fields. A malformed present field must never
+/// collapse into an absent field and select a default algorithm (RFC 7616 §3.4).
+fn parameters(input: &str) -> Option<std::collections::BTreeMap<String, String>> {
+    let mut fields = std::collections::BTreeMap::new();
+    let mut rest = input.trim_matches([' ', '\t']);
     while !rest.is_empty() {
-        let rest_trimmed = rest.trim_start_matches([' ', '\t', ',']);
-        let (key, after) = rest_trimmed.split_once('=')?;
-        let key = key.trim();
-        let after = after.trim_start();
+        let (key, after) = rest.split_once('=')?;
+        let key = key.trim_end_matches([' ', '\t']);
+        if !is_token(key) {
+            return None;
+        }
+        let after = after.trim_start_matches([' ', '\t']);
         let (value, remainder) = if let Some(quoted) = after.strip_prefix('"') {
-            // A quoted string, honouring backslash escapes — a realm or username containing a
-            // quote would otherwise end the value early and shift every parameter after it.
             let mut value = String::new();
             let mut chars = quoted.char_indices();
             let mut end = None;
             while let Some((index, character)) = chars.next() {
                 match character {
                     '\\' => {
-                        if let Some((_, escaped)) = chars.next() {
-                            value.push(escaped);
+                        let (_, escaped) = chars.next()?;
+                        if escaped.is_control() && escaped != '\t' {
+                            return None;
                         }
+                        value.push(escaped);
                     }
                     '"' => {
                         end = Some(index + 1);
                         break;
                     }
+                    other if other.is_control() && other != '\t' => return None,
                     other => value.push(other),
                 }
             }
-            (value, quoted.get(end?..).unwrap_or_default())
+            (value, quoted.get(end?..)?)
         } else {
             let end = after.find(',').unwrap_or(after.len());
-            (
-                after.get(..end).unwrap_or_default().trim().to_owned(),
-                after.get(end..).unwrap_or_default(),
-            )
+            let value = after.get(..end)?.trim_end_matches([' ', '\t']);
+            if !is_token(value) {
+                return None;
+            }
+            (value.to_owned(), after.get(end..)?)
         };
-        if key.eq_ignore_ascii_case(name) {
-            return Some(value);
+        if fields.insert(key.to_ascii_lowercase(), value).is_some() {
+            return None;
         }
-        rest = remainder;
+        let remainder = remainder.trim_start_matches([' ', '\t']);
+        if remainder.is_empty() {
+            break;
+        }
+        rest = remainder.strip_prefix(',')?.trim_start_matches([' ', '\t']);
+        if rest.is_empty() {
+            return None;
+        }
     }
-    None
+    Some(fields)
+}
+
+fn is_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'-' | b'.' | b'!' | b'%' | b'*' | b'_' | b'+' | b'`' | b'\'' | b'~'
+                )
+        })
 }
 
 /// What verification concluded.
@@ -180,6 +208,9 @@ pub enum Reason {
     QopMismatch,
     /// The algorithm named is not one this server offered.
     Algorithm,
+    /// The bounded replay window has no expired slot for this new identity.
+    /// Retry policy belongs to the caller; this is not an expired nonce or a bad credential.
+    ReplayCapacity,
 }
 
 /// A server that issues digest challenges and checks the answers.
@@ -192,12 +223,15 @@ pub struct Authenticator {
     secret: [u8; 32],
     lifetime: Duration,
     algorithm: Algorithm,
-    /// Nonce → the highest nonce-count seen and the response that came with it.
-    ///
-    /// The response is kept so a *retransmission* — the same request arriving twice, which is
-    /// ordinary over UDP — can be told from a replay. Same count and same response is the same
-    /// request; same count and a different response is somebody reusing a captured credential.
-    seen: std::collections::VecDeque<(String, u32, String)>,
+    /// Length-framed hash of (nonce, username, cnonce), issue time, highest count, response.
+    seen: std::collections::VecDeque<ReplayEntry>,
+}
+
+struct ReplayEntry {
+    key: [u8; 32],
+    issued: u64,
+    count: u32,
+    response: String,
 }
 
 /// Renders the realm and the algorithm, and **never the secret** (`M-110`, `M-117`).
@@ -353,7 +387,8 @@ impl Authenticator {
     ///
     /// `password` is the one this server holds for `presented.username`; looking it up is the
     /// caller's job, because a credential store is not this crate's business. `method` is the
-    /// request's, since the digest covers it.
+    /// request's, since the digest covers it. The caller must compare `presented.uri` with the
+    /// actual request URI. Replay state is local to this authenticator.
     pub fn verify(&mut self, presented: &Presented, method: &str, password: &str) -> Verdict {
         self.verify_at(presented, method, password, now())
     }
@@ -366,13 +401,54 @@ impl Authenticator {
         password: &str,
         now: u64,
     ) -> Verdict {
-        if presented.algorithm != self.algorithm {
+        let Ok(verifier) = DigestVerifier::derive(
+            &Credentials::new(&presented.username, password),
+            &self.realm,
+            self.algorithm,
+        ) else {
+            return Verdict::Rejected(Reason::Mismatch);
+        };
+        self.verify_with_verifier_at(presented, method, &verifier, now)
+    }
+
+    /// Verify using a bound base-HA1 credential instead of a plaintext password.
+    ///
+    /// The caller must compare the presented URI with the actual request URI. An identical
+    /// Digest retransmission authenticates; the transaction layer must not execute it twice.
+    pub fn verify_with_verifier(
+        &mut self,
+        presented: &Presented,
+        method: &str,
+        verifier: &DigestVerifier,
+    ) -> Verdict {
+        self.verify_with_verifier_at(presented, method, verifier, now())
+    }
+
+    /// [`Authenticator::verify_with_verifier`] with nondecreasing seconds supplied by the caller.
+    /// Configure lifetime before verification. Replay state is local and is lost on restart.
+    pub fn verify_with_verifier_at(
+        &mut self,
+        presented: &Presented,
+        method: &str,
+        verifier: &DigestVerifier,
+        now: u64,
+    ) -> Verdict {
+        if verifier.username() != presented.username
+            || verifier.realm() != self.realm
+            || presented.realm != self.realm
+        {
+            return Verdict::Rejected(Reason::Mismatch);
+        }
+        if presented.algorithm != self.algorithm || verifier.algorithm() != self.algorithm {
             return Verdict::Rejected(Reason::Algorithm);
         }
         // The challenge always offers `qop=auth`, so credentials without it are answering a
         // question this server did not ask — and the RFC 2069 formula they would then use has no
         // client nonce in it, which is the replay protection.
-        if !presented.qop_auth || presented.nonce_count.is_none() || presented.cnonce.is_none() {
+        if !presented.qop_auth
+            || presented.nonce_count.is_none_or(|count| count == 0)
+            || presented.cnonce.as_ref().is_none_or(String::is_empty)
+        {
             return Verdict::Rejected(Reason::QopMismatch);
         }
         let Some(issued) = self.issued_at(&presented.nonce) else {
@@ -382,15 +458,17 @@ impl Authenticator {
         // The digest is checked *before* the clock. A wrong password on an expired nonce is a
         // rejection, not a `stale` — answering `stale=true` there would tell an attacker that the
         // only thing wrong with their guess was its timing.
-        let expected = respond(
+        let Ok(expected) = verifier.respond(
             &self.as_challenge(&presented.nonce),
-            &Credentials::new(presented.username.clone(), password.to_owned()),
             method,
             &presented.uri,
             presented.nonce_count.unwrap_or(1),
             presented.cnonce.as_deref().unwrap_or_default(),
-        );
-        let Some(computed) = parameter(&expected, "response") else {
+        ) else {
+            return Verdict::Rejected(Reason::Mismatch);
+        };
+        let Some(computed) = Presented::parse(expected.as_bytes()).map(|value| value.response)
+        else {
             return Verdict::Rejected(Reason::Mismatch);
         };
         if !constant_time_eq(computed.as_bytes(), presented.response.as_bytes()) {
@@ -401,7 +479,7 @@ impl Authenticator {
             return Verdict::Stale;
         }
 
-        match self.record(presented) {
+        match self.record(presented, issued, now) {
             Ok(()) => Verdict::Authenticated,
             Err(reason) => Verdict::Rejected(reason),
         }
@@ -414,31 +492,41 @@ impl Authenticator {
     /// which is ordinary over UDP and must still authenticate. The response digest tells them
     /// apart: same count and the same digest is one request seen twice; same count and a different
     /// digest is somebody reusing a captured credential against a different request.
-    fn record(&mut self, presented: &Presented) -> Result<(), Reason> {
+    fn record(&mut self, presented: &Presented, issued: u64, now: u64) -> Result<(), Reason> {
+        use sha2::{Digest as _, Sha256};
+        let mut hash = Sha256::new();
+        for part in [
+            presented.nonce.as_str(),
+            presented.username.as_str(),
+            presented.cnonce.as_deref().unwrap_or_default(),
+        ] {
+            hash.update((part.len() as u64).to_be_bytes());
+            hash.update(part.as_bytes());
+        }
+        let key: [u8; 32] = hash.finalize().into();
         let count = presented.nonce_count.unwrap_or(1);
-        if let Some(entry) = self
-            .seen
-            .iter_mut()
-            .find(|(nonce, _, _)| nonce == &presented.nonce)
-        {
-            if count > entry.1 {
-                entry.1 = count;
-                entry.2.clone_from(&presented.response);
+        self.seen
+            .retain(|entry| now.saturating_sub(entry.issued) <= self.lifetime.as_secs());
+        if let Some(entry) = self.seen.iter_mut().find(|entry| entry.key == key) {
+            if count > entry.count {
+                entry.count = count;
+                entry.response.clone_from(&presented.response);
                 return Ok(());
             }
-            if count == entry.1 && entry.2 == presented.response {
+            if count == entry.count && entry.response == presented.response {
                 return Ok(());
             }
             return Err(Reason::Replay);
         }
-        // Bounded: the oldest nonce goes when the window is full. A client whose nonce is evicted
-        // is challenged again with `stale=true` and retries by itself, which is a round trip. An
-        // unbounded window is an outage.
         if self.seen.len() >= REPLAY_CAPACITY {
-            self.seen.pop_front();
+            return Err(Reason::ReplayCapacity);
         }
-        self.seen
-            .push_back((presented.nonce.clone(), count, presented.response.clone()));
+        self.seen.push_back(ReplayEntry {
+            key,
+            issued,
+            count,
+            response: presented.response.clone(),
+        });
         Ok(())
     }
 

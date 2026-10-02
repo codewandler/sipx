@@ -304,6 +304,173 @@ impl Credentials {
     }
 }
 
+/// A realm-, username- and algorithm-bound base-HA1 credential verifier.
+///
+/// This is credential-equivalent secret material, not a password-hardening hash. Keep it out
+/// of logs and untrusted storage. Session variants retain the base hash and bind the nonces
+/// only when computing a response (RFC 7616 §3.4.2).
+#[derive(Clone)]
+pub struct DigestVerifier {
+    username: String,
+    realm: String,
+    algorithm: Algorithm,
+    base_ha1: String,
+}
+
+/// A verifier could not be constructed or used. No variant includes secret input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VerifierError {
+    /// Empty username, control-containing metadata, or a colon in the username.
+    InvalidMetadata,
+    /// The base hash has the wrong hexadecimal encoding or length.
+    InvalidHa1,
+    /// The challenge does not match the verifier's realm and algorithm.
+    BindingMismatch,
+}
+
+impl std::fmt::Display for VerifierError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::InvalidMetadata => "invalid Digest verifier metadata",
+            Self::InvalidHa1 => "invalid Digest verifier hash encoding",
+            Self::BindingMismatch => "Digest verifier binding mismatch",
+        })
+    }
+}
+impl std::error::Error for VerifierError {}
+
+impl std::fmt::Debug for DigestVerifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DigestVerifier")
+            .field("username", &self.username)
+            .field("realm", &self.realm)
+            .field("algorithm", &self.algorithm)
+            .field("base_ha1", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl DigestVerifier {
+    /// Derive a base-HA1, retaining no plaintext password.
+    ///
+    /// An empty realm is preserved for legacy API compatibility as an exact binding. Callers
+    /// must select a compliant globally unique realm (RFC 3261 §22.1) for production use.
+    ///
+    /// # Errors
+    /// Returns [`VerifierError::InvalidMetadata`] for invalid username or realm metadata.
+    pub fn derive(
+        credentials: &Credentials,
+        realm: &str,
+        algorithm: Algorithm,
+    ) -> Result<Self, VerifierError> {
+        Self::validate_metadata(&credentials.username, realm)?;
+        Ok(Self {
+            username: credentials.username.clone(),
+            realm: realm.to_owned(),
+            algorithm,
+            base_ha1: algorithm.hash(&format!(
+                "{}:{realm}:{}",
+                credentials.username, credentials.password
+            )),
+        })
+    }
+
+    /// Import a hexadecimal base-HA1, including for session algorithms.
+    ///
+    /// Metadata is validated and bound, but its correspondence to the imported hash cannot be
+    /// proven without the password. Uppercase hex is accepted and normalized.
+    ///
+    /// # Errors
+    /// Returns a typed metadata or hash-encoding error, never echoing the supplied hash.
+    pub fn from_ha1(
+        username: &str,
+        realm: &str,
+        algorithm: Algorithm,
+        base_ha1: &str,
+    ) -> Result<Self, VerifierError> {
+        Self::validate_metadata(username, realm)?;
+        let length = match algorithm {
+            Algorithm::Md5 | Algorithm::Md5Sess => 32,
+            _ => 64,
+        };
+        if base_ha1.len() != length || !base_ha1.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(VerifierError::InvalidHa1);
+        }
+        Ok(Self {
+            username: username.to_owned(),
+            realm: realm.to_owned(),
+            algorithm,
+            base_ha1: base_ha1.to_ascii_lowercase(),
+        })
+    }
+
+    fn validate_metadata(username: &str, realm: &str) -> Result<(), VerifierError> {
+        if username.is_empty()
+            || username.contains(':')
+            || username.chars().any(char::is_control)
+            || realm.chars().any(char::is_control)
+        {
+            return Err(VerifierError::InvalidMetadata);
+        }
+        Ok(())
+    }
+
+    /// The credential's username binding.
+    #[must_use]
+    pub fn username(&self) -> &str {
+        &self.username
+    }
+    /// The credential's protection space.
+    #[must_use]
+    pub fn realm(&self) -> &str {
+        &self.realm
+    }
+    /// The exact algorithm binding, including the session distinction.
+    #[must_use]
+    pub fn algorithm(&self) -> Algorithm {
+        self.algorithm
+    }
+
+    /// Explicitly expose the canonical lowercase hexadecimal base-HA1 for protected storage.
+    ///
+    /// This is credential-equivalent secret material: possession permits impersonation in the
+    /// bound protection space. Never log it or treat it as an ordinary password-hardening hash.
+    /// Store it with [`Self::username`], [`Self::realm`] and [`Self::algorithm`], then restore via
+    /// [`Self::from_ha1`]. Storage protection belongs to the caller; diagnostics and implicit
+    /// serialization do not expose this value. This does not persist authenticator replay state.
+    #[must_use]
+    pub fn expose_ha1(&self) -> &str {
+        &self.base_ha1
+    }
+
+    /// Answer a matching challenge without a plaintext password.
+    ///
+    /// # Errors
+    /// Returns [`VerifierError::BindingMismatch`] for a different realm or algorithm.
+    pub fn respond(
+        &self,
+        challenge: &Challenge,
+        method: &str,
+        uri: &str,
+        nonce_count: u32,
+        cnonce: &str,
+    ) -> Result<String, VerifierError> {
+        if challenge.realm != self.realm || challenge.algorithm != self.algorithm {
+            return Err(VerifierError::BindingMismatch);
+        }
+        Ok(respond_from_ha1(
+            challenge,
+            &self.username,
+            &self.base_ha1,
+            method,
+            uri,
+            nonce_count,
+            cnonce,
+        ))
+    }
+}
+
 /// Answer a challenge.
 ///
 /// `uri` is the Request-URI of the request being authorized — not the user's URI. They differ
@@ -318,12 +485,32 @@ pub fn respond(
     nonce_count: u32,
     cnonce: &str,
 ) -> String {
-    let algorithm = challenge.algorithm;
-
-    let mut ha1 = algorithm.hash(&format!(
+    let base_ha1 = challenge.algorithm.hash(&format!(
         "{}:{}:{}",
         credentials.username, challenge.realm, credentials.password
     ));
+    respond_from_ha1(
+        challenge,
+        &credentials.username,
+        &base_ha1,
+        method,
+        uri,
+        nonce_count,
+        cnonce,
+    )
+}
+
+fn respond_from_ha1(
+    challenge: &Challenge,
+    username: &str,
+    base_ha1: &str,
+    method: &str,
+    uri: &str,
+    nonce_count: u32,
+    cnonce: &str,
+) -> String {
+    let algorithm = challenge.algorithm;
+    let mut ha1 = base_ha1.to_owned();
     if algorithm.is_session() {
         // RFC 7616 §3.4.2: the session variants bind HA1 to this exchange's nonces, so a
         // captured HA1 cannot be replayed into a later one.
@@ -345,7 +532,7 @@ pub fn respond(
 
     let mut header = format!(
         r#"Digest username="{}", realm="{}", nonce="{}", uri="{}", response="{response}""#,
-        escape(&credentials.username),
+        escape(username),
         escape(&challenge.realm),
         escape(&challenge.nonce),
         escape(uri),
