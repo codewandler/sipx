@@ -93,3 +93,61 @@ The request body is abbreviated as the identical byte string `SDP`.
 checks the stable identity, incremented CSeq, fresh branch and digest result. CLI coverage drives the
 same path through `sipx dial --password` and verifies a missing/wrong credential maps directly to
 exit 4 (`Unauthorized`), never to a timeout.
+
+## 6. Server verifiers and bounded replay state
+
+`auth::DigestVerifier` holds private username, realm, algorithm and base-HA1 fields. The
+base-HA1 is `H(username:realm:password)` (RFC 7616 §3.4.2), including for session algorithms;
+the nonce-dependent session hash is computed for each request. This value is credential-equivalent,
+not a password-hardening hash: anyone holding it can impersonate the user in its protection space.
+No Debug, Display or error output may disclose it. `derive` accepts credentials; `from_ha1`
+imports exactly 32 hexadecimal digits for MD5 or 64 for SHA-256/SHA-512-256, normalizing case.
+Both reject empty usernames, controls and a colon in the username. An empty realm remains an
+exact binding for compatibility with the existing password API; callers are responsible for
+selecting a compliant globally unique realm (RFC 3261 §22.1), and an empty realm is not a
+production recommendation. Import binds the
+caller's metadata; no hash can prove which metadata originally produced imported bytes.
+
+`expose_ha1` explicitly borrows the canonical lowercase hexadecimal base-HA1 for an application
+that must persist a verifier. Store it with the username, realm and exact algorithm getters,
+protecting the whole bound record as credential-equivalent secret material. Export does not imply
+safe logging or ordinary password-hash security. No implicit serialization, Debug, Display or
+error representation exposes it. A derived verifier can be exported, the plaintext credentials
+and original verifier discarded, then the bound record imported without duplicating Digest
+arithmetic in the application. Storage encryption, access control and replication belong to the
+caller; exporting the verifier does not export this authenticator's replay window.
+
+`Authenticator::verify_with_verifier[_at]` and existing password methods share this order:
+validate algorithm, declared realm and verifier binding; require qop=auth, a nonzero count and
+nonempty client nonce; authenticate the server nonce; compare the response in constant time;
+check expiry; then record replay state. Unsupported named algorithms fail parsing; only an absent
+algorithm defaults to MD5. The complete authorization parameter list must parse before field
+lookup: malformed quoting/escaping, invalid tokens, missing values/separators, duplicate names,
+trailing junk and invalid UTF-8 are rejected rather than interpreted as absent metadata. Parameter
+names and the Digest scheme are case-insensitive; valid quoted escapes and extension parameters
+remain supported. Wrong credentials on an expired nonce are rejected, never `Stale`.
+The caller must compare the presented URI with the actual request URI before trusting either API.
+This API does not provide userhash, distributed replay storage or request-level authorization.
+
+Replay state keys the tuple (nonce, username, client nonce), using a length-framed SHA-256 key
+so retained input lengths cannot grow storage. Each key stores its issue time, highest count and
+response. A greater count advances it; an identical highest count/response is a retransmission;
+a lower count or changed response at the highest count is `Reason::Replay`. Identical Digest
+retransmissions cannot be distinguished from captured identical requests; the SIP transaction
+layer must avoid executing a retransmitted request twice.
+
+At most 4096 identities are retained. Only expired entries may be removed. New identities at
+capacity return `Reason::ReplayCapacity`; retained identities continue to work. Capacity refusal
+is not `Stale`, and must not prompt an unbounded immediate retry loop. After expiry, capacity is
+available again. The supplied clock must not move backwards, and lifetime is configured before
+verification begins; replay state is local to one authenticator and does not survive its restart.
+
+| Vector | Required result |
+|---|---|
+| RFC 2617 §3.5 base-HA1 `939e7578ed9e3c518a452acee763bce9`, user `Mufasa`, realm `testrealm@host.com`, GET `/dir/index.html`, nonce `dcd98b7102dd2f0e8b11d0f600bfb0c093`, cnonce `0a4f113b`, nc=1 | response `6629fae49393a05397450978507c4ef1` |
+| All six supported algorithms, derived and imported verifiers | same response as the password API |
+| Changed declared realm, username, algorithm, method or credential | rejected before expiry/replay success |
+| Wrong hex length/encoding, empty user/control metadata, colon in user | typed import/derive error without input echo |
+| 4096 fresh identities then another, before nonce expiry | first 4096 authenticate; new identity returns ReplayCapacity; old lower-count requests still Replay |
+| Same server nonce with distinct users or cnonces | independent replay counters |
+| Correct/incorrect responses after expiry | Stale/Mismatch respectively; newly issued nonce authenticates |

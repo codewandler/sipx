@@ -5,7 +5,8 @@
 //! and supplies entropy at the runtime-facing layer.
 
 pub use sipx_sip::auth::{
-    Algorithm, Challenge, Credentials, respond, strongest, topmost_supported,
+    Algorithm, Challenge, Credentials, DigestVerifier, VerifierError, respond, strongest,
+    topmost_supported,
 };
 
 /// A fresh client nonce.
