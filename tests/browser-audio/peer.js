@@ -314,7 +314,14 @@
       socket.send(buildInvite(config, dialog, localSdp));
       observe("invite");
       let response = await queue.next(config.signallingTimeoutMs || 10000);
-      while (!response.start.startsWith("SIP/2.0 2")) response = await queue.next(config.signallingTimeoutMs || 10000);
+      while (!response.start.startsWith("SIP/2.0 2")) {
+        if (config.coupled && response.start.startsWith("SIP/2.0 18")) {
+          if (response.body) fail("no-100rel source received provisional SDP");
+          observe("bodiless-provisional");
+        }
+        if (config.coupled && /^SIP\/2.0 [4-6]/.test(response.start)) fail(`coupled invitation refused: ${response.start}`);
+        response = await queue.next(config.signallingTimeoutMs || 10000);
+      }
       observe("final");
       remoteSdp = response.body;
       dialog.remoteTo = header(response, "to");
@@ -364,6 +371,16 @@
       }
     }
 
+    if (config.coupledFailure) {
+      let bye = await queue.next(config.signallingTimeoutMs || 10000);
+      while (bye.start.startsWith("SIP/2.0 200")) bye = await queue.next(config.signallingTimeoutMs || 10000);
+      if (!bye.start.startsWith("BYE ")) fail(`post-200 failure did not end with BYE: ${bye.start}`);
+      observe("bye");
+      socket.send(buildEmptyResponse(bye));
+      observe("bye-final");
+      fail("coupled fingerprint mismatch ended the answered dialog with BYE");
+    }
+
     await waitConnected(pc, config.iceTimeoutMs || 15000);
     if (config.mutation === "FingerprintMismatch") {
       proofState.negativeFacts = await withDeadline("selected pair evidence", 1000, async () => {
@@ -388,13 +405,13 @@
           continue;
         }
         const energy = current.inbound.totalAudioEnergy || current.inbound.audioLevel || 0;
-        if (current.inbound.packetsReceived > 0 && current.outbound.packetsSent > 0 && energy > 0) return current;
+        if (current.inbound.packetsReceived > (config.minimumPackets || 0) && current.outbound.packetsSent > (config.minimumPackets || 0) && energy > 0) return current;
         // Sampling cadence: getStats(), not this duration, decides whether media evidence exists.
         await waitEvent(pc, "connectionstatechange", null, 250).catch(() => undefined);
       }
     });
 
-    if (config.role === "browser-offerer") {
+    if (config.role === "browser-offerer" && !config.peerHangup) {
       socket.send(buildDialogRequest("BYE", config, dialog, 2));
       observe("bye");
       let byeResponse = await queue.next(config.signallingTimeoutMs || 10000);

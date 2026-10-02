@@ -428,6 +428,52 @@ def validate_sipx_result(
     return result
 
 
+def validate_coupled_lifecycle(browser: dict[str, Any], *, provisional_required: bool) -> None:
+    order = _mapping(browser.get("sip"), "coupled SIP evidence").get("order")
+    require(isinstance(order, list), "coupled SIP order evidence must be an array")
+    require(all(isinstance(event, str) for event in order), "coupled SIP events must be strings")
+    expected = ("invite", "final", "ack", "bye", "bye-final")
+    require(all(order.count(event) == 1 for event in expected), "coupled SIP lifecycle must be complete and unambiguous")
+    positions = [order.index(event) for event in expected]
+    require(positions == sorted(positions), "coupled SIP lifecycle is out of order")
+    provisionals = [index for index, event in enumerate(order) if event == "bodiless-provisional"]
+    if provisional_required:
+        require(bool(provisionals), "no-100rel provisional evidence is absent")
+    require(all(positions[0] < index < positions[1] for index in provisionals), "coupled provisional must follow INVITE and precede final answer")
+
+
+def validate_coupled(directory: pathlib.Path, expected_pin: str) -> dict[str, Any]:
+    origins = {"CoupledBrowserHangup": "browser", "CoupledPeerHangup": "peer"}
+    require(directory.name in (*origins, "CoupledFingerprintMismatch"), "unknown coupled proof case")
+    if directory.name == "CoupledFingerprintMismatch":
+        browser = _mapping(load_json(directory / "browser.json"), "browser failure")
+        gateway = _mapping(load_json(directory / "sipx.json"), "gateway failure")
+        require(browser.get("contract") == CONTRACT and browser.get("role") == "browser-offerer", "missing native browser contract or role")
+        require(browser.get("type") == "proof.negative-browser" and browser.get("mutation") == "FingerprintMismatch", "missing native fingerprint failure")
+        require(gateway.get("error") == "FingerprintMismatch", "missing typed fingerprint failure")
+        peer = _mapping(gateway.get("ordinary_peer"), "failed ordinary peer")
+        require(peer.get("ended") is True and peer.get("packets_sent") == 0, "failed coupling did not end its ordinary peer without media")
+        facts = _mapping(browser.get("facts"), "browser failure facts")
+        require(facts.get("selected_pair") is True and facts.get("nominated") is True and facts.get("dtls_state") in ("connecting", "connected", "failed", "closed") and facts.get("rtp_packets") == 0, "fingerprint failure did not reach ICE or carried media")
+        validate_coupled_lifecycle(browser, provisional_required=False)
+        return {"status": "passed", "error": "FingerprintMismatch", "browser": browser, "sipx": gateway}
+    browser = _mapping(load_json(directory / "browser.json"), "coupled browser result")
+    validate_coupled_lifecycle(browser, provisional_required=True)
+    browser = validate_browser_result(browser, "browser-offerer", expected_pin, "AEAD_AES_128_GCM")
+    gateway = validate_sipx_result(load_json(directory / "sipx.json"), "browser-offerer", "AEAD_AES_128_GCM")
+    cross_check_pair(browser, gateway)
+    require(gateway.get("source_ended") is True and gateway.get("target_ended") is True, "coupled dialogs did not both end")
+    require(gateway.get("hangup") == origins[directory.name], "hangup origin does not match selected coupled case")
+    require(gateway.get("audio_observation") == "ordinary-peer", "PCM must be measured beyond the bridge")
+    peer = _mapping(gateway.get("ordinary_peer"), "ordinary peer evidence")
+    require(peer.get("header") == "app-1000", "coupled extension header changed")
+    require(peer.get("transport") == "udp" and peer.get("keying") == "plain", "target is not ordinary UDP/RTP")
+    require(peer.get("ended") is True, "ordinary peer did not end")
+    for name in ("received_audio_peak", "packets_sent", "packets_received"):
+        _positive_number(peer.get(name), f"ordinary peer {name}")
+    return {"status": "passed", "hangup": gateway["hangup"], "browser": browser, "sipx": gateway}
+
+
 def validate_unused_rtcp_candidate(
     browser_value: Any, sipx_value: Any, expected_pin: str
 ) -> dict[str, dict[str, Any]]:
@@ -888,6 +934,10 @@ def main() -> int:
     negative.add_argument("--output", type=pathlib.Path, required=True)
     negative.add_argument("--timeout", type=int, default=120)
 
+    coupled = commands.add_parser("validate-coupled")
+    coupled.add_argument("--directory", type=pathlib.Path, required=True)
+    coupled.add_argument("--pin", required=True)
+
     validate = commands.add_parser("validate-proof")
     validate.add_argument("--directory", type=pathlib.Path, required=True)
     validate.add_argument("--pin", required=True)
@@ -929,6 +979,8 @@ def main() -> int:
         prepare_config(args.input, args.output, args.role, args.wss_url)
     elif args.command == "prepare-capabilities":
         prepare_capabilities(args.input, args.output, args.pin)
+    elif args.command == "validate-coupled":
+        print(json.dumps(validate_coupled(args.directory, args.pin)))
     elif args.command == "run-role":
         config = load_json(args.config)
         require(config.get("role") == args.role, "browser config names the wrong role")

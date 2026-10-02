@@ -51,6 +51,9 @@ impl Role {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Case {
     Positive,
+    CoupledBrowserHangup,
+    CoupledPeerHangup,
+    CoupledFingerprintMismatch,
     FingerprintMismatch,
     NoNominatedPair,
     WeakerMedia,
@@ -61,6 +64,9 @@ impl Case {
     fn parse(value: &str) -> Result<Self, String> {
         match value {
             "positive" => Ok(Self::Positive),
+            "CoupledBrowserHangup" => Ok(Self::CoupledBrowserHangup),
+            "CoupledPeerHangup" => Ok(Self::CoupledPeerHangup),
+            "CoupledFingerprintMismatch" => Ok(Self::CoupledFingerprintMismatch),
             "FingerprintMismatch" => Ok(Self::FingerprintMismatch),
             "NoNominatedPair" => Ok(Self::NoNominatedPair),
             "WeakerMedia" => Ok(Self::WeakerMedia),
@@ -71,7 +77,11 @@ impl Case {
 
     const fn expected(self) -> Option<ProfileError> {
         match self {
-            Self::Positive | Self::KdfPerturbation => None,
+            Self::Positive
+            | Self::KdfPerturbation
+            | Self::CoupledBrowserHangup
+            | Self::CoupledPeerHangup
+            | Self::CoupledFingerprintMismatch => None,
             Self::FingerprintMismatch => Some(ProfileError::FingerprintMismatch),
             Self::NoNominatedPair => Some(ProfileError::NoNominatedPair),
             Self::WeakerMedia => Some(ProfileError::WeakerMedia),
@@ -81,6 +91,9 @@ impl Case {
     const fn error_name(self) -> &'static str {
         match self {
             Self::Positive => "",
+            Self::CoupledBrowserHangup => "CoupledBrowserHangup",
+            Self::CoupledPeerHangup => "CoupledPeerHangup",
+            Self::CoupledFingerprintMismatch => "CoupledFingerprintMismatch",
             Self::FingerprintMismatch => "FingerprintMismatch",
             Self::NoNominatedPair => "NoNominatedPair",
             Self::WeakerMedia => "WeakerMedia",
@@ -144,7 +157,10 @@ impl Arguments {
     fn validate(&self) -> Result<(), String> {
         let valid = match self.case {
             Case::Positive => true,
-            Case::FingerprintMismatch => self.role == Role::BrowserOfferer,
+            Case::CoupledBrowserHangup
+            | Case::CoupledPeerHangup
+            | Case::CoupledFingerprintMismatch
+            | Case::FingerprintMismatch => self.role == Role::BrowserOfferer,
             Case::NoNominatedPair | Case::WeakerMedia => self.role == Role::BrowserAnswerer,
             Case::KdfPerturbation => {
                 self.role == Role::BrowserAnswerer
@@ -205,6 +221,13 @@ async fn execute(arguments: &Arguments) -> Result<Value, Box<dyn std::error::Err
         .wss_addr()
         .ok_or_else(|| std::io::Error::other("WSS listener was not bound"))?;
     println!("{}", json!({"status": "listening", "address": wss_address}));
+
+    if matches!(
+        arguments.case,
+        Case::CoupledBrowserHangup | Case::CoupledPeerHangup | Case::CoupledFingerprintMismatch
+    ) {
+        return Box::pin(execute_coupled(arguments, endpoint, incoming)).await;
+    }
 
     let attempt = match arguments.role {
         Role::BrowserOfferer => {
@@ -283,6 +306,187 @@ async fn execute(arguments: &Arguments) -> Result<Value, Box<dyn std::error::Err
     }
 }
 
+async fn execute_coupled(
+    arguments: &Arguments,
+    endpoint: sipx_transport::Handle,
+    incoming: tokio::sync::mpsc::Receiver<sipx_transport::Incoming>,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    use sipx_call::{CouplingEnd, Dispatched, Dispatcher, EarlyCoupling, Leg};
+    let mut dispatcher = Dispatcher::new(endpoint.clone(), incoming);
+    let calls = dispatcher.calls();
+    let invitation = match dispatcher.next().await {
+        Some(Dispatched::Invitation(invitation)) => invitation,
+        other => {
+            return Err(
+                std::io::Error::other(format!("expected invitation, got {other:?}")).into(),
+            );
+        }
+    };
+    if sipx_sip::rel::Offered::in_request(&invitation.request().request).supported {
+        return Err(std::io::Error::other("coupled browser unexpectedly offers 100rel").into());
+    }
+    // JoinSet aborts the dispatcher on every error return as well as normal completion.
+    let mut pumps = tokio::task::JoinSet::new();
+    pumps.spawn(async move { while dispatcher.next().await.is_some() {} });
+    let (peer_endpoint, mut peer_incoming) =
+        bind(Config::new(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))).await?;
+    let target = Target::udp(peer_endpoint.local_addr());
+    let peer_hangup = arguments.case == Case::CoupledPeerHangup;
+    let failed_fingerprint = arguments.case == Case::CoupledFingerprintMismatch;
+    let media_ready = tokio::sync::Notify::new();
+    let peer = ordinary_coupled_peer(
+        &peer_endpoint,
+        &mut peer_incoming,
+        &media_ready,
+        peer_hangup,
+        failed_fingerprint,
+    );
+    let gateway = async {
+        let to = Uri::sip(Host::Name(HostName::new("peer.example")?));
+        let options =
+            DialOptions::new("<sip:gateway@example.com>", Ipv4Addr::LOCALHOST.into()).with_header(
+                sipx_sip::Header::build(HeaderName::Other("X-Test-Route".into()), "app-1000")?,
+            );
+        let early = Box::pin(EarlyCoupling::dial_with_policy(
+            invitation,
+            &calls,
+            &endpoint,
+            target,
+            &to,
+            &options,
+            arguments.media_address,
+            arguments.media_policy(),
+        ))
+        .await?;
+        eprintln!("gateway early coupling created");
+        let confirmed = Box::pin(early.confirmed()).await;
+        if failed_fingerprint {
+            return match confirmed {
+                Err(Error::Profile(ProfileError::FingerprintMismatch)) => {
+                    Ok(json!({"error": "FingerprintMismatch"}))
+                }
+                other => Err(std::io::Error::other(format!(
+                    "expected coupled fingerprint refusal, got {other:?}"
+                ))
+                .into()),
+            };
+        }
+        let (mut coupling, mut one, mut two) = confirmed?.into_parts();
+        eprintln!("gateway both calls confirmed");
+        coupling.bridge_media();
+        media_ready.notify_one();
+        let mut evidence = positive_result(coupling.calls().0, arguments, 0)?;
+        let ended = coupling.run(&mut one, &mut two).await?;
+        if ended != CouplingEnd::Bye(if peer_hangup { Leg::Two } else { Leg::One }) {
+            return Err(std::io::Error::other("unexpected coupling terminal event").into());
+        }
+        let (source, target) = coupling.calls();
+        extend_evidence(
+            &mut evidence,
+            json!({
+                "packets_sent": source.media().packets_sent(),
+                "packets_received": source.media().packets_received(),
+                "source_ended": source.is_ended(), "target_ended": target.is_ended(),
+                "hangup": if peer_hangup { "peer" } else { "browser" },
+            }),
+        )?;
+        Ok::<_, Box<dyn std::error::Error>>(evidence)
+    };
+    let (mut gateway, peer) = tokio::try_join!(gateway, peer)?;
+    if failed_fingerprint {
+        extend_evidence(&mut gateway, json!({"ordinary_peer": peer}))?;
+        pumps.abort_all();
+        while pumps.join_next().await.is_some() {}
+        return Ok(gateway);
+    }
+    let peak = peer
+        .get("received_audio_peak")
+        .ok_or_else(|| std::io::Error::other("peer audio observation missing"))?
+        .clone();
+    extend_evidence(
+        &mut gateway,
+        json!({"received_audio_peak": peak, "audio_observation": "ordinary-peer", "ordinary_peer": peer}),
+    )?;
+    pumps.abort_all();
+    while pumps.join_next().await.is_some() {}
+    Ok(gateway)
+}
+
+fn extend_evidence(value: &mut Value, fields: Value) -> Result<(), std::io::Error> {
+    let target = value
+        .as_object_mut()
+        .ok_or_else(|| std::io::Error::other("expected evidence object"))?;
+    let Value::Object(fields) = fields else {
+        return Err(std::io::Error::other("expected evidence fields"));
+    };
+    target.extend(fields);
+    Ok(())
+}
+
+async fn ordinary_coupled_peer(
+    peer_endpoint: &sipx_transport::Handle,
+    peer_incoming: &mut tokio::sync::mpsc::Receiver<sipx_transport::Incoming>,
+    media_ready: &tokio::sync::Notify,
+    peer_hangup: bool,
+    failed_fingerprint: bool,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    let invite = next_method(peer_incoming, Method::Invite, |request| {
+        &request.request.method
+    })
+    .await?;
+    let header = invite
+        .request
+        .headers
+        .get(&HeaderName::Other("X-Test-Route".into()))
+        .ok_or_else(|| std::io::Error::other("extension header was lost"))?;
+    if header.value().as_ref() != b"app-1000" {
+        return Err(std::io::Error::other("extension header changed").into());
+    }
+    let sdp = String::from_utf8_lossy(invite.request.body());
+    if !sdp.contains("RTP/AVP") || sdp.contains("fingerprint") || sdp.contains("ice-ufrag") {
+        return Err(std::io::Error::other("browser security crossed onto the ordinary leg").into());
+    }
+    let mut ringing = sipx_call::ring_early(
+        peer_endpoint,
+        &invite,
+        183,
+        "Session Progress",
+        Ipv4Addr::LOCALHOST.into(),
+    )
+    .await?;
+    let prack = next_method(peer_incoming, Method::Prack, |request| {
+        &request.request.method
+    })
+    .await?;
+    if !ringing.on_prack(&prack).await? {
+        return Err(std::io::Error::other("target PRACK was not acknowledged").into());
+    }
+    let mut call = sipx_call::answer_early(peer_endpoint, &invite, &mut ringing).await?;
+    if call.negotiated_keying() != NegotiatedKeying::Plain
+        || call.media_profile() != MediaProfile::Standard
+    {
+        return Err(std::io::Error::other("ordinary peer negotiated unexpected security").into());
+    }
+    if failed_fingerprint {
+        serve(&mut call, peer_incoming).await?;
+        return Ok(json!({"ended": call.is_ended(), "packets_sent": call.media().packets_sent()}));
+    }
+    eprintln!("ordinary peer answered; waiting for bridge");
+    media_ready.notified().await;
+    eprintln!("ordinary peer bridge ready");
+    let peak = exercise_media(&call).await?;
+    if peer_hangup {
+        call.hang_up().await?;
+    } else {
+        serve(&mut call, peer_incoming).await?;
+    }
+    Ok::<_, Box<dyn std::error::Error>>(json!({
+        "received_audio_peak": peak, "packets_received": call.media().packets_received(),
+        "packets_sent": call.media().packets_sent(), "ended": call.is_ended(),
+        "header": "app-1000", "keying": "plain", "transport": "udp"
+    }))
+}
+
 async fn perturbed_kdf_result(
     call: &Call,
     arguments: &Arguments,
@@ -333,10 +537,13 @@ async fn exercise_media(call: &Call) -> Result<u16, Box<dyn std::error::Error>> 
             }
         })
         .collect();
-    if !call.play(&tone).await {
+    let (played, heard) = tokio::join!(
+        call.play(&tone),
+        call.record_at_least(MEDIA_SAMPLES, MEDIA_BOUND)
+    );
+    if !played {
         return Err(std::io::Error::other("outbound tone did not play to completion").into());
     }
-    let heard = call.record_at_least(MEDIA_SAMPLES, MEDIA_BOUND).await;
     let peak = heard
         .iter()
         .map(|sample| sample.unsigned_abs())

@@ -179,8 +179,12 @@ fi
 : "${SIPX_BROWSER_AUDIO_WSS_SPKI_SHA256:?set SIPX_BROWSER_AUDIO_WSS_SPKI_SHA256}"
 : "${SIPX_BROWSER_AUDIO_WEBDRIVER_CMD:?set SIPX_BROWSER_AUDIO_WEBDRIVER_CMD}"
 : "${SIPX_BROWSER_AUDIO_PROOF_BIN:?set SIPX_BROWSER_AUDIO_PROOF_BIN}"
-: "${SIPX_BROWSER_AUDIO_PERTURBED_PROOF_BIN:?set SIPX_BROWSER_AUDIO_PERTURBED_PROOF_BIN}"
-: "${SIPX_BROWSER_AUDIO_PERTURBATION_MANIFEST:?set SIPX_BROWSER_AUDIO_PERTURBATION_MANIFEST}"
+COUPLING_ONLY=false
+[[ ${1:-} != --coupling-only ]] || COUPLING_ONLY=true
+if ! "$COUPLING_ONLY"; then
+    : "${SIPX_BROWSER_AUDIO_PERTURBED_PROOF_BIN:?set SIPX_BROWSER_AUDIO_PERTURBED_PROOF_BIN}"
+    : "${SIPX_BROWSER_AUDIO_PERTURBATION_MANIFEST:?set SIPX_BROWSER_AUDIO_PERTURBATION_MANIFEST}"
+fi
 : "${SIPX_BROWSER_AUDIO_MEDIA_ADDRESS:?set SIPX_BROWSER_AUDIO_MEDIA_ADDRESS}"
 : "${SIPX_BROWSER_AUDIO_EVIDENCE_DIR:?set SIPX_BROWSER_AUDIO_EVIDENCE_DIR}"
 
@@ -197,11 +201,13 @@ require_file "offerer config" "$SIPX_BROWSER_AUDIO_OFFERER_CONFIG"
 require_file "answerer config" "$SIPX_BROWSER_AUDIO_ANSWERER_CONFIG"
 require_executable "WebDriver command" "$SIPX_BROWSER_AUDIO_WEBDRIVER_CMD"
 require_executable "sipx proof endpoint" "$SIPX_BROWSER_AUDIO_PROOF_BIN"
+if ! "$COUPLING_ONLY"; then
 require_executable "perturbed-KDF sipx proof endpoint" "$SIPX_BROWSER_AUDIO_PERTURBED_PROOF_BIN"
 require_file "perturbed-KDF build manifest" "$SIPX_BROWSER_AUDIO_PERTURBATION_MANIFEST"
 "$DRIVER" preflight-perturbed-build \
     --binary "$SIPX_BROWSER_AUDIO_PERTURBED_PROOF_BIN" \
     --manifest "$SIPX_BROWSER_AUDIO_PERTURBATION_MANIFEST"
+fi
 preflight_identity "$SIPX_BROWSER_AUDIO_WSS_CERT" "$SIPX_BROWSER_AUDIO_WSS_HOST" "$SIPX_BROWSER_AUDIO_WSS_SPKI_SHA256"
 
 mkdir -p "$SIPX_BROWSER_AUDIO_EVIDENCE_DIR"
@@ -277,7 +283,7 @@ run_case() {
             --config "$config" \
             --capabilities "$CAPABILITIES" \
             --role "$role" \
-            --mutation "$case_name" \
+            --mutation "${browser_mutation:-$case_name}" \
             --pin "$SIPX_BROWSER_AUDIO_WSS_SPKI_SHA256" \
             --output "$directory/browser.json" \
             --timeout "$ROLE_TIMEOUT"
@@ -290,6 +296,29 @@ run_positive() {
     # Empty case argument means run-role receives no mutation flag.
     run_case "$role" "" "$config" "$directory" run-role "" "$suite"
 }
+
+if "$COUPLING_ONLY"; then
+    coupled_passed=0
+    for case_name in CoupledBrowserHangup CoupledPeerHangup CoupledFingerprintMismatch; do
+        config="$SIPX_BROWSER_AUDIO_EVIDENCE_DIR/$case_name.config.json"
+        python3 - "$SIPX_BROWSER_AUDIO_OFFERER_CONFIG" "$config" "$case_name" <<'PYCONFIG'
+import json, pathlib, sys
+config = json.loads(pathlib.Path(sys.argv[1]).read_text())
+config.update(coupled=True, coupledFailure=sys.argv[3] == "CoupledFingerprintMismatch", minimumPackets=80, peerHangup=sys.argv[3] == "CoupledPeerHangup")
+pathlib.Path(sys.argv[2]).write_text(json.dumps(config))
+PYCONFIG
+        directory="$SIPX_BROWSER_AUDIO_EVIDENCE_DIR/$case_name"
+        if [[ $case_name == CoupledFingerprintMismatch ]]; then
+            run_case browser-offerer "$case_name" "$config" "$directory" run-negative FingerprintMismatch AEAD_AES_128_GCM
+        else
+            run_case browser-offerer "$case_name" "$config" "$directory" run-role "" AEAD_AES_128_GCM
+        fi
+        "$DRIVER" validate-coupled --directory "$directory" --pin "$SIPX_BROWSER_AUDIO_WSS_SPKI_SHA256" >"$directory/proof.json"
+        coupled_passed=$((coupled_passed + 1))
+    done
+    printf 'browser-audio coupling: %s passed; 0 failed\n' "$coupled_passed"
+    exit 0
+fi
 
 run_positive browser-offerer "$SIPX_BROWSER_AUDIO_OFFERER_CONFIG" AEAD_AES_128_GCM
 run_positive browser-answerer "$SIPX_BROWSER_AUDIO_ANSWERER_CONFIG" AEAD_AES_256_GCM

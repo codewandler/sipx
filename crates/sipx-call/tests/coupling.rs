@@ -289,6 +289,7 @@ async fn next_reliable_provisional(
 
 async fn delayed_relay(
     call_id: &'static str,
+    source_policy: sipx_call::MediaPolicy,
 ) -> (
     Handle,
     SocketAddr,
@@ -317,7 +318,7 @@ async fn delayed_relay(
     let target = Target::udp(target_endpoint.local_addr());
     let outbound_to = Uri::sip(Host::Name(HostName::new("callee.example").expect("valid")));
     let coupling_task = tokio::spawn(async move {
-        Box::pin(EarlyCoupling::dial(
+        Box::pin(EarlyCoupling::dial_with_policy(
             inbound,
             &calls,
             &edge_for_coupling,
@@ -325,6 +326,7 @@ async fn delayed_relay(
             &outbound_to,
             &DialOptions::new("<sip:edge@example.net>", loopback()),
             loopback(),
+            source_policy,
         ))
         .await
         .expect("the coupling reaches the target early dialog")
@@ -1124,7 +1126,11 @@ async fn a_target_provisional_offer_crosses_both_legs_before_its_prack_leaves() 
         mut target_requests,
         mut target_events,
         early,
-    ) = delayed_relay("coupled-delayed-offer@sipx").await;
+    ) = delayed_relay(
+        "coupled-delayed-offer@sipx",
+        sipx_call::MediaPolicy::default(),
+    )
+    .await;
     let coupled = tokio::spawn(early.confirmed());
 
     let source_provisional = next_reliable_provisional(&mut source_responses).await;
@@ -1211,7 +1217,11 @@ async fn cancelling_a_delayed_offer_cancels_the_target_without_pracking_it() {
         mut target_requests,
         mut target_events,
         early,
-    ) = delayed_relay("coupled-delayed-cancel@sipx").await;
+    ) = delayed_relay(
+        "coupled-delayed-cancel@sipx",
+        sipx_call::MediaPolicy::default(),
+    )
+    .await;
     let source_provisional = next_reliable_provisional(&mut source_responses).await;
     assert!(!source_provisional.body().is_empty());
     let coupled = tokio::spawn(early.confirmed());
@@ -1261,7 +1271,11 @@ async fn a_malformed_source_prack_answer_refuses_and_cleans_both_pending_legs() 
         mut target_requests,
         mut target_events,
         early,
-    ) = delayed_relay("coupled-delayed-malformed@sipx").await;
+    ) = delayed_relay(
+        "coupled-delayed-malformed@sipx",
+        sipx_call::MediaPolicy::default(),
+    )
+    .await;
     let source_provisional = next_reliable_provisional(&mut source_responses).await;
     let mut source_prack = prack_answer(&source, &source_invite, &source_provisional);
     let declared_length = source_prack.body().len();
@@ -1411,4 +1425,370 @@ async fn a_crossed_target_final_is_acked_and_ended_when_the_source_answer_fails(
         !methods.contains(&Method::Prack),
         "the failed source answer never releases the target PRACK"
     );
+}
+
+/// Both final-only and reliable-early source answers must retain a policy independent of the
+/// target's G.711 policy. L16-only on the source makes accidental defaulting observable.
+async fn independent_source_policy(early_answer: bool) {
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        Box::pin(async {
+            let (edge, edge_incoming) = endpoint().await;
+            let mut pumped = pump(&edge, edge_incoming);
+            let (source, mut source_incoming) = endpoint().await;
+            let (target, mut target_incoming) = endpoint().await;
+            let source_target = Target::udp(edge.local_addr());
+            let target_target = Target::udp(target.local_addr());
+            let to = Uri::sip(Host::Name(HostName::new("edge.example").unwrap()));
+            let source_future = async {
+                let mut call = dial_early(
+                    &source,
+                    source_target,
+                    &to,
+                    &DialOptions::new("<sip:source@example.com>", loopback())
+                        .with_codecs(sipx_call::Codecs::L16),
+                )
+                .await
+                .unwrap()
+                .answered()
+                .await
+                .unwrap();
+                assert_eq!(call.media().codec(), sipx_media::Codec::L16);
+                sipx_call::serve(&mut call, &mut source_incoming)
+                    .await
+                    .unwrap();
+                assert!(call.is_ended());
+            };
+            let target_future = async {
+                let invite = target_incoming.recv().await.unwrap();
+                let mut ringing = if early_answer {
+                    ring_early(&target, &invite, 183, "Session Progress", loopback())
+                        .await
+                        .unwrap()
+                } else {
+                    ring(&target, &invite, 180, "Ringing", false).await.unwrap()
+                };
+                if early_answer {
+                    let prack = target_incoming.recv().await.unwrap();
+                    assert!(ringing.on_prack(&prack).await.unwrap());
+                }
+                let mut call = if early_answer {
+                    sipx_call::answer_early(&target, &invite, &mut ringing)
+                        .await
+                        .unwrap()
+                } else {
+                    sipx_call::answer_ringing(&target, &invite, loopback(), &ringing)
+                        .await
+                        .unwrap()
+                };
+                assert_eq!(call.media().codec(), sipx_media::Codec::Pcmu);
+                // ACK establishes that the target answered before its BYE is sent.
+                while target_incoming.recv().await.unwrap().request.method != Method::Ack {}
+                call.hang_up().await.unwrap();
+            };
+            let coupling_future = async {
+                let invitation = pumped.invitation().await;
+                let early = Box::pin(EarlyCoupling::dial_with_policy(
+                    invitation,
+                    &pumped.calls,
+                    &edge,
+                    target_target,
+                    &to,
+                    &DialOptions::new("<sip:edge@example.com>", loopback()),
+                    loopback(),
+                    sipx_call::MediaPolicy::default().with_codecs(sipx_call::Codecs::L16),
+                ))
+                .await
+                .unwrap();
+                let (mut coupling, mut one, mut two) =
+                    Box::pin(early.confirmed()).await.unwrap().into_parts();
+                assert_eq!(coupling.calls().0.media().codec(), sipx_media::Codec::L16);
+                assert_eq!(coupling.calls().1.media().codec(), sipx_media::Codec::Pcmu);
+                assert_eq!(
+                    coupling.run(&mut one, &mut two).await.unwrap(),
+                    CouplingEnd::Bye(Leg::Two)
+                );
+            };
+            tokio::join!(source_future, target_future, coupling_future);
+        }),
+    )
+    .await
+    .expect("mixed policies and peer BYE finish within the bound");
+}
+
+#[tokio::test]
+async fn independent_source_policy_survives_a_final_answer() {
+    Box::pin(independent_source_policy(false)).await;
+}
+
+#[tokio::test]
+async fn independent_source_policy_survives_a_reliable_early_answer() {
+    Box::pin(independent_source_policy(true)).await;
+}
+
+#[tokio::test]
+async fn delayed_source_offer_uses_its_independent_policy() {
+    let (
+        source,
+        edge_addr,
+        source_invite,
+        mut responses,
+        _ringing,
+        mut requests,
+        mut events,
+        early,
+    ) = delayed_relay(
+        "independent-delayed@example.com",
+        sipx_call::MediaPolicy::default().with_codecs(sipx_call::Codecs::G722),
+    )
+    .await;
+    let provisional = next_reliable_provisional(&mut responses).await;
+    assert!(
+        String::from_utf8_lossy(provisional.body()).contains("G722/8000"),
+        "source delayed offer retains its codec policy"
+    );
+    assert!(
+        requests.try_recv().is_err(),
+        "target PRACK remains held until an answer"
+    );
+    let coupled = tokio::spawn(early.confirmed());
+    let mut cancellation = source
+        .send(cancel_for(&source_invite), Target::udp(edge_addr))
+        .await
+        .unwrap();
+    let (result, event, response) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(coupled, events.recv(), cancellation.final_response())
+    })
+    .await
+    .expect("cancellation ends both pending legs");
+    assert!(matches!(result.unwrap(), Err(Error::InvitationCancelled)));
+    assert!(matches!(
+        event,
+        Some(sipx_call::CallEvent::Ended(
+            sipx_call::EndCause::RemoteCancel
+        ))
+    ));
+    assert_eq!(response.unwrap().status.code(), 200);
+}
+
+#[tokio::test]
+async fn source_policy_failure_before_final_refuses_invite_and_ends_target() {
+    let (edge, edge_incoming) = endpoint().await;
+    let mut pumped = pump(&edge, edge_incoming);
+    let (source, _source_incoming) = endpoint().await;
+    let (target, mut target_incoming) = endpoint().await;
+    let to = Uri::sip(Host::Name(HostName::new("edge.example").unwrap()));
+    let source_target = Target::udp(edge.local_addr());
+    let target_target = Target::udp(target.local_addr());
+    let caller = async {
+        let mut invite = offerless_invite(&source, "policy-failure@example.com");
+        invite.headers.remove_all(&HeaderName::Supported);
+        invite.set_body(Bytes::from(offer_sdp(0, "PCMU")));
+        invite.headers.remove_all(&HeaderName::ContentLength);
+        invite.headers.push(
+            sipx_sip::Header::build(HeaderName::ContentLength, invite.body().len().to_string())
+                .unwrap(),
+        );
+        invite
+            .headers
+            .push(sipx_sip::Header::build(HeaderName::ContentType, "application/sdp").unwrap());
+        let mut responses = source.send(invite, source_target).await.unwrap();
+        let final_response =
+            tokio::time::timeout(Duration::from_secs(3), responses.final_response())
+                .await
+                .expect(
+                    "pre-final policy failure must send a final response, not abandon the INVITE",
+                )
+                .unwrap();
+        assert_eq!(final_response.status.code(), 488);
+    };
+    let recipient = async {
+        let invite = target_incoming.recv().await.unwrap();
+        let ringing = ring(&target, &invite, 180, "Ringing", false).await.unwrap();
+        let mut call = sipx_call::answer_ringing(&target, &invite, loopback(), &ringing)
+            .await
+            .unwrap();
+        sipx_call::serve(&mut call, &mut target_incoming)
+            .await
+            .unwrap();
+        assert!(
+            call.is_ended(),
+            "confirmed target receives BYE on source failure"
+        );
+    };
+    let gateway = async {
+        let invitation = pumped.invitation().await;
+        let early = Box::pin(EarlyCoupling::dial_with_policy(
+            invitation,
+            &pumped.calls,
+            &edge,
+            target_target,
+            &to,
+            &DialOptions::new("<sip:edge@example.com>", loopback()),
+            loopback(),
+            sipx_call::MediaPolicy::browser_audio(),
+        ))
+        .await
+        .unwrap();
+        assert!(matches!(
+            Box::pin(early.confirmed()).await,
+            Err(Error::Profile(_))
+        ));
+    };
+    Box::pin(tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(caller, recipient, gateway);
+    }))
+    .await
+    .expect("both legs settle");
+}
+
+#[tokio::test]
+async fn source_cancel_during_answer_preparation_keeps_its_487() {
+    let (edge, incoming) = endpoint().await;
+    let mut pumped = pump(&edge, incoming);
+    let (source, _requests) = endpoint().await;
+    let (target, mut target_incoming) = endpoint().await;
+    // Deliberately silent STUN is a preparation barrier. Receiving its first request proves
+    // gathering has started; no sleep guesses when cancellation races the final answer.
+    let stun = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let policy = sipx_call::MediaPolicy::default()
+        .with_ice(sipx_call::IcePolicy::Stun(stun.local_addr().unwrap()));
+    let to = Uri::sip(Host::Name(HostName::new("edge.example").unwrap()));
+    let source_target = Target::udp(edge.local_addr());
+    let target_target = Target::udp(target.local_addr());
+    let caller = async {
+        let mut invite = offerless_invite(&source, "cancel-preparation@example.com");
+        invite.headers.remove_all(&HeaderName::Supported);
+        invite.set_body(Bytes::from(format!("{}a=ice-ufrag:source123\r\na=ice-pwd:sourcepassword123456789012\r\na=candidate:1 1 UDP 2130706431 127.0.0.1 45000 typ host\r\n", offer_sdp(0,"PCMU"))));
+        invite.headers.remove_all(&HeaderName::ContentLength);
+        invite.headers.push(
+            sipx_sip::Header::build(HeaderName::ContentLength, invite.body().len().to_string())
+                .unwrap(),
+        );
+        invite
+            .headers
+            .push(sipx_sip::Header::build(HeaderName::ContentType, "application/sdp").unwrap());
+        let mut responses = source
+            .send(invite.clone(), source_target.clone())
+            .await
+            .unwrap();
+        let mut buffer = [0u8; 2048];
+        stun.recv_from(&mut buffer).await.unwrap();
+        let mut cancel = source
+            .send(cancel_for(&invite), source_target)
+            .await
+            .unwrap();
+        assert_eq!(cancel.final_response().await.unwrap().status.code(), 200);
+        let response = tokio::time::timeout(Duration::from_secs(3), responses.final_response())
+            .await
+            .expect("CANCEL before the final response retains its 487")
+            .unwrap();
+        assert_eq!(response.status.code(), 487);
+    };
+    let recipient = async {
+        let invite = target_incoming.recv().await.unwrap();
+        let ringing = ring(&target, &invite, 180, "Ringing", false).await.unwrap();
+        let mut call = sipx_call::answer_ringing(&target, &invite, loopback(), &ringing)
+            .await
+            .unwrap();
+        sipx_call::serve(&mut call, &mut target_incoming)
+            .await
+            .unwrap();
+        assert!(call.is_ended());
+    };
+    let gateway = async {
+        let invitation = pumped.invitation().await;
+        let early = Box::pin(EarlyCoupling::dial_with_policy(
+            invitation,
+            &pumped.calls,
+            &edge,
+            target_target,
+            &to,
+            &DialOptions::new("<sip:edge@example.com>", loopback()),
+            loopback(),
+            policy,
+        ))
+        .await
+        .unwrap();
+        assert!(matches!(
+            Box::pin(early.confirmed()).await,
+            Err(Error::InvitationCancelled)
+        ));
+    };
+    Box::pin(tokio::time::timeout(Duration::from_secs(15), async {
+        tokio::join!(caller, recipient, gateway);
+    }))
+    .await
+    .expect("cancelled preparation cleans the target after bounded gathering");
+}
+
+#[tokio::test]
+async fn source_media_bind_failure_before_final_refuses_and_ends_confirmed_target() {
+    let (edge, edge_incoming) = endpoint().await;
+    let mut pumped = pump(&edge, edge_incoming);
+    let (source, _source_incoming) = endpoint().await;
+    let (target, mut target_incoming) = endpoint().await;
+    let to = Uri::sip(Host::Name(HostName::new("edge.example").unwrap()));
+    let source_target = Target::udp(edge.local_addr());
+    let target_target = Target::udp(target.local_addr());
+    let caller = async {
+        let mut invite = offerless_invite(&source, "media-bind-failure@example.com");
+        invite.headers.remove_all(&HeaderName::Supported);
+        invite.set_body(Bytes::from(offer_sdp(0, "PCMU")));
+        invite.headers.remove_all(&HeaderName::ContentLength);
+        invite.headers.push(
+            sipx_sip::Header::build(HeaderName::ContentLength, invite.body().len().to_string())
+                .unwrap(),
+        );
+        invite
+            .headers
+            .push(sipx_sip::Header::build(HeaderName::ContentType, "application/sdp").unwrap());
+        let mut responses = source.send(invite, source_target).await.unwrap();
+        let final_response =
+            tokio::time::timeout(Duration::from_secs(3), responses.final_response())
+                .await
+                .expect(
+                    "pre-final policy failure must send a final response, not abandon the INVITE",
+                )
+                .unwrap();
+        assert_eq!(final_response.status.code(), 488);
+    };
+    let recipient = async {
+        let invite = target_incoming.recv().await.unwrap();
+        let ringing = ring(&target, &invite, 180, "Ringing", false).await.unwrap();
+        let mut call = sipx_call::answer_ringing(&target, &invite, loopback(), &ringing)
+            .await
+            .unwrap();
+        sipx_call::serve(&mut call, &mut target_incoming)
+            .await
+            .unwrap();
+        assert!(
+            call.is_ended(),
+            "confirmed target receives BYE on source failure"
+        );
+    };
+    let gateway = async {
+        let invitation = pumped.invitation().await;
+        let early = Box::pin(EarlyCoupling::dial_with_policy(
+            invitation,
+            &pumped.calls,
+            &edge,
+            target_target,
+            &to,
+            &DialOptions::new("<sip:edge@example.com>", loopback()),
+            std::net::Ipv4Addr::new(192, 0, 2, 123).into(),
+            sipx_call::MediaPolicy::default(),
+        ))
+        .await
+        .unwrap();
+        assert!(matches!(
+            Box::pin(early.confirmed()).await,
+            Err(Error::Io(_))
+        ));
+    };
+    Box::pin(tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(caller, recipient, gateway);
+    }))
+    .await
+    .expect("both legs settle");
 }

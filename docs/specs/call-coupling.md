@@ -134,6 +134,24 @@ before the calls and stops both forwarding tasks.
 An application implementing RFC 7092 §3.2.3 negotiates the two sessions at the B2BUA and calls
 `bridge_media`.
 
+### Independent terminating policies
+
+`EarlyCoupling::dial_with_policy` takes a source `MediaPolicy`; target policy remains in
+`DialOptions`. The legacy `dial` and `new` constructors retain the default source policy.
+`new_with_policy` supplies the policy when joining legs already rung by the application.
+The source policy governs both reliable early SDP and the final answer. Each leg generates its
+own media endpoint, ICE credentials, fingerprints and keys; only direction crosses legs.
+
+When the source offered SDP but did not offer `100rel`, a target early answer MUST NOT force a
+source provisional answer: send a bodiless 180 and answer using the source policy in the 200.
+The reliable-provisional guard remains unchanged. Delayed offers retain the existing PRACK
+causal chain and use the selected source policy for their locally generated offer.
+
+The native-browser coupled fixture is a no-100rel WSS source with browser audio and a separate
+UDP/RTP peer behind the coupling. It measures non-silent audio at that ordinary peer and in native
+browser statistics, verifies an unchanged extension header, and ends through BYE from each side.
+The existing cancellation and crossed-final vectors remain mandatory under the new constructor.
+
 ### 6.1 The off-media role (RFC 7092 §3.1.3)
 
 `OffMediaCoupling` is the other role and a different object, because the difference is not a flag:
@@ -280,3 +298,12 @@ learns there was never an answer.
 | T9 | off-media leg: source offerless INVITE without `100rel`; target 2xx carries an offer | target ACK is held; source 2xx carries the mapped offer; source ACK carries an answer; target ACK carries the mapped answer; RTP sent by the target reaches the source answer's own port; no sipx media socket exists |
 | T10 | T9 with a missing or unmappable source ACK answer | target receives a bodiless ACK and then BYE; source receives BYE; target never receives the bad description; coupling returns the typed error |
 | T11 | T9 but the source sends no ACK before `cancellation_timeout` | before the target's 64·T1 lifetime, target receives a bodiless ACK and BYE, source receives BYE, and coupling returns `NoResponse` with no retained task or dialog |
+
+### Final-answer failure ownership
+
+Preparing a source final answer MUST retain cancellation ownership until the call layer is about
+to transmit a final response. The source claim selects the ringing dialog tag at that boundary.
+A preparation error before any final response refuses the pending source INVITE with 488 and
+ends the confirmed target; a CANCEL which wins preparation instead retains its 487. A failure
+while starting ICE/DTLS after 200 ends the source dialog with BYE and ends the target too, without
+sending a conflicting non-2xx final. The call layer owns that distinction and post-200 teardown.

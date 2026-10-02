@@ -12,6 +12,7 @@
 
 use std::collections::VecDeque;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use sipx_media::Bridge;
 use sipx_sdp::Direction;
@@ -21,7 +22,7 @@ use tokio::sync::mpsc;
 
 use crate::call::{CouplingDialEvent, sleep_until};
 use crate::dispatch::CouplingInvitation;
-use crate::{Call, Calls, DialOptions, Dialing, Error, Invitation, Result, Ringing};
+use crate::{Call, Calls, DialOptions, Dialing, Error, Invitation, MediaPolicy, Result, Ringing};
 
 pub mod transparent;
 
@@ -306,6 +307,7 @@ pub struct EarlyCoupling {
     outgoing_incoming: mpsc::Receiver<Incoming>,
     endpoint: sipx_transport::Handle,
     media_address: IpAddr,
+    source_policy: MediaPolicy,
     state: CouplingState,
     deferred: PerLeg<VecDeque<Incoming>>,
     delayed_offer_pending: bool,
@@ -317,19 +319,29 @@ async fn ring_source_leg(
     media_address: IpAddr,
     delayed_direction: Option<Direction>,
     answered_early: bool,
+    source_policy: &MediaPolicy,
 ) -> Result<Ringing> {
     if let Some(direction) = delayed_direction {
-        crate::ring_offer_early(
+        crate::ring_offer_early_with_policy(
             endpoint,
             incoming,
             183,
             "Session Progress",
             media_address,
             direction,
+            source_policy.clone(),
         )
         .await
-    } else if answered_early {
-        crate::ring_early(endpoint, incoming, 183, "Session Progress", media_address).await
+    } else if answered_early && sipx_sip::rel::Offered::in_request(&incoming.request).supported {
+        crate::ring_early_with_policy(
+            endpoint,
+            incoming,
+            183,
+            "Session Progress",
+            media_address,
+            source_policy.clone(),
+        )
+        .await
     } else {
         crate::ring(endpoint, incoming, 180, "Ringing", true).await
     }
@@ -356,6 +368,38 @@ impl EarlyCoupling {
         to: &Uri,
         options: &DialOptions,
         media_address: IpAddr,
+    ) -> Result<Self> {
+        Box::pin(Self::dial_with_policy(
+            invitation,
+            calls,
+            endpoint,
+            target,
+            to,
+            options,
+            media_address,
+            MediaPolicy::default(),
+        ))
+        .await
+    }
+
+    /// Like [`Self::dial`], with an independent policy for the source media session.
+    ///
+    /// The target keeps the policy in `options`. Source ICE credentials, keying and codecs are
+    /// negotiated locally; none are copied from the target. Without source `100rel` support,
+    /// an offered source session is answered in the final response, not a provisional.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "extends the existing dial parameters with an independent source policy"
+    )]
+    pub async fn dial_with_policy(
+        invitation: Invitation,
+        calls: &Calls,
+        endpoint: &sipx_transport::Handle,
+        target: sipx_transport::Target,
+        to: &Uri,
+        options: &DialOptions,
+        media_address: IpAddr,
+        source_policy: MediaPolicy,
     ) -> Result<Self> {
         let source_offer = !invitation.request().request.body().is_empty();
         let direction = relayed_direction(&invitation.request().request);
@@ -427,6 +471,7 @@ impl EarlyCoupling {
             media_address,
             delayed_direction,
             answered_early,
+            &source_policy,
         )
         .await;
         let ringing = match ringing {
@@ -448,6 +493,7 @@ impl EarlyCoupling {
             outgoing_incoming,
             endpoint: endpoint.clone(),
             media_address,
+            source_policy,
             state,
             deferred: PerLeg::new(VecDeque::new(), VecDeque::new()),
             delayed_offer_pending: delayed_direction.is_some(),
@@ -468,6 +514,31 @@ impl EarlyCoupling {
         endpoint: &sipx_transport::Handle,
         media_address: IpAddr,
     ) -> Self {
+        Self::new_with_policy(
+            invitation,
+            ringing,
+            dialing,
+            outgoing_incoming,
+            endpoint,
+            media_address,
+            MediaPolicy::default(),
+        )
+    }
+
+    /// Like [`Self::new`], retaining a chosen source policy for its final answer.
+    ///
+    /// If `ringing` already owns early media, that session's already negotiated policy remains
+    /// authoritative. Callers must use the same policy when creating its early offer or answer.
+    #[must_use]
+    pub fn new_with_policy(
+        invitation: Invitation,
+        ringing: Ringing,
+        dialing: Dialing,
+        outgoing_incoming: mpsc::Receiver<Incoming>,
+        endpoint: &sipx_transport::Handle,
+        media_address: IpAddr,
+        source_policy: MediaPolicy,
+    ) -> Self {
         Self {
             invitation: invitation.into_coupling(),
             ringing,
@@ -475,6 +546,7 @@ impl EarlyCoupling {
             outgoing_incoming,
             endpoint: endpoint.clone(),
             media_address,
+            source_policy,
             state: CouplingState::new(),
             deferred: PerLeg::new(VecDeque::new(), VecDeque::new()),
             delayed_offer_pending: false,
@@ -573,13 +645,14 @@ impl EarlyCoupling {
                     OfferAction::Relay { .. } => {}
                     OfferAction::Refuse { .. } => return Err(Error::NoDialog),
                 }
-                let ringing = crate::ring_offer_early(
+                let ringing = crate::ring_offer_early_with_policy(
                     &self.endpoint,
                     &self.invitation.incoming,
                     183,
                     "Session Progress",
                     self.media_address,
                     direction,
+                    self.source_policy.clone(),
                 )
                 .await?;
                 self.ringing = ringing;
@@ -650,25 +723,50 @@ impl EarlyCoupling {
         let Some(mut outbound) = outbound else {
             return Err(Error::NoResponse);
         };
-        if let Err(error) = self.invitation.claim() {
-            outbound.hang_up().await?;
-            return Err(error);
-        }
+        let final_started = AtomicBool::new(false);
+        let source_tag = self.ringing.tag().to_owned();
         let inbound = if self.ringing.has_early_session() {
+            if let Err(error) = self.invitation.claim_with_tag(&source_tag) {
+                outbound.hang_up().await?;
+                return Err(error);
+            }
+            final_started.store(true, Ordering::Release);
             let mut ringing = self.ringing;
             crate::answer_early(&self.endpoint, &self.invitation.incoming, &mut ringing).await
         } else {
-            crate::answer_ringing(
+            let claim = || {
+                self.invitation.claim_with_tag(&source_tag)?;
+                final_started.store(true, Ordering::Release);
+                Ok(())
+            };
+            crate::call::answer_ringing_claimed(
                 &self.endpoint,
                 &self.invitation.incoming,
-                self.media_address,
+                crate::MediaAddress::new(self.media_address),
                 &self.ringing,
+                self.source_policy,
+                Some(&claim),
             )
             .await
         };
         let inbound = match inbound {
             Ok(inbound) => inbound,
             Err(error) => {
+                if !final_started.load(Ordering::Acquire)
+                    && !matches!(error, Error::InvitationCancelled)
+                {
+                    let refusal = match self.invitation.claim_with_tag(&source_tag) {
+                        Ok(()) => {
+                            self.invitation
+                                .refuse(&self.endpoint, 488, "Not Acceptable Here")
+                                .await
+                        }
+                        Err(error) => Err(error),
+                    };
+                    if let Err(refusal) = refusal {
+                        tracing::debug!(%refusal, "source refusal crossed cancellation or transport failure");
+                    }
+                }
                 // The target already has a confirmed dialog. An inbound answer failure cannot
                 // make that ownership disappear; end it before returning the primary cause.
                 if let Err(cleanup) = outbound.hang_up().await {

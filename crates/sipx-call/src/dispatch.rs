@@ -403,10 +403,6 @@ impl CouplingInvitation {
         CouplingCancellation(Arc::clone(&self.pending))
     }
 
-    pub(crate) fn claim(&self) -> Result<()> {
-        self.pending.claim()
-    }
-
     /// The `To` tag every response about this invitation carries.
     pub(crate) fn tag(&self) -> String {
         self.pending.tag()

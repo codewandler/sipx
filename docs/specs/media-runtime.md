@@ -631,3 +631,26 @@ exists for.
 | D9 | D5 bytes carried on PT 101 when SDP selected PT 96 | no receiver input and no digit |
 | E1 | a pass-through bridge whose two legs send the same one-byte element under identifier 1 and identifier 2 respectively, at the same time | each far end receives the identifier its own sender wrote, byte for byte, in both directions; §5's decision, and the extension is the only one on the packet |
 | E2 | a browser-audio offer carrying `a=extmap:` lines and `a=extmap-allow-mixed` | the offer validates and is answerable; the generated answer contains no `a=extmap`, and neither does an offer sipx generates — §5.2's precondition |
+
+## Mixed-rate media bridges
+
+A terminating bridge forwards encoded packets only when both codec and decoded audio rate match.
+Otherwise each direction owns a stateful `LinearResampler` from its source `audio_rate()` to its
+recipient's `audio_rate()` and packetizes converted PCM using the recipient's
+`samples_per_packet()`. G.722 uses its 16 kHz audio rate here, never its 8 kHz RTP clock (RFC 3551
+§4.5.2); Opus media uses 48 kHz (RFC 7587). Unconverted packet sample counts cannot cross this seam.
+
+Resampler phase survives every input chunk. Packet assembly retains fewer than one destination
+packet between chunks, in addition to the resampler's bounded interpolation state; sending a full
+packet awaits the existing bounded session queue. An incomplete final packet remains pending until
+more audio arrives and is discarded when the bridge stops; no silence is fabricated to flush it.
+Dropping the bridge cancels both directions and releases their pending PCM and resampling state.
+
+Regression vectors: a four-session bridge transfers a 440 Hz tone in both directions between G.711
+and G.722, and between G.711 and Opus. Decoded sample counts follow the recipient's audio rate,
+non-silent peaks survive, and zero-crossing frequency remains within codec tolerance. Existing
+same-format encoded-relay and bridge-drop tests remain mandatory.
+
+A destination whose public configuration derives zero samples per packet causes the forwarding
+direction to terminate before reading source PCM. It must never accumulate an unflushable buffer
+or invent a packet duration by clamping zero to one.

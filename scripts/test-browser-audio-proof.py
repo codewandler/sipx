@@ -380,6 +380,157 @@ class BrowserAudioProofTest(unittest.TestCase):
                 json.dumps(negative(name, role, digest)), encoding="utf-8"
             )
 
+    def coupled_adversary_fixture(self, case_name: str, hangup: str) -> pathlib.Path:
+        directory = self.directory / case_name
+        directory.mkdir()
+        browser_value = browser("browser-offerer")
+        browser_value["sip"]["order"].insert(1, "bodiless-provisional")
+        gateway = sipx("browser-offerer")
+        gateway.update(source_ended=True, target_ended=True, hangup=hangup,
+                       audio_observation="ordinary-peer", ordinary_peer={
+                           "header": "app-1000", "transport": "udp", "keying": "plain",
+                           "ended": True, "received_audio_peak": 123,
+                           "packets_sent": 80, "packets_received": 80})
+        (directory / "browser.json").write_text(json.dumps(browser_value))
+        (directory / "sipx.json").write_text(json.dumps(gateway))
+        return directory
+
+    def test_coupled_hangup_must_match_the_selected_case(self) -> None:
+        for case_name, expected, wrong in (
+            ("CoupledPeerHangup", "peer", "browser"),
+            ("CoupledBrowserHangup", "browser", "peer"),
+        ):
+            with self.subTest(case=case_name):
+                directory = self.coupled_adversary_fixture(case_name, expected)
+                self.assertEqual(DRIVER.validate_coupled(directory, PIN)["hangup"], expected)
+                path = directory / "sipx.json"
+                gateway = json.loads(path.read_text())
+                gateway["hangup"] = wrong
+                path.write_text(json.dumps(gateway))
+                with self.assertRaises(DRIVER.ProofError):
+                    DRIVER.validate_coupled(directory, PIN)
+
+    def test_coupled_provisional_must_precede_the_final_answer(self) -> None:
+        directory = self.coupled_adversary_fixture("CoupledBrowserHangup", "browser")
+        self.assertEqual(DRIVER.validate_coupled(directory, PIN)["status"], "passed")
+        path = directory / "browser.json"
+        value = json.loads(path.read_text())
+        value["sip"]["order"].remove("bodiless-provisional")
+        value["sip"]["order"].append("bodiless-provisional")
+        path.write_text(json.dumps(value))
+        with self.assertRaises(DRIVER.ProofError):
+            DRIVER.validate_coupled(directory, PIN)
+
+    def test_coupled_lifecycle_checks_every_event_ordering(self) -> None:
+        import itertools
+
+        # Literal accepted traces, independently enumerating every other permutation.
+        for provisional_required, accepted in (
+            (True, ("invite", "bodiless-provisional", "final", "ack", "bye", "bye-final")),
+            (False, ("invite", "final", "ack", "bye", "bye-final")),
+        ):
+            for permutation in itertools.permutations(accepted):
+                with self.subTest(order=permutation, provisional_required=provisional_required):
+                    evidence = {"sip": {"order": list(permutation)}}
+                    if permutation == accepted:
+                        DRIVER.validate_coupled_lifecycle(evidence, provisional_required=provisional_required)
+                    else:
+                        with self.assertRaises(DRIVER.ProofError):
+                            DRIVER.validate_coupled_lifecycle(evidence, provisional_required=provisional_required)
+
+    def test_coupled_unknown_case_is_refused(self) -> None:
+        directory = self.coupled_adversary_fixture("UnknownCoupledCase", "browser")
+        with self.assertRaises(DRIVER.ProofError):
+            DRIVER.validate_coupled(directory, PIN)
+
+    def test_coupled_lifecycle_rejects_ambiguous_or_malformed_events(self) -> None:
+        directory = self.coupled_adversary_fixture("CoupledBrowserHangup", "browser")
+        path = directory / "browser.json"
+        value = json.loads(path.read_text())
+        valid = value["sip"]["order"]
+        # Retransmitted provisionals before the answer are valid; every occurrence must fit.
+        value["sip"]["order"] = valid[:2] + ["bodiless-provisional"] + valid[2:]
+        path.write_text(json.dumps(value))
+        self.assertEqual(DRIVER.validate_coupled(directory, PIN)["status"], "passed")
+        invalid = [
+            ["bodiless-provisional"] + valid,
+            valid + ["bodiless-provisional"],
+            *[valid + [event] for event in ("invite", "final", "ack", "bye", "bye-final")],
+            *[valid + [event] for event in (None, True, 1, [], {})],
+            None, {}, "invite final ack bye bye-final",
+        ]
+        for order in invalid:
+            with self.subTest(order=order):
+                value["sip"]["order"] = order
+                path.write_text(json.dumps(value))
+                with self.assertRaises(DRIVER.ProofError):
+                    DRIVER.validate_coupled(directory, PIN)
+
+    def test_coupled_proof_requires_far_peer_audio_headers_and_both_dialog_ends(self) -> None:
+        directory = self.directory / "CoupledBrowserHangup"
+        directory.mkdir()
+        browser_value = browser("browser-offerer")
+        browser_value["sip"]["order"].insert(1, "bodiless-provisional")
+        (directory / "browser.json").write_text(json.dumps(browser_value))
+        value = sipx("browser-offerer")
+        value.update(source_ended=True, target_ended=True, hangup="browser", audio_observation="ordinary-peer",
+                     ordinary_peer={"header": "app-1000", "transport": "udp", "keying": "plain",
+                                    "ended": True, "received_audio_peak": 123, "packets_sent": 80, "packets_received": 80})
+        path = directory / "sipx.json"
+        path.write_text(json.dumps(value))
+        self.assertEqual(DRIVER.validate_coupled(directory, PIN)["status"], "passed")
+        for field in ("header", "ended", "received_audio_peak", "packets_sent", "packets_received", "keying", "transport"):
+            with self.subTest(field=field):
+                broken = copy.deepcopy(value)
+                del broken["ordinary_peer"][field]
+                path.write_text(json.dumps(broken))
+                with self.assertRaises(DRIVER.ProofError):
+                    DRIVER.validate_coupled(directory, PIN)
+        for field in ("source_ended", "target_ended", "audio_observation", "hangup"):
+            with self.subTest(field=field):
+                broken = copy.deepcopy(value)
+                del broken[field]
+                path.write_text(json.dumps(broken))
+                with self.assertRaises(DRIVER.ProofError):
+                    DRIVER.validate_coupled(directory, PIN)
+
+    def test_coupled_post_answer_failure_requires_bye_and_target_cleanup(self) -> None:
+        directory = self.directory / "CoupledFingerprintMismatch"
+        directory.mkdir()
+        browser_value = {"contract": DRIVER.CONTRACT, "type": "proof.negative-browser", "role": "browser-offerer",
+                         "mutation": "FingerprintMismatch", "facts": {"selected_pair": True, "nominated": True,
+                         "dtls_state": "connected", "rtp_packets": 0}, "sip": {"order": ["invite", "final", "ack", "bye", "bye-final"]}}
+        gateway = {"error": "FingerprintMismatch", "ordinary_peer": {"ended": True, "packets_sent": 0}}
+        (directory / "sipx.json").write_text(json.dumps(gateway))
+        path = directory / "browser.json"
+        path.write_text(json.dumps(browser_value))
+        self.assertEqual(DRIVER.validate_coupled(directory, PIN)["status"], "passed")
+        for event in ("final", "ack", "bye", "bye-final"):
+            broken = copy.deepcopy(browser_value)
+            broken["sip"]["order"].remove(event)
+            path.write_text(json.dumps(broken))
+            with self.assertRaises(DRIVER.ProofError):
+                DRIVER.validate_coupled(directory, PIN)
+        valid = browser_value["sip"]["order"]
+        for order in (
+            valid + ["bodiless-provisional"],
+            ["bodiless-provisional"] + valid,
+            *[valid + [event] for event in valid],
+            *[valid + [event] for event in (None, True, 1, [], {})],
+            None, {}, "final ack bye bye-final",
+        ):
+            with self.subTest(order=order):
+                broken = copy.deepcopy(browser_value)
+                broken["sip"]["order"] = order
+                path.write_text(json.dumps(broken))
+                with self.assertRaises(DRIVER.ProofError):
+                    DRIVER.validate_coupled(directory, PIN)
+        path.write_text(json.dumps(browser_value))
+        gateway["ordinary_peer"]["ended"] = False
+        (directory / "sipx.json").write_text(json.dumps(gateway))
+        with self.assertRaises(DRIVER.ProofError):
+            DRIVER.validate_coupled(directory, PIN)
+
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
