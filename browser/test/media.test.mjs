@@ -528,3 +528,51 @@ test("synchronous command enqueue refusal releases acquired resources", async ()
   assert.equal(f.timers.size, 0);
   adapter.close();
 });
+
+test("codec preferences preserve the profile-required comfort noise alongside speech and telephone events", async () => {
+  const f = setup();
+  f.platform.codecs = () =>
+    ["PCMU", "CN", "telephone-event", "opus", "PCMA", "G722"].map((name) => ({
+      mimeType: `audio/${name}`,
+    }));
+  await f.adapter.handle(local());
+  const names = f.peers[0].transceivers[0].codecs.map((codec) =>
+    codec.mimeType.toLowerCase(),
+  );
+  assert.ok(names.includes("audio/cn"));
+  assert.ok(names.includes("audio/telephone-event"));
+  assert.equal(names[0], "audio/opus");
+  assert.equal(names.includes("audio/g722"), false);
+  f.adapter.close();
+  clean(f);
+});
+
+test("readiness admits profile comfort noise facts without selecting comfort noise as speech", async () => {
+  const f = setup();
+  await f.adapter.handle(local());
+  const event = facts();
+  event.kernel.codecs.push({
+    name: "cn",
+    clock_rate: 8000,
+    channels: 1,
+    payload_type: 13,
+  });
+  await f.adapter.handle(event);
+  await f.adapter.handle(established());
+  f.peers[0].connect();
+  assert.equal(f.states.filter((e) => e.state === "established").length, 1);
+  f.adapter.close();
+  clean(f);
+});
+test("comfort noise cannot be the selected speech codec", async () => {
+  const f = setup();
+  await f.adapter.handle(local());
+  const event = facts();
+  const cn = { name: "cn", clock_rate: 8000, channels: 1, payload_type: 13 };
+  event.kernel.codecs.push(cn);
+  event.kernel.selected_codec = cn;
+  await f.adapter.handle(event);
+  assert.equal(f.errors.at(-1).kind, "negotiation");
+  clean(f);
+  f.adapter.close();
+});

@@ -9,7 +9,7 @@ export class SipxMediaError extends Error {
   }
 }
 const CANCELLED = Symbol("cancelled");
-const codecNames = new Set(["opus", "pcmu", "pcma", "telephone-event"]);
+const codecNames = new Set(["opus", "pcmu", "pcma", "cn", "telephone-event"]);
 const clone = (value) => JSON.parse(JSON.stringify(value));
 function codecValid(codec) {
   return (
@@ -39,7 +39,7 @@ function validFacts(facts) {
     facts.codecs.length > 0 &&
     facts.codecs.every(codecValid) &&
     codecValid(facts.selected_codec) &&
-    facts.selected_codec.name !== "telephone-event" &&
+    ["opus", "pcmu", "pcma"].includes(facts.selected_codec.name) &&
     facts.codecs.some((codec) =>
       ["name", "clock_rate", "channels", "payload_type"].every(
         (key) => codec[key] === facts.selected_codec[key],

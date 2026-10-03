@@ -9,6 +9,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The experimental `@sipx/browser` ESM package ships its WASM kernel, Rust-generated ABI/types,
+  ordered client/call lifecycle and bounded native browser media ownership. Its packed consumer
+  proof uses challenged WSS registration and calls in both SIP roles.
+
 - The browser kernel handles bounded INVITE Digest challenges and reports validated negotiated
   media facts. Its native media adapter owns microphone, peer connection and playback resources,
   combines signaling with connected media, and bounds setup and teardown races.
@@ -22,6 +26,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   uses the same verification and replay-protection path.
 
 ### Fixed
+
+- Browser codec preferences retain required comfort noise. The strict audio profile discards
+  bounded ICE-TCP fallback candidates while still requiring usable UDP and rejecting malformed
+  supported candidates.
 
 - Browser answer cleanup reserves ACK/BYE entropy atomically and retains deferred cleanup across
   cancellation races, duplicate answers and late timers until the pair can be sent.

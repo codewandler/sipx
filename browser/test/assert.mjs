@@ -67,9 +67,15 @@ export async function run(label) {
       console.log(`  ok   ${name}`);
     } catch (error) {
       failures += 1;
-      const detail = error instanceof AssertionFailed ? error.message : `${error?.stack ?? error}`;
+      const detail =
+        error instanceof AssertionFailed
+          ? error.message
+          : `${error?.stack ?? error}`;
       console.log(`  FAIL ${name}\n         ${detail}`);
     }
   }
+  console.log(
+    `${label}: ${registered.length} executed, ${registered.length - failures} passed, ${failures} failed`,
+  );
   return failures;
 }
