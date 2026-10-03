@@ -17,6 +17,23 @@ routed inboxes until cancellation, refusal, or confirmation. `Coupling` then own
 initial INVITE, so the object owns the first relayed axis as well as all later ones. Routing and
 target selection remain application policy and are inputs to that constructor.
 
+### 1.1 Authentication before coupling
+
+An application authenticating a dispatched INVITE uses `Invitation::challenge(endpoint, value)`
+to send **401 Unauthorized** with exactly one `WWW-Authenticate` value (RFC 3261 section 22).
+The helper preserves the invitation's native To tag and response transaction headers; it exposes
+no arbitrary header or status override. Credential lookup and Digest verification remain caller
+policy using the native authentication primitives.
+
+The complete response, including header-injection validation, is built before claiming the
+invitation. Immediately before sending, the helper claims the existing cancellation state. If
+CANCEL won, it returns `InvitationCancelled` and sends no 401: the dispatcher owes 200 CANCEL
+and 487 INVITE. If the challenge won, a later CANCEL gets 200 without a replacement 487
+(RFC 3261 section 9.2). A construction error leaves the invitation cancellable. A send error
+does not release the claim because it cannot prove that no response bytes reached the peer.
+A subsequent authenticated INVITE uses a fresh branch and incremented CSeq and is dispatched
+as a new invitation; challenge issuance alone never authorizes coupling.
+
 ## 2. Types and ownership
 
 | Type | Values / ownership | Purpose |

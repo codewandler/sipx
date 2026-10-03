@@ -353,6 +353,30 @@ impl Invitation {
         .await
     }
 
+    /// Challenge this invitation with 401 Unauthorized and one `WWW-Authenticate` value.
+    ///
+    /// The response retains the native To tag and transaction headers. Header construction is
+    /// validated before claiming the invitation, so invalid input leaves it cancellable. Once
+    /// claimed, a crossing CANCEL receives 200 without replacing this final with 487. A send
+    /// failure retains that claim because partial delivery is not proof of absence.
+    ///
+    /// Credential lookup and verification remain application policy. An authenticated retry is
+    /// a new invitation, not permission granted by this response.
+    pub async fn challenge(&self, endpoint: &Handle, value: impl Into<Bytes>) -> Result<()> {
+        let status = StatusCode::new(401).ok_or_else(|| Error::Rejected {
+            status: 401,
+            reason: "invalid challenge response status".to_owned(),
+        })?;
+        let tag = self.pending.tag();
+        let response = ResponseBuilder::to_request(&self.incoming.request, status, "Unauthorized")
+            .and_then(|builder| with_to_tag(builder, &self.incoming.request, Some(&tag)))?
+            .header(HeaderName::WwwAuthenticate, value)?
+            .build();
+        self.pending.claim()?;
+        endpoint.respond(&self.incoming.key, response).await?;
+        Ok(())
+    }
+
     /// Refuse this pending invitation with a final response.
     ///
     /// The dispatcher's cancellation state is claimed before the response leaves, so a crossing
