@@ -9,6 +9,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Dispatched invitations can send a validated authentication challenge while retaining native
+  cancellation ownership through malformed input, crossing CANCEL and transport shutdown.
+
 - Supervised coupling retains a sticky local-stop request and exposes observed per-leg termination
   plus joined media cleanup. Accepted peer BYE evidence survives crossed and interrupted waits;
   timeouts and rejected requests remain uncertain.
