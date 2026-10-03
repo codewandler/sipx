@@ -1,0 +1,82 @@
+{
+  "case": "aead-srtp-sdes",
+  "evaluated_at": "2026-10-03",
+  "negative": {
+    "build_manifest": "runs/2026-10-03T124031Z/KdfPerturbationSdes.json",
+    "mutation": "right-align-aead-master-salt-in-14-octet-x",
+    "peer_log": "runs/2026-10-03T124031Z/peer-KdfPerturbationSdes.log",
+    "peer_srtp_rejections": 50,
+    "result": "runs/2026-10-03T124031Z/KdfPerturbationSdes-result.json",
+    "suite": "AEAD_AES_256_GCM"
+  },
+  "positive": {
+    "AEAD_AES_128_GCM": {
+      "peer_log": "runs/2026-10-03T124031Z/peer-AEAD_AES_128_GCM.log",
+      "result": "runs/2026-10-03T124031Z/AEAD_AES_128_GCM.json"
+    },
+    "AEAD_AES_256_GCM": {
+      "peer_log": "runs/2026-10-03T124031Z/peer-AEAD_AES_256_GCM.log",
+      "result": "runs/2026-10-03T124031Z/AEAD_AES_256_GCM.json"
+    }
+  },
+  "protocol": {
+    "codec": "PCMU/8000/1",
+    "keying": "SDES",
+    "media": "RTP/SAVP",
+    "signalling": "TLS"
+  },
+  "schema": "sipx.comparison.interop.run.v1",
+  "sha256": {
+    "adapter/Cargo.lock": "446736f9d7bd366dca8904460d06f33dcf2a73f2886c9c6da86dfc40c93e78bc",
+    "adapter/Cargo.toml": "e75a2df05015a86f83c2fbbf02f16f097e2daf39c2ee4fa98b2614bf4d7113fe",
+    "adapter/src/main.rs": "67870c669f8abfd61b3e682effe8ccfc903c13f323b31bd7652fd9265206d665",
+    "bounded.py": "adde36c76b7711edaf6525e2b4a78815290e5cbad62494ea05565254dfbd67cd",
+    "build-negative.py": "d123fa5d8b4f7e32d911aabc936922786550db240754cade78cbf95f291a26c9",
+    "peer/accounts": "34b14fadb3e962afa64509907974c31b53b46b18c740e8b8e489afc769ff892f",
+    "peer/config": "5f4f7085c8aa51fe774a5e55a64d724cac114503451e59011294287e4d61b20c",
+    "reproduce.sh": "63f483c62cc14b983b2bfd11d8e22ed7ffa6a2c139cb194903a2ffb5f3ced64e",
+    "runs/2026-08-14/AEAD_AES_128_GCM.json": "029cfb8daffc6aed5e5f22ff06ad93cf031ad029a1668a3eb17af16909b91d78",
+    "runs/2026-08-14/AEAD_AES_256_GCM.json": "e586282ac36ce1cb9ac2c0f8adf70b08a6582afd4e7024327e45760f46d9f827",
+    "runs/2026-08-14/KdfPerturbationSdes-result.json": "0303a2158105da069665de413a87844f823a03ed180ba1db39f44f046a5c353c",
+    "runs/2026-08-14/KdfPerturbationSdes.json": "a3cc6472c8125fd599df464179e5e54adc60273437f8b0d05b3bd6d33098d110",
+    "runs/2026-08-14/peer-AEAD_AES_128_GCM.log": "6ee8fc234786d2529432a31fe5f3a1da393a05a046db2f359da9f581a455927d",
+    "runs/2026-08-14/peer-AEAD_AES_256_GCM.log": "022079a57bbdfccad59eadf402337c183f430981611aadf46216dccabcaca6fd",
+    "runs/2026-08-14/peer-KdfPerturbationSdes.log": "a8a6bfa03903c095ae676c6e37e158f06548c79ef03c3409527ef427e7b94173",
+    "runs/2026-10-03/AEAD_AES_128_GCM.json": "7020c9e6062087d35e2f096f0b57c7e0c7e4c8a38cf7a87a0ff19bc52471b4da",
+    "runs/2026-10-03/AEAD_AES_256_GCM.json": "ee785516d0a9897bb08722963034a4f0e2f1607318db321ad497005c3bce0fdf",
+    "runs/2026-10-03/KdfPerturbationSdes-result.json": "d2a059e0c9d68fd2b1bb518dd9ff5183baabc3b9908d08f5c6380bc5736c141a",
+    "runs/2026-10-03/KdfPerturbationSdes.json": "e8b157a90c159401328332ce3c02dc49fdf9c5b52d6abfc82a1d9dea243d80a7",
+    "runs/2026-10-03/peer-AEAD_AES_128_GCM.log": "6727e5351fd6d46979e449cdaa729484888133fb16b86bb1e3c9d9903b20b0fa",
+    "runs/2026-10-03/peer-AEAD_AES_256_GCM.log": "c8d5bf3823e5be3182c5f0d5fd8384ea5145149e07d32937edc37c7400b44eef",
+    "runs/2026-10-03/peer-KdfPerturbationSdes.log": "4d5f5fd6e60d4adf3f217eea757ef85b3eb394b66576815ea879bbc95f626783",
+    "runs/2026-10-03T085633Z/AEAD_AES_128_GCM.json": "816f9f0a6134bacc99af49630cb1a06e9d6171e2c04de9460d577d168af36ea0",
+    "runs/2026-10-03T085633Z/AEAD_AES_256_GCM.json": "30e76d27ebbe96a6d782e0ff7de3a1796eedca573f7e868b8f4c80f0d21a3885",
+    "runs/2026-10-03T085633Z/KdfPerturbationSdes-result.json": "0303a2158105da069665de413a87844f823a03ed180ba1db39f44f046a5c353c",
+    "runs/2026-10-03T085633Z/KdfPerturbationSdes.json": "a61357b51e7aeb31d9def79f14cc0fa7fdd7f2184576a0132bd317ef6db21686",
+    "runs/2026-10-03T085633Z/peer-AEAD_AES_128_GCM.log": "0dec73093630cede1502c769640e442bb1853c60f036c5f65a8b965f3e4ad98c",
+    "runs/2026-10-03T085633Z/peer-AEAD_AES_256_GCM.log": "d0320fea77287a9402650c8f3e59e8cef49c9689c1291ae73bfb438cdf5a78fb",
+    "runs/2026-10-03T085633Z/peer-KdfPerturbationSdes.log": "0300455f24486318be6497b3e765a2673866f243262f28aede0c63f3adc329e4",
+    "runs/2026-10-03T124031Z/AEAD_AES_128_GCM.json": "881b432ca1e64e9f9634f0c34466c1ae80ef6bf59da678099ccb3d24a1e78196",
+    "runs/2026-10-03T124031Z/AEAD_AES_256_GCM.json": "2caee446cc4b5907b745cc1259c6fe755e50d49007d9495bd16efbe946668349",
+    "runs/2026-10-03T124031Z/KdfPerturbationSdes-result.json": "d2a059e0c9d68fd2b1bb518dd9ff5183baabc3b9908d08f5c6380bc5736c141a",
+    "runs/2026-10-03T124031Z/KdfPerturbationSdes.json": "c3d130a3c4a15a168cf84426d7aecfbda9f85521528f72472db3fb2a1cc09a25",
+    "runs/2026-10-03T124031Z/peer-AEAD_AES_128_GCM.log": "2279aa7930c5e5997c5058575b043561e109628880438291e6763a49b32605af",
+    "runs/2026-10-03T124031Z/peer-AEAD_AES_256_GCM.log": "41f2655c14f20945fea16f26ec61fb7785bb28d79565da0f926b1352b3db929d",
+    "runs/2026-10-03T124031Z/peer-KdfPerturbationSdes.log": "1a67adee3f8d83e44500151c2ba0fb88ede1e12e158a1e27bed78f93c8dfd579",
+    "seal.py": "bc19a0b2ea22c431f54d88d0dcd196797ddf5c365e68bff056c7d35616af0b6d"
+  },
+  "source_under_test": {
+    "files": {
+      "crates/sipx-call/src/call/mod.rs": "7cdef57a35281d812e36209b21d6ecbf653f0be1a41e927887681b83ce0b8158",
+      "crates/sipx-call/src/call/offer_answer.rs": "6318a1b76e82dd06d0dfb46f729716d0f48db63eb8e1428e4aebacc352b06b59",
+      "crates/sipx-call/src/media_policy.rs": "f3992ef75f02464322b74f60390683b605f4a1c186076379f2bb17325b966f1a",
+      "crates/sipx-media/src/lib.rs": "c1a0ef08ada4638d882db24f36e837893b9c2ff720df85266b7622c6544f22b4",
+      "crates/sipx-media/src/session.rs": "6f77d5ef8422ef62d1d436fdd89928f7ffd7333ef6ea8c9a0632d214054544b6",
+      "crates/sipx-rtp/src/srtp/mod.rs": "5c0fa7528b83b7e90802fcf1b3bb343cd32d63763beeb923a28d215edb26e631",
+      "crates/sipx-sdp/src/crypto.rs": "6a6d53bd9f821f11e0150e5f54bec9c114ff7e5ea724e283ca1a8d02bccdcddd"
+    },
+    "normal_binary_sha256": "74fe0ce2655decd3327bc9d3ea4e85199c2ca7e09e4e52582d1a0bcc12a228c4",
+    "perturbed_binary_sha256": "44426affc4a5a07172e265bb86c75cca4a48bcacf5bbfa0b5629cc8913ec3186"
+  },
+  "subject": "baresip-v1"
+}

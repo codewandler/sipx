@@ -6,7 +6,7 @@
       "id": "aead-srtp-sdes",
       "subject": "baresip",
       "subject_descriptor": "subjects/baresip-v1.json",
-      "run": "aead-srtp-sdes/runs/2026-10-03T085633Z",
+      "run": "aead-srtp-sdes/runs/2026-10-03T124031Z",
       "reproduce": "docs/comparison/interop/aead-srtp-sdes/reproduce.sh",
       "claim": "Both RFC 7714 AEAD profiles carry non-silent bidirectional audio when their SRTP master keys arrive through RFC 4568 SDES.",
       "not_inferred": [

@@ -149,8 +149,8 @@ These rows report exact pinned builds and calls, not general compatibility claim
 
 | Subject | Keying | Exact suite | sipx sent/received | Exact echo | Evidence |
 |---|---|---|---|---|---|
-| baresip (with libre) `v1.0.0` `sha256:3f2deef4f8a0…` | SDES | `AEAD_AES_128_GCM` | 50/378 | 7520 bytes | [raw result](comparison/interop/aead-srtp-sdes/runs/2026-10-03T085633Z/AEAD_AES_128_GCM.json) |
-| baresip (with libre) `v1.0.0` `sha256:3f2deef4f8a0…` | SDES | `AEAD_AES_256_GCM` | 50/397 | 7680 bytes | [raw result](comparison/interop/aead-srtp-sdes/runs/2026-10-03T085633Z/AEAD_AES_256_GCM.json) |
+| baresip (with libre) `v1.0.0` `sha256:3f2deef4f8a0…` | SDES | `AEAD_AES_128_GCM` | 50/367 | 7520 bytes | [raw result](comparison/interop/aead-srtp-sdes/runs/2026-10-03T124031Z/AEAD_AES_128_GCM.json) |
+| baresip (with libre) `v1.0.0` `sha256:3f2deef4f8a0…` | SDES | `AEAD_AES_256_GCM` | 50/365 | 7040 bytes | [raw result](comparison/interop/aead-srtp-sdes/runs/2026-10-03T124031Z/AEAD_AES_256_GCM.json) |
 
 Negative control: a disposable wrong salt-alignment build negotiated `AEAD_AES_256_GCM`, sent media, and the independent peer rejected all 50 packets.
 
