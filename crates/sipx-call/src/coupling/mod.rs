@@ -306,7 +306,7 @@ pub struct EarlyCoupling {
     dialing: Option<Dialing>,
     outgoing_incoming: mpsc::Receiver<Incoming>,
     endpoint: sipx_transport::Handle,
-    media_address: IpAddr,
+    media_address: crate::MediaAddress,
     source_policy: MediaPolicy,
     state: CouplingState,
     deferred: PerLeg<VecDeque<Incoming>>,
@@ -316,13 +316,13 @@ pub struct EarlyCoupling {
 async fn ring_source_leg(
     endpoint: &sipx_transport::Handle,
     incoming: &Incoming,
-    media_address: IpAddr,
+    media_address: crate::MediaAddress,
     delayed_direction: Option<Direction>,
     answered_early: bool,
     source_policy: &MediaPolicy,
 ) -> Result<Ringing> {
     if let Some(direction) = delayed_direction {
-        crate::ring_offer_early_with_policy(
+        crate::ring_offer_early_with_policy_at(
             endpoint,
             incoming,
             183,
@@ -333,7 +333,7 @@ async fn ring_source_leg(
         )
         .await
     } else if answered_early && sipx_sip::rel::Offered::in_request(&incoming.request).supported {
-        crate::ring_early_with_policy(
+        crate::ring_early_with_policy_at(
             endpoint,
             incoming,
             183,
@@ -399,6 +399,31 @@ impl EarlyCoupling {
         to: &Uri,
         options: &DialOptions,
         media_address: IpAddr,
+        source_policy: MediaPolicy,
+    ) -> Result<Self> {
+        Box::pin(Self::dial_with_policy_at(
+            invitation,
+            calls,
+            endpoint,
+            target,
+            to,
+            options,
+            crate::MediaAddress::new(media_address),
+            source_policy,
+        ))
+        .await
+    }
+
+    /// Retain independent source bind/advertised address and optional UDP range.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn dial_with_policy_at(
+        invitation: Invitation,
+        calls: &Calls,
+        endpoint: &sipx_transport::Handle,
+        target: sipx_transport::Target,
+        to: &Uri,
+        options: &DialOptions,
+        media_address: crate::MediaAddress,
         source_policy: MediaPolicy,
     ) -> Result<Self> {
         let source_offer = !invitation.request().request.body().is_empty();
@@ -539,6 +564,28 @@ impl EarlyCoupling {
         media_address: IpAddr,
         source_policy: MediaPolicy,
     ) -> Self {
+        Self::new_with_policy_at(
+            invitation,
+            ringing,
+            dialing,
+            outgoing_incoming,
+            endpoint,
+            crate::MediaAddress::new(media_address),
+            source_policy,
+        )
+    }
+
+    /// Retain independent source bind/advertised address and optional UDP range.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_policy_at(
+        invitation: Invitation,
+        ringing: Ringing,
+        dialing: Dialing,
+        outgoing_incoming: mpsc::Receiver<Incoming>,
+        endpoint: &sipx_transport::Handle,
+        media_address: crate::MediaAddress,
+        source_policy: MediaPolicy,
+    ) -> Self {
         Self {
             invitation: invitation.into_coupling(),
             ringing,
@@ -645,7 +692,7 @@ impl EarlyCoupling {
                     OfferAction::Relay { .. } => {}
                     OfferAction::Refuse { .. } => return Err(Error::NoDialog),
                 }
-                let ringing = crate::ring_offer_early_with_policy(
+                let ringing = crate::ring_offer_early_with_policy_at(
                     &self.endpoint,
                     &self.invitation.incoming,
                     183,
@@ -742,7 +789,7 @@ impl EarlyCoupling {
             crate::call::answer_ringing_claimed(
                 &self.endpoint,
                 &self.invitation.incoming,
-                crate::MediaAddress::new(self.media_address),
+                self.media_address,
                 &self.ringing,
                 self.source_policy,
                 Some(&claim),

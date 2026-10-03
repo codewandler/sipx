@@ -82,8 +82,10 @@ impl Call {
                 preserve_rtcp_mode(self.current.rtcp_mode, renegotiated.rtcp_mode)?;
                 // Do not let an answer that failed the mode guard mutate the running ICE
                 // generation. Socket ownership and candidate state move together or neither does.
+                let replacement = self.prepare_media_change(renegotiated).await?;
                 self.accept_answer_ice(&answer).await;
-                self.move_media_if_changed(renegotiated).await?;
+                self.move_media_if_changed(renegotiated, replacement)
+                    .await?;
             }
         }
         self.hold = direction;

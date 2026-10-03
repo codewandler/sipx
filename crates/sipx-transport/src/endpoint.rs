@@ -80,6 +80,24 @@ impl CleartextTransports {
     }
 }
 
+/// Additive endpoint bind policies, separate from the stable public [`Config`] fields.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct BindOptions {
+    #[cfg(feature = "ws")]
+    websocket_origins: Option<Arc<crate::ws::WebSocketOriginPolicy>>,
+}
+
+impl BindOptions {
+    /// Install immutable exact Origin admission on both WS and WSS listeners before bind.
+    #[cfg(feature = "ws")]
+    #[must_use]
+    pub fn with_websocket_origins(mut self, policy: crate::ws::WebSocketOriginPolicy) -> Self {
+        self.websocket_origins = Some(Arc::new(policy));
+        self
+    }
+}
+
 /// How an endpoint is configured.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -399,6 +417,8 @@ fn apply_network_source(message: Message, source: SocketAddr) -> Message {
 #[cfg(any(feature = "tls", feature = "ws"))]
 #[derive(Debug, Clone)]
 struct HandshakeRuntime {
+    #[cfg(feature = "ws")]
+    origins: Option<Arc<crate::ws::WebSocketOriginPolicy>>,
     deadline: std::time::Duration,
     permits: Arc<Semaphore>,
     owner: Background,
@@ -1505,6 +1525,20 @@ fn cancel_request(invite: &Request, reason: Option<Reason>) -> Result<Request> {
     reason = "one ordered assembly keeps validation, every bind and task ownership auditable"
 )]
 pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> {
+    bind_with_options(config, BindOptions::default()).await
+}
+
+/// Bind an endpoint with immutable policies installed before any listener is started.
+#[allow(
+    clippy::too_many_lines,
+    reason = "ordered binding owns validation and listener cleanup"
+)]
+pub async fn bind_with_options(
+    config: Config,
+    options: BindOptions,
+) -> Result<(Handle, mpsc::Receiver<Incoming>)> {
+    #[cfg(not(feature = "ws"))]
+    let _ = options;
     config.validate()?;
     let CleartextBindings {
         udp: socket,
@@ -1517,6 +1551,8 @@ pub async fn bind(config: Config) -> Result<(Handle, mpsc::Receiver<Incoming>)> 
     let observations = Arc::new(ObservationHub::new(Arc::clone(&meters)));
     #[cfg(any(feature = "tls", feature = "ws"))]
     let handshakes = HandshakeRuntime {
+        #[cfg(feature = "ws")]
+        origins: options.websocket_origins,
         deadline: config.handshake_timeout,
         permits: Arc::new(Semaphore::new(config.handshake_limit)),
         owner: background.clone(),
@@ -2273,6 +2309,7 @@ async fn listen_ws(
     let cancel = owner.cancel.clone();
     let permits = Arc::clone(&runtime.permits);
     let deadline = runtime.deadline;
+    let origins = runtime.origins.clone();
     #[cfg(test)]
     let observations = runtime.observations.clone();
     runtime.owner.spawn(async move {
@@ -2312,13 +2349,14 @@ async fn listen_ws(
             };
             let adopt = adopt.clone();
             let cancel = cancel.clone();
+            let origins = origins.clone();
             owner.spawn(async move {
                 let upgraded = tokio::select! {
                     biased;
                     () = cancel.cancelled() => None,
                     result = tokio::time::timeout(
                         deadline,
-                        crate::ws::accept_with_limits(stream, peer, &limits),
+                        crate::ws::accept_with_policy(stream, peer, &limits, origins.as_deref()),
                     ) => Some(result),
                 };
                 match upgraded {
@@ -2369,6 +2407,7 @@ async fn listen_wss(
     let cancel = owner.cancel.clone();
     let permits = Arc::clone(&runtime.permits);
     let deadline = runtime.deadline;
+    let origins = runtime.origins.clone();
     #[cfg(test)]
     let observations = runtime.observations.clone();
     runtime.owner.spawn(async move {
@@ -2409,13 +2448,14 @@ async fn listen_wss(
             let acceptor = server.acceptor();
             let adopt = adopt.clone();
             let cancel = cancel.clone();
+            let origins = origins.clone();
             owner.spawn(async move {
                 let upgraded = tokio::select! {
                     biased;
                     () = cancel.cancelled() => None,
                     result = tokio::time::timeout(deadline, async move {
                         let tls = acceptor.accept(stream).await.map_err(|error| error.to_string())?;
-                        crate::ws::accept_with_limits(tls, peer, &limits)
+                        crate::ws::accept_with_policy(tls, peer, &limits, origins.as_deref())
                             .await
                             .map_err(|error| error.to_string())
                     }) => Some(result),
@@ -4799,6 +4839,8 @@ mod tests {
         let owner = Background::new();
         let (observations, observed) = mpsc::unbounded_channel();
         let runtime = HandshakeRuntime {
+            #[cfg(feature = "ws")]
+            origins: None,
             deadline: DEADLINE,
             permits: Arc::new(Semaphore::new(limit)),
             owner: owner.clone(),

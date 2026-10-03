@@ -120,6 +120,7 @@ pub(crate) fn token() -> String {
 pub struct MediaAddress {
     advertised: IpAddr,
     bind: IpAddr,
+    port_range: Option<sipx_media::MediaPortRange>,
 }
 
 impl MediaAddress {
@@ -129,6 +130,7 @@ impl MediaAddress {
         Self {
             advertised,
             bind: advertised,
+            port_range: None,
         }
     }
 
@@ -141,6 +143,23 @@ impl MediaAddress {
     pub const fn with_bind(mut self, bind: IpAddr) -> Self {
         self.bind = bind;
         self
+    }
+
+    /// Require each new RTP/RTCP pair to remain inside this validated local range.
+    #[must_use]
+    pub const fn with_port_range(mut self, range: sipx_media::MediaPortRange) -> Self {
+        self.port_range = Some(range);
+        self
+    }
+
+    /// The local allocation range, or unrestricted allocation for existing callers.
+    #[must_use]
+    pub const fn port_range(self) -> Option<sipx_media::MediaPortRange> {
+        self.port_range
+    }
+
+    async fn bind_port(self) -> std::io::Result<MediaPort> {
+        bind_media_port(self.bind, self.port_range).await
     }
 
     /// The address serialized into SDP.
@@ -265,6 +284,7 @@ pub struct Call {
     media_address: IpAddr,
     /// Where replacement media sockets bind during an in-dialog renegotiation.
     media_bind_address: IpAddr,
+    media_port_range: Option<sipx_media::MediaPortRange>,
     /// The codec set this call was placed or answered with, so a re-offer offers the same
     /// set — a re-INVITE that silently narrowed to G.711 would move an Opus call mid-call.
     codecs: Codecs,
@@ -550,6 +570,7 @@ impl Call {
             ended: false,
             media_address: context.media_address.advertised(),
             media_bind_address: context.media_address.bind(),
+            media_port_range: context.media_address.port_range(),
             codecs: snapshot.codecs_value(),
             profile: snapshot.media_profile_value(),
             current: snapshot.negotiated(context.remote_media),
@@ -2157,6 +2178,16 @@ fn bye_request(dialog: &Dialog, cseq: u32, reason: &ReasonValue) -> Result<Reque
     Ok(add_routes(builder, &routes)?.build())
 }
 
+async fn bind_media_port(
+    ip: IpAddr,
+    range: Option<sipx_media::MediaPortRange>,
+) -> std::io::Result<MediaPort> {
+    match range {
+        Some(range) => MediaPort::bind_in_range(ip, range).await,
+        None => MediaPort::bind(SocketAddr::new(ip, 0)).await,
+    }
+}
+
 /// How a call is placed.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -2179,6 +2210,7 @@ pub struct DialOptions {
     /// `allow_media_range_overlap: false`, or move to [`Self::new`] and the builder methods.
     /// Constructor-based callers remain compatible.
     pub(crate) media_bind_address: IpAddr,
+    pub(crate) media_port_range: Option<sipx_media::MediaPortRange>,
     /// Whether a private-range collision implied by the peer's answer is known to be routable.
     ///
     /// False is fail-closed: when the effective peer media address and [`Self::media_address`]
@@ -2260,6 +2292,7 @@ impl DialOptions {
             from: from.into(),
             media_address,
             media_bind_address: media_address,
+            media_port_range: None,
             allow_media_range_overlap: false,
             initial_direction: Direction::SendRecv,
             timeout: None,
@@ -2281,9 +2314,25 @@ impl DialOptions {
     pub fn with_call_config(mut self, config: CallConfig) -> Self {
         self.media_address = config.media_address.advertised();
         self.media_bind_address = config.media_address.bind();
+        self.media_port_range = config.media_address.port_range();
         self.initial_direction = config.initial_direction;
         self.media = config.media;
         self
+    }
+
+    /// Restrict every media allocation for this call to a validated local UDP range.
+    #[must_use]
+    pub const fn with_media_port_range(mut self, range: sipx_media::MediaPortRange) -> Self {
+        self.media_port_range = Some(range);
+        self
+    }
+
+    fn addresses(&self) -> MediaAddress {
+        MediaAddress {
+            advertised: self.media_address,
+            bind: self.media_bind_address,
+            port_range: self.media_port_range,
+        }
     }
 
     /// Offer these codecs, most preferred first.
@@ -2907,12 +2956,10 @@ async fn open_invitation(
     Request,
 )> {
     validate_profile_preflight(&options.media, target.transport)?;
-    MediaAddress::new(options.media_address)
-        .with_bind(options.media_bind_address)
-        .validate()?;
+    options.addresses().validate()?;
     // The offer has to name the port audio will arrive on, and only a bound socket knows it.
     // So the port is bound now and the session started once the answer says where and in what.
-    let port = MediaPort::bind(SocketAddr::new(options.media_bind_address, 0))
+    let port = bind_media_port(options.media_bind_address, options.media_port_range)
         .await
         .map_err(Error::Io)?;
 
@@ -2965,9 +3012,7 @@ fn open_offerless_invitation(
     options: &DialOptions,
     identity: &Identity,
 ) -> Result<Request> {
-    MediaAddress::new(options.media_address)
-        .with_bind(options.media_bind_address)
-        .validate()?;
+    options.addresses().validate()?;
     let via = format!(
         "SIP/2.0/{} {};rport;branch={}",
         target.transport.as_str(),
@@ -3318,6 +3363,7 @@ async fn dial_with(
                 ended: false,
                 media_address,
                 media_bind_address: options.media_bind_address,
+                media_port_range: options.media_port_range,
                 codecs: options.media.codecs,
                 profile: options.media.profile,
                 current: settled.negotiated,
@@ -3988,6 +4034,7 @@ async fn answer_delayed(
         ended: false,
         media_address: early.media_address,
         media_bind_address: early.media_bind_address,
+        media_port_range: early.media_port_range,
         codecs: early.codecs,
         profile: policy.profile,
         current,
@@ -4922,8 +4969,7 @@ impl Dialing {
         let offer = sipx_sdp::parse(&String::from_utf8_lossy(response.body()))
             .map_err(|error| Error::Sdp(error.to_string()))?;
         let (early, answer) = Early::settle(
-            MediaAddress::new(self.options.media_address)
-                .with_bind(self.options.media_bind_address),
+            self.options.addresses(),
             self.target.transport.is_secure(),
             &offer,
             &self.options.media,
@@ -5012,6 +5058,7 @@ impl Dialing {
             settled,
             media_address: self.options.media_address,
             media_bind_address: self.options.media_bind_address,
+            media_port_range: self.options.media_port_range,
             codecs: self.options.media.codecs,
             keying: self.options.media.keying,
         })));
@@ -5133,6 +5180,7 @@ impl Dialing {
                     ended: false,
                     media_address: self.options.media_address,
                     media_bind_address: self.options.media_bind_address,
+                    media_port_range: self.options.media_port_range,
                     codecs: self.options.media.codecs,
                     profile: self.options.media.profile,
                     current: settled.negotiated,
@@ -5493,6 +5541,7 @@ pub(crate) struct Early {
     pub(crate) settled: Settled,
     pub(crate) media_address: IpAddr,
     pub(crate) media_bind_address: IpAddr,
+    pub(crate) media_port_range: Option<sipx_media::MediaPortRange>,
     /// The codec set the provisional's answer was built from, kept because the exchange is not
     /// over: an UPDATE may reoffer before the 200, and it has to be answered from the same set
     /// rather than from the default one.
@@ -5525,9 +5574,7 @@ impl EarlyOffer {
         if policy.keying == Keying::DtlsSrtp {
             return Err(Error::DtlsEarlyMedia);
         }
-        let port = MediaPort::bind(SocketAddr::new(media_address.bind(), 0))
-            .await
-            .map_err(Error::Io)?;
+        let port = media_address.bind_port().await.map_err(Error::Io)?;
         let local_ice = match policy.gathering(true)? {
             // As with the ordinary initial offer, mux is not settled until the answer arrives.
             Some(gathering) => Some(
@@ -5592,6 +5639,7 @@ impl EarlyOffer {
             settled,
             media_address: self.media_address.advertised(),
             media_bind_address: self.media_address.bind(),
+            media_port_range: self.media_address.port_range(),
             codecs: self.codecs,
             keying: self.policy_keying,
         })
@@ -5611,9 +5659,7 @@ impl Early {
             return Err(Error::DtlsEarlyMedia);
         }
         let negotiated = negotiated(offer, policy.codecs)?;
-        let port = MediaPort::bind(SocketAddr::new(media_address.bind(), 0))
-            .await
-            .map_err(Error::Io)?;
+        let port = media_address.bind_port().await.map_err(Error::Io)?;
         let (remote_ice, mut local_ice) = answer_gathering(&port, offer, policy).await?;
         let advertised = local_ice
             .as_ref()
@@ -5654,6 +5700,7 @@ impl Early {
                 settled,
                 media_address: media_address.advertised(),
                 media_bind_address: media_address.bind(),
+                media_port_range: media_address.port_range(),
                 codecs: policy.codecs,
                 keying: policy.keying,
             },
@@ -5954,6 +6001,7 @@ pub async fn answer_early(
         ended: false,
         media_address: early.media_address,
         media_bind_address: early.media_bind_address,
+        media_port_range: early.media_port_range,
         codecs: early.codecs,
         profile: MediaProfile::Standard,
         current: early.settled.negotiated,
@@ -6138,9 +6186,7 @@ async fn answer_negotiated(
     // The port is bound before the session starts, because the answer has to name it *and* the
     // session has to be created with the keys that answer settles on. Starting the session first
     // — as this did — leaves nowhere to put them.
-    let port = MediaPort::bind(SocketAddr::new(media_address.bind(), 0))
-        .await
-        .map_err(Error::Io)?;
+    let port = media_address.bind_port().await.map_err(Error::Io)?;
 
     let (remote_ice, mut local_ice) = answer_gathering(&port, &offer, &policy).await?;
     let advertised = local_ice
@@ -6302,6 +6348,7 @@ async fn answer_negotiated(
         ended: false,
         media_address: media_address.advertised(),
         media_bind_address: media_address.bind(),
+        media_port_range: media_address.port_range(),
         codecs: policy.codecs,
         profile: policy.profile,
         current: settled.negotiated,
@@ -7375,5 +7422,71 @@ mod tests {
         assert_eq!(local.candidates().len(), 1);
         assert_eq!(local.candidates()[0].component, ComponentId::RTP);
         assert_eq!(local.default_destination(ComponentId::RTCP), None);
+    }
+    #[tokio::test]
+    async fn configured_range_reaches_both_early_media_roles() {
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+        let reservation = MediaPort::bind((ip, 0).into()).await.unwrap();
+        let port = reservation.local_addr().port();
+        assert!(reservation.has_control_port());
+        let range = sipx_media::MediaPortRange::new(port, port + 1).unwrap();
+        let address = MediaAddress::new(ip).with_port_range(range);
+        drop(reservation);
+        let early = EarlyOffer::bind(address, false, Direction::SendRecv, &MediaPolicy::default())
+            .await
+            .unwrap();
+        assert_eq!(early.port.local_addr().port(), port);
+        drop(early);
+        let offer = offered("0", &[]);
+        let (early, _) = Early::settle(address, false, &offer, &MediaPolicy::default())
+            .await
+            .unwrap();
+        assert_eq!(early.media.local_addr().port(), port);
+        assert_eq!(early.media_port_range, Some(range));
+        early.media.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn replacement_exhaustion_retains_existing_media_and_range() {
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+        let reservation = MediaPort::bind((ip, 0).into()).await.unwrap();
+        let number = reservation.local_addr().port();
+        assert!(reservation.has_control_port());
+        let range = sipx_media::MediaPortRange::new(number, number + 1).unwrap();
+        let (client, _) = sipx_transport::bind(sipx_transport::Config::new((ip, 0).into()))
+            .await
+            .unwrap();
+        let (peer, mut incoming) =
+            sipx_transport::bind(sipx_transport::Config::new((ip, 0).into()))
+                .await
+                .unwrap();
+        let options =
+            DialOptions::new("<sip:caller@example.test>", ip).with_media_port_range(range);
+        let uri = Uri::parse(Bytes::from_static(b"sip:peer@example.test")).unwrap();
+        drop(reservation);
+        let (caller, recipient) = tokio::join!(
+            dial(&client, Target::udp(peer.local_addr()), &uri, &options),
+            async {
+                let invite = incoming.recv().await.unwrap();
+                answer(&peer, &invite, ip).await
+            }
+        );
+        let caller = caller.unwrap();
+        let recipient = recipient.unwrap();
+        let old = Arc::clone(&caller.media);
+        let mut changed = caller.current;
+        changed
+            .remote
+            .set_port(changed.remote.port().saturating_add(2));
+        let error = caller.prepare_media_change(changed).await.unwrap_err();
+        assert!(matches!(error, Error::Io(error) if error.kind() == std::io::ErrorKind::AddrInUse));
+        assert!(Arc::ptr_eq(&old, &caller.media));
+        assert_eq!(caller.media_port_range, Some(range));
+        assert!(caller.retired_media.is_empty());
+        caller.media.shutdown().await;
+        recipient.media.shutdown().await;
+        drop((old, caller, recipient));
+        client.shutdown().await;
+        peer.shutdown().await;
     }
 }

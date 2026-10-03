@@ -974,3 +974,20 @@ be combined with the lab-only redaction opt-out. The collector socket is non-blo
 counted and logged HEP drop and does not disable the local pcapng file or fail a call. The exact
 chunk subset, byte vectors and ownership rules are in
 [`observability-export.md`](observability-export.md).
+
+## Optional WebSocket Origin admission
+
+`bind_with_options(config, BindOptions::default().with_websocket_origins(policy))`
+installs immutable admission before any WS or WSS listener accepts connections.
+`WebSocketOriginPolicy::require_listed` accepts at most 128 distinct serialized HTTP(S)
+origins, each at most 2048 bytes. Exact matching admits a single matching Origin header;
+absent, duplicate, malformed, opaque `null`, or unlisted Origin returns HTTP 403 before
+connection adoption or SIP delivery (RFC 6455 section 4.2.1; RFC 6454 section 6).
+An origin contains scheme and authority only, no userinfo, path, query or fragment.
+Wildcard patterns are not origins. The SIP subprotocol remains independently required.
+
+Origin admission is not authentication. `bind(config)` and low-level WebSocket accept
+retain their previous defaults. The exhaustive public Config remains constructible
+without adding fields. Handshake deadlines, concurrency bounds and cancellation apply
+to policy rejection as to every other upgrade. Tests exercise real WS and WSS upgrades,
+including rejection followed by successful admission on the same endpoint.

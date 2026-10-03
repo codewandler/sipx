@@ -654,3 +654,18 @@ same-format encoded-relay and bridge-drop tests remain mandatory.
 A destination whose public configuration derives zero samples per packet causes the forwarding
 direction to terminate before reading source PCM. It must never accumulate an unflushable buffer
 or invent a packet duration by clamping zero to one.
+
+## Bounded UDP allocation
+
+`MediaPortRange::new(first, last)` validates an inclusive nonzero range containing at least
+one complete even RTP / following odd RTCP pair (RFC 3550 section 11).
+`MediaPort::bind_in_range(ip, range)` scans each eligible pair at most once, holding the
+actual RTP socket while binding RTCP. Occupied pairs are skipped; exhaustion returns
+`io::ErrorKind::AddrInUse`. Other socket errors are returned. No ephemeral or RTP-only
+fallback is permitted for this opt-in API. Both sockets remain within the range even
+when subsequent negotiation selects RTCP mux. Partial acquisition owns no background
+work and cancellation releases its sockets. Existing `bind` behavior is unchanged.
+
+Allocation tests cover invalid bounds, concurrent ownership, occupied control ports,
+exhaustion and reuse after release. A replacement generation needs a spare pair while
+the old generation is still owned; refusal must leave that generation in place.

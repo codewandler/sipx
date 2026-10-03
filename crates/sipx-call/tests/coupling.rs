@@ -1792,3 +1792,82 @@ async fn source_media_bind_failure_before_final_refuses_and_ends_confirmed_targe
     .await
     .expect("both legs settle");
 }
+
+#[tokio::test]
+async fn coupling_retains_independent_source_and_target_port_ranges() {
+    let held_one = sipx_media::MediaPort::bind((loopback(), 0).into())
+        .await
+        .unwrap();
+    let held_two = sipx_media::MediaPort::bind((loopback(), 0).into())
+        .await
+        .unwrap();
+    assert!(held_one.has_control_port() && held_two.has_control_port());
+    let source_port = held_one.local_addr().port();
+    let target_port = held_two.local_addr().port();
+    let source_range = sipx_media::MediaPortRange::new(source_port, source_port + 1).unwrap();
+    let target_range = sipx_media::MediaPortRange::new(target_port, target_port + 1).unwrap();
+    let (edge, edge_incoming) = endpoint().await;
+    let mut pumped = pump(&edge, edge_incoming);
+    let (source, _source_incoming) = endpoint().await;
+    let (target, mut target_incoming) = endpoint().await;
+    let to = Uri::sip(Host::Name(HostName::new("edge.example").unwrap()));
+    let source_options = DialOptions::new("<sip:source@example.test>", loopback());
+    let target_options =
+        DialOptions::new("<sip:edge@example.test>", loopback()).with_media_port_range(target_range);
+    drop((held_one, held_two));
+    let caller = async {
+        let mut call = dial(
+            &source,
+            Target::udp(edge.local_addr()),
+            &to,
+            &source_options,
+        )
+        .await
+        .unwrap();
+        call.hang_up().await.unwrap();
+        call.media().shutdown().await;
+    };
+    let recipient = async {
+        let invite = target_incoming.recv().await.unwrap();
+        let ringing = ring(&target, &invite, 180, "Ringing", false).await.unwrap();
+        let mut call = sipx_call::answer_ringing(&target, &invite, loopback(), &ringing)
+            .await
+            .unwrap();
+        sipx_call::serve(&mut call, &mut target_incoming)
+            .await
+            .unwrap();
+        assert!(call.is_ended());
+        call.media().shutdown().await;
+    };
+    let gateway = async {
+        let invitation = pumped.invitation().await;
+        let early = Box::pin(EarlyCoupling::dial_with_policy_at(
+            invitation,
+            &pumped.calls,
+            &edge,
+            Target::udp(target.local_addr()),
+            &to,
+            &target_options,
+            sipx_call::MediaAddress::new(loopback()).with_port_range(source_range),
+            sipx_call::MediaPolicy::default(),
+        ))
+        .await
+        .unwrap();
+        let (mut coupling, mut one, mut two) =
+            Box::pin(early.confirmed()).await.unwrap().into_parts();
+        assert_eq!(coupling.calls().0.media().local_addr().port(), source_port);
+        assert_eq!(coupling.calls().1.media().local_addr().port(), target_port);
+        assert_eq!(
+            coupling.run(&mut one, &mut two).await.unwrap(),
+            CouplingEnd::Bye(Leg::One)
+        );
+    };
+    Box::pin(tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(caller, recipient, gateway);
+    }))
+    .await
+    .expect("both legs establish and end");
+    edge.shutdown().await;
+    source.shutdown().await;
+    target.shutdown().await;
+}
