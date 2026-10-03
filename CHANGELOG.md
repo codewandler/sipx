@@ -9,6 +9,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Supervised coupling retains a sticky local-stop request and exposes observed per-leg termination
+  plus joined media cleanup. Accepted peer BYE evidence survives crossed and interrupted waits;
+  timeouts and rejected requests remain uncertain.
+
 - The experimental `@sipx/browser` ESM package ships its WASM kernel, Rust-generated ABI/types,
   ordered client/call lifecycle and bounded native browser media ownership. Its packed consumer
   proof uses challenged WSS registration and calls in both SIP roles.
