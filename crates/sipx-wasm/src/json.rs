@@ -68,6 +68,27 @@ impl Writer {
         self
     }
 
+    /// An array of objects, each written in the caller's canonical field order.
+    pub(crate) fn objects<T>(
+        &mut self,
+        name: &str,
+        values: &[T],
+        build: impl Fn(&mut Self, &T),
+    ) -> &mut Self {
+        self.key(name);
+        self.out.push('[');
+        for (index, value) in values.iter().enumerate() {
+            if index > 0 {
+                self.out.push(',');
+            }
+            let mut nested = Self::object();
+            build(&mut nested, value);
+            self.out.push_str(&nested.finish());
+        }
+        self.out.push(']');
+        self
+    }
+
     /// A string field written only when the value is present, which is how §5.3's `"field"?`
     /// columns are spelled.
     pub(crate) fn string_opt(&mut self, name: &str, value: Option<&str>) -> &mut Self {

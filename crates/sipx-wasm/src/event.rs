@@ -124,6 +124,57 @@ impl OutcomeError {
     }
 }
 
+/// Codec facts copied from the validated answer, without SDP or media credentials.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CodecFact {
+    pub(crate) name: String,
+    pub(crate) clock_rate: u32,
+    pub(crate) channels: u32,
+    pub(crate) payload_type: u8,
+}
+
+impl CodecFact {
+    fn write(&self, writer: &mut Writer) {
+        writer
+            .string("name", &self.name)
+            .number("clock_rate", u64::from(self.clock_rate))
+            .number("channels", u64::from(self.channels))
+            .number("payload_type", u64::from(self.payload_type));
+    }
+}
+
+/// The redacted §5.5 fact set; neither raw descriptions nor browser statistics belong here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MediaFacts {
+    pub(crate) call_id: String,
+    pub(crate) local_tag: String,
+    pub(crate) remote_tag: String,
+    pub(crate) codecs: Vec<CodecFact>,
+    pub(crate) selected_codec: CodecFact,
+    pub(crate) fingerprint_algorithm: &'static str,
+    pub(crate) answer_setup: &'static str,
+    pub(crate) local_dtls_role: &'static str,
+}
+
+impl MediaFacts {
+    fn write(&self, facts: &mut Writer) {
+        facts
+            .object_field("dialog", |dialog| {
+                dialog
+                    .string("call_id", &self.call_id)
+                    .string("local_tag", &self.local_tag)
+                    .string("remote_tag", &self.remote_tag);
+            })
+            .objects("codecs", &self.codecs, |codec, value| value.write(codec))
+            .object_field("selected_codec", |codec| self.selected_codec.write(codec))
+            .string("fingerprint_algorithm", self.fingerprint_algorithm)
+            .string("answer_setup", self.answer_setup)
+            .string("local_dtls_role", self.local_dtls_role)
+            .boolean("rtcp_mux", true)
+            .number("audio_sections", 1);
+    }
+}
+
 /// One §5.3 event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Event {
@@ -151,6 +202,10 @@ pub(crate) enum Event {
         call: u32,
         kind: MediaKind,
         sdp: String,
+    },
+    NegotiatedMedia {
+        call: u32,
+        kernel: MediaFacts,
     },
     CallEnded {
         call: u32,
@@ -218,6 +273,12 @@ impl Event {
                     .number("call", u64::from(*call))
                     .string("kind", kind.as_str())
                     .string("sdp", sdp);
+            }
+            Self::NegotiatedMedia { call, kernel } => {
+                writer
+                    .string("evt", "negotiated-media")
+                    .number("call", u64::from(*call))
+                    .object_field("kernel", |facts| kernel.write(facts));
             }
             Self::CallEnded { call, cause } => {
                 writer

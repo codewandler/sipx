@@ -9,13 +9,16 @@
 
 use sipx_sdp::browser_audio::{self, BrowserAudioRole, ProfileError};
 use sipx_sdp::fingerprint::SetupCapabilities;
-use sipx_sip::{Message, Method, Request, Response, StatusCode, TransactionKey};
+use sipx_sip::auth::{Challenge, Credentials, respond, strongest};
+use sipx_sip::{
+    Header, HeaderName, Message, Method, Request, Response, StatusCode, TransactionKey,
+};
 
 use super::Kernel;
 use crate::bounds;
 use crate::command::{MediaKind, Verb};
 use crate::error::{Error, Result};
-use crate::event::{Cause, CauseClass, Direction, Event};
+use crate::event::{Cause, CauseClass, CodecFact, Direction, Event, MediaFacts};
 use crate::sip::{self, Dialog};
 
 /// The nonterminal states of §5.4, in their `"call"`-event spelling.
@@ -59,6 +62,12 @@ pub(crate) struct Call {
     /// The INVITE's own branch, which a CANCEL must reuse (RFC 3261 §9.1).
     invite_branch: Option<String>,
     invite_cseq: u32,
+    invite_key: Option<TransactionKey>,
+    auth_retries: u8,
+    auth_challenges: Vec<(Challenge, u32)>,
+    cancelled: bool,
+    /// A received 2xx owes ACK and BYE; retain ownership until both branches are available.
+    pending_cleanup: Option<Cause>,
     /// The server transaction of a received INVITE, so a 180/200/486/488 can be sent on it.
     server_key: Option<TransactionKey>,
     /// The offer this endpoint sent, kept so the answer can be validated against it.
@@ -72,6 +81,22 @@ pub(crate) struct Call {
 impl Call {
     pub(crate) fn state(&self) -> CallState {
         self.state
+    }
+
+    fn remember_challenge(&mut self, challenge: Challenge) {
+        let count = self
+            .auth_challenges
+            .iter()
+            .find(|(old, _)| {
+                old.from_proxy == challenge.from_proxy
+                    && old.realm == challenge.realm
+                    && old.nonce == challenge.nonce
+                    && old.algorithm == challenge.algorithm
+            })
+            .map_or(0, |(_, count)| *count);
+        self.auth_challenges
+            .retain(|(old, _)| old.from_proxy != challenge.from_proxy);
+        self.auth_challenges.push((challenge, count));
     }
 }
 
@@ -184,6 +209,11 @@ impl Kernel {
                 },
                 invite_branch: None,
                 invite_cseq: 0,
+                invite_key: None,
+                auth_retries: 0,
+                auth_challenges: Vec::new(),
+                cancelled: false,
+                pending_cleanup: None,
                 server_key: None,
                 local_offer: None,
                 remote_offer: None,
@@ -244,6 +274,7 @@ impl Kernel {
             self.poison("the transaction layer refused an INVITE");
             return Ok(());
         };
+        self.call_mut(number)?.invite_key = Some(key.clone());
         self.own_transaction(key.clone(), number);
         self.set_state(number, CallState::InviteSent);
         self.drive(&key, outputs);
@@ -273,7 +304,8 @@ impl Kernel {
             return Ok(());
         };
 
-        if let Err(error) = validate_exchange(&offer, sdp) {
+        let facts = media_facts(&offer, sdp, &dialog, Direction::In);
+        if let Err(error) = &facts {
             self.refuse(id, "sdp-profile", error.to_string());
             self.respond_on(&server_key, 488, "Not Acceptable Here", &dialog, None);
             self.end(
@@ -283,6 +315,12 @@ impl Kernel {
             return Ok(());
         }
 
+        if let Ok(kernel) = facts {
+            self.emit(&Event::NegotiatedMedia {
+                call: number,
+                kernel,
+            });
+        }
         self.respond_on(&server_key, 200, "OK", &dialog, Some(sdp));
         self.set_state(number, CallState::AnswerSent);
         self.announce(number);
@@ -312,8 +350,7 @@ impl Kernel {
         if self.call_state(number)? != CallState::AnswerDelivered {
             return Err(Error::State);
         }
-        self.send_ack(number)?;
-        self.send_bye(number)?;
+        self.send_ack_bye(number)?;
         self.succeed(id);
         self.end(
             number,
@@ -370,6 +407,14 @@ impl Kernel {
 
     /// `"hangup"`: one verb, one row per state (§5.2 — "end a call in any state").
     fn hangup(&mut self, id: u64, number: u32) -> Result<()> {
+        if self
+            .calls
+            .get(&number)
+            .is_some_and(|call| call.pending_cleanup.is_some())
+        {
+            self.succeed(id);
+            return Ok(());
+        }
         match self.call_state(number)? {
             // No SIP owed: the INVITE was never serialised.
             CallState::Dialing => {
@@ -378,7 +423,10 @@ impl Kernel {
             }
             // CANCEL; the call ends when the 487 exchange completes.
             CallState::InviteSent | CallState::Ringing => {
-                self.send_cancel(number)?;
+                if !self.call_mut(number)?.cancelled {
+                    self.call_mut(number)?.cancelled = true;
+                    self.send_cancel(number)?;
+                }
                 self.succeed(id);
             }
             // An unanswered incoming call is refused 486, which §5.2 names explicitly.
@@ -396,7 +444,11 @@ impl Kernel {
                 self.end(number, Cause::class(class));
             }
             CallState::AnswerDelivered | CallState::AnswerSent | CallState::SipEstablished => {
-                self.send_bye(number)?;
+                if self.call_state(number)? == CallState::AnswerDelivered {
+                    self.send_ack_bye(number)?;
+                } else {
+                    self.send_bye(number)?;
+                }
                 self.succeed(id);
                 self.end(number, Cause::class(CauseClass::Local));
             }
@@ -406,6 +458,51 @@ impl Kernel {
     }
 
     // ------------------------------------------------------------------ outgoing requests
+
+    /// Reserve the complete two-branch draw before either wire effect. Commands may retry
+    /// after `E_ENTROPY` without a partial ACK or consumed branch.
+    fn send_ack_bye(&mut self, number: u32) -> Result<()> {
+        if self.entropy.level() < 16 {
+            return Err(Error::Entropy);
+        }
+        self.send_ack(number)?;
+        self.send_bye(number)
+    }
+
+    /// Network inputs have already been accepted; unlike a refused host command, their
+    /// cleanup cannot be retried by the caller. Keep one bounded obligation on the call.
+    fn cleanup_answer(&mut self, number: u32, cause: Cause) {
+        if let Some(call) = self.calls.get_mut(&number) {
+            call.pending_cleanup = Some(cause);
+        }
+        self.resume_cleanup(number);
+    }
+
+    fn resume_cleanup(&mut self, number: u32) {
+        let Some(cause) = self
+            .calls
+            .get(&number)
+            .and_then(|call| call.pending_cleanup.clone())
+        else {
+            return;
+        };
+        match self.send_ack_bye(number) {
+            Ok(()) => self.end(number, cause),
+            Err(Error::Entropy) => self.ask_for_entropy_if_low(),
+            Err(_) => self.poison("a pending answer cleanup lost its call"),
+        }
+    }
+
+    pub(super) fn resume_answer_cleanups(&mut self) {
+        let pending: Vec<u32> = self
+            .calls
+            .iter()
+            .filter_map(|(number, call)| call.pending_cleanup.as_ref().map(|_| *number))
+            .collect();
+        for number in pending {
+            self.resume_cleanup(number);
+        }
+    }
 
     fn send_ack(&mut self, number: u32) -> Result<()> {
         let branch = self.entropy.branch()?;
@@ -522,7 +619,15 @@ impl Kernel {
             .client_request(key)
             .map(|request| request.method.clone());
         match method {
-            Some(Method::Invite) => self.on_invite_response(number, response),
+            Some(Method::Invite)
+                if self
+                    .calls
+                    .get(&number)
+                    .and_then(|call| call.invite_key.as_ref())
+                    == Some(key) =>
+            {
+                self.on_invite_response(number, response);
+            }
             Some(Method::Bye) if response.status.is_final() => {
                 self.end(number, Cause::class(CauseClass::Local));
             }
@@ -535,7 +640,31 @@ impl Kernel {
     /// §5.4 outbound rows 5 to 8.
     fn on_invite_response(&mut self, number: u32, response: &Response) {
         let status = response.status;
-        if self.call_state(number).is_err() {
+        if self.call_state(number).is_err()
+            || self
+                .calls
+                .get(&number)
+                .is_some_and(|call| call.pending_cleanup.is_some())
+        {
+            return;
+        }
+        // A duplicate final response cannot emit media facts or establish twice. The ACK
+        // stays held while the browser applies the answer; after that it may be repeated.
+        if matches!(
+            self.call_state(number),
+            Ok(CallState::AnswerDelivered | CallState::SipEstablished)
+        ) {
+            if self.call_state(number) == Ok(CallState::SipEstablished) && status.is_success() {
+                let _ = self.send_ack(number);
+            }
+            return;
+        }
+        if matches!(status.code(), 401 | 407) {
+            if self.calls.get(&number).is_some_and(|call| call.cancelled) {
+                self.end(number, Cause::class(CauseClass::Local));
+            } else {
+                self.retry_invite(number, response);
+            }
             return;
         }
         if let Some(tag) = sip::to_tag(&response.headers)
@@ -569,6 +698,119 @@ impl Kernel {
         self.end(number, cause);
     }
 
+    /// RFC 3261 §22: the transaction already emitted the non-2xx ACK. Only a current,
+    /// uncancelled call may originate its replacement initial INVITE.
+    fn retry_invite(&mut self, number: u32, response: &Response) {
+        let status = u64::from(response.status.code());
+        if let Some(reason) = self.invite_auth_refusal(number) {
+            self.end(number, Cause::sip(status, reason));
+            return;
+        }
+        let Some(challenge) = invite_challenge(response) else {
+            self.end(
+                number,
+                Cause::sip(status, "no supported authentication challenge"),
+            );
+            return;
+        };
+        // Reserve the complete draw before consuming any of it, as §4.7 requires.
+        if self.entropy.level() < 24 {
+            self.end(
+                number,
+                Cause::sip(status, "insufficient authentication entropy"),
+            );
+            self.ask_for_entropy_if_low();
+            return;
+        }
+        let (Ok(cnonce), Ok(branch)) = (self.entropy.cnonce(), self.entropy.branch()) else {
+            self.end(
+                number,
+                Cause::sip(status, "insufficient authentication entropy"),
+            );
+            return;
+        };
+        let Some(call) = self.calls.get_mut(&number) else {
+            return;
+        };
+        call.remember_challenge(challenge);
+        let Some(offer) = call.local_offer.as_deref() else {
+            return;
+        };
+        let credentials =
+            Credentials::new(self.config.username.clone(), self.config.password.clone());
+        let headers = call
+            .auth_challenges
+            .iter_mut()
+            .map(|(challenge, count)| {
+                *count += 1;
+                Header::build(
+                    challenge.response_header(),
+                    respond(
+                        challenge,
+                        &credentials,
+                        "INVITE",
+                        &call.dialog.remote_uri,
+                        *count,
+                        &cnonce,
+                    ),
+                )
+            })
+            .collect::<core::result::Result<Vec<_>, _>>();
+        let Ok(headers) = headers else {
+            self.end(
+                number,
+                Cause::sip(status, "invalid authentication challenge"),
+            );
+            return;
+        };
+        call.dialog.remote_tag = None;
+        call.dialog.remote_target = None;
+        call.dialog.local_cseq = call.dialog.local_cseq.saturating_add(1);
+        call.invite_cseq = call.dialog.local_cseq;
+        call.invite_branch = Some(branch.clone());
+        let Ok(mut request) =
+            sip::invite(&self.config, &call.dialog, &branch, call.invite_cseq, offer)
+        else {
+            self.end(
+                number,
+                Cause::sip(status, "authenticated request could not be composed"),
+            );
+            return;
+        };
+        for header in headers {
+            request.headers.push(header);
+        }
+        let Some((key, outputs)) = self.transactions.send_request(request, Self::reliability())
+        else {
+            self.end(
+                number,
+                Cause::sip(status, "authenticated transaction could not be created"),
+            );
+            return;
+        };
+        call.auth_retries += 1;
+        call.invite_key = Some(key.clone());
+        call.state = CallState::InviteSent;
+        self.own_transaction(key.clone(), number);
+        self.drive(&key, outputs);
+        self.announce(number);
+        self.ask_for_entropy_if_low();
+    }
+
+    fn invite_auth_refusal(&self, number: u32) -> Option<&'static str> {
+        if !self.config.may_authenticate() {
+            Some("authentication requires secure signalling")
+        } else if self
+            .calls
+            .get(&number)
+            .is_none_or(|call| call.auth_retries >= 2)
+        {
+            Some("authentication retry limit reached")
+        } else {
+            None
+        }
+    }
+
     /// A 2xx to INVITE: validate the answer, then hold the ACK until the browser has applied it.
     fn on_invite_success(&mut self, number: u32, response: &Response) {
         if let Some(target) = sip::contact_target(&response.headers)
@@ -576,12 +818,14 @@ impl Kernel {
         {
             call.dialog.remote_target = Some(target);
         }
+        if self.calls.get(&number).is_some_and(|call| call.cancelled) {
+            self.cleanup_answer(number, Cause::class(CauseClass::Local));
+            return;
+        }
         let Some(sdp) = sip::sdp_body(&response.headers, response.body()) else {
             // A 2xx with no answer leaves nothing to apply and no way to start media. The ACK is
             // still owed (RFC 3261 §13.2.2.4) before the BYE.
-            let _ = self.send_ack(number);
-            let _ = self.send_bye(number);
-            self.end(
+            self.cleanup_answer(
                 number,
                 Cause::class(CauseClass::Media).with_reason("the 2xx carried no answer"),
             );
@@ -592,23 +836,28 @@ impl Kernel {
             .calls
             .get(&number)
             .and_then(|call| call.local_offer.clone());
-        let outcome = match offer {
-            Some(offer) => validate_exchange(&offer, &sdp),
-            None => validate(&sdp, BrowserAudioRole::Answerer),
+        let outcome = match (offer, self.calls.get(&number)) {
+            (Some(offer), Some(call)) => media_facts(&offer, &sdp, &call.dialog, Direction::Out),
+            _ => Err(ProfileError::MediaSectionCount),
         };
-        if let Err(error) = outcome {
-            // §9.6's `BSDK-STATE-7`. The refusal names the profile rule, never the description:
-            // an SDES key echoed into an event would publish exactly what the refusal exists to
-            // reject.
-            let _ = self.send_ack(number);
-            let _ = self.send_bye(number);
-            self.end(
-                number,
-                Cause::class(CauseClass::Media).with_reason(error.to_string()),
-            );
-            return;
-        }
+        let facts = match outcome {
+            Ok(facts) => facts,
+            Err(error) => {
+                // §9.6's `BSDK-STATE-7`. The refusal names the profile rule, never the description:
+                // an SDES key echoed into an event would publish exactly what the refusal exists to
+                // reject.
+                self.cleanup_answer(
+                    number,
+                    Cause::class(CauseClass::Media).with_reason(error.to_string()),
+                );
+                return;
+            }
+        };
 
+        self.emit(&Event::NegotiatedMedia {
+            call: number,
+            kernel: facts,
+        });
         self.set_state(number, CallState::AnswerDelivered);
         self.announce(number);
         self.emit(&Event::RemoteMedia {
@@ -698,6 +947,11 @@ impl Kernel {
                 },
                 invite_branch: sip::top_branch(&request.headers),
                 invite_cseq: sip::cseq(&request.headers).unwrap_or(0),
+                invite_key: None,
+                auth_retries: 0,
+                auth_challenges: Vec::new(),
+                cancelled: false,
+                pending_cleanup: None,
                 server_key: Some(key.clone()),
                 local_offer: None,
                 remote_offer: Some(sdp.clone()),
@@ -799,6 +1053,26 @@ impl Kernel {
         let Some(number) = self.transaction_owner(key) else {
             return;
         };
+        if self
+            .transactions
+            .client_request(key)
+            .is_some_and(|request| request.method == Method::Invite)
+            && self
+                .calls
+                .get(&number)
+                .and_then(|call| call.invite_key.as_ref())
+                != Some(key)
+        {
+            return;
+        }
+        // A CANCEL/INVITE transaction timeout cannot erase cleanup owed by its accepted 2xx.
+        if self
+            .calls
+            .get(&number)
+            .is_some_and(|call| call.pending_cleanup.is_some())
+        {
+            return;
+        }
         self.end(number, Cause::class(CauseClass::Timeout));
     }
 
@@ -846,6 +1120,10 @@ impl Kernel {
             // the transaction is abandoned so a late retransmission finds nothing to drive.
             self.clear_transaction_timers(key);
             self.transactions.abandon(key);
+            // abandon owns server transactions only. The call's terminal cleanup withdraws
+            // transport ownership from its client transactions too; their terminal TU signal
+            // is intentionally not delivered again after CallEnded.
+            let _ = self.transactions.on_transport_error(key);
         }
         self.transaction_calls.retain(|(_, owner)| *owner != number);
     }
@@ -897,10 +1175,78 @@ fn validate(sdp: &str, role: BrowserAudioRole) -> Profile {
     browser_audio::validate(&description, role).map(|_| ())
 }
 
-/// Validate a complete offer/answer exchange, which is stricter than validating the answer alone:
-/// it also holds the answer to the offer's payload numbers and their offered order.
-fn validate_exchange(offer: &str, answer: &str) -> Profile {
+/// Validate the exchange first, then copy only the typed facts admitted by §5.5.
+fn media_facts(
+    offer: &str,
+    answer: &str,
+    dialog: &Dialog,
+    direction: Direction,
+) -> core::result::Result<MediaFacts, ProfileError> {
     let offered = sipx_sdp::parse::parse(offer).map_err(|_| ProfileError::MediaSectionCount)?;
     let answered = sipx_sdp::parse::parse(answer).map_err(|_| ProfileError::MediaSectionCount)?;
-    browser_audio::validate_answer(&offered, &answered, SetupCapabilities::both()).map(|_| ())
+    let validated = browser_audio::validate_answer(&offered, &answered, SetupCapabilities::both())?;
+    let media = answered
+        .media
+        .first()
+        .ok_or(ProfileError::MediaSectionCount)?;
+    let codecs: Vec<CodecFact> = media
+        .formats
+        .iter()
+        .map(|format| {
+            // RFC 3551 static payloads may omit rtpmap; profile validation above has
+            // already checked these fixed assignments and rejects a conflicting mapping.
+            let mapping = media
+                .rtpmap(format)
+                .or(match format.as_str() {
+                    "0" => Some("PCMU/8000"),
+                    "8" => Some("PCMA/8000"),
+                    _ => None,
+                })
+                .ok_or(ProfileError::CodecSetIncomplete)?;
+            let typed = sipx_sdp::rtpmap::Rtpmap::parse(mapping)
+                .map_err(|_| ProfileError::CodecSetIncomplete)?;
+            Ok(CodecFact {
+                name: typed.encoding().to_ascii_lowercase(),
+                clock_rate: typed.clock_rate(),
+                channels: typed.channels(),
+                payload_type: format
+                    .parse()
+                    .map_err(|_| ProfileError::CodecSetIncomplete)?,
+            })
+        })
+        .collect::<core::result::Result<_, ProfileError>>()?;
+    let selected_codec = codecs
+        .iter()
+        .find(|codec| codec.payload_type == validated.description.selected_audio_payload)
+        .cloned()
+        .ok_or(ProfileError::CodecSetIncomplete)?;
+    Ok(MediaFacts {
+        call_id: dialog.call_id.clone(),
+        local_tag: dialog.local_tag.clone(),
+        remote_tag: dialog.remote_tag.clone().unwrap_or_default(),
+        codecs,
+        selected_codec,
+        fingerprint_algorithm: validated.description.fingerprint.func.as_str(),
+        answer_setup: validated.description.setup.as_str(),
+        local_dtls_role: match direction {
+            Direction::In => validated.description.setup.as_str(),
+            Direction::Out => validated.local_setup.as_str(),
+        },
+    })
+}
+
+/// Only the challenge header associated with the current response status is admissible.
+fn invite_challenge(response: &Response) -> Option<Challenge> {
+    let proxy = response.status.code() == 407;
+    let name = if proxy {
+        HeaderName::ProxyAuthenticate
+    } else {
+        HeaderName::WwwAuthenticate
+    };
+    let challenges = response
+        .headers
+        .get_all(&name)
+        .filter_map(|header| Challenge::parse(&header.value(), proxy))
+        .collect();
+    strongest(challenges)
 }
