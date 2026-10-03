@@ -217,6 +217,7 @@ impl Kernel {
     /// §4.3 `sipx_input_entropy`.
     pub(crate) fn input_entropy(&mut self, bytes: &[u8]) -> Result<()> {
         self.entropy.feed(bytes)?;
+        self.resume_answer_cleanups();
         self.ask_for_entropy_if_low();
         Ok(())
     }
@@ -401,16 +402,23 @@ impl Kernel {
     /// retransmit it — and this preserves it, because §4.6's records are strictly FIFO and the
     /// host replays them in the order it drains them.
     fn drive(&mut self, key: &TransactionKey, outputs: Vec<Output>) {
+        let call_owned = self.transaction_calls.iter().any(|(owned, _)| owned == key);
         for output in outputs {
             match output {
                 Output::Send(message) => self.wire(&message),
-                Output::SetTimer { timer, after } => self.set_timer(
-                    Scheduled::Transaction {
-                        key: key.clone(),
-                        timer,
-                    },
-                    after,
-                ),
+                Output::SetTimer { timer, after } => {
+                    // A preceding TU callback can terminate the call and abandon this
+                    // transaction. Its remaining outputs cannot recreate a retired timer.
+                    if !call_owned || self.transaction_calls.iter().any(|(owned, _)| owned == key) {
+                        self.set_timer(
+                            Scheduled::Transaction {
+                                key: key.clone(),
+                                timer,
+                            },
+                            after,
+                        );
+                    }
+                }
                 Output::ClearTimer(timer) => self.clear_timer(&Scheduled::Transaction {
                     key: key.clone(),
                     timer,

@@ -238,6 +238,13 @@ maintains a pool: capacity 1024 octets, low-water mark 64. When the pool drops b
 mark the kernel emits the `"need-entropy"` event (`BSDK-EVT-1`); feeding beyond capacity is
 `E_BOUNDS` with the pool unchanged. An operation that needs more entropy than the pool holds fails
 whole with `E_ENTROPY` — no partial consumption, no weaker generator, no silent reuse (§8.4).
+An ACK-then-BYE command reserves both branches before either message is emitted. When an
+already received successful response requires that pair (cancellation, missing answer or invalid
+answer), insufficient entropy retains the dialog and its cleanup cause, emits `need-entropy`,
+and resumes the pair on a later entropy input. Duplicate responses and transaction timeouts
+cannot discard this pending cleanup or publish media success. No `call-ended` is emitted until
+the pair is sent, or the peer itself terminates the dialog. Pending work remains within the
+concurrent-call bound; freeing the kernel releases it under the existing host close contract.
 
 Identifiers are derived from the pool as an ordered tape, so that a pinned tape yields pinned
 identifiers (`BSDK-ENT-1`):
@@ -369,6 +376,7 @@ discipline [app-contract.md](app-contract.md) established for its own events.
 | `"call"` | `"call"`, `"dir"` (`"in"`\|`"out"`), `"state"` (§5.4), `"from"?, "to"?` | call state replaced wholesale |
 | `"need-local-media"` | `"call"`, `"kind"`, `"constraints"` (`{"audio":true,"video":false}`, always) | the browser must produce a description of that kind |
 | `"remote-media"` | `"call"`, `"kind"`, `"sdp"` | a profile-validated remote description for `setRemoteDescription`; hostile or off-profile SDP is refused inside the kernel and never reaches this event |
+| `"negotiated-media"` | `"call"`, `"kernel"` (the §5.5 typed fact set) | once per validated answer, before SIP establishment |
 | `"call-ended"` | `"call"`, `"cause"` (`{"class": "local"\|"remote"\|"refused"\|"sip"\|"media"\|"timeout", "status"?, "reason"?}`) | final event for that call number |
 | `"outcome"` | `"id"`, `"ok"`, `"error"?` (`{"code","reason"}`) | the single completion of one command |
 | `"error"` | `"fatal"`, `"code"`, `"reason"` | kernel-level fault; `"fatal":true` accompanies the poisoned state |
@@ -388,7 +396,8 @@ Outbound:
 | `Dialing` | `"hangup"` | no SIP owed; `Ended(local)` |
 | `InviteSent` | 1xx | `Ringing`, event `"call"` |
 | `InviteSent`/`Ringing` | 2xx with SDP answer | validate profile; valid → emit `"remote-media"` (answer), hold the ACK → `AnswerDelivered`; invalid → ACK then BYE, `Ended(media)` |
-| `InviteSent`/`Ringing` | 3xx–6xx | ACK per RFC 3261; `Ended(sip, status)` |
+| `InviteSent`/`Ringing` | 401/407 | transaction ACK, then bounded authenticated retry or typed terminal refusal (below) |
+| `InviteSent`/`Ringing` | other 3xx–6xx | ACK per RFC 3261; `Ended(sip, status)` |
 | `InviteSent`/`Ringing` | `"hangup"` | CANCEL; on the 487 exchange completing, `Ended(local)` |
 | `AnswerDelivered` | `"media-applied"` | send ACK → `SipEstablished` |
 | `AnswerDelivered` | `"media-failed"` | send ACK then BYE → `Ended(media)` |
@@ -418,6 +427,26 @@ cause instead of a `"call"` state — there is exactly one terminal notification
 two spellings of it. "The call is established" as presented to the application is a stricter,
 combined fact defined in §6.2.
 
+#### INVITE authentication
+
+A matched 401/407 to the current initial INVITE may cause at most two authenticated retries
+per call, including stale challenges (RFC 3261 §22, RFC 7616). The transaction owns the non-2xx
+ACK and emits it before the retry. Retry preserves Call-ID, local tag, target and validated offer,
+increments CSeq, and draws a fresh cnonce and branch from the entropy tape. The challenge's
+To-tag never becomes the new initial INVITE's To-tag. A 401 uses WWW-Authenticate/Authorization;
+a 407 uses Proxy-Authenticate/Proxy-Authorization. Previously answered challenges of the other
+kind remain on a subsequent retry, recomputed with the fresh cnonce and incremented nonce count.
+Digest uses the actual INVITE method and Request-URI; only
+the shared Digest implementation's supported algorithms and qop are admitted.
+
+Cancellation intent is sticky: no challenge or stale transaction may launch another INVITE
+once hangup has been accepted. A successful answer racing cancellation is ACKed and terminated
+with BYE, without media facts or an established event. Stale transactions cannot advance the
+current call. Unsupported/malformed challenges, exhausted retries, insecure signalling and
+insufficient entropy end the attempt with a typed `sip` outcome and a fixed diagnostic reason;
+challenge values and credentials never enter that diagnostic. No fallback credentials or
+unbounded retry are permitted.
+
 ### 5.5 The negotiated-media report
 
 The SDK reports what was actually negotiated as two labelled fact sets, and never infers one from
@@ -431,6 +460,22 @@ the other (the discipline [browser-audio-proof.md](browser-audio-proof.md) §3 e
 A missing browser statistic is a missing field, never a kernel substitute. The JavaScript surface
 exposes the combined report (`call.negotiatedMedia()`, §6.1) with each fact's origin preserved,
 and a call is never presented as `established` while the facts required by §6.2 are absent.
+
+The additive `negotiated-media` event carries fields in this order: `v:1`,
+`evt:"negotiated-media"`, `call`, `kernel`. Within `kernel`, fields are `dialog`
+(`call_id`, `local_tag`, `remote_tag`), `codecs`, `selected_codec`, `fingerprint_algorithm`,
+`answer_setup`, `local_dtls_role`, `rtcp_mux`, `audio_sections`. Codec objects contain
+`name`, `clock_rate`, `channels`, `payload_type`; names are lowercase and the list follows
+the validated answer's payload order. The selected primary codec follows the typed profile
+selection. Setup fields are `active` or `passive`: the local answerer uses the answer's role,
+and the local offerer uses the complementary role. Static PCMU/PCMA payloads retain their RFC 3551 facts when `rtpmap` is omitted.
+`rtcp_mux` and `audio_sections` are the
+validated profile's facts, never browser observations.
+
+Both roles emit this event exactly once, after a validated complete offer/answer exists and
+before `sipEstablished`. An early offer alone or refused answer emits none. The event contains
+no raw SDP, ICE credentials, candidate addresses or fingerprint value. Existing event vectors
+retain their bytes. The browser adapter consumes these facts without parsing SIP or SDP.
 
 ## 6. The JavaScript lifecycle
 

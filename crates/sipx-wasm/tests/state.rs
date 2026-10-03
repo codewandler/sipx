@@ -687,3 +687,575 @@ fn inbound_ack(response: &str) -> String {
          Content-Length: 0\r\n\r\n"
     )
 }
+
+fn start_offer(host: &mut Host) -> String {
+    assert_eq!(host.command(BSDK_CMD_2), 0);
+    assert_eq!(host.command(&local_media(4, 1, "offer", BA_SDP_O1)), 0);
+    host.wires().last().unwrap().to_string()
+}
+
+fn challenged(request: &str, proxy: bool, value: &str) -> String {
+    let name = if proxy {
+        "Proxy-Authenticate"
+    } else {
+        "WWW-Authenticate"
+    };
+    let status = if proxy {
+        "407 Proxy Authentication Required"
+    } else {
+        "401 Unauthorized"
+    };
+    let response = respond_to(request, status, &[&format!("{name}: {value}")], None);
+    let to = header(request, "To").unwrap();
+    response.replace(
+        &format!("To: {to}\r\n"),
+        &format!("To: {to};tag=challenge-tag\r\n"),
+    )
+}
+
+const INVITE_CHALLENGE: &str =
+    r#"Digest realm="example.net", nonce="nonce-one", qop="auth", algorithm=SHA-256"#;
+
+#[test]
+fn invite_digest_401_and_407_ack_before_retry_and_establish_once() {
+    use sipx_sip::auth::{Challenge, Credentials, respond};
+    for proxy in [false, true] {
+        let mut host = ready();
+        let first = start_offer(&mut host);
+        host.clear_log();
+        host.receive(&challenged(&first, proxy, INVITE_CHALLENGE));
+        let wires = host.wires();
+        assert_eq!(wires.len(), 2, "ACK then authenticated INVITE: {wires:?}");
+        assert!(wires[0].starts_with("ACK "));
+        let retry = wires[1].to_string();
+        assert!(retry.starts_with("INVITE sip:bob@example.net SIP/2.0"));
+        assert_eq!(header(&retry, "Call-ID"), header(&first, "Call-ID"));
+        assert_eq!(header(&retry, "From"), header(&first, "From"));
+        assert_eq!(header(&retry, "To"), header(&first, "To"));
+        assert_ne!(header(&retry, "Via"), header(&first, "Via"));
+        assert_eq!(header(&retry, "CSeq").as_deref(), Some("2 INVITE"));
+        assert!(retry.ends_with(BA_SDP_O1));
+        let name = if proxy {
+            "Proxy-Authorization"
+        } else {
+            "Authorization"
+        };
+        let authorization = header(&retry, name).unwrap();
+        let cnonce = authorization
+            .split("cnonce=\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap();
+        assert_eq!(
+            authorization,
+            respond(
+                &Challenge::parse(INVITE_CHALLENGE.as_bytes(), proxy).unwrap(),
+                &Credentials::new("alice", "secret"),
+                "INVITE",
+                "sip:bob@example.net",
+                1,
+                cnonce
+            )
+        );
+        let answer = respond_to(
+            &retry,
+            "200 OK",
+            &["Contact: <sip:bob@example.net>"],
+            Some(BA_SDP_A1),
+        );
+        let to = header(&retry, "To").unwrap();
+        let answer = answer.replace(
+            &format!("To: {to}\r\n"),
+            &format!("To: {to};tag=answered\r\n"),
+        );
+        host.receive(&answer);
+        host.receive(&answer);
+        assert_eq!(host.events_of("negotiated-media").len(), 1);
+        assert_eq!(
+            host.command(br#"{"v":1,"cmd":"media-applied","id":8,"call":1}"#),
+            0
+        );
+        assert_eq!(
+            host.events()
+                .iter()
+                .filter(|e| e.contains("sipEstablished"))
+                .count(),
+            1
+        );
+        let facts = host
+            .position(|o| o.as_event().is_some_and(|e| e.contains("negotiated-media")))
+            .unwrap();
+        let established = host
+            .position(|o| o.as_event().is_some_and(|e| e.contains("sipEstablished")))
+            .unwrap();
+        assert!(facts < established);
+    }
+}
+
+#[test]
+fn invite_retries_are_bounded_even_for_stale_challenges_and_keep_proxy_credentials() {
+    let mut host = ready();
+    let first = start_offer(&mut host);
+    host.receive(&challenged(&first, true, INVITE_CHALLENGE));
+    let second = host.wires().last().unwrap().to_string();
+    assert!(second.starts_with("INVITE "));
+    let stale = format!("{INVITE_CHALLENGE}, stale=true");
+    host.receive(&challenged(&second, false, &stale));
+    let third = host.wires().last().unwrap().to_string();
+    assert!(third.starts_with("INVITE "));
+    assert!(header(&third, "Proxy-Authorization").is_some());
+    assert!(header(&third, "Authorization").is_some());
+    let previous = header(&second, "Proxy-Authorization").unwrap();
+    let refreshed = header(&third, "Proxy-Authorization").unwrap();
+    assert_ne!(
+        previous, refreshed,
+        "a retained proxy challenge needs a fresh digest/cnonce on the next request"
+    );
+    assert!(refreshed.contains("nc=00000002"));
+    assert!(
+        header(&third, "Authorization")
+            .unwrap()
+            .contains("nc=00000001")
+    );
+
+    assert_ne!(header(&third, "Via"), header(&second, "Via"));
+    assert_eq!(header(&third, "CSeq").as_deref(), Some("3 INVITE"));
+    host.receive(&challenged(&third, false, &stale));
+    assert_eq!(
+        host.wires()
+            .iter()
+            .filter(|s| s.starts_with("INVITE "))
+            .count(),
+        3
+    );
+    assert_eq!(host.events_of("call-ended").len(), 1);
+    assert!(
+        host.events()
+            .iter()
+            .any(|e| e.contains("authentication retry limit"))
+    );
+    assert!(
+        host.events()
+            .iter()
+            .all(|e| !e.contains("nonce-one") && !e.contains("secret"))
+    );
+}
+
+#[test]
+fn cancelled_invite_challenge_does_not_retry_and_late_success_cannot_establish() {
+    for success in [false, true] {
+        let mut host = ready();
+        let first = start_offer(&mut host);
+        host.command(br#"{"v":1,"cmd":"hangup","id":7,"call":1}"#);
+        host.clear_log();
+        if success {
+            host.receive(&respond_to(
+                &first,
+                "200 OK",
+                &["Contact: <sip:bob@example.net>"],
+                Some(BA_SDP_A1),
+            ));
+            let wires = host.wires();
+            assert!(wires[0].starts_with("ACK "));
+            assert!(wires[1].starts_with("BYE "));
+        } else {
+            host.receive(&challenged(&first, false, INVITE_CHALLENGE));
+            assert_eq!(host.wires().len(), 1);
+            assert!(host.wires()[0].starts_with("ACK "));
+        }
+        assert_eq!(host.events_of("call-ended").len(), 1);
+        assert!(host.events_of("negotiated-media").is_empty());
+        assert!(!host.events().iter().any(|e| e.contains("sipEstablished")));
+        assert!(host.events().iter().any(|e| e.contains("cancelled")));
+        let snapshot: serde_json::Value = serde_json::from_str(&host.snapshot()).unwrap();
+        assert_eq!(snapshot["pendingTimers"], 0);
+    }
+}
+
+#[test]
+fn invite_auth_failures_are_typed_and_do_not_echo_hostile_challenges() {
+    for (count, value) in [
+        (32, INVITE_CHALLENGE),
+        (48, INVITE_CHALLENGE),
+        (256, "Basic secret"),
+        (
+            256,
+            "Digest realm=secret, nonce=secret, algorithm=unsupported",
+        ),
+        (256, "Digest realm=secret, nonce=secret, qop=auth-int"),
+    ] {
+        let mut host = Host::new();
+        host.entropy(&tape(0x80)[..count]);
+        let first = start_offer(&mut host);
+        host.clear_log();
+        host.receive(&challenged(&first, false, value));
+        assert_eq!(host.wires().len(), 1);
+        assert_eq!(host.events_of("call-ended").len(), 1);
+        assert!(host.events().iter().any(|e| e.contains("\"code\":\"sip\"")));
+        assert!(
+            host.events()
+                .iter()
+                .all(|e| !e.contains("secret") && !e.contains("nonce-one"))
+        );
+    }
+}
+
+#[test]
+fn stale_invite_responses_do_not_advance_the_retried_call() {
+    let mut host = ready();
+    let first = start_offer(&mut host);
+    let response = challenged(&first, false, INVITE_CHALLENGE);
+    host.receive(&response);
+    assert!(host.wires().last().unwrap().starts_with("INVITE "));
+    host.clear_log();
+    host.receive(&response);
+    host.receive(&respond_to(&first, "200 OK", &[], Some(BA_SDP_A1)));
+    assert!(host.events_of("negotiated-media").is_empty());
+    assert!(host.events_of("call-ended").is_empty());
+    assert!(!host.wires().iter().any(|s| s.starts_with("INVITE ")));
+    assert!(host.snapshot().contains("inviteSent"));
+}
+
+#[test]
+fn negotiated_media_is_typed_redacted_and_emitted_in_both_roles() {
+    for inbound in [false, true] {
+        for setup in ["active", "passive"] {
+            let mut host = ready();
+            let answer = BA_SDP_A1.replace("setup:active", &format!("setup:{setup}"));
+            if inbound {
+                host.receive(&inbound_invite(BA_SDP_O1));
+                assert!(host.events_of("negotiated-media").is_empty());
+                host.command(br#"{"v":1,"cmd":"answer","id":7,"call":1}"#);
+                host.command(&local_media(8, 1, "answer", &answer));
+            } else {
+                let invite = start_offer(&mut host);
+                assert!(host.events_of("negotiated-media").is_empty());
+                host.receive(&respond_to(
+                    &invite,
+                    "200 OK",
+                    &["Contact: <sip:bob@example.net>"],
+                    Some(&answer),
+                ));
+            }
+            let events = host.events_of("negotiated-media");
+            assert_eq!(events.len(), 1);
+            let event: serde_json::Value = serde_json::from_str(events[0]).unwrap();
+            let facts = &event["kernel"];
+            assert_eq!(facts["rtcp_mux"], true);
+            assert_eq!(facts["audio_sections"], 1);
+            assert_eq!(facts["fingerprint_algorithm"], "sha-256");
+            assert_eq!(facts["answer_setup"], setup);
+            assert_eq!(
+                facts["local_dtls_role"],
+                if inbound {
+                    setup
+                } else if setup == "active" {
+                    "passive"
+                } else {
+                    "active"
+                }
+            );
+            assert_eq!(
+                facts["selected_codec"],
+                serde_json::json!({"name":"opus","clock_rate":48000,"channels":2,"payload_type":111})
+            );
+            assert_eq!(facts["codecs"].as_array().unwrap().len(), 5);
+            for secret in [
+                "ice-pwd",
+                "Password",
+                "192.0.2.",
+                "198.51.100.",
+                "20:21:22",
+                "v=0",
+            ] {
+                assert!(!events[0].contains(secret), "{secret}");
+            }
+        }
+    }
+}
+
+#[test]
+fn invalid_answers_emit_no_negotiated_media() {
+    for inbound in [false, true] {
+        let mut host = ready();
+        let answer = BA_SDP_A1.replace("a=rtcp-mux\r\n", "");
+        if inbound {
+            host.receive(&inbound_invite(BA_SDP_O1));
+            host.command(br#"{"v":1,"cmd":"answer","id":7,"call":1}"#);
+            host.command(&local_media(8, 1, "answer", &answer));
+        } else {
+            let invite = start_offer(&mut host);
+            host.receive(&respond_to(&invite, "200 OK", &[], Some(&answer)));
+        }
+        assert!(host.events_of("negotiated-media").is_empty());
+        assert_eq!(host.events_of("call-ended").len(), 1);
+    }
+}
+
+#[test]
+fn negotiated_facts_preserve_static_payload_defaults_and_selected_order() {
+    let mut host = ready();
+    let offer = BA_SDP_O1.replace("111 0 8 13 101", "0 111 8 13 101");
+    let answer = BA_SDP_A1
+        .replace("111 0 8 13 101", "0 111 8 13 101")
+        .replace("a=rtpmap:0 PCMU/8000\r\n", "")
+        .replace("a=rtpmap:8 PCMA/8000\r\n", "");
+    host.command(BSDK_CMD_2);
+    host.command(&local_media(4, 1, "offer", &offer));
+    let invite = host.wires().last().unwrap().to_string();
+    host.receive(&respond_to(&invite, "200 OK", &[], Some(&answer)));
+    let events = host.events_of("negotiated-media");
+    assert_eq!(events.len(), 1);
+    let event: serde_json::Value = serde_json::from_str(events[0]).unwrap();
+    assert_eq!(
+        event["kernel"]["selected_codec"],
+        serde_json::json!({"name":"pcmu","clock_rate":8000,"channels":1,"payload_type":0})
+    );
+}
+
+#[test]
+fn insecure_invite_never_authenticates() {
+    let config = String::from_utf8(support::BSDK_CFG_1.to_vec())
+        .unwrap()
+        .replace("\"wss\"", "\"ws\"")
+        .replace("\"refuse\"", "\"allow-development\"");
+    let mut host = Host::with_config(config.as_bytes());
+    host.entropy(&tape(0));
+    let first = start_offer(&mut host);
+    host.clear_log();
+    host.receive(&challenged(&first, false, INVITE_CHALLENGE));
+    assert_eq!(host.wires().len(), 1);
+    assert_eq!(host.events_of("call-ended").len(), 1);
+    assert!(
+        host.events()
+            .iter()
+            .any(|e| e.contains("authentication requires secure signalling"))
+    );
+}
+
+#[test]
+fn hangup_after_authenticated_answer_acks_before_bye_without_establishment() {
+    let mut host = ready();
+    let first = start_offer(&mut host);
+    host.receive(&challenged(&first, false, INVITE_CHALLENGE));
+    let retry = host.wires().last().unwrap().to_string();
+    host.receive(&respond_to(
+        &retry,
+        "200 OK",
+        &["Contact: <sip:bob@example.net>"],
+        Some(BA_SDP_A1),
+    ));
+    host.clear_log();
+    host.command(br#"{"v":1,"cmd":"hangup","id":9,"call":1}"#);
+    let wires = host.wires();
+    assert!(wires[0].starts_with("ACK "));
+    assert!(wires[1].starts_with("BYE "));
+    assert!(
+        host.events()
+            .iter()
+            .all(|event| !event.contains("sipEstablished"))
+    );
+    assert_eq!(host.events_of("call-ended").len(), 1);
+}
+
+#[test]
+fn repeated_nonce_increments_digest_count_with_fresh_cnonce() {
+    let mut host = ready();
+    let first = start_offer(&mut host);
+    host.receive(&challenged(&first, false, INVITE_CHALLENGE));
+    let second = host.wires().last().unwrap().to_string();
+    host.receive(&challenged(
+        &second,
+        false,
+        &format!("{INVITE_CHALLENGE}, stale=true"),
+    ));
+    let third = host.wires().last().unwrap().to_string();
+    let authorization = header(&third, "Authorization").unwrap();
+    assert!(authorization.contains("nc=00000002"), "{authorization}");
+    assert_ne!(header(&second, "Authorization"), Some(authorization));
+}
+
+/// Browser SDK §4.7: a command whose full draw cannot be covered fails whole.
+#[test]
+fn adversary_authenticated_hangup_reserves_ack_and_bye_entropy_atomically() {
+    let mut host = Host::new();
+    // Initial dialog = 32 octets, challenge retry = 24, leaving one branch only.
+    assert_eq!(host.entropy(&tape(0x80)[..64]), 0);
+    let first = start_offer(&mut host);
+    host.receive(&challenged(&first, false, INVITE_CHALLENGE));
+    let retry = host.wires().last().unwrap().to_string();
+    assert!(retry.starts_with("INVITE "));
+    host.receive(
+        &respond_to(
+            &retry,
+            "200 OK",
+            &["Contact: <sip:bob@example.net>"],
+            Some(BA_SDP_A1),
+        )
+        .replace(
+            "\r\nTo: <sip:bob@example.net>\r\n",
+            "\r\nTo: <sip:bob@example.net>;tag=answer-tag\r\n",
+        ),
+    );
+    host.clear_log();
+    assert_eq!(
+        host.command(br#"{"v":1,"cmd":"hangup","id":9,"call":1}"#),
+        -8
+    );
+    assert!(
+        host.wires().is_empty(),
+        "entropy refusal must not emit a partial ACK: {:?}",
+        host.wires()
+    );
+    let snapshot: serde_json::Value = serde_json::from_str(&host.snapshot()).unwrap();
+    assert_eq!(snapshot["entropy"], 8);
+}
+
+/// Browser SDK §5.4: accepted cancellation racing success owes both ACK and BYE.
+#[test]
+fn adversary_cancelled_authenticated_answer_does_not_forget_unfinished_bye() {
+    let mut host = Host::new();
+    assert_eq!(host.entropy(&tape(0x80)[..64]), 0);
+    let first = start_offer(&mut host);
+    host.receive(&challenged(&first, false, INVITE_CHALLENGE));
+    let retry = host.wires().last().unwrap().to_string();
+    assert!(retry.starts_with("INVITE "));
+    assert_eq!(
+        host.command(br#"{"v":1,"cmd":"hangup","id":9,"call":1}"#),
+        0
+    );
+    host.clear_log();
+    host.receive(
+        &respond_to(
+            &retry,
+            "200 OK",
+            &["Contact: <sip:bob@example.net>"],
+            Some(BA_SDP_A1),
+        )
+        .replace(
+            "\r\nTo: <sip:bob@example.net>\r\n",
+            "\r\nTo: <sip:bob@example.net>;tag=answer-tag\r\n",
+        ),
+    );
+    // A delayed host refill is legal; terminal cleanup must not erase owed work.
+    assert_eq!(host.entropy(&tape(0x20)[..32]), 0);
+    let methods: Vec<&str> = host
+        .wires()
+        .iter()
+        .map(|wire| wire.split_whitespace().next().unwrap())
+        .collect();
+    assert_eq!(
+        methods,
+        ["ACK", "BYE"],
+        "a locally ended call must not leave the accepted remote dialog alive"
+    );
+    assert!(host.events_of("negotiated-media").is_empty());
+}
+
+#[test]
+fn cleanup_media_failed_refuses_atomically_and_retries_after_refill() {
+    let mut host = Host::new();
+    assert_eq!(host.entropy(&tape(0x80)[..64]), 0);
+    let first = start_offer(&mut host);
+    host.receive(&challenged(&first, false, INVITE_CHALLENGE));
+    let retry = host.wires().last().unwrap().to_string();
+    host.receive(&respond_to(
+        &retry,
+        "200 OK",
+        &["Contact: <sip:bob@example.net>"],
+        Some(BA_SDP_A1),
+    ));
+    host.clear_log();
+    let command = br#"{"v":1,"cmd":"media-failed","id":9,"call":1,"reason":"browser refused"}"#;
+    assert_eq!(host.command(command), -8);
+    assert!(host.wires().is_empty());
+    let snapshot: serde_json::Value = serde_json::from_str(&host.snapshot()).unwrap();
+    assert_eq!(snapshot["entropy"], 8);
+    assert!(host.events_of("call-ended").is_empty());
+    assert_eq!(host.entropy(&tape(0x20)[..8]), 0);
+    assert_eq!(host.command(command), 0);
+    let methods: Vec<_> = host
+        .wires()
+        .iter()
+        .map(|wire| wire.split_whitespace().next().unwrap())
+        .collect();
+    assert_eq!(methods, ["ACK", "BYE"]);
+    assert_eq!(host.events_of("call-ended").len(), 1);
+}
+
+#[test]
+fn cleanup_invalid_or_missing_answer_retains_work_through_duplicate_and_refill() {
+    for answer in [None, Some("v=0\r\n")] {
+        let mut host = Host::new();
+        assert_eq!(host.entropy(&tape(0x80)[..64]), 0);
+        let first = start_offer(&mut host);
+        host.receive(&challenged(&first, false, INVITE_CHALLENGE));
+        let retry = host.wires().last().unwrap().to_string();
+        let response = respond_to(
+            &retry,
+            "200 OK",
+            &["Contact: <sip:bob@example.net>"],
+            answer,
+        );
+        host.clear_log();
+        assert_eq!(host.receive(&response), 0);
+        assert!(host.wires().is_empty());
+        assert!(!host.events_of("need-entropy").is_empty());
+        assert!(host.events_of("call-ended").is_empty());
+        assert_eq!(host.receive(&response), 0);
+        assert_eq!(host.entropy(&tape(0x20)[..7]), 0);
+        assert!(host.wires().is_empty());
+        assert!(host.events_of("call-ended").is_empty());
+        assert_eq!(host.entropy(&tape(0x40)[..1]), 0);
+        let methods: Vec<_> = host
+            .wires()
+            .iter()
+            .map(|wire| wire.split_whitespace().next().unwrap())
+            .collect();
+        assert_eq!(methods, ["ACK", "BYE"]);
+        assert_eq!(host.events_of("call-ended").len(), 1);
+        assert!(host.events_of("negotiated-media").is_empty());
+        assert_eq!(host.entropy(&tape(0x60)[..32]), 0);
+        assert_eq!(host.wires().len(), 2);
+    }
+}
+
+#[test]
+fn cleanup_cancel_timeout_cannot_retire_accepted_dialog_awaiting_entropy() {
+    let mut host = Host::new();
+    assert_eq!(host.entropy(&tape(0x80)[..64]), 0);
+    let first = start_offer(&mut host);
+    host.receive(&challenged(&first, false, INVITE_CHALLENGE));
+    let retry = host.wires().last().unwrap().to_string();
+    host.clear_log();
+    assert_eq!(
+        host.command(br#"{"v":1,"cmd":"hangup","id":9,"call":1}"#),
+        0
+    );
+    let timer = host.timer_at_least(32000).unwrap();
+    host.clear_log();
+    host.receive(&respond_to(
+        &retry,
+        "200 OK",
+        &["Contact: <sip:bob@example.net>"],
+        Some(BA_SDP_A1),
+    ));
+    host.tick(32000);
+    assert_eq!(host.fire(timer), 0);
+    assert!(host.events_of("call-ended").is_empty());
+    assert_eq!(
+        host.command(br#"{"v":1,"cmd":"hangup","id":10,"call":1}"#),
+        0
+    );
+    assert!(host.wires().is_empty());
+    assert_eq!(host.entropy(&tape(0x20)[..8]), 0);
+    let methods: Vec<_> = host
+        .wires()
+        .iter()
+        .map(|wire| wire.split_whitespace().next().unwrap())
+        .collect();
+    assert_eq!(methods, ["ACK", "BYE"]);
+    assert_eq!(host.events_of("call-ended").len(), 1);
+}
