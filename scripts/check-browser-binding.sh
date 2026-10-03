@@ -74,6 +74,14 @@ else
     status=1
 fi
 
+step "the native media adapter holds its contract"
+if node --test browser/test/media.test.mjs; then
+    echo "ok"
+else
+    echo "FAILED"
+    status=1
+fi
+
 if [ "$status" -eq 0 ]; then
     echo "browser binding: the signalling transport holds against the shipped kernel"
 fi

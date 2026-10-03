@@ -1,0 +1,13 @@
+{
+  "encrypted": true,
+  "expected_outcome": "independent-peer-rejects-incorrect-derived-keys",
+  "keying": "SDES",
+  "negative": "right-align-aead-master-salt-in-14-octet-x",
+  "negotiated_profile": "AeadAes256Gcm",
+  "packets_received": 0,
+  "packets_sent": 50,
+  "peer_echo_audio_bytes": 0,
+  "srtcp_unprotect_failures": 2,
+  "srtp_unprotect_failures": 203,
+  "suite_required": "AEAD_AES_256_GCM"
+}

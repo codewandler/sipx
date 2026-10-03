@@ -46,3 +46,38 @@ arguments. That is not dependency-injection decoration — it is what lets every
 race at an exact instant, and it is why no case in this directory waits on wall-clock time. A
 change that reaches for a global from `src/transport.mjs` has removed the property the suite is
 built on. `src/platform.mjs` is where globals live.
+
+## Native media adapter
+
+`BrowserMediaAdapter` in `src/media.mjs` owns browser audio resources, and
+`browserMediaPlatform` in `src/media-platform.mjs` supplies its browser globals. The adapter
+accepts `{ platform, sendCommand, onState, onError, onDiagnostic, setupTimeoutMs,
+operationTimeoutMs }`; defaults bound setup to 30 seconds and each browser operation to 10 seconds.
+Hooks are internal lifecycle inputs, not application callbacks; the packaged client owns public
+callback scheduling and command outcome promises. The sender accepts `{cmd, call, ...}` and the
+client supplies command version and correlation id. The sender must synchronously enqueue or
+throw; return values are ignored and asynchronous senders are unsupported. Kernel command
+outcome promises belong to the lifecycle.
+
+Deliver every kernel event through `handle(event)` without awaiting pending media work before
+forwarding cancellation. `need-local-media` follows the user's dial/answer gesture; construction
+and incoming offers acquire no microphone. A remote offer is applied without a kernel command;
+a remote answer emits `media-applied` only after application succeeds. Failure while applying an
+answer uses `media-failed`; every other media failure requests `hangup` and emits the separate
+`SipxMediaError` kind. The client must preserve that media cause while completing SIP cleanup.
+
+The adapter submits unchanged, complete-gathered descriptions and consumes the kernel's validated
+`negotiated-media` event; it never parses SDP. `onState({call,state:"established"})` requires both
+kernel establishment/profile facts and browser connectivity. `refreshStats(call)` updates a
+`negotiatedMedia(call)` report with separate `kernel` and `browser` origins; missing fields remain
+absent. `setMicrophone(deviceId)` selects the device for subsequent capture and `mute(call, true)`
+changes only local track enablement.
+
+`closeCall(call)` and `close()` synchronously revoke media ownership. Terminal kernel events and
+pagehide use the same cleanup; late permission results stop their tracks. Platform playback
+returns `{ready, close}` synchronously, so a pending autoplay promise cannot retain a resource.
+The injected platform also supplies `getUserMedia`, `createPeerConnection`, `codecs`, `clock`
+(`setTimer`, `clearTimer`) and `onPageHide` (returning an unsubscribe function).
+
+Run `node --test browser/test/media.test.mjs` for deterministic media cases. These do not replace
+the dependent package story's real browser proof.

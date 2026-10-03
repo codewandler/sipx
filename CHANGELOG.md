@@ -9,6 +9,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The browser kernel handles bounded INVITE Digest challenges and reports validated negotiated
+  media facts. Its native media adapter owns microphone, peer connection and playback resources,
+  combines signaling with connected media, and bounds setup and teardown races.
+- Native calls can use a bounded paired RTP/RTCP port range. WebSocket listeners can admit exact
+  browser Origins before SIP processing without changing the existing default binding API.
+
 - Early coupling accepts independent source and target media policies. Native browser audio can
   use ICE/DTLS-SRTP without requiring reliable provisionals while the other leg uses ordinary RTP.
 - Realm-, username- and algorithm-bound Digest verifiers support authentication from a stored
@@ -16,6 +22,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   uses the same verification and replay-protection path.
 
 ### Fixed
+
+- Browser answer cleanup reserves ACK/BYE entropy atomically and retains deferred cleanup across
+  cancellation races, duplicate answers and late timers until the pair can be sent.
+- Encrypted-media recapture uses a unique UTC timestamp and retains earlier same-day evidence.
 
 - Mixed-rate media bridges resample and frame audio for each destination, including browser Opus
   and narrowband RTP. Zero-sized frames fail closed and incomplete tails end with the call.

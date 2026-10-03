@@ -589,6 +589,24 @@ dies with the page, and no track or peer connection may outlive it (§8.8).
 its failure to feed is a `SipxAbiDefect`. Error strings never contain credentials, authorization
 headers, entropy bytes or full SIP messages (§8.3).
 
+### 6.7 Native-media adapter handshake
+
+The adapter acquires microphone media only for `need-local-media` following a caller's explicit
+dial or answer action. It MUST wait for complete ICE gathering and submit the browser's unchanged
+local description; trickle remains excluded by §10. Applying an inbound remote offer does not
+send a kernel acknowledgment. Applying an outbound remote answer successfully sends
+`media-applied`; failure while that answer is pending sends `media-failed`. Other media failures
+request `hangup` and separately report their §6.6 media kind. The lifecycle layer preserves that
+cause while the kernel completes cancellation or teardown.
+
+Media cancellation MUST remain deliverable while permission, ICE, description, playback or stats
+operations are pending. Ownership is revoked synchronously, all currently owned resources are
+released, and late capture results have their tracks stopped before they can attach to a call.
+Playback ownership is acquired before awaiting autoplay. Each operation and overall setup have
+finite deadlines; expiry releases resources and does not imply connected media. Transient
+`disconnected` is diagnostic; `failed` terminates the call. Browser statistics remain distinct
+from kernel profile facts and missing statistics MUST remain absent.
+
 ## 7. Packages, generation and support policy
 
 ### 7.1 Names

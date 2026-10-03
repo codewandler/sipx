@@ -1,0 +1,97 @@
+baresip v1.0.0 Copyright (C) 2010 - 2020 Alfred E. Heggestad et al.
+Binding to interface or IP address '127.0.0.1'
+Local network address:  IPv4=lo|127.0.0.1 
+SIP Certificate: /proof/server-combined.pem
+aucodec: PCMU/8000/1
+aucodec: PCMA/8000/1
+ausrc: aubridge
+auplay: aubridge
+mediaenc: srtp
+mediaenc: srtp-mand
+mediaenc: srtp-mandf
+echo@sipx.test: Using media encryption 'srtp-mand'
+Populated 1 account
+Populated 2 audio codecs
+Populated 0 audio filters
+Populated 0 video codecs
+Populated 0 video filters
+baresip is ready.
+ua: using AF from sdp offer: af=AF_INET
+stream: audio: starting mediaenc 'srtp-mand' (wait_secure=0)
+audio: using account specific source: (aubridge,proof)
+audio: using account specific player: (aubridge,proof)
+call: answering call on line 1 from sip:sipx-srtp@sipx.test with 200
+stream: update 'audio'
+stream: audio: starting mediaenc 'srtp-mand' (wait_secure=0)
+srtp: audio: SRTP is Enabled (cryptosuite=AEAD_AES_256_GCM)
+audio: Set audio encoder: PCMU 8000Hz 1ch
+aubridge: created device 'proof'
+audio: source started with sample format S16LE
+audio: Set audio decoder: PCMU 8000Hz 1ch
+audio: player started with sample format S16LE
+audio tx pipeline:    aubridge ---> PCMU
+audio rx pipeline:    aubridge <--- PCMU
+aubridge: thread start: 8000 Hz, 1 channels, format=S16LE
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+tls: accept error: (r=-1, ssl_err=1)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+tls: accept error: (r=-1, ssl_err=1)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+srtp: failed to decrypt RTP packet with 188 bytes (Unknown error 217)
+tls: accept error: (r=-1, ssl_err=1)
+tls: accept error: (r=-1, ssl_err=1)
+srtp: failed to decrypt RTCP packet with 84 bytes (Unknown error 217)
+tls: accept error: (r=-1, ssl_err=1)
+terminated by signal 15
+ua: stop all (forced=0)
+
+audio           Transmit:     Receive:
+packets:            208            0
+avg. bitrate:      64.0          0.0  (kbit/s)
+errors:               0            0

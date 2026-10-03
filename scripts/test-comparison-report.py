@@ -2490,6 +2490,12 @@ class TheComparativeLoadDataset(unittest.TestCase):
 
 class RetainedInteropEvidence(unittest.TestCase):
     def test_reseal_preserves_old_evidence_and_points_to_fresh_execution(self):
+        self.check_retained("2026-01-01", "2026-01-02")
+
+    def test_same_day_recapture_retains_the_previous_run(self):
+        self.check_retained("2026-01-02", "2026-01-02T123456Z")
+
+    def check_retained(self, old_name, fresh_name):
         spec = importlib.util.spec_from_file_location(
             "interop_seal", ROOT / "docs/comparison/interop/aead-srtp-sdes/seal.py"
         )
@@ -2498,8 +2504,8 @@ class RetainedInteropEvidence(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             case = root / "case"
-            old = case / "runs/2026-01-01"
-            fresh = case / "runs/2026-01-02"
+            old = case / "runs" / old_name
+            fresh = case / "runs" / fresh_name
             old.mkdir(parents=True)
             fresh.mkdir(parents=True)
             old_result = old / "result.json"
@@ -2531,14 +2537,14 @@ class RetainedInteropEvidence(unittest.TestCase):
                 sys.argv = previous_argv
             manifest = json.loads((fresh / "manifest.json").read_text())
             inventory = manifest["sha256"]
-            self.assertEqual(seal.digest(old_result), inventory.get("runs/2026-01-01/result.json"))
-            self.assertNotIn("runs/2026-01-01/manifest.json", inventory)
-            self.assertNotIn("runs/2026-01-02/manifest.json", inventory)
+            self.assertEqual(seal.digest(old_result), inventory.get(f"runs/{old_name}/result.json"))
+            self.assertNotIn(f"runs/{old_name}/manifest.json", inventory)
+            self.assertNotIn(f"runs/{fresh_name}/manifest.json", inventory)
             for path, original in originals.items():
                 self.assertEqual(original, path.read_bytes())
             for positive in manifest["positive"].values():
-                self.assertTrue(positive["result"].startswith("runs/2026-01-02/"))
-            self.assertTrue(manifest["negative"]["result"].startswith("runs/2026-01-02/"))
+                self.assertTrue(positive["result"].startswith(f"runs/{fresh_name}/"))
+            self.assertTrue(manifest["negative"]["result"].startswith(f"runs/{fresh_name}/"))
             self.assertEqual("2026-01-02", manifest["evaluated_at"])
             for name in seal.SOURCE_FILES:
                 self.assertEqual(seal.digest(root / name), manifest["source_under_test"]["files"][name])

@@ -19,3 +19,6 @@ export {
 export { HEADER_OCTETS, RecordFormatError, RecordType, decodeRecord } from "./records.mjs";
 
 export { SignallingCapabilityError, browserPlatform, missingCapability } from "./platform.mjs";
+
+export { BrowserMediaAdapter, SipxMediaError } from "./media.mjs";
+export { browserMediaPlatform, MediaCapabilityError } from "./media-platform.mjs";

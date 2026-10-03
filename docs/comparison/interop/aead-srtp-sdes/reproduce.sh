@@ -3,10 +3,12 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../../../.." && pwd)"
-RUN="$HERE/runs/$(date -u +%F)"
+RUN="$HERE/runs/$(date -u +%FT%H%M%SZ)"
 CONTAINER="sipx-comparison-aead-srtp-sdes"
 IMAGE="docker.io/holius/baresip@sha256:3f2deef4f8a03ca569c3f252b919c439b8b2015a0a68f5b2ddc22d3edd8e2da7"
-mkdir -p "$ROOT/target" "$RUN"
+mkdir -p "$ROOT/target" "$HERE/runs"
+# Never overwrite evidence from an earlier run, including one on the same UTC date.
+mkdir "$RUN"
 SCRATCH="$(mktemp -d "$ROOT/target/comparison-aead-srtp-sdes.XXXXXX")"
 touch "$SCRATCH/.owned-comparison-aead-srtp-sdes"
 

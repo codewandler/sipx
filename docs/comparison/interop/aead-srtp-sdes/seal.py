@@ -8,6 +8,7 @@ import datetime
 import hashlib
 import json
 import pathlib
+import re
 
 
 CASE = pathlib.Path(__file__).resolve().parent
@@ -47,6 +48,9 @@ def main() -> int:
     run = args.run.resolve()
     if run.parent != CASE / "runs":
         raise SystemExit("run directory must be under this case's runs directory")
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:T\d{6}Z)?", run.name) is None:
+        raise SystemExit("run name must be a UTC date or timestamp")
+    evaluated_at = datetime.date.fromisoformat(run.name[:10]).isoformat()
     relative_run = run.relative_to(CASE)
     evidence = (
         "AEAD_AES_128_GCM.json",
@@ -72,7 +76,7 @@ def main() -> int:
         "schema": "sipx.comparison.interop.run.v1",
         "case": "aead-srtp-sdes",
         "subject": "baresip-v1",
-        "evaluated_at": datetime.date.fromisoformat(run.name).isoformat(),
+        "evaluated_at": evaluated_at,
         "protocol": {
             "signalling": "TLS",
             "keying": "SDES",
