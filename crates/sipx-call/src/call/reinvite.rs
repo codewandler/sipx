@@ -6,9 +6,9 @@
 
 use super::{
     Arc, Bytes, Call, CallEvent, CancellationToken, Direction, Error, HeaderName, IceOffer,
-    Incoming, Keying, MediaPort, MediaProfile, Method, Negotiated, OwnedTask, Reception,
-    RequestBuilder, ResponseBuilder, Result, SessionDescription, SessionExpires, SocketAddr,
-    Target, add_routes, contact_for, exchanged_rtcp_mode, in_dialog_target, negotiated, offer_from,
+    Incoming, Keying, MediaProfile, MediaSession, Method, Negotiated, OwnedTask, Reception,
+    RequestBuilder, ResponseBuilder, Result, SessionDescription, SessionExpires, Target,
+    add_routes, contact_for, exchanged_rtcp_mode, in_dialog_target, negotiated, offer_from,
     ok_status, preserve_rtcp_mode, required_interval, retransmit_until_acked, send_ack, session,
     settle_answer, update,
 };
@@ -187,8 +187,10 @@ impl Call {
             .map_err(|error| Error::Sdp(error.to_string()))?;
         let settled = settle_answer(&offered, &answer, self.codecs)?;
         preserve_rtcp_mode(self.current.rtcp_mode, settled.negotiated.rtcp_mode)?;
+        let replacement = self.prepare_media_change(settled.negotiated).await?;
         self.accept_answer_ice(&answer).await;
-        self.move_media_if_changed(settled.negotiated).await
+        self.move_media_if_changed(settled.negotiated, replacement)
+            .await
     }
 
     /// Apply an offer that arrived in-dialog, and produce the answer to send back.
@@ -256,7 +258,18 @@ impl Call {
         let Some(mut prepared) = self.prepare_renegotiation(body) else {
             return Ok(None);
         };
+        // Reserve and prepare before publishing any ICE, hold or media mutation. Both
+        // request handlers turn a local setup failure into 488 and retain the live call.
+        let replacement = match self.prepare_media_change(prepared.negotiated).await {
+            Ok(replacement) => replacement,
+            Err(error) => {
+                tracing::debug!(%error, "could not prepare replacement media");
+                return Ok(None);
+            }
+        };
         self.answer_ice(&prepared.offer, &mut prepared.answer).await;
+        self.move_media_if_changed(prepared.negotiated, replacement)
+            .await?;
 
         // Hold is a direction, not a separate state: `sendonly` or `inactive` from the far end
         // means it will not play what we send.
@@ -271,7 +284,6 @@ impl Call {
             _ => {}
         }
 
-        self.move_media_if_changed(prepared.negotiated).await?;
         Ok(Some(prepared.answer))
     }
 
@@ -311,11 +323,9 @@ impl Call {
             // §5.2: the UAS "MUST adjust the session parameters accordingly and generate an
             // answer in the 2xx response".
             //
-            // The result is captured rather than propagated with `?`, because `renegotiate`
-            // can fail on something that has nothing to do with the peer — a media port that
-            // will not bind. Returning through the `?` would leave this UPDATE forever in
-            // progress and the offer forever owed, and every later UPDATE on the dialog would
-            // draw §5.2's "you are too early" for a transaction nobody is waiting on.
+            // Local media setup refusal is the same None outcome as an unusable offer.
+            // Clear the offer on every refusal before sending 488; otherwise a later UPDATE
+            // would see permanent glare for an exchange that already ended.
             let renegotiated = self.renegotiate(incoming.request.body()).await;
             let Some(answer_sdp) = renegotiated.inspect_err(|_| self.negotiation.answered())?
             else {
@@ -370,18 +380,11 @@ impl Call {
         Ok(())
     }
 
-    /// Rebuild the media session, but only if where or how the media flows actually changed.
-    ///
-    /// Restarting an unchanged session would drop packets for no reason on every re-INVITE, and
-    /// some peers send one every thirty seconds as a keep-alive.
-    pub(super) async fn move_media_if_changed(&mut self, to: Negotiated) -> Result<()> {
-        // A caller cancelled after a prior replacement was installed but while a conference
-        // registry was contended. Republish before retiring that generation: the retained old Arc
-        // keeps the transition retryable instead of letting cancellation strand a stale member.
-        if !self.retired_media.is_empty() {
-            self.rebind_compositions().await;
-        }
-        self.reap_retired_media().await;
+    /// Prepare replacement capacity without changing this call or its ICE generation.
+    pub(super) async fn prepare_media_change(
+        &self,
+        to: Negotiated,
+    ) -> Result<Option<MediaSession>> {
         // The payload type is the codec's number on the wire: a re-offer can move Opus from
         // 111 to 96 and leave the codec unchanged, and a session not rebuilt for that goes on
         // sending on the number the far end just reassigned.
@@ -397,10 +400,31 @@ impl Call {
             || to.receive_wire_payload_type() != self.current.receive_wire_payload_type()
             || to.rtcp_mode != self.current.rtcp_mode
         {
-            let port = MediaPort::bind(SocketAddr::new(self.media_bind_address, 0))
+            let port = super::bind_media_port(self.media_bind_address, self.media_port_range)
                 .await
                 .map_err(Error::Io)?;
-            let replacement = port.start(to.media_config())?;
+            return Ok(Some(port.start(to.media_config())?));
+        }
+        Ok(None)
+    }
+
+    /// Rebuild the media session, but only if where or how the media flows actually changed.
+    ///
+    /// Restarting an unchanged session would drop packets for no reason on every re-INVITE, and
+    /// some peers send one every thirty seconds as a keep-alive.
+    pub(super) async fn move_media_if_changed(
+        &mut self,
+        to: Negotiated,
+        replacement: Option<MediaSession>,
+    ) -> Result<()> {
+        // A caller cancelled after a prior replacement was installed but while a conference
+        // registry was contended. Republish before retiring that generation: the retained old Arc
+        // keeps the transition retryable instead of letting cancellation strand a stale member.
+        if !self.retired_media.is_empty() {
+            self.rebind_compositions().await;
+        }
+        self.reap_retired_media().await;
+        if let Some(replacement) = replacement {
             // Mute is a property of the call, not of the session that happens to be carrying it
             // (`M-18`). Without this a re-INVITE that moves the media — the far end changing
             // address or codec, which this side did not ask for and cannot refuse — unmutes the
@@ -555,8 +579,10 @@ impl Call {
             // re-answer cannot silence ICE on a call that is working.
             if let Ok(settled) = settle_answer(&capabilities, &answer, self.codecs) {
                 preserve_rtcp_mode(self.current.rtcp_mode, settled.negotiated.rtcp_mode)?;
+                let replacement = self.prepare_media_change(settled.negotiated).await?;
                 self.accept_answer_ice(&answer).await;
-                self.move_media_if_changed(settled.negotiated).await?;
+                self.move_media_if_changed(settled.negotiated, replacement)
+                    .await?;
             }
         }
         self.hold = direction;

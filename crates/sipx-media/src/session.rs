@@ -1505,6 +1505,36 @@ impl Drop for Clip {
     }
 }
 
+/// An inclusive local UDP range containing at least one complete RTP/RTCP pair.
+///
+/// Construction validates before any socket is opened. Allocations use even RTP ports and
+/// the following RTCP port, both inside these bounds (RFC 3550 section 11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MediaPortRange {
+    first: u16,
+    last: u16,
+}
+
+impl MediaPortRange {
+    /// Validate an inclusive range. Zero and ranges without a complete pair are refused.
+    pub fn new(first: u16, last: u16) -> std::io::Result<Self> {
+        let first_even = u32::from(first) + u32::from(first % 2);
+        if first == 0 || first_even + 1 > u32::from(last) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "media port range must contain a nonzero even RTP/odd RTCP pair",
+            ));
+        }
+        Ok(Self { first, last })
+    }
+
+    /// Whether a port lies inside the configured inclusive bounds.
+    #[must_use]
+    pub const fn contains(self, port: u16) -> bool {
+        port >= self.first && port <= self.last
+    }
+}
+
 /// A bound media port that is not yet carrying anything.
 ///
 /// This exists because of an ordering constraint in offer/answer: an SDP offer has to name the
@@ -1529,6 +1559,41 @@ pub struct MediaPort {
 }
 
 impl MediaPort {
+    /// Bind a complete pair inside a validated range, with no ephemeral or RTP-only fallback.
+    ///
+    /// Actual bound sockets own capacity. Every candidate pair is attempted at most once;
+    /// cancellation or a failed second bind releases the first socket immediately.
+    pub async fn bind_in_range(
+        ip: std::net::IpAddr,
+        range: MediaPortRange,
+    ) -> std::io::Result<Self> {
+        let first = u32::from(range.first) + u32::from(range.first % 2);
+        for number in (first..u32::from(range.last)).step_by(2) {
+            let port = u16::try_from(number).map_err(std::io::Error::other)?;
+            let local_addr = SocketAddr::new(ip, port);
+            let socket = match UdpSocket::bind(local_addr).await {
+                Ok(socket) => socket,
+                Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => continue,
+                Err(error) => return Err(error),
+            };
+            let rtcp = match UdpSocket::bind(SocketAddr::new(ip, port + 1)).await {
+                Ok(socket) => socket,
+                Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => continue,
+                Err(error) => return Err(error),
+            };
+            return Ok(Self {
+                socket: Arc::new(socket),
+                rtcp: Some(Arc::new(rtcp)),
+                local_addr,
+                discards: Arc::new(DiscardMeters::default()),
+            });
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AddrInUse,
+            "configured media port range is exhausted",
+        ))
+    }
+
     /// Bind a port, and the control port above it. Port 0 asks the OS to choose.
     ///
     /// RFC 3550 §11: RTP on an even port, RTCP on the next one up. They are bound together

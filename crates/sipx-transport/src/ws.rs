@@ -42,6 +42,94 @@ pub const SUBPROTOCOL: &str = "sip";
 /// The header both halves of the handshake negotiate it in.
 const PROTOCOL_HEADER: &str = "sec-websocket-protocol";
 
+/// Immutable, exact HTTP(S) Origin admission for browser-facing listeners.
+///
+/// This is an admission filter, not SIP authentication. Values are bounded to 128 entries
+/// of at most 2048 bytes; missing, duplicate and opaque origins fail closed.
+#[derive(Debug, Clone)]
+pub struct WebSocketOriginPolicy {
+    allowed: Vec<String>,
+}
+
+impl WebSocketOriginPolicy {
+    /// Admit only a single Origin header exactly matching one validated listed origin.
+    pub fn require_listed(origins: Vec<String>) -> crate::Result<Self> {
+        if origins.len() > 128 || origins.iter().any(|value| !valid_origin(value)) {
+            return Err(crate::Error::InvalidConfig {
+                field: "websocket_origins",
+                reason: "requires at most 128 HTTP(S) origins of at most 2048 bytes each",
+            });
+        }
+        Ok(Self { allowed: origins })
+    }
+
+    fn admits(&self, headers: &HeaderMap) -> bool {
+        let mut values = headers.get_all("origin").iter();
+        let Some(value) = values.next().and_then(|value| value.to_str().ok()) else {
+            return false;
+        };
+        values.next().is_none()
+            && valid_origin(value)
+            && self.allowed.iter().any(|allowed| allowed == value)
+    }
+}
+
+fn valid_origin(value: &str) -> bool {
+    if value.len() > 2048 || !value.is_ascii() {
+        return false;
+    }
+    let Some(authority) = value
+        .strip_prefix("https://")
+        .or_else(|| value.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    if authority.is_empty()
+        || authority.bytes().any(|byte| {
+            byte.is_ascii_control()
+                || byte.is_ascii_whitespace()
+                || matches!(byte, b'/' | b'?' | b'#' | b'@' | b'*' | b'\\')
+        })
+    {
+        return false;
+    }
+    let Ok(parsed) = authority.parse::<tokio_tungstenite::tungstenite::http::uri::Authority>()
+    else {
+        return false;
+    };
+    let Some(suffix) = authority.strip_prefix(parsed.host()) else {
+        return false;
+    };
+    if !suffix.is_empty() && !suffix.starts_with(':') {
+        return false;
+    }
+    let port_text = suffix.strip_prefix(':');
+    if port_text.is_some_and(|port| {
+        port.is_empty()
+            || !port.bytes().all(|byte| byte.is_ascii_digit())
+            || port.parse::<u16>().is_err()
+    }) {
+        return false;
+    }
+    let host = parsed.host();
+    if let Some(ip) = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+    {
+        return ip.parse::<std::net::Ipv6Addr>().is_ok();
+    }
+    !host.is_empty()
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+}
+
 /// A negotiated WebSocket carrying SIP.
 pub type Socket<S> = WebSocketStream<S>;
 
@@ -186,6 +274,19 @@ pub(crate) async fn accept_with_limits<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    accept_with_policy(stream, peer, limits, None).await
+}
+
+#[allow(clippy::result_large_err)]
+pub(crate) async fn accept_with_policy<S>(
+    stream: S,
+    peer: SocketAddr,
+    limits: &Limits,
+    origins: Option<&WebSocketOriginPolicy>,
+) -> Result<Socket<S>, WsError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     accept_hdr_async_with_config(
         stream,
         |request: &Request, mut response: Response| {
@@ -194,6 +295,11 @@ where
                     "this endpoint speaks the {SUBPROTOCOL} subprotocol only (RFC 7118 §4.2)"
                 )));
                 *refusal.status_mut() = StatusCode::BAD_REQUEST;
+                return Err(refusal);
+            }
+            if origins.is_some_and(|policy| !policy.admits(request.headers())) {
+                let mut refusal = ErrorResponse::new(Some("Origin is not admitted".to_owned()));
+                *refusal.status_mut() = StatusCode::FORBIDDEN;
                 return Err(refusal);
             }
             // Echoing it is what makes the negotiation two-sided: the client is entitled to check

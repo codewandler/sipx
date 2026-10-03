@@ -72,9 +72,9 @@ pub use counters::{
     UnsentCounts,
 };
 pub use endpoint::{
-    CancelInviteOutcome, CancelTransactionOutcome, CleartextTransports, Config, Handle,
-    InProcessEndpoint, InProcessPair, Incoming, InviteCancellation, Responses, Unmatched, bind,
-    in_process_pair, new_branch,
+    BindOptions, CancelInviteOutcome, CancelTransactionOutcome, CleartextTransports, Config,
+    Handle, InProcessEndpoint, InProcessPair, Incoming, InviteCancellation, Responses, Unmatched,
+    bind, bind_with_options, in_process_pair, new_branch,
 };
 pub use error::{Error, Result};
 pub use overload::{OverloadConfig, OverloadFeedback, RequestCategory};
@@ -89,3 +89,6 @@ pub use resolve::{
 pub use stun::Reply as StunReply;
 pub use target::{ConnectionKey, Target, TransportKind};
 pub use tcp::{Pool, PoolConfig};
+
+#[cfg(feature = "ws")]
+pub use ws::WebSocketOriginPolicy;

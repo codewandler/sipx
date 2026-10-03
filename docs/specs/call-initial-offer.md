@@ -151,3 +151,19 @@ port. `answer` then returns and audio played through the returned call arrives a
 `IOF-6` replaces the ACK body with malformed SDP. `IOF-7` supplies a well-formed answer that selects
 no format from the 2xx offer. In both vectors the peer receives BYE, `answer` returns an error, and no
 media session survives.
+
+## Optional local media port range
+
+`MediaAddress::with_port_range` selects a validated `MediaPortRange` for both RTP and
+RTCP. `CallConfig` and `DialOptions` carry that same policy through originate, answer,
+early/delayed answers, coupling and replacement media. Every fresh socket allocation
+uses the range; re-INVITE cannot silently revert to an ephemeral port. Initial local
+allocation failure precedes outbound INVITE. Existing constructors retain unrestricted
+allocation. Media replacement allocation failure preserves the previous media session.
+
+This includes an offerless INVITE answered in a reliable provisional/PRACK exchange.
+Before an incoming re-INVITE or UPDATE changes hold, ICE or media state, replacement
+capacity and codec setup must be available. A local setup refusal returns 488, clears
+the outstanding offer, and leaves the previous media, direction and target in force.
+Outgoing and delayed-answer paths likewise allocate replacement media before applying
+the answer's ICE state; their existing protocol completion rules remain in force.
