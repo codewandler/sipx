@@ -165,8 +165,8 @@ These rows report exact pinned builds and calls, not general compatibility claim
 
 | Subject | Keying | Exact suite | sipx sent/received | Exact echo | Evidence |
 |---|---|---|---|---|---|
-| baresip (with libre) `v1.0.0` `sha256:3f2deef4f8a0…` | SDES | `AEAD_AES_128_GCM` | 50/393 | 7200 bytes | [raw result](https://github.com/codewandler/sipx/blob/main/docs/comparison/interop/aead-srtp-sdes/runs/2026-08-14/AEAD_AES_128_GCM.json) |
-| baresip (with libre) `v1.0.0` `sha256:3f2deef4f8a0…` | SDES | `AEAD_AES_256_GCM` | 50/373 | 7520 bytes | [raw result](https://github.com/codewandler/sipx/blob/main/docs/comparison/interop/aead-srtp-sdes/runs/2026-08-14/AEAD_AES_256_GCM.json) |
+| baresip (with libre) `v1.0.0` `sha256:3f2deef4f8a0…` | SDES | `AEAD_AES_128_GCM` | 50/369 | 7360 bytes | [raw result](https://github.com/codewandler/sipx/blob/main/docs/comparison/interop/aead-srtp-sdes/runs/2026-10-03/AEAD_AES_128_GCM.json) |
+| baresip (with libre) `v1.0.0` `sha256:3f2deef4f8a0…` | SDES | `AEAD_AES_256_GCM` | 50/368 | 7680 bytes | [raw result](https://github.com/codewandler/sipx/blob/main/docs/comparison/interop/aead-srtp-sdes/runs/2026-10-03/AEAD_AES_256_GCM.json) |
 
 Negative control: a disposable wrong salt-alignment build negotiated `AEAD_AES_256_GCM`, sent media, and the independent peer rejected all 50 packets.
 

@@ -59,6 +59,14 @@ def main() -> int:
     )
     hashes = {name: digest(CASE / name) for name in STATIC_FILES}
     hashes.update({f"{relative_run}/{name}": digest(run / name) for name in evidence})
+    # A fresh measurement must retain the audit trail of earlier runs. The checker
+    # inventories all evidence under the case; manifests are excluded to avoid
+    # self-referential hashes. Only the fresh run supplies the result pointers below.
+    hashes.update({
+        path.relative_to(CASE).as_posix(): digest(path)
+        for path in (CASE / "runs").rglob("*")
+        if path.is_file() and path.name != "manifest.json"
+    })
     source_hashes = {name: digest(ROOT / name) for name in SOURCE_FILES}
     manifest = {
         "schema": "sipx.comparison.interop.run.v1",

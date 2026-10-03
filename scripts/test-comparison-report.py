@@ -2488,6 +2488,64 @@ class TheComparativeLoadDataset(unittest.TestCase):
         self.assertIn("highest tested rate", text)
 
 
+class RetainedInteropEvidence(unittest.TestCase):
+    def test_reseal_preserves_old_evidence_and_points_to_fresh_execution(self):
+        spec = importlib.util.spec_from_file_location(
+            "interop_seal", ROOT / "docs/comparison/interop/aead-srtp-sdes/seal.py"
+        )
+        seal = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(seal)
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            case = root / "case"
+            old = case / "runs/2026-01-01"
+            fresh = case / "runs/2026-01-02"
+            old.mkdir(parents=True)
+            fresh.mkdir(parents=True)
+            old_result = old / "result.json"
+            old_result.write_text('{"historical": true}\n')
+            old_manifest = old / "manifest.json"
+            old_manifest.write_text('{"source_under_test": "old"}\n')
+            originals = {p: p.read_bytes() for p in (old_result, old_manifest)}
+            for name in seal.STATIC_FILES:
+                path = case / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("fixture static input\n")
+            for name in seal.SOURCE_FILES:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("fresh source under test\n")
+            for name in (
+                "AEAD_AES_128_GCM.json", "AEAD_AES_256_GCM.json",
+                "KdfPerturbationSdes.json", "KdfPerturbationSdes-result.json",
+                "peer-AEAD_AES_128_GCM.log", "peer-AEAD_AES_256_GCM.log",
+                "peer-KdfPerturbationSdes.log",
+            ):
+                (fresh / name).write_text("fresh execution evidence\n")
+            seal.ROOT, seal.CASE = root, case
+            previous_argv = sys.argv
+            try:
+                sys.argv = ["seal.py", str(fresh), "a" * 64, "b" * 64]
+                self.assertEqual(0, seal.main())
+            finally:
+                sys.argv = previous_argv
+            manifest = json.loads((fresh / "manifest.json").read_text())
+            inventory = manifest["sha256"]
+            self.assertEqual(seal.digest(old_result), inventory.get("runs/2026-01-01/result.json"))
+            self.assertNotIn("runs/2026-01-01/manifest.json", inventory)
+            self.assertNotIn("runs/2026-01-02/manifest.json", inventory)
+            for path, original in originals.items():
+                self.assertEqual(original, path.read_bytes())
+            for positive in manifest["positive"].values():
+                self.assertTrue(positive["result"].startswith("runs/2026-01-02/"))
+            self.assertTrue(manifest["negative"]["result"].startswith("runs/2026-01-02/"))
+            self.assertEqual("2026-01-02", manifest["evaluated_at"])
+            for name in seal.SOURCE_FILES:
+                self.assertEqual(seal.digest(root / name), manifest["source_under_test"]["files"][name])
+            self.assertEqual("a" * 64, manifest["source_under_test"]["normal_binary_sha256"])
+            self.assertEqual("b" * 64, manifest["source_under_test"]["perturbed_binary_sha256"])
+
+
 class TheRealDataset(unittest.TestCase):
     """The guard is only worth having if the dataset it guards already satisfies it."""
 

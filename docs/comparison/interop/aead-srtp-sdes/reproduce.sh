@@ -57,15 +57,16 @@ run_positive() {
 }
 
 cd "$ROOT"
-export RUSTC_WRAPPER=sccache
+export RUSTC_WRAPPER="${RUSTC_WRAPPER-sccache}"
 export CARGO_TARGET_DIR="$SCRATCH/build"
 mkdir -p "$SCRATCH/peer"
 cp "$HERE/peer/config" "$HERE/peer/accounts" "$SCRATCH/peer/"
 bounded 180 docker pull "$IMAGE"
-bounded 120 cargo run --quiet -p sipx-testkit --example issue-certs -- "$SCRATCH/peer" sipx.test
+# Compilation can be cold on a shared host; call and readiness deadlines stay separate.
+bounded 600 cargo run --quiet -p sipx-testkit --example issue-certs -- "$SCRATCH/peer" sipx.test
 cp "$SCRATCH/peer/server.key" "$SCRATCH/peer/server-combined.pem"
 openssl x509 -in "$SCRATCH/peer/server.pem" >>"$SCRATCH/peer/server-combined.pem"
-bounded 300 cargo build --manifest-path "$HERE/adapter/Cargo.toml"
+bounded 600 cargo build --manifest-path "$HERE/adapter/Cargo.toml"
 python3 "$HERE/build-negative.py" "$SCRATCH/negative-source" "$SCRATCH/negative-build" \
     "$RUN/KdfPerturbationSdes.json"
 

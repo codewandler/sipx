@@ -763,6 +763,11 @@ impl EarlyCoupling {
                         }
                         Err(error) => Err(error),
                     };
+                    // discard: the primary answer failure is returned below; cancellation
+                    // may already own the source final, or the terminal refusal could not be
+                    // sent. The secondary failure stays observable here and the confirmed
+                    // target is still ended. There is no dedicated failed-refusal counter;
+                    // an absent final is bounded by the source peer's transaction timeout.
                     if let Err(refusal) = refusal {
                         tracing::debug!(%refusal, "source refusal crossed cancellation or transport failure");
                     }

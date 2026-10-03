@@ -98,10 +98,10 @@ def main() -> int:
             start_new_session=True,
         )
         try:
-            status = process.wait(timeout=300)
+            status = process.wait(timeout=600)
         except subprocess.TimeoutExpired as error:
             stop_group(process)
-            raise SystemExit("negative probe build exceeded 300 seconds") from error
+            raise SystemExit("negative probe build exceeded 600 seconds") from error
         if status != 0:
             raise subprocess.CalledProcessError(status, process.args)
         binary = target / "debug/m72-sdes-proof"
