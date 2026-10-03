@@ -307,3 +307,46 @@ A preparation error before any final response refuses the pending source INVITE 
 ends the confirmed target; a CANCEL which wins preparation instead retains its 487. A failure
 while starting ICE/DTLS after 200 ends the source dialog with BYE and ends the target too, without
 sending a conflicting non-2xx final. The call layer owns that distinction and post-200 teardown.
+
+### Supervised local stop
+
+`CouplingControl` separates sticky cancellation intent and bounded observation from the single
+owned driver future. `EarlyCoupling::dial_supervised` owns both legs from before outbound INVITE
+creation through confirmation and teardown; `Coupling::run_supervised` accepts an already confirmed
+owner. The application MUST drive that future in its tracked task registry until it returns. The
+control starts no detached tasks. Dropping or timing out a control wait does not drop that owner,
+and repeated stop requests cannot originate another INVITE or another teardown operation.
+
+A pre-stopped control refuses the pending source with 487 and creates no outbound transaction.
+Native dialing checks cancellation during media preparation and immediately before handing the
+INVITE to the transport. Once that handoff has begun, the tracked owner retains the transaction
+through bounded withdrawal even if cancellation races queue admission or network I/O. Preparation
+cancelled before a transaction exists supplies no peer observation; that native cancellation error
+is conservatively Unknown unless the coupling's pre-stopped check established NotStarted.
+During dialing, native invitation cancellation observes the exact INVITE's provisional/final
+sequence. A crossed successful final MUST receive ACK and BYE; successful teardown evidence
+requires the exact dialog/CSeq BYE response to be successful. A missing or rejected BYE response,
+transaction disappearance, transport error, or timeout is Unknown, never proof of absence.
+For confirmed legs, teardown drops the bridge first and observes both BYEs concurrently while
+answering crossed requests. A received and accepted peer BYE is terminal evidence for that leg.
+That evidence is recorded only at the native matching-dialog, in-order BYE acceptance boundary,
+and survives cancellation of an intermediate wait. A locally ended flag, a handled request,
+or a stale BYE refused with 500 is not peer termination evidence.
+A pending source refused before any successful final has no confirmed dialog; its final status is
+reported separately from an observed BYE. Existing dial/confirmed/run behavior and signatures remain.
+
+The control's wait bound bounds observation, not ownership: it returns no report while native
+cleanup is still pending. Cleanup keeps its native cancellation bound. Setup/answer work already
+in progress retains ownership across its native finite lifecycle; a stop racing successful setup
+immediately tears down the resulting dialogs. Aborting the owner is not observed cleanup and
+cannot yield a successful report. The registry must retain that uncertainty.
+
+| Vector | Input | Required result |
+|---|---|---|
+| S1 | local stop before polling initial owner | source 487, no outbound INVITE |
+| S2 | local stop after outbound INVITE but before provisional | no premature CANCEL; after provisional, CANCEL and observed final withdrawal |
+| S3 | local stop while ringing; 200 crosses CANCEL | ACK then BYE; withheld BYE acknowledgement keeps observation pending, missing acknowledgement yields Unknown |
+| S4 | local stop after both dialogs confirm | bridge closes, both legs receive BYE and positive evidence requires both responses |
+| S5 | repeated stop / dropped bounded observer / crossed peer BYE | one sticky operation, tracked owner finishes, no duplicate INVITE or false absence |
+| S6 | local stop races stopped media | both signalling legs are still observed; media failure is not peer absence |
+| S7 | native cancellation is ready before media preparation / transport handoff | no outbound INVITE is handed to the transport |
