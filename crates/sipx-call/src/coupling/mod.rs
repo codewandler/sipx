@@ -24,6 +24,8 @@ use crate::call::{CouplingDialEvent, sleep_until};
 use crate::dispatch::CouplingInvitation;
 use crate::{Call, Calls, DialOptions, Dialing, Error, Invitation, MediaPolicy, Result, Ringing};
 
+mod supervised;
+pub use supervised::{CouplingControl, CouplingTermination, LegTermination};
 pub mod transparent;
 
 const DEFERRED_CAPACITY: usize = 16;
@@ -311,6 +313,7 @@ pub struct EarlyCoupling {
     state: CouplingState,
     deferred: PerLeg<VecDeque<Incoming>>,
     delayed_offer_pending: bool,
+    supervision: Option<CouplingControl>,
 }
 
 async fn ring_source_leg(
@@ -426,6 +429,35 @@ impl EarlyCoupling {
         media_address: crate::MediaAddress,
         source_policy: MediaPolicy,
     ) -> Result<Self> {
+        Box::pin(Self::dial_owned(
+            invitation,
+            calls,
+            endpoint,
+            target,
+            to,
+            options,
+            media_address,
+            source_policy,
+            None,
+        ))
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn dial_owned(
+        invitation: Invitation,
+        calls: &Calls,
+        endpoint: &sipx_transport::Handle,
+        target: sipx_transport::Target,
+        to: &Uri,
+        options: &DialOptions,
+        media_address: crate::MediaAddress,
+        source_policy: MediaPolicy,
+        supervision: Option<CouplingControl>,
+    ) -> Result<Self> {
+        if refuse_pre_stopped(&invitation, endpoint, supervision.as_ref()).await? {
+            return Err(Error::InvitationCancelled);
+        }
         let source_offer = !invitation.request().request.body().is_empty();
         let direction = relayed_direction(&invitation.request().request);
         if source_offer && direction.is_none() {
@@ -446,34 +478,29 @@ impl EarlyCoupling {
             || options.clone(),
             |direction| options.clone().with_initial_direction(direction),
         );
-        let mut dialing = Box::pin(async {
-            match direction {
-                Some(_) => crate::dial_early(endpoint, target, to, &options)
-                    .await
-                    .map(|dialing| (dialing, None)),
-                None => {
-                    crate::call::dial_early_without_offer_for_coupling(
-                        endpoint, target, to, &options,
-                    )
-                    .await
-                }
+        if let Some(control) = &supervision {
+            control.record(Leg::Two, LegTermination::Unknown);
+        }
+        let cancelled = async {
+            tokio::select! { () = cancellation.cancelled() => {}, () = local_stop(supervision.as_ref()) => {} }
+        };
+        let outbound = match direction {
+            Some(_) => crate::dial_early_until(endpoint, target, to, &options, cancelled)
+                .await
+                .map(|dialing| (dialing, None)),
+            None => {
+                crate::call::dial_early_without_offer_for_coupling_until(
+                    endpoint, target, to, &options, cancelled,
+                )
+                .await
             }
-        });
-        let outbound = tokio::select! {
-            result = &mut dialing => match result {
-                Ok(outbound) => outbound,
-                Err(error) => {
-                    let (status, reason) = outbound_failure_response(&error);
-                    invitation.refuse(endpoint, status, reason).await?;
-                    return Err(error);
-                }
-            },
-            () = cancellation.cancelled() => {
-                match dialing.await {
-                    Ok((dialing, _)) => dialing.cancel().await,
-                    Err(error) => tracing::debug!(%error, "outbound leg ended while cancellation waited for a provisional"),
-                }
-                return Err(Error::InvitationCancelled);
+        };
+        let outbound = match outbound {
+            Ok(outbound) => outbound,
+            Err(error) => {
+                return Err(
+                    refuse_failed_dial(invitation, endpoint, error, supervision.as_ref()).await,
+                );
             }
         };
         let (outbound, delayed_direction) = outbound;
@@ -522,6 +549,7 @@ impl EarlyCoupling {
             state,
             deferred: PerLeg::new(VecDeque::new(), VecDeque::new()),
             delayed_offer_pending: delayed_direction.is_some(),
+            supervision,
         })
     }
 
@@ -597,6 +625,7 @@ impl EarlyCoupling {
             state: CouplingState::new(),
             deferred: PerLeg::new(VecDeque::new(), VecDeque::new()),
             delayed_offer_pending: false,
+            supervision: None,
         }
     }
 
@@ -616,6 +645,14 @@ impl EarlyCoupling {
         let mut outbound_call = None;
 
         loop {
+            if self
+                .supervision
+                .as_ref()
+                .is_some_and(CouplingControl::stopped)
+            {
+                self.stop_early(outbound_call.take()).await;
+                return Err(Error::InvitationCancelled);
+            }
             if outbound_call.is_some()
                 && (!self.ringing.has_early_session() || self.ringing.is_acknowledged())
             {
@@ -633,6 +670,11 @@ impl EarlyCoupling {
             }
 
             tokio::select! {
+                biased;
+                () = local_stop(self.supervision.as_ref()) => {
+                    self.stop_early(outbound_call.take()).await;
+                    return Err(Error::InvitationCancelled);
+                }
                 () = cancellation.cancelled() => {
                     match self.state.cancel(Leg::One) {
                         CancelAction::CancelPeer => {
@@ -673,6 +715,27 @@ impl EarlyCoupling {
                 } => {
                     self.handle_dial_event(step, &mut outbound_call).await?;
                 }
+            }
+        }
+    }
+
+    async fn stop_early(&mut self, outbound: Option<Call>) {
+        if let Some(control) = &self.supervision {
+            if self
+                .invitation
+                .refuse(&self.endpoint, 487, "Request Terminated")
+                .await
+                .is_ok()
+            {
+                control.record(Leg::One, LegTermination::Rejected(487));
+            }
+            if let Some(mut call) = outbound {
+                let observed = call
+                    .hang_up_observed_while_serving(&mut self.outgoing_incoming, control.within)
+                    .await;
+                control.record(Leg::Two, supervised::termination(&call, &observed));
+            } else if let Some(dialing) = self.dialing.take() {
+                control.cancellation(dialing.cancel_observed().await);
             }
         }
     }
@@ -1050,6 +1113,7 @@ pub struct Coupling {
     two: Call,
     state: CouplingState,
     deferred: PerLeg<VecDeque<Incoming>>,
+    supervision: Option<CouplingControl>,
 }
 
 impl Coupling {
@@ -1065,6 +1129,7 @@ impl Coupling {
             two,
             state,
             deferred: PerLeg::new(VecDeque::new(), VecDeque::new()),
+            supervision: None,
         }
     }
 
@@ -1215,12 +1280,36 @@ impl Coupling {
             call.refuse_unclaimed(&incoming).await;
             return Ok(None);
         }
-        if !is_bye || !call.is_ended() {
+        if !is_bye || !call.accepted_remote_bye() {
             return Ok(None);
         }
-        match reason {
-            Some(reason) => peer.hang_up_with_reason(reason).await?,
-            None => peer.hang_up().await?,
+        if let Some(control) = &self.supervision {
+            control.record(leg, LegTermination::RemoteBye);
+            self.bridge.take();
+            let incoming = match leg.peer() {
+                Leg::One => one_incoming,
+                Leg::Two => two_incoming,
+            };
+            let observed = match reason {
+                Some(reason) => {
+                    peer.hang_up_observed_while_serving_with_reason(
+                        incoming,
+                        control.within,
+                        reason,
+                    )
+                    .await
+                }
+                None => {
+                    peer.hang_up_observed_while_serving(incoming, control.within)
+                        .await
+                }
+            };
+            control.record(leg.peer(), supervised::termination(peer, &observed));
+        } else {
+            match reason {
+                Some(reason) => peer.hang_up_with_reason(reason).await?,
+                None => peer.hang_up().await?,
+            }
         }
         Ok(Some(CouplingEnd::Bye(leg)))
     }
@@ -1410,6 +1499,61 @@ fn relayed_direction(request: &sipx_sip::Request) -> Option<Direction> {
                 .find(|media| media.media == "audio" && !media.is_rejected())
                 .map(|media| media.direction())
         })
+}
+
+async fn local_stop(control: Option<&CouplingControl>) {
+    match control {
+        Some(control) => control.cancelled().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn refuse_failed_dial(
+    invitation: CouplingInvitation,
+    endpoint: &sipx_transport::Handle,
+    error: Error,
+    control: Option<&CouplingControl>,
+) -> Error {
+    if let Some(control) = control {
+        match &error {
+            Error::Cancelled(cancellation) => control.cancellation(*cancellation),
+            Error::Rejected { status, .. } => {
+                control.record(Leg::Two, LegTermination::Rejected(*status));
+            }
+            _ => {}
+        }
+    }
+    let (status, reason) = if matches!(error, Error::Cancelled(_)) {
+        (487, "Request Terminated".to_owned())
+    } else {
+        outbound_failure_response(&error)
+    };
+    let refused = invitation.refuse(endpoint, status, reason).await;
+    if refused.is_ok()
+        && let Some(control) = control
+    {
+        control.record(Leg::One, LegTermination::Rejected(status));
+    }
+    if matches!(error, Error::Cancelled(_)) {
+        Error::InvitationCancelled
+    } else {
+        refused.err().unwrap_or(error)
+    }
+}
+
+async fn refuse_pre_stopped(
+    invitation: &Invitation,
+    endpoint: &sipx_transport::Handle,
+    control: Option<&CouplingControl>,
+) -> Result<bool> {
+    let Some(control) = control.filter(|control| control.stopped()) else {
+        return Ok(false);
+    };
+    invitation
+        .refuse(endpoint, 487, "Request Terminated")
+        .await?;
+    control.record(Leg::One, LegTermination::Rejected(487));
+    Ok(true)
 }
 
 #[cfg(test)]
