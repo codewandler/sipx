@@ -1,0 +1,32 @@
+{
+  "name": "@sipx/browser",
+  "version": "0.1.0",
+  "description": "Experimental SIPx browser phone: native browser media and Rust WASM signalling",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./src/index.mjs"
+    },
+    "./sipx_browser.wasm": "./sipx_browser.wasm",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "generated",
+    "index.d.ts",
+    "sipx_browser.wasm",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "README.md",
+    "PROVENANCE.json",
+    "SHA256SUMS"
+  ],
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/codewandler/sipx",
+    "directory": "browser"
+  }
+}

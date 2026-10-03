@@ -10,60 +10,22 @@ use serde_json::{Map, Value};
 use crate::bounds;
 use crate::error::{Error, Result};
 
-/// Which direction a description was authored in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MediaKind {
-    /// An RFC 3264 offer.
-    Offer,
-    /// An RFC 3264 answer.
-    Answer,
-}
+pub(crate) use crate::contract::MediaKind;
 
-impl MediaKind {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Offer => "offer",
-            Self::Answer => "answer",
+macro_rules! define_commands {
+    ($($variant:ident($wire:literal) { $($name:ident: $ty:ty => $parser:ident),* };)*) => {
+        /// The command arguments, generated from the kernel-owned wire declaration.
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub(crate) enum Verb { $($variant { $($name: $ty,)* },)* }
+        fn parse_verb(root: &Map<String, Value>) -> Result<Verb> {
+            match field(root, "cmd")?.as_str().ok_or(Error::Schema)? {
+                $($wire => Ok(Verb::$variant { $($name: $parser(field(root, stringify!($name))?)?,)* }),)*
+                _ => Err(Error::Schema),
+            }
         }
-    }
+    };
 }
-
-/// One §5.2 verb with its arguments.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Verb {
-    Register {
-        expires: u32,
-    },
-    Unregister,
-    Dial {
-        target: String,
-    },
-    Ring {
-        call: u32,
-    },
-    Answer {
-        call: u32,
-    },
-    Reject {
-        call: u32,
-        status: u16,
-    },
-    Hangup {
-        call: u32,
-    },
-    LocalMedia {
-        call: u32,
-        kind: MediaKind,
-        sdp: String,
-    },
-    MediaApplied {
-        call: u32,
-    },
-    MediaFailed {
-        call: u32,
-        reason: String,
-    },
-}
+browser_commands!(define_commands);
 
 /// A parsed command: the envelope's `"id"` and the verb.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,57 +52,7 @@ impl Command {
             return Err(Error::Schema);
         }
 
-        let verb = match field(root, "cmd")?.as_str().ok_or(Error::Schema)? {
-            "register" => Verb::Register {
-                expires: u32::try_from(field(root, "expires")?.as_u64().ok_or(Error::Schema)?)
-                    .map_err(|_| Error::Schema)
-                    .and_then(|expires| {
-                        if expires >= 1 {
-                            Ok(expires)
-                        } else {
-                            Err(Error::Schema)
-                        }
-                    })?,
-            },
-            "unregister" => Verb::Unregister,
-            "dial" => Verb::Dial {
-                target: sip_uri(field(root, "target")?)?,
-            },
-            "ring" => Verb::Ring { call: call(root)? },
-            "answer" => Verb::Answer { call: call(root)? },
-            "reject" => {
-                let status = field(root, "status")?.as_u64().ok_or(Error::Schema)?;
-                if !(300..=699).contains(&status) {
-                    return Err(Error::Schema);
-                }
-                Verb::Reject {
-                    call: call(root)?,
-                    status: u16::try_from(status).map_err(|_| Error::Schema)?,
-                }
-            }
-            "hangup" => Verb::Hangup { call: call(root)? },
-            "local-media" => Verb::LocalMedia {
-                call: call(root)?,
-                kind: match field(root, "kind")?.as_str().ok_or(Error::Schema)? {
-                    "offer" => MediaKind::Offer,
-                    "answer" => MediaKind::Answer,
-                    _ => return Err(Error::Schema),
-                },
-                sdp: field(root, "sdp")?
-                    .as_str()
-                    .ok_or(Error::Schema)?
-                    .to_owned(),
-            },
-            "media-applied" => Verb::MediaApplied { call: call(root)? },
-            "media-failed" => Verb::MediaFailed {
-                call: call(root)?,
-                reason: field(root, "reason")?
-                    .as_str()
-                    .ok_or(Error::Schema)?
-                    .to_owned(),
-            },
-            _ => return Err(Error::Schema),
-        };
+        let verb = parse_verb(root)?;
 
         Ok(Self { id, verb })
     }
@@ -165,9 +77,33 @@ pub(crate) fn require_version(root: &Map<String, Value>) -> Result<()> {
     }
 }
 
-fn call(root: &Map<String, Value>) -> Result<u32> {
-    let number = field(root, "call")?.as_u64().ok_or(Error::Schema)?;
-    u32::try_from(number).map_err(|_| Error::Schema)
+fn call_value(value: &Value) -> Result<u32> {
+    u32::try_from(value.as_u64().ok_or(Error::Schema)?).map_err(|_| Error::Schema)
+}
+fn expires_value(value: &Value) -> Result<u32> {
+    let value = call_value(value)?;
+    if value == 0 {
+        Err(Error::Schema)
+    } else {
+        Ok(value)
+    }
+}
+fn status_value(value: &Value) -> Result<u16> {
+    let value = value.as_u64().ok_or(Error::Schema)?;
+    if !(300..=699).contains(&value) {
+        return Err(Error::Schema);
+    }
+    u16::try_from(value).map_err(|_| Error::Schema)
+}
+fn string_value(value: &Value) -> Result<String> {
+    value.as_str().map(str::to_owned).ok_or(Error::Schema)
+}
+fn kind_value(value: &Value) -> Result<MediaKind> {
+    match value.as_str() {
+        Some("offer") => Ok(MediaKind::Offer),
+        Some("answer") => Ok(MediaKind::Answer),
+        _ => Err(Error::Schema),
+    }
 }
 
 /// A field that must hold a parseable SIP URI.

@@ -105,7 +105,7 @@ impl Kernel {
     pub(super) fn dispatch(&mut self, id: u64, verb: Verb) -> Result<()> {
         match verb {
             Verb::Register { expires } => self.register(id, expires),
-            Verb::Unregister => self.unregister(id),
+            Verb::Unregister {} => self.unregister(id),
             Verb::Dial { target } => self.dial(id, &target),
             Verb::Ring { call } => self.ring(id, call),
             Verb::Answer { call } => self.answer(id, call),
@@ -1221,9 +1221,13 @@ fn media_facts(
         .cloned()
         .ok_or(ProfileError::CodecSetIncomplete)?;
     Ok(MediaFacts {
-        call_id: dialog.call_id.clone(),
-        local_tag: dialog.local_tag.clone(),
-        remote_tag: dialog.remote_tag.clone().unwrap_or_default(),
+        dialog: crate::event::DialogFact {
+            call_id: dialog.call_id.clone(),
+            local_tag: dialog.local_tag.clone(),
+            remote_tag: dialog.remote_tag.clone().unwrap_or_default(),
+        },
+        rtcp_mux: true,
+        audio_sections: 1,
         codecs,
         selected_codec,
         fingerprint_algorithm: validated.description.fingerprint.func.as_str(),

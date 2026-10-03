@@ -161,9 +161,9 @@ jobs:
       - run: cargo check -p sipx-cli --all-targets --features device-audio --target x86_64-pc-windows-gnu
 
   browser-audio:
-    name: native browser audio proof
+    name: native browser audio and packed SDK proof
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       # Building one example still resolves this crate's live-device dev-dependency, so the
@@ -182,6 +182,19 @@ jobs:
       # media-authentication negative. An unavailable native peer is a red environment, never a
       # skip.
       - run: ./tests/browser-audio/ci.sh
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --global typescript@6.0.3
+      - run: rustup target add wasm32-unknown-unknown
+      - run: ./tests/browser-sdk/ci.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-sdk-evidence
+          path: ${{ runner.temp }}/sipx-browser-sdk
+          if-no-files-found: error
+          retention-days: 14
       - uses: actions/upload-artifact@v4
         if: always()
         with:

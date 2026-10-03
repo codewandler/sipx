@@ -1,23 +1,21 @@
-// Drive the binding against the compiled kernel, not a fake one.
-//
-// `transport.test.mjs` proves what the binding decides; a scripted kernel cannot prove that those
-// decisions are the ones the real module needs. These cases wire `WebSocketSignalling` to the same
-// `sipx_browser.wasm` that `wasm/harness.mjs` checks, through a `KernelPort` written by hand over
-// the §4 ABI, and assert the two properties that only the real module can settle: that bytes the
-// binding sends are the kernel's serialisation, and that "the peer disagrees about message
-// boundaries" is the real parser's verdict rather than a fake's.
-//
-// The port below is a **test fixture**. `docs/specs/browser-sdk.md` §7.2 makes the ABI bindings
-// generated from a checked source in the Rust workspace, which is `A-17`'s deliverable; this is
-// forty lines of it, written out so that `T-33` can be evidenced before `A-17` exists, and it is
-// expected to be deleted when the generated glue lands.
-
+// Drive the signalling binding through the production generated ABI loader.
 import { readFile } from "node:fs/promises";
 
 import { check, equal, test } from "./assert.mjs";
-import { FakeClock, FakeConnectivity, FakeEntropy, FakeNetwork, Recorder } from "./fakes.mjs";
-import { decodeRecord } from "../src/records.mjs";
-import { Reason, SIP_SUBPROTOCOL, WebSocketSignalling } from "../src/transport.mjs";
+import {
+  FakeClock,
+  FakeConnectivity,
+  FakeEntropy,
+  FakeNetwork,
+  Recorder,
+} from "./fakes.mjs";
+import { Kernel } from "../src/kernel.mjs";
+import { createClientForTest } from "../src/client.mjs";
+import {
+  Reason,
+  SIP_SUBPROTOCOL,
+  WebSocketSignalling,
+} from "../src/transport.mjs";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -27,92 +25,6 @@ const BSDK_CFG_1 =
   '{"v":1,"aor":"sip:alice@example.net","auth":{"username":"alice","password":"secret"},"transport":{"scheme":"wss","host":"edge.example.net","resource":"/sip"},"insecure":"refuse"}';
 /** `BSDK-CMD-1`. */
 const BSDK_CMD_1 = '{"v":1,"cmd":"register","id":1,"expires":600}';
-
-/** A `KernelPort` over one handle of the compiled module. */
-class CompiledKernel {
-  #exports;
-  #handle;
-
-  constructor(exports, configuration) {
-    this.#exports = exports;
-    this.#handle = this.#withBuffer(encoder.encode(configuration), (ptr, len) =>
-      exports.sipx_kernel_new(ptr, len),
-    );
-    if (this.#handle <= 0) throw new Error(`sipx_kernel_new returned ${this.#handle}`);
-  }
-
-  /** §4.4's host side: allocate, write, call, release. */
-  #withBuffer(data, run) {
-    const ptr = this.#exports.sipx_alloc(data.length);
-    if (ptr === 0) throw new Error("sipx_alloc returned 0");
-    new Uint8Array(this.#exports.memory.buffer, ptr, data.length).set(data);
-    try {
-      return run(ptr, data.length);
-    } finally {
-      this.#exports.sipx_free(ptr, data.length);
-    }
-  }
-
-  /** §4.6's drain obligation, discharged before the entry point's caller sees anything. */
-  #drain() {
-    const records = [];
-    for (;;) {
-      const packed = this.#exports.sipx_next_output(this.#handle);
-      if (packed === 0n) return records;
-      const ptr = Number(packed >> 32n);
-      const len = Number(packed & 0xffffffffn);
-      records.push(decodeRecord(new Uint8Array(this.#exports.memory.buffer, ptr, len)));
-    }
-  }
-
-  #checked(code) {
-    if (code < 0) throw new Error(`the ABI returned ${code}`);
-    return this.#drain();
-  }
-
-  command(document, nowMs) {
-    return this.#checked(
-      this.#withBuffer(document, (ptr, len) =>
-        this.#exports.sipx_command(this.#handle, ptr, len, BigInt(nowMs)),
-      ),
-    );
-  }
-
-  inputBytes(bytes, nowMs) {
-    return this.#checked(
-      this.#withBuffer(bytes, (ptr, len) =>
-        this.#exports.sipx_input_bytes(this.#handle, ptr, len, BigInt(nowMs)),
-      ),
-    );
-  }
-
-  inputTimer(id, nowMs) {
-    return this.#checked(this.#exports.sipx_input_timer(this.#handle, id, BigInt(nowMs)));
-  }
-
-  inputEntropy(bytes) {
-    return this.#checked(
-      this.#withBuffer(bytes, (ptr, len) =>
-        this.#exports.sipx_input_entropy(this.#handle, ptr, len),
-      ),
-    );
-  }
-
-  snapshot() {
-    const packed = this.#exports.sipx_snapshot(this.#handle);
-    const ptr = Number(packed >> 32n);
-    const len = Number(packed & 0xffffffffn);
-    // §4.2: a null pointer with a nonzero length carries an error-code magnitude rather than a
-    // buffer — which is what a freed handle answers. There is nothing to report about a kernel
-    // that no longer exists, and inventing a counter would be worse than saying so.
-    if (ptr === 0) return null;
-    return JSON.parse(decoder.decode(new Uint8Array(this.#exports.memory.buffer, ptr, len)));
-  }
-
-  free() {
-    this.#exports.sipx_kernel_free(this.#handle);
-  }
-}
 
 /**
  * Register the compiled-kernel cases against the module at `modulePath`.
@@ -130,7 +42,7 @@ export async function register(modulePath) {
     const clock = new FakeClock();
     const network = new FakeNetwork();
     const recorder = new Recorder();
-    const kernel = new CompiledKernel(instance.exports, BSDK_CFG_1);
+    const kernel = new Kernel(instance.exports, BSDK_CFG_1);
     const signalling = new WebSocketSignalling({
       transport: { scheme: "wss", host: "edge.example.net", resource: "/sip" },
       insecure: "refuse",
@@ -159,9 +71,18 @@ export async function register(modulePath) {
       register.startsWith("REGISTER sip:example.net SIP/2.0\r\n"),
       `the request line the kernel serialised (got ${JSON.stringify(register.slice(0, 40))})`,
     );
-    check(register.includes("Via: SIP/2.0/WSS"), "over the WebSocket transport (RFC 7118 §5.2)");
-    check(!register.includes("secret"), "§8.3 the credential is not on the wire");
-    check(!network.latest.url.includes("secret"), "§8.6 nor in the URL the socket was opened with");
+    check(
+      register.includes("Via: SIP/2.0/WSS"),
+      "over the WebSocket transport (RFC 7118 §5.2)",
+    );
+    check(
+      !register.includes("secret"),
+      "§8.3 the credential is not on the wire",
+    );
+    check(
+      !network.latest.url.includes("secret"),
+      "§8.6 nor in the URL the socket was opened with",
+    );
     check(
       !JSON.stringify(recorder.events).includes("secret"),
       "§8.3 nor in any event the binding emitted",
@@ -173,15 +94,24 @@ export async function register(modulePath) {
     const before = clock.pending;
     signalling.submit(BSDK_CMD_1);
     clock.flush();
-    check(clock.pending > before, "the transaction's timer became a host timer");
+    check(
+      clock.pending > before,
+      "the transaction's timer became a host timer",
+    );
   });
 
   test("the compiled parser's verdict on a fragmented frame closes the connection", async () => {
     const { clock, network, recorder, kernel } = await harness();
-    equal(kernel.snapshot().counters.parse_errors, 0, "nothing has failed to parse yet");
+    equal(
+      kernel.snapshot().counters.parse_errors,
+      0,
+      "nothing has failed to parse yet",
+    );
     // Half a request: RFC 7118 §5 makes the frame boundary the message boundary, so a peer that
     // split one message across two frames has sent this.
-    network.latest.deliver("REGISTER sip:example.net SIP/2.0\r\nVia: SIP/2.0/WSS ");
+    network.latest.deliver(
+      "REGISTER sip:example.net SIP/2.0\r\nVia: SIP/2.0/WSS ",
+    );
     clock.flush();
     // Reaching `framing` is itself the evidence: the binding gets there only by reading a raised
     // `parse_errors` out of the §4.11 snapshot, and the count came from the compiled parser. The
@@ -210,7 +140,11 @@ export async function register(modulePath) {
 
   test("the compiled parser's verdict on a coalesced frame closes the connection", async () => {
     const { clock, network, recorder, kernel } = await harness();
-    equal(kernel.snapshot().counters.parse_errors, 0, "nothing has failed to parse yet");
+    equal(
+      kernel.snapshot().counters.parse_errors,
+      0,
+      "nothing has failed to parse yet",
+    );
     // The other half of RFC 7118 §5, and the half that used to be silent: the kernel parsed the
     // first message, acted on it, and dropped the rest without counting it. The binding offers the
     // frame whole and once — it holds no boundary search to split one with — so reaching `framing`
@@ -235,9 +169,17 @@ export async function register(modulePath) {
     // `docs/specs/browser-sdk.md` §4.3.1 has to get right.
     network.latest.deliver("SIP/2.0 100 Trying\r\n\r\nSIP/2.0 200 OK\r\n\r\n");
     clock.flush();
-    equal(kernel.snapshot().counters.parse_errors, 0, "the frame said where the message ended");
+    equal(
+      kernel.snapshot().counters.parse_errors,
+      0,
+      "the frame said where the message ended",
+    );
     equal(recorder.ofType("closed").length, 0, "so the connection is still up");
-    equal(network.latest.sent.length, 0, "and nothing was invented in response");
+    equal(
+      network.latest.sent.length,
+      0,
+      "and nothing was invented in response",
+    );
   });
 
   test("cancellation frees the compiled kernel's handle", async () => {
@@ -247,4 +189,119 @@ export async function register(modulePath) {
     check(network.latest.closed !== null, "the socket was closed");
     equal(signalling.state, "closed", "terminal");
   });
+  async function clientHarness() {
+    const instance = await WebAssembly.instantiate(compiled, {});
+    const clock = new FakeClock(),
+      network = new FakeNetwork();
+    const kernel = new Kernel(instance.exports, BSDK_CFG_1);
+    const ready = createClientForTest(JSON.parse(BSDK_CFG_1), {
+      kernel,
+      clock,
+      openSocket: network.factory,
+      entropy: new FakeEntropy(),
+      connectivity: new FakeConnectivity(),
+      makeMedia: () => ({ handle() {}, closeCall() {}, close() {} }),
+    });
+    clock.flush();
+    network.latest.acceptOpen(SIP_SUBPROTOCOL);
+    clock.flush();
+    return { client: await ready, clock, network, kernel };
+  }
+  async function settleTasks(h) {
+    for (let i = 0; i < 8; i++) {
+      h.clock.flush();
+      await Promise.resolve();
+    }
+  }
+  function registrationResponse(request, status = 200) {
+    const header = (name) =>
+      request.match(new RegExp(`^${name}: (.*)$`, "mi"))[1].trim();
+    return (
+      `SIP/2.0 ${status} ${status === 200 ? "OK" : "Forbidden"}\r\n` +
+      `Via: ${header("Via")}\r\nFrom: ${header("From")}\r\n` +
+      `To: ${header("To")};tag=registrar\r\nCall-ID: ${header("Call-ID")}\r\n` +
+      `CSeq: ${header("CSeq")}\r\nExpires: ${header("Expires")}\r\nContent-Length: 0\r\n\r\n`
+    );
+  }
+  for (const finalStatus of [200, 403]) {
+    test(`aborted pending registration waits for real kernel ${finalStatus} then cleans only its registration`, async () => {
+      const h = await clientHarness();
+      try {
+        const unrelated = h.client.dial("sip:bob@example.net").catch((e) => e);
+        await settleTasks(h);
+        const call = h.client.calls[0];
+        check(call, "an unrelated call has a real kernel identity");
+        const abort = new AbortController();
+        let outcome;
+        const pending = h.client
+          .register({ signal: abort.signal })
+          .catch((e) => {
+            outcome = e;
+            return e;
+          });
+        await settleTasks(h);
+        const socket = h.network.latest;
+        const request = decoder.decode(socket.sent.at(-1));
+        check(request.startsWith("REGISTER "), "real REGISTER is on the wire");
+        abort.abort();
+        abort.abort();
+        await settleTasks(h);
+        equal(
+          h.client.state,
+          "connected",
+          "aborting pending REGISTER does not close the client",
+        );
+        equal(
+          outcome,
+          undefined,
+          "cancellation waits for the original exchange",
+        );
+        equal(
+          socket.sent.length,
+          1,
+          "no premature deregistration while kernel is busy",
+        );
+        socket.deliver(registrationResponse(request, finalStatus));
+        await settleTasks(h);
+        if (finalStatus === 200) {
+          equal(
+            socket.sent.length,
+            2,
+            "accepted registration is deregistered exactly once",
+          );
+          const inverse = decoder.decode(socket.sent.at(-1));
+          check(
+            inverse.includes("Expires: 0\r\n"),
+            "inverse is actual Expires0 REGISTER",
+          );
+          equal(
+            outcome,
+            undefined,
+            "promise still waits for deregistration response",
+          );
+          socket.deliver(registrationResponse(inverse));
+          await settleTasks(h);
+        }
+        equal(
+          (await pending).name,
+          "SipxCancelled",
+          "cancel settles typed only after kernel reports",
+        );
+        equal(h.client.calls[0], call, "unrelated call survives cancellation");
+        equal(call.state, "dialing", "unrelated call is not terminalized");
+        equal(h.client.state, "connected", "client remains usable");
+        const closed = h.client.close({ timeoutMs: 1 });
+        h.clock.flush();
+        h.clock.advance(1);
+        await closed;
+        await unrelated;
+        equal(h.clock.pending, 0, "teardown frees all owned timers");
+      } finally {
+        const closed = h.client.close({ timeoutMs: 1 });
+        h.clock.flush();
+        h.clock.advance(1);
+        await closed;
+      }
+    });
+  }
 }

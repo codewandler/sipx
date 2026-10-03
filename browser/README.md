@@ -1,83 +1,73 @@
-# The browser signalling binding
+# @sipx/browser — experimental
 
-The browser half of the browser SDK: the code that opens the WebSocket and drives the sans-I/O
-session kernel over it. The kernel is Rust compiled to WebAssembly and lives in
-[`../crates/sipx-wasm`](../crates/sipx-wasm) and [`../wasm`](../wasm); nothing in this directory
-parses SIP, holds protocol state or reaches the network except through the four platform
-facilities named below.
+Browser ESM SIP phone with a Rust WASM signaling kernel and native WebRTC audio. This pre-1.0 API
+is experimental (`experimental === true` at import); no registry publication is implied.
 
-- **Contract:** [`../docs/specs/browser-signalling.md`](../docs/specs/browser-signalling.md), under
-  its parent [`../docs/specs/browser-sdk.md`](../docs/specs/browser-sdk.md).
-- **Story:** `T-33`.
-- **Checked by:** `../scripts/check-browser-binding.sh`, which is a gate step and a step of CI's
-  `wasm` job.
-
-## Layout
-
-| Path | What it is |
-|---|---|
-| `src/transport.mjs` | `WebSocketSignalling`, the binding, plus `signallingUrl` and the bounds |
-| `src/records.mjs` | the parent §4.6 output-record framing, decoded |
-| `src/platform.mjs` | the only file that reads a global: the real socket, clock, CSPRNG and connectivity monitor |
-| `src/index.mjs` | the public surface |
-| `test/` | the cases, the fakes, and a hand-written ABI port used to drive the compiled module |
-
-Browser-targeted ESM throughout, with no dependencies and no build step. `A-17` packages this as
-part of `@sipx/browser` and generates the ABI glue that today's `test/kernel.test.mjs` writes by
-hand; `M-52` adds the media adapter; the `SipxClient` lifecycle layer is `A-17`'s.
-
-## Running the cases
-
-```sh
-node browser/test/run.mjs                       # against fakes only
-node browser/test/run.mjs --module <path.wasm>  # and against the compiled kernel
-./scripts/check-browser-binding.sh              # builds the module, then does both
+```js
+import { SipxClient } from '@sipx/browser';
+const client = await SipxClient.create({
+  aor: 'sip:browser@example.net',
+  auth: { username: 'short-lived-user', password: 'server-issued-secret' },
+  transport: { scheme: 'wss', host: 'edge.example.net:443', resource: '/sip' },
+  insecure: 'refuse',
+});
+client.on('outgoing', call => call.on('state', state => console.log(state)));
+client.on('incoming', call => { /* show an explicit Answer action calling call.answer() */ });
+await client.register({ expires: 600 });
+const call = await client.dial('sip:target@example.net');
+call.mute(true);
+await call.hangup();
+await client.close();
 ```
 
-There is no test runner and no `package.json` here on purpose: the repository has no JavaScript
-toolchain, `wasm/harness.mjs` established that a self-asserting script run by a checker is enough,
-and the parent §7.1 requires the shipped package to have no Node runtime dependency. `test/` uses
-Node only to read files; `src/` uses nothing but the web platform.
+The `host` includes an optional port; there is no separate transport port field. Serve the package
+modules and `sipx_browser.wasm` on the page's origin. The loader resolves the packaged asset relative
+to its module, or accepts a same-origin `wasmURL`; cross-origin URLs and redirects are refused.
+There are no runtime Node dependencies and no remote code downloads.
 
-## The one thing to know before changing it
+`dial()` and `answer()` resolve only after SIP establishment, validated negotiated profile facts
+and the native peer connection are all ready. `outgoing` exposes the handle during setup, allowing
+ringing UI and early hangup. `incoming` exposes an incoming offer without acquiring a microphone.
+Microphone acquisition follows explicit dial/answer; use `setMicrophone(deviceId)` for selection.
+Applications needing permission before server authorization can preflight capture and stop those
+application-owned tracks before calling the SDK. Stream ownership is not transferred implicitly.
 
-The binding takes its socket, clock, entropy source and connectivity monitor as constructor
-arguments. That is not dependency-injection decoration — it is what lets every case decide a
-race at an exact instant, and it is why no case in this directory waits on wall-clock time. A
-change that reaches for a global from `src/transport.mjs` has removed the property the suite is
-built on. `src/platform.mjs` is where globals live.
+Register/dial/answer accept `AbortSignal`. Cancellation sends the inverse command and stops media
+before settling. `close({timeoutMs:3000})` refuses new work, bounds SIP cleanup, frees the kernel,
+closes the socket and media, then delivers `closed` before resolving. Page teardown synchronously
+releases resources. State callbacks are ordered and deferred; one listener throwing cannot block
+others. A fatal ABI defect suppresses further callbacks. Diagnostics never include SIP messages,
+credentials, SDP or listener exception strings.
 
-## Native media adapter
+Errors have distinct exported classes: `SipxAbiDefect`, `SipxStateError`, `SipxLimitError`,
+`SipxTransportError`, `SipxSipError`, `SipxMediaError`, `SipxCancelled`, and `SipxCapabilityError`.
+`call.negotiatedMedia()` keeps validated kernel facts separate from browser observations;
+`refreshStats()` refreshes optional native statistics. Missing observations remain absent.
 
-`BrowserMediaAdapter` in `src/media.mjs` owns browser audio resources, and
-`browserMediaPlatform` in `src/media-platform.mjs` supplies its browser globals. The adapter
-accepts `{ platform, sendCommand, onState, onError, onDiagnostic, setupTimeoutMs,
-operationTimeoutMs }`; defaults bound setup to 30 seconds and each browser operation to 10 seconds.
-Hooks are internal lifecycle inputs, not application callbacks; the packaged client owns public
-callback scheduling and command outcome promises. The sender accepts `{cmd, call, ...}` and the
-client supplies command version and correlation id. The sender must synchronously enqueue or
-throw; return values are ignored and asynchronous senders are unsupported. Kernel command
-outcome promises belong to the lifecycle.
+The media adapter waits for complete ICE gathering and sends unchanged browser descriptions.
+SIP, Digest, SDP validation and timers remain in Rust. ABI functions, commands, events and error
+codes are generated from `crates/sipx-wasm/src/contract.rs`, consumed by the actual kernel, using
+`scripts/generate-browser.py`; four independent mutation tests enforce drift detection.
 
-Deliver every kernel event through `handle(event)` without awaiting pending media work before
-forwarding cancellation. `need-local-media` follows the user's dial/answer gesture; construction
-and incoming offers acquire no microphone. A remote offer is applied without a kernel command;
-a remote answer emits `media-applied` only after application succeeds. Failure while applying an
-answer uses `media-failed`; every other media failure requests `hangup` and emits the separate
-`SipxMediaError` kind. The client must preserve that media cause while completing SIP cleanup.
+Build and validate from the repository root:
 
-The adapter submits unchanged, complete-gathered descriptions and consumes the kernel's validated
-`negotiated-media` event; it never parses SDP. `onState({call,state:"established"})` requires both
-kernel establishment/profile facts and browser connectivity. `refreshStats(call)` updates a
-`negotiatedMedia(call)` report with separate `kernel` and `browser` origins; missing fields remain
-absent. `setMicrophone(deviceId)` selects the device for subsequent capture and `mute(call, true)`
-changes only local track enablement.
+```sh
+./scripts/check-browser-binding.sh
+python3 scripts/pack-browser.py --output scratch/package-candidate
+cargo build -p sipx-call --example browser_sdk_proof --features dtls,opus
+python3 tests/browser-sdk/prove.py \
+  --archive scratch/package-candidate/sipx-browser-0.1.0.tgz \
+  --output scratch/package-proof --chrome /path/to/chrome --driver /path/to/chromedriver
+```
 
-`closeCall(call)` and `close()` synchronously revoke media ownership. Terminal kernel events and
-pagehide use the same cleanup; late permission results stop their tracks. Platform playback
-returns `{ready, close}` synchronously, so a pending autoplay promise cannot retain a resource.
-The injected platform also supplies `getUserMedia`, `createPeerConnection`, `codecs`, `clock`
-(`setTimer`, `clearTimer`) and `onPageHide` (returning an unsubscribe function).
+Packing rebuilds WASM, includes generated declarations, dual licenses, per-file checksums and
+source provenance, and retains one explicit archive. Dirty candidates identify their base and
+source digest. Final delivery is repacked from committed source and reruns the exact archive proof.
+The clean consumer installs only that archive and compiles with TypeScript before served native
+browser tests. The proof checks both SIP roles, challenges, audible sample energy and six independent
+negative fixtures with zero remaining SDK resources. Fixture SDP mutations are isolated to tests.
 
-Run `node --test browser/test/media.test.mjs` for deterministic media cases. These do not replace
-the dependent package story's real browser proof.
+Browser support is determined by executed proof evidence, not capability detection alone. The
+current proof runner records negotiated Chrome/driver versions. Firefox and WebKit are explicitly
+unsupported until their rows execute; no unexecuted version is claimed. Full repository acceptance
+is the coordinator's `scripts/gate.py` run; package creation is not npm publication.

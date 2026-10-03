@@ -536,3 +536,42 @@ fn candidate_set_is_complete_and_limited_to_host_or_server_reflexive() {
         );
     }
 }
+
+#[test]
+fn browser_udp_candidates_remain_usable_beside_unsupported_tcp() {
+    let extra = "a=candidate:tcp 1 TCP 1518280447 192.0.2.10 9 typ host tcptype active\r\n";
+    for (base, role) in [
+        (O1, BrowserAudioRole::Offerer),
+        (A1, BrowserAudioRole::Answerer),
+    ] {
+        let description = parse::parse(&format!("{base}{extra}")).unwrap();
+        let profile = validate(&description, role).expect("UDP remains usable beside TCP");
+        assert_eq!(profile.candidates.len(), 1);
+        assert_eq!(
+            profile.candidates[0].transport,
+            sipx_sdp::ice::Transport::Udp
+        );
+    }
+}
+
+#[test]
+fn discarded_transport_candidates_cannot_erase_bounds_or_supported_candidate_errors() {
+    let extra = "a=candidate:tcp 1 TCP 1518280447 192.0.2.10 9 typ host tcptype active\r\n";
+    for source in [
+        O1.replace("1 UDP", "1 TCP"),
+        format!("{O1}{}", extra.repeat(32)),
+        format!("{O1}a=candidate:tcp 1 TCP {}\r\n", "x".repeat(512)),
+        format!("{O1}{extra}a=candidate:bad 1 UDP invalid\r\n"),
+        format!("{O1}{extra}a=candidate:bad 1 UDP 1234 192.0.2.10 9999 typ relay\r\n"),
+    ] {
+        assert_eq!(
+            validate(&parse::parse(&source).unwrap(), BrowserAudioRole::Offerer),
+            Err(ProfileError::IceRequired)
+        );
+    }
+    let answer = format!("{A1}{}", extra.replace(" 1 TCP", " 2 TCP"));
+    assert_eq!(
+        validate(&parse::parse(&answer).unwrap(), BrowserAudioRole::Answerer),
+        Err(ProfileError::RtcpMuxRequired)
+    );
+}

@@ -39,6 +39,9 @@ require() {
 }
 
 require node
+require python3
+python3 scripts/generate-browser.py --check
+python3 scripts/test-browser-generation.py
 
 if ! rustup target list --installed 2>/dev/null | grep -qx wasm32-unknown-unknown; then
     echo "browser-binding: the wasm32-unknown-unknown target is not installed;" \
@@ -75,7 +78,7 @@ else
 fi
 
 step "the native media adapter holds its contract"
-if node --test browser/test/media.test.mjs; then
+if node --test browser/test/media.test.mjs browser/test/client.test.mjs browser/test/package-contract.test.mjs browser/test/command-errors.test.mjs; then
     echo "ok"
 else
     echo "FAILED"

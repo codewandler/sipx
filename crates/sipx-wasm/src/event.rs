@@ -1,57 +1,97 @@
-//! Events, kernel → host (`docs/specs/browser-sdk.md` §5.3).
-//!
-//! Call and registration events are **snapshots, not deltas**: each one replaces the previous
-//! state wholesale, so a missed delivery cannot leave the page permanently wrong.
-//!
-//! Field order here is the order of §5.3's table, and it is load-bearing: `BSDK-EVT-1`,
-//! `BSDK-EVT-2` and `BSDK-EVT-3` are pinned by SHA-256 over exactly these bytes.
-
+//! Canonical event encoders expanded from the Rust-owned browser contract.
 use crate::command::MediaKind;
+pub(crate) use crate::contract::{CauseClass, Direction, RegistrationState};
 use crate::json::Writer;
 
-/// Registration state, replaced wholesale on every change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RegistrationState {
-    Registering,
-    Registered,
-    Unregistered,
-    Failed,
+trait WireValue {
+    fn write_field(&self, writer: &mut Writer, name: &str);
 }
-
-impl RegistrationState {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Registering => "registering",
-            Self::Registered => "registered",
-            Self::Unregistered => "unregistered",
-            Self::Failed => "failed",
+trait WireObject {
+    fn write_object(&self, writer: &mut Writer);
+}
+impl<T: WireValue + ?Sized> WireValue for &T {
+    fn write_field(&self, writer: &mut Writer, name: &str) {
+        (*self).write_field(writer, name);
+    }
+}
+impl WireValue for str {
+    fn write_field(&self, writer: &mut Writer, name: &str) {
+        writer.string(name, self);
+    }
+}
+impl WireValue for String {
+    fn write_field(&self, writer: &mut Writer, name: &str) {
+        self.as_str().write_field(writer, name);
+    }
+}
+impl WireValue for bool {
+    fn write_field(&self, writer: &mut Writer, name: &str) {
+        writer.boolean(name, *self);
+    }
+}
+macro_rules! numeric_values {
+    ($($ty:ty),*) => { $(impl WireValue for $ty {
+        fn write_field(&self, writer: &mut Writer, name: &str) { writer.number(name, u64::from(*self)); }
+    })* };
+}
+numeric_values!(u8, u32, u64);
+impl<T: WireValue> WireValue for Option<T> {
+    fn write_field(&self, writer: &mut Writer, name: &str) {
+        if let Some(value) = self {
+            value.write_field(writer, name);
         }
     }
 }
-
-/// Which side started the call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Direction {
-    In,
-    Out,
-}
-
-impl Direction {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::In => "in",
-            Self::Out => "out",
-        }
+impl<T: WireObject> WireValue for Vec<T> {
+    fn write_field(&self, writer: &mut Writer, name: &str) {
+        writer.objects(name, self, |object, value| value.write_object(object));
     }
 }
+macro_rules! string_values {
+    ($($ty:ty),*) => { $(impl WireValue for $ty {
+        fn write_field(&self, writer: &mut Writer, name: &str) { writer.string(name, self.as_str()); }
+    })* };
+}
+string_values!(MediaKind, RegistrationState, Direction, CauseClass);
+macro_rules! define_objects {
+    ($($name:ident { $($field:ident: $ty:ty),* };)*) => { $(
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub(crate) struct $name { $(pub(crate) $field: $ty,)* }
+        impl WireObject for $name {
+            fn write_object(&self, writer: &mut Writer) { $(self.$field.write_field(writer, stringify!($field));)* }
+        }
+        impl WireValue for $name {
+            fn write_field(&self, writer: &mut Writer, name: &str) { writer.object_field(name, |object| self.write_object(object)); }
+        }
+    )* };
+}
+browser_objects!(define_objects);
 
-/// Why a call ended (§5.3's `"cause"` object).
+/// Internal outcome ownership; encoded fields are declared in `browser_events`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Cause {
-    pub(crate) class: CauseClass,
-    pub(crate) status: Option<u64>,
-    pub(crate) reason: Option<String>,
+pub(crate) struct Outcome {
+    pub(crate) id: u64,
+    pub(crate) error: Option<OutcomeError>,
 }
+
+macro_rules! define_events {
+    ($($variant:ident($wire:literal) { $($field:ident: $ty:ty),* } => { $($key:ident: $wire_ty:ty = $value:expr),* };)*) => {
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub(crate) enum Event { $($variant { $($field: $ty,)* },)* }
+        impl Event {
+            pub(crate) fn encode(&self) -> Vec<u8> {
+                let mut writer = Writer::object();
+                writer.number("v", 1);
+                match self { $(Self::$variant { $($field,)* } => {
+                    writer.string("evt", $wire);
+                    $(let value: &$wire_ty = &($value); value.write_field(&mut writer, stringify!($key));)*
+                },)* }
+                writer.finish().into_bytes()
+            }
+        }
+    };
+}
+browser_events!(define_events);
 
 impl Cause {
     pub(crate) fn class(class: CauseClass) -> Self {
@@ -76,247 +116,12 @@ impl Cause {
     }
 }
 
-/// The six terminal classes. A media failure never presents as a SIP failure and vice versa.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CauseClass {
-    Local,
-    Remote,
-    Refused,
-    Sip,
-    Media,
-    Timeout,
-}
-
-impl CauseClass {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Local => "local",
-            Self::Remote => "remote",
-            Self::Refused => "refused",
-            Self::Sip => "sip",
-            Self::Media => "media",
-            Self::Timeout => "timeout",
-        }
-    }
-}
-
-/// A command's single completion (§5.2: exactly one `"outcome"` per command, at protocol
-/// completion rather than at acceptance).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Outcome {
-    pub(crate) id: u64,
-    pub(crate) error: Option<OutcomeError>,
-}
-
-/// A typed refusal carried inside an `"outcome"`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct OutcomeError {
-    pub(crate) code: &'static str,
-    pub(crate) reason: String,
-}
-
 impl OutcomeError {
     pub(crate) fn new(code: &'static str, reason: impl Into<String>) -> Self {
         Self {
             code,
             reason: reason.into(),
         }
-    }
-}
-
-/// Codec facts copied from the validated answer, without SDP or media credentials.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CodecFact {
-    pub(crate) name: String,
-    pub(crate) clock_rate: u32,
-    pub(crate) channels: u32,
-    pub(crate) payload_type: u8,
-}
-
-impl CodecFact {
-    fn write(&self, writer: &mut Writer) {
-        writer
-            .string("name", &self.name)
-            .number("clock_rate", u64::from(self.clock_rate))
-            .number("channels", u64::from(self.channels))
-            .number("payload_type", u64::from(self.payload_type));
-    }
-}
-
-/// The redacted §5.5 fact set; neither raw descriptions nor browser statistics belong here.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct MediaFacts {
-    pub(crate) call_id: String,
-    pub(crate) local_tag: String,
-    pub(crate) remote_tag: String,
-    pub(crate) codecs: Vec<CodecFact>,
-    pub(crate) selected_codec: CodecFact,
-    pub(crate) fingerprint_algorithm: &'static str,
-    pub(crate) answer_setup: &'static str,
-    pub(crate) local_dtls_role: &'static str,
-}
-
-impl MediaFacts {
-    fn write(&self, facts: &mut Writer) {
-        facts
-            .object_field("dialog", |dialog| {
-                dialog
-                    .string("call_id", &self.call_id)
-                    .string("local_tag", &self.local_tag)
-                    .string("remote_tag", &self.remote_tag);
-            })
-            .objects("codecs", &self.codecs, |codec, value| value.write(codec))
-            .object_field("selected_codec", |codec| self.selected_codec.write(codec))
-            .string("fingerprint_algorithm", self.fingerprint_algorithm)
-            .string("answer_setup", self.answer_setup)
-            .string("local_dtls_role", self.local_dtls_role)
-            .boolean("rtcp_mux", true)
-            .number("audio_sections", 1);
-    }
-}
-
-/// One §5.3 event.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Event {
-    NeedEntropy {
-        min: u64,
-    },
-    Registration {
-        state: RegistrationState,
-        expires: Option<u64>,
-        status: Option<u64>,
-        reason: Option<String>,
-    },
-    Call {
-        call: u32,
-        dir: Direction,
-        state: &'static str,
-        from: Option<String>,
-        to: Option<String>,
-    },
-    NeedLocalMedia {
-        call: u32,
-        kind: MediaKind,
-    },
-    RemoteMedia {
-        call: u32,
-        kind: MediaKind,
-        sdp: String,
-    },
-    NegotiatedMedia {
-        call: u32,
-        kernel: MediaFacts,
-    },
-    CallEnded {
-        call: u32,
-        cause: Cause,
-    },
-    Outcome(Outcome),
-    Fault {
-        fatal: bool,
-        code: &'static str,
-        reason: String,
-    },
-}
-
-impl Event {
-    /// Render the canonical document.
-    pub(crate) fn encode(&self) -> Vec<u8> {
-        let mut writer = Writer::object();
-        writer.number("v", 1);
-        match self {
-            Self::NeedEntropy { min } => {
-                writer.string("evt", "need-entropy").number("min", *min);
-            }
-            Self::Registration {
-                state,
-                expires,
-                status,
-                reason,
-            } => {
-                writer
-                    .string("evt", "registration")
-                    .string("state", state.as_str())
-                    .number_opt("expires", *expires)
-                    .number_opt("status", *status)
-                    .string_opt("reason", reason.as_deref());
-            }
-            Self::Call {
-                call,
-                dir,
-                state,
-                from,
-                to,
-            } => {
-                writer
-                    .string("evt", "call")
-                    .number("call", u64::from(*call))
-                    .string("dir", dir.as_str())
-                    .string("state", state)
-                    .string_opt("from", from.as_deref())
-                    .string_opt("to", to.as_deref());
-            }
-            Self::NeedLocalMedia { call, kind } => {
-                writer
-                    .string("evt", "need-local-media")
-                    .number("call", u64::from(*call))
-                    .string("kind", kind.as_str())
-                    // Always exactly this: the contract is audio-only, and a page that asked for
-                    // video would be asking a kernel that refuses video sections outright.
-                    .object_field("constraints", |constraints| {
-                        constraints.boolean("audio", true).boolean("video", false);
-                    });
-            }
-            Self::RemoteMedia { call, kind, sdp } => {
-                writer
-                    .string("evt", "remote-media")
-                    .number("call", u64::from(*call))
-                    .string("kind", kind.as_str())
-                    .string("sdp", sdp);
-            }
-            Self::NegotiatedMedia { call, kernel } => {
-                writer
-                    .string("evt", "negotiated-media")
-                    .number("call", u64::from(*call))
-                    .object_field("kernel", |facts| kernel.write(facts));
-            }
-            Self::CallEnded { call, cause } => {
-                writer
-                    .string("evt", "call-ended")
-                    .number("call", u64::from(*call))
-                    .object_field("cause", |object| {
-                        object
-                            .string("class", cause.class.as_str())
-                            .number_opt("status", cause.status)
-                            .string_opt("reason", cause.reason.as_deref());
-                    });
-            }
-            Self::Outcome(outcome) => {
-                writer
-                    .string("evt", "outcome")
-                    .number("id", outcome.id)
-                    .boolean("ok", outcome.error.is_none());
-                if let Some(error) = &outcome.error {
-                    writer.object_field("error", |object| {
-                        object
-                            .string("code", error.code)
-                            .string("reason", &error.reason);
-                    });
-                }
-            }
-            Self::Fault {
-                fatal,
-                code,
-                reason,
-            } => {
-                writer
-                    .string("evt", "error")
-                    .boolean("fatal", *fatal)
-                    .string("code", code)
-                    .string("reason", reason);
-            }
-        }
-        writer.finish().into_bytes()
     }
 }
 
@@ -370,10 +175,12 @@ mod tests {
 
     #[test]
     fn an_outcome_failure_carries_a_typed_code() {
-        let bytes = Event::Outcome(Outcome {
-            id: 7,
-            error: Some(OutcomeError::new("call-limit", "eight concurrent calls")),
-        })
+        let bytes = Event::Outcome {
+            outcome: Outcome {
+                id: 7,
+                error: Some(OutcomeError::new("call-limit", "eight concurrent calls")),
+            },
+        }
         .encode();
         assert_eq!(
             bytes,
@@ -383,7 +190,10 @@ mod tests {
 
     #[test]
     fn a_successful_outcome_has_no_error_object() {
-        let bytes = Event::Outcome(Outcome { id: 1, error: None }).encode();
+        let bytes = Event::Outcome {
+            outcome: Outcome { id: 1, error: None },
+        }
+        .encode();
         assert_eq!(bytes, &br#"{"v":1,"evt":"outcome","id":1,"ok":true}"#[..]);
     }
 }

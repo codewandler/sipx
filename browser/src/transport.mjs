@@ -236,7 +236,10 @@ export function signallingUrl({ scheme, host, resource }, insecure) {
     );
   }
   if (typeof host !== "string" || host === "" || host.includes("/")) {
-    throw new SignallingConfigError(Reason.InvalidHost, "the signalling host is not a host");
+    throw new SignallingConfigError(
+      Reason.InvalidHost,
+      "the signalling host is not a host",
+    );
   }
   if (host.includes("@")) {
     throw new SignallingConfigError(
@@ -245,7 +248,10 @@ export function signallingUrl({ scheme, host, resource }, insecure) {
     );
   }
   if (typeof resource !== "string") {
-    throw new SignallingConfigError(Reason.InvalidResource, "the signalling resource is not a string");
+    throw new SignallingConfigError(
+      Reason.InvalidResource,
+      "the signalling resource is not a string",
+    );
   }
   if (resource !== "" && !resource.startsWith("/")) {
     throw new SignallingConfigError(
@@ -264,13 +270,19 @@ export function signallingUrl({ scheme, host, resource }, insecure) {
   try {
     url = new URL(`${scheme}://${host}${resource === "" ? "/" : resource}`);
   } catch {
-    throw new SignallingConfigError(Reason.InvalidHost, "the signalling host is not a host");
+    throw new SignallingConfigError(
+      Reason.InvalidHost,
+      "the signalling host is not a host",
+    );
   }
   // Parse, then verify: the checks above read the strings, and these read what the URL parser
   // made of them. A host that smuggled a scheme, userinfo or query past a substring test cannot
   // also survive being reparsed and compared.
   if (url.protocol !== `${scheme}:`) {
-    throw new SignallingConfigError(Reason.UnsupportedScheme, "the signalling scheme was rewritten");
+    throw new SignallingConfigError(
+      Reason.UnsupportedScheme,
+      "the signalling scheme was rewritten",
+    );
   }
   if (url.username !== "" || url.password !== "") {
     throw new SignallingConfigError(
@@ -285,7 +297,10 @@ export function signallingUrl({ scheme, host, resource }, insecure) {
     );
   }
   if (url.host !== host.toLowerCase()) {
-    throw new SignallingConfigError(Reason.InvalidHost, "the signalling host was rewritten");
+    throw new SignallingConfigError(
+      Reason.InvalidHost,
+      "the signalling host was rewritten",
+    );
   }
   if (scheme === "ws" && !LOOPBACK.test(url.hostname)) {
     throw new SignallingConfigError(
@@ -388,7 +403,16 @@ export class WebSocketSignalling {
    * @throws {SignallingConfigError} before anything is allocated, so there is no half-built
    *   binding for a caller to hold (§6.2's "no half-started client")
    */
-  constructor({ transport, insecure = "refuse", kernel, openSocket, clock, entropy, connectivity, onEvent }) {
+  constructor({
+    transport,
+    insecure = "refuse",
+    kernel,
+    openSocket,
+    clock,
+    entropy,
+    connectivity,
+    onEvent,
+  }) {
     this.#url = signallingUrl(transport, insecure);
     this.#kernel = kernel;
     this.#openSocket = openSocket;
@@ -428,7 +452,9 @@ export class WebSocketSignalling {
    */
   start() {
     if (this.#state === "closed") {
-      throw new SignallingStateError("this transport has closed and does not restart");
+      throw new SignallingStateError(
+        "this transport has closed and does not restart",
+      );
     }
     if (this.#state !== "idle") return;
     this.#state = "connecting";
@@ -437,7 +463,9 @@ export class WebSocketSignalling {
     // make the first message that produced no records look like a framing violation.
     this.#parseErrors = this.#readParseErrors() ?? 0;
     if (!this.#refillEntropy()) return;
-    this.#unsubscribe = this.#connectivity.subscribe((online) => this.#onConnectivity(online));
+    this.#unsubscribe = this.#connectivity.subscribe((online) =>
+      this.#onConnectivity(online),
+    );
     this.#clock.defer(() => this.#connect());
   }
 
@@ -453,9 +481,12 @@ export class WebSocketSignalling {
    */
   submit(document) {
     if (this.#state === "closed") {
-      throw new SignallingStateError("this transport has closed and accepts no commands");
+      throw new SignallingStateError(
+        "this transport has closed and accepts no commands",
+      );
     }
-    const bytes = typeof document === "string" ? encoder.encode(document) : document;
+    const bytes =
+      typeof document === "string" ? encoder.encode(document) : document;
     this.#enqueue({ kind: "command", document: bytes, size: bytes.length });
   }
 
@@ -496,7 +527,11 @@ export class WebSocketSignalling {
     this.#attempts += 1;
     this.#counters.connectAttempts = this.#attempts;
     this.#state = "connecting";
-    this.#emit({ type: EventType.Connecting, attempt: this.#attempts, url: this.#url });
+    this.#emit({
+      type: EventType.Connecting,
+      attempt: this.#attempts,
+      url: this.#url,
+    });
 
     let socket;
     try {
@@ -534,7 +569,8 @@ export class WebSocketSignalling {
       // needs only its stale guard. Acting on both would end one socket twice.
       error: () => this.#guard(socket),
     };
-    for (const [type, handler] of Object.entries(on)) socket.addEventListener(type, handler);
+    for (const [type, handler] of Object.entries(on))
+      socket.addEventListener(type, handler);
     this.#handlers = { socket, on };
   }
 
@@ -564,7 +600,11 @@ export class WebSocketSignalling {
       return;
     }
     this.#state = "open";
-    this.#emit({ type: EventType.Open, protocol: socket.protocol, url: this.#url });
+    this.#emit({
+      type: EventType.Open,
+      protocol: socket.protocol,
+      url: this.#url,
+    });
     this.#flushSendQueue();
   }
 
@@ -575,7 +615,10 @@ export class WebSocketSignalling {
 
   #onClose(socket, event) {
     if (!this.#guard(socket)) return;
-    this.#endSocket(Reason.RemoteClose, { code: event?.code, wasClean: event?.wasClean === true });
+    this.#endSocket(Reason.RemoteClose, {
+      code: event?.code,
+      wasClean: event?.wasClean === true,
+    });
   }
 
   /**
@@ -608,7 +651,12 @@ export class WebSocketSignalling {
     this.#state = "disconnected";
     this.#emit({ type: EventType.Disconnected, reason, dropped, ...detail });
     if (dropped > 0) {
-      this.#emit({ type: EventType.Discarded, scope: "send", reason, count: dropped });
+      this.#emit({
+        type: EventType.Discarded,
+        scope: "send",
+        reason,
+        count: dropped,
+      });
     }
     this.#scheduleReconnect();
   }
@@ -625,8 +673,15 @@ export class WebSocketSignalling {
       return;
     }
     this.#state = "waiting";
-    this.#emit({ type: EventType.ReconnectScheduled, attempt: this.#attempts + 1, delayMs });
-    this.#reconnectTimer = this.#clock.setTimer(() => this.#onReconnect(), delayMs);
+    this.#emit({
+      type: EventType.ReconnectScheduled,
+      attempt: this.#attempts + 1,
+      delayMs,
+    });
+    this.#reconnectTimer = this.#clock.setTimer(
+      () => this.#onReconnect(),
+      delayMs,
+    );
   }
 
   #onReconnect() {
@@ -776,15 +831,34 @@ export class WebSocketSignalling {
         default:
           records = [];
       }
-    } catch {
-      // A trap, or glue that refused the call. §4.9 makes either instance-fatal: the kernel is
-      // never called again.
+    } catch (error) {
+      // Legal host commands can be refused without poisoning the instance. Keep their
+      // correlation id, but never expose document bytes or an exception message.
+      if (
+        entry.kind === "command" &&
+        ["SipxStateError", "SipxLimitError"].includes(error?.name)
+      ) {
+        let id;
+        try {
+          id = JSON.parse(
+            new TextDecoder("utf-8", { fatal: true }).decode(entry.document),
+          ).id;
+        } catch {}
+        if (Number.isSafeInteger(id) && id > 0) {
+          this.#emit({ type: "command-error", id, code: error.code });
+          return;
+        }
+      }
       this.#drivingEntropy = false;
       this.#finish(Reason.KernelFault);
       return;
     }
     const produced = records ?? [];
-    if (entry.kind === "bytes" && produced.length === 0 && this.#framingViolation()) {
+    if (
+      entry.kind === "bytes" &&
+      produced.length === 0 &&
+      this.#framingViolation()
+    ) {
       this.#drivingEntropy = false;
       this.#finish(Reason.Framing);
       return;
@@ -795,7 +869,10 @@ export class WebSocketSignalling {
 
   #monotonic() {
     const reading = Math.trunc(this.#clock.now());
-    this.#lastNow = Math.max(this.#lastNow, Number.isFinite(reading) ? reading : this.#lastNow);
+    this.#lastNow = Math.max(
+      this.#lastNow,
+      Number.isFinite(reading) ? reading : this.#lastNow,
+    );
     return this.#lastNow;
   }
 
@@ -894,7 +971,12 @@ export class WebSocketSignalling {
       // No socket owns this message, so nothing may. Held bytes would be replayed onto whatever
       // connects next, which is the one thing `#endSocket` exists to prevent.
       this.#counters.discarded += 1;
-      this.#emit({ type: EventType.Discarded, scope: "send", reason: Reason.NoSocket, count: 1 });
+      this.#emit({
+        type: EventType.Discarded,
+        scope: "send",
+        reason: Reason.NoSocket,
+        count: 1,
+      });
       return;
     }
     if (this.#sendQueue.length >= limits.sendQueueRecords) {
@@ -1125,6 +1207,7 @@ export class WebSocketSignalling {
 function synchronousBytes(data) {
   if (typeof data === "string") return encoder.encode(data);
   if (data instanceof ArrayBuffer) return new Uint8Array(data);
-  if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  if (ArrayBuffer.isView(data))
+    return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
   return null;
 }

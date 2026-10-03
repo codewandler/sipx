@@ -200,16 +200,20 @@ impl Kernel {
     /// Complete a command with a successful outcome.
     fn succeed(&mut self, id: u64) {
         self.unfinished.remove(&id);
-        self.emit(&Event::Outcome(Outcome { id, error: None }));
+        self.emit(&Event::Outcome {
+            outcome: Outcome { id, error: None },
+        });
     }
 
     /// Complete a command with a typed refusal.
     fn refuse(&mut self, id: u64, code: &'static str, reason: impl Into<String>) {
         self.unfinished.remove(&id);
-        self.emit(&Event::Outcome(Outcome {
-            id,
-            error: Some(OutcomeError::new(code, reason)),
-        }));
+        self.emit(&Event::Outcome {
+            outcome: Outcome {
+                id,
+                error: Some(OutcomeError::new(code, reason)),
+            },
+        });
     }
 
     // ---------------------------------------------------------------- entry points

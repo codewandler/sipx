@@ -16,9 +16,34 @@ export {
   signallingUrl,
 } from "./transport.mjs";
 
-export { HEADER_OCTETS, RecordFormatError, RecordType, decodeRecord } from "./records.mjs";
+export {
+  HEADER_OCTETS,
+  RecordFormatError,
+  RecordType,
+  decodeRecord,
+} from "./records.mjs";
 
-export { SignallingCapabilityError, browserPlatform, missingCapability } from "./platform.mjs";
+export {
+  SignallingCapabilityError,
+  browserPlatform,
+  missingCapability,
+} from "./platform.mjs";
 
 export { BrowserMediaAdapter, SipxMediaError } from "./media.mjs";
-export { browserMediaPlatform, MediaCapabilityError } from "./media-platform.mjs";
+export {
+  browserMediaPlatform,
+  MediaCapabilityError,
+} from "./media-platform.mjs";
+
+// This pre-1.0 API is experimental. The exported flag makes that status inspectable at import.
+export const experimental = true;
+export { SipxClient, SipxCall } from "./client.mjs";
+export {
+  SipxAbiDefect,
+  SipxStateError,
+  SipxLimitError,
+  SipxTransportError,
+  SipxSipError,
+  SipxCancelled,
+  SipxCapabilityError,
+} from "./errors.mjs";

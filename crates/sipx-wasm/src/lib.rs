@@ -56,6 +56,9 @@
 // `./scripts/coverage-report.py --annotate`; `docs/coverage.md` states what it costs.
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
+#[macro_use]
+mod contract;
+
 pub mod abi;
 mod bounds;
 mod command;

@@ -490,12 +490,17 @@ const client = await SipxClient.create(config);   // loads WASM, checks capabili
 await client.register({ expires: 600, signal });
 const call = await client.dial("sip:bob@example.net", { signal });
 client.on("incoming", (call) => call.answer());
+client.on("outgoing", (call) => call.on("state", renderCallState));
 call.on("state", (s) => ...);
 const report = call.negotiatedMedia();            // §5.5, origins preserved
 call.mute(true);                                   // local track fact: track.enabled — never SIP
 await call.hangup();
 await client.close();
 ```
+
+`outgoing` delivers the newly allocated call handle before readiness, so the application can
+observe ringing or hang up during setup. `dial()` still resolves only after the combined
+establishment gate below succeeds.
 
 `mute` is deliberately a local media-track operation with no kernel verb and no SIP signalling in
 v1 (no hold re-INVITE — §10). Device selection wraps the platform's device enumeration and is
@@ -566,7 +571,7 @@ media cleanup it names have completed.
    timer it owns;
 5. close the WebSocket;
 6. stop every `MediaStreamTrack` the SDK acquired and close every `RTCPeerConnection` it created;
-7. resolve `close()`; deliver `closed` as the final event.
+7. deliver `closed` as the final event, then resolve `close()`; no callback follows resolution.
 
 A deadline expiry skips forward — it never leaves steps 4–6 unrun and never detaches them. On
 `pagehide`/page destruction the SDK performs steps 4–6 synchronously as best effort; the endpoint

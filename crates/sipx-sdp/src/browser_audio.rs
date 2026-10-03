@@ -685,11 +685,24 @@ fn profile_candidates(
         return Err(ProfileError::IceRequired);
     }
 
-    let candidates: Vec<Candidate> = component_one
-        .into_iter()
-        .map(Candidate::parse)
-        .collect::<Option<_>>()
-        .ok_or(ProfileError::IceRequired)?;
+    let mut candidates = Vec::new();
+    for value in component_one {
+        // Browsers include ICE-TCP fallback beside UDP. It is not a transport this
+        // profile checks; discard only that named unsupported transport after the
+        // raw line/component/count bounds above. Malformed UDP and unknown tokens
+        // still fail the strict profile, and discarded lines cannot satisfy ICE.
+        if value
+            .split_whitespace()
+            .nth(2)
+            .is_some_and(|transport| transport.eq_ignore_ascii_case("TCP"))
+        {
+            continue;
+        }
+        candidates.push(Candidate::parse(value).ok_or(ProfileError::IceRequired)?);
+    }
+    if candidates.is_empty() {
+        return Err(ProfileError::IceRequired);
+    }
     if candidates.iter().any(|candidate| {
         !matches!(
             candidate.kind,

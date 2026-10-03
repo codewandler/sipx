@@ -91,6 +91,7 @@ impl Writer {
 
     /// A string field written only when the value is present, which is how §5.3's `"field"?`
     /// columns are spelled.
+    #[cfg(test)]
     pub(crate) fn string_opt(&mut self, name: &str, value: Option<&str>) -> &mut Self {
         if let Some(value) = value {
             self.string(name, value);
@@ -99,6 +100,7 @@ impl Writer {
     }
 
     /// A numeric field written only when the value is present.
+    #[cfg(test)]
     pub(crate) fn number_opt(&mut self, name: &str, value: Option<u64>) -> &mut Self {
         if let Some(value) = value {
             self.number(name, value);
